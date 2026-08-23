@@ -359,14 +359,12 @@ mod tests {
         assert!(TAA_SHADER_WGSL.contains("velocity_divergence < 0.0000001"));
         assert!(TAA_SHADER_WGSL
             .contains("let jitter_coverage_compatible = gross_color_dist <= reject_hi;"));
-        assert!(TAA_SHADER_WGSL.contains(
-            "static_zero_velocity && jitter_coverage_compatible,"
-        ));
-        assert!(TAA_SHADER_WGSL.contains(
-            "let temporal_rejection = max(depth_disocclusion,"
-        ));
-        assert!(!TAA_SHADER_WGSL.contains(
-            "let temporal_rejection = max(raw_depth_disocclusion,"
-        ));
+        assert!(TAA_SHADER_WGSL.contains("static_zero_velocity && jitter_coverage_compatible,"));
+        assert!(TAA_SHADER_WGSL.contains("let temporal_rejection = max(depth_disocclusion,"));
+        assert!(!TAA_SHADER_WGSL.contains("let temporal_rejection = max(raw_depth_disocclusion,"));
+        assert!(TAA_SHADER_WGSL.contains("let settled_static_lock = select("));
+        assert!(TAA_SHADER_WGSL.contains("current_weight >= 0.095"));
+        assert!(TAA_SHADER_WGSL.contains("min(motion_ramped, 0.041666667)"));
+        assert!(TAA_SHADER_WGSL.contains("min(bootstrap_alpha, 0.041666667)"));
     }
 }

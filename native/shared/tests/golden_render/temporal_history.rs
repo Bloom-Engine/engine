@@ -1121,6 +1121,107 @@ fn camera_motion_sequence_bounds_ghosting_flicker_and_cut_residue() {
 }
 
 #[test]
+fn settled_static_taa_bounds_complete_jitter_cycle_flicker() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    configure_taa_motion_corpus(&mut eng.renderer);
+
+    // A single stable receiver isolates texture-phase shimmer from geometry
+    // rejection. Its deliberately unfiltered, near-pixel-frequency checker
+    // makes every Halton phase observable without changing depth or velocity.
+    let mut checker = Vec::with_capacity(64 * 64 * 4);
+    for y in 0..64 {
+        for x in 0..64 {
+            let value = if (x + y) & 1 == 0 { 245 } else { 8 };
+            checker.extend_from_slice(&[value, value, value, 255]);
+        }
+    }
+    let texture = eng.renderer.register_texture_no_mips(64, 64, &checker);
+    let vertices = [
+        ([-3.0, -1.7, 0.0], [0.0, 2.0]),
+        ([3.0, -1.7, 0.0], [4.0, 2.0]),
+        ([3.0, 1.7, 0.0], [4.0, 0.0]),
+        ([-3.0, 1.7, 0.0], [0.0, 0.0]),
+    ]
+    .into_iter()
+    .map(|(position, uv)| Vertex3D {
+        position,
+        normal: [0.0, 0.0, 1.0],
+        color: [1.0; 4],
+        uv,
+        joints: [0.0; 4],
+        weights: [0.0; 4],
+        tangent: [1.0, 0.0, 0.0, 1.0],
+    })
+    .collect();
+    let receiver = eng.scene.create_node();
+    eng.scene
+        .update_geometry(receiver, vertices, vec![0, 1, 2, 0, 2, 3]);
+    eng.scene.set_material_texture(receiver, texture);
+    eng.scene.set_material_pbr(receiver, 1.0, 0.0);
+
+    // A settled TAA history should integrate the complete finite phase cycle
+    // instead of continuing to expose the current phase at the authored
+    // native-resolution blend weight.
+    let draw_frame = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(4.0, 5.0, 8.0, 255.0);
+        r.begin_mode_3d(0.0, 0.0, 5.2, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 42.0, 0.0);
+        r.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+    };
+
+    eng.renderer.reset_temporal_history();
+    for _ in 0..32 {
+        eng.begin_frame();
+        draw_frame(&mut eng);
+        eng.end_frame();
+    }
+
+    let frames = (0..32)
+        .map(|_| render(&mut eng, 1, |eng| draw_frame(eng)).2)
+        .collect::<Vec<_>>();
+    let adjacent_mean = frames
+        .windows(2)
+        .map(|pair| calculate_diff_metrics(&pair[0], &pair[1], W, H).mean_rgb)
+        .sum::<f64>()
+        / (frames.len() - 1) as f64;
+    let mut range_sum = 0u64;
+    let mut range_outliers = 0usize;
+    let channel_count = (W * H * 3) as usize;
+    for channel in 0..channel_count {
+        let pixel = channel / 3;
+        let component = channel % 3;
+        let offset = pixel * 4 + component;
+        let minimum = frames.iter().map(|frame| frame[offset]).min().unwrap();
+        let maximum = frames.iter().map(|frame| frame[offset]).max().unwrap();
+        let range = maximum - minimum;
+        range_sum += u64::from(range);
+        range_outliers += usize::from(range > 8);
+    }
+    let mean_range = range_sum as f64 / channel_count as f64;
+    let range_outlier_fraction = range_outliers as f64 / channel_count as f64;
+    eprintln!(
+        "temporal-corpus complete-jitter-cycle adjacent_mean={adjacent_mean:.4} \
+         mean_range={mean_range:.4} range_outliers={:.4}%",
+        range_outlier_fraction * 100.0,
+    );
+    // The former perpetual 0.10 current-frame weight measures 1.3058 mean
+    // adjacent change, 4.1401 range, and 4.186% range outliers on this corpus.
+    assert!(
+        adjacent_mean <= 0.65,
+        "settled static TAA exposed too much current jitter phase: {adjacent_mean:.4}"
+    );
+    assert!(
+        mean_range <= 2.5 && range_outlier_fraction <= 0.015,
+        "settled static TAA retained a visible phase-cycle range: \
+         mean={mean_range:.4}, outliers={:.4}%",
+        range_outlier_fraction * 100.0,
+    );
+}
+
+#[test]
 fn retained_rigid_and_reactive_motion_sequences_bound_trails() {
     fn transform(x: f32, angle: f32) -> [[f32; 4]; 4] {
         let (sin, cos) = angle.sin_cos();
