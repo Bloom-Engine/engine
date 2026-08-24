@@ -51,7 +51,8 @@ stationary burst with TAA, SSGI, SSR, and Hi-Z occlusion removed one at a time:
 ```sh
 python3 tools/quality/bistro_temporal_matrix.py \
   --scene /absolute/path/to/BistroReference.gltf \
-  --output /tmp/bloom-bistro-temporal-matrix
+  --output /tmp/bloom-bistro-temporal-matrix \
+  --max-largest-component-pixels 32
 ```
 
 The command writes each variant's images and `metrics.json`, plus a root
@@ -61,7 +62,13 @@ quality threshold: the control reductions identify which subsystem should be
 changed before a permanent regression gate is approved. Use `--analyze-only`
 to recompute metrics without recapturing, or `--resume` after an interrupted
 matrix to retain complete variants. The underlying opt-in golden also accepts
-`BLOOM_BISTRO_PROBE_DUMP_OCCLUSION=0` for the exact visibility control.
+`BLOOM_BISTRO_PROBE_DUMP_OCCLUSION=0` for the exact visibility control and a
+comma-separated `BLOOM_BISTRO_PROBE_DUMP_SEQUENCE_DIAGNOSTICS` list when TAA
+policy images are needed at particular sequence frames.
+
+The `32`-pixel coherent-component limit is the qualified 512×288 gate for
+issue #151: the prior full path measures 55 pixels and the corrected path 25.
+Keep the size and 32-frame sequence unchanged when applying that limit.
 
 For the official Khronos alpha, transmission, volume, and ordering controls:
 

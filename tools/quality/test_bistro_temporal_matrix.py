@@ -1,9 +1,13 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from tools.quality.khronos_materials import QualificationError
 from tools.quality.bistro_temporal_matrix import (
     CHANGE_THRESHOLD,
+    capture_is_complete,
     control_deltas,
+    enforce_component_limit,
     parse_size,
     sequence_metrics,
 )
@@ -58,6 +62,35 @@ class BistroTemporalMatrixTests(unittest.TestCase):
         self.assertEqual(deltas["no-taa"]["temporal_range_mean_reduction"], 0.75)
         self.assertEqual(deltas["no-taa"]["adjacent_rgb_mean_reduction"], 0.75)
         self.assertEqual(deltas["no-taa"]["largest_component_reduction"], 0.75)
+
+    def test_resume_accepts_only_an_exact_nonempty_numbered_sequence(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for index in range(3):
+                (directory / f"sequence-{index:03}.png").write_bytes(b"png")
+            self.assertTrue(capture_is_complete(directory, 3))
+
+            (directory / "sequence-002.png").unlink()
+            self.assertFalse(capture_is_complete(directory, 3))
+            (directory / "sequence-002.png").write_bytes(b"")
+            self.assertFalse(capture_is_complete(directory, 3))
+            (directory / "sequence-002.png").write_bytes(b"png")
+            (directory / "sequence-003.png").write_bytes(b"png")
+            self.assertFalse(capture_is_complete(directory, 3))
+
+    def test_component_limit_fails_the_prior_bistro_behavior(self) -> None:
+        def result(pixels: int) -> dict:
+            return {
+                "adjacent_frames": {
+                    "largest_component_over_threshold": {"pixels": pixels},
+                }
+            }
+
+        enforce_component_limit({"full": result(25)}, 32)
+        with self.assertRaisesRegex(QualificationError, "55 pixels; limit is 32"):
+            enforce_component_limit({"full": result(55)}, 32)
+        with self.assertRaisesRegex(QualificationError, "requires the full variant"):
+            enforce_component_limit({"no-taa": result(2)}, 32)
 
 
 if __name__ == "__main__":

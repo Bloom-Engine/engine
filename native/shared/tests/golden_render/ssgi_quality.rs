@@ -1433,6 +1433,16 @@ fn dump_detailed_bistro_probe_state() {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0)
         .min(64);
+    let sequence_diagnostic_frames = std::env::var("BLOOM_BISTRO_PROBE_DUMP_SEQUENCE_DIAGNOSTICS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|part| part.trim().parse::<usize>().ok())
+                .filter(|index| *index < sequence_frames)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if sequence_frames > 0 {
         image::save_buffer(
             dump_dir.join("sequence-000.png"),
@@ -1443,6 +1453,14 @@ fn dump_detailed_bistro_probe_state() {
         )
         .expect("write first Bistro sequence frame");
         for sequence_index in 1..sequence_frames {
+            if sequence_diagnostic_frames.contains(&sequence_index) {
+                eng.renderer.pending_quality_capture_dir = Some(
+                    dump_dir
+                        .join(format!("sequence-diagnostics-{sequence_index:03}"))
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
             let (sequence_w, sequence_h, sequence) =
                 render(&mut eng, 1, |eng| draw(eng, start_x, start_z, cam_yaw));
             image::save_buffer(

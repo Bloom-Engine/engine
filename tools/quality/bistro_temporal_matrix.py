@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Iterable, Sequence
 
@@ -38,6 +39,7 @@ PROBE_ENV = (
     "BLOOM_BISTRO_PROBE_DUMP_OCCLUSION",
     "BLOOM_BISTRO_PROBE_DUMP_MOVE",
     "BLOOM_BISTRO_PROBE_DUMP_SEQUENCE_FRAMES",
+    "BLOOM_BISTRO_PROBE_DUMP_SEQUENCE_DIAGNOSTICS",
 )
 
 
@@ -231,6 +233,13 @@ def analyze_variant(directory: Path, expected_frames: int) -> dict[str, object]:
     return metrics
 
 
+def capture_is_complete(directory: Path, expected_frames: int) -> bool:
+    """Return true only for an exact, non-empty numbered frame sequence."""
+    expected = [directory / f"sequence-{index:03}.png" for index in range(expected_frames)]
+    actual = sorted(directory.glob("sequence-*.png"))
+    return actual == expected and all(path.stat().st_size > 0 for path in expected)
+
+
 def reduction(control: float, full: float) -> float | None:
     return None if full == 0.0 else 1.0 - control / full
 
@@ -266,6 +275,22 @@ def control_deltas(results: dict[str, dict[str, object]]) -> dict[str, object]:
             ),
         }
     return deltas
+
+
+def enforce_component_limit(
+    results: dict[str, dict[str, object]], maximum_pixels: int | None
+) -> None:
+    if maximum_pixels is None:
+        return
+    if "full" not in results:
+        raise QualificationError("the coherent-component quality gate requires the full variant")
+    measured = int(
+        results["full"]["adjacent_frames"]["largest_component_over_threshold"]["pixels"]
+    )
+    if measured > maximum_pixels:
+        raise QualificationError(
+            f"full variant coherent component is {measured} pixels; limit is {maximum_pixels}"
+        )
 
 
 def capture_variant(
@@ -363,6 +388,11 @@ def main() -> int:
     parser.add_argument(
         "--resume", action="store_true", help="reuse complete variants and capture missing ones"
     )
+    parser.add_argument(
+        "--max-largest-component-pixels",
+        type=int,
+        help="fail if the full variant's largest >8-level adjacent component exceeds this size",
+    )
     args = parser.parse_args()
     repository = Path(__file__).resolve().parents[2]
     args.output = args.output.resolve()
@@ -381,7 +411,19 @@ def main() -> int:
             directory = args.output / name
             if not args.analyze_only:
                 if args.resume and directory.exists():
-                    print(f"REUSE {name}: {directory}", flush=True)
+                    if capture_is_complete(directory, args.sequence_frames):
+                        print(f"REUSE {name}: {directory}", flush=True)
+                    else:
+                        print(f"RECAPTURE incomplete {name}: {directory}", flush=True)
+                        shutil.rmtree(directory)
+                        capture_variant(
+                            repository,
+                            args.scene.resolve(),
+                            directory,
+                            name,
+                            args.size,
+                            args.sequence_frames,
+                        )
                 else:
                     capture_variant(
                         repository,
@@ -404,7 +446,11 @@ def main() -> int:
             "variants": {name: VARIANTS[name] for name in args.variants},
             "results": results,
             "control_reductions_relative_to_full": control_deltas(results),
+            "quality_limits": {
+                "max_largest_component_pixels": args.max_largest_component_pixels,
+            },
         }
+        enforce_component_limit(results, args.max_largest_component_pixels)
         (args.output / "matrix.json").write_text(
             json.dumps(document, indent=2) + "\n", encoding="utf-8"
         )

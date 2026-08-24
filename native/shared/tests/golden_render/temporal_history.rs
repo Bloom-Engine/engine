@@ -1209,6 +1209,10 @@ fn settled_static_taa_bounds_complete_jitter_cycle_flicker() {
     );
     // The former perpetual 0.10 current-frame weight measures 1.3058 mean
     // adjacent change, 4.1401 range, and 4.186% range outliers on this corpus.
+    // The generic alternating checker deliberately exercises every phase over
+    // a broad surface. Thin, color-incompatible Bistro phases are gated by the
+    // exact-scene coherent-component oracle instead of tightening this
+    // different signal until it biases the ordinary jitter-cycle average.
     assert!(
         adjacent_mean <= 0.65,
         "settled static TAA exposed too much current jitter phase: {adjacent_mean:.4}"

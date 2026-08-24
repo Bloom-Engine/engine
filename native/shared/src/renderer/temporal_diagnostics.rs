@@ -366,13 +366,23 @@ mod tests {
         assert!(TAA_SHADER_WGSL.contains("(!camera_moving || reconstruction_scale > 0.95)"));
         assert!(TAA_SHADER_WGSL.contains("reprojection_motion < 0.00025"));
         assert!(TAA_SHADER_WGSL.contains("current_weight >= 0.095"));
-        assert!(TAA_SHADER_WGSL
-            .contains("let settled_current_cap = select(0.041666667, 0.085, camera_moving);"));
+        assert!(TAA_SHADER_WGSL.contains("let settled_static_phase_candidate = select("));
+        assert!(TAA_SHADER_WGSL.contains("depth < 0.9999"));
+        assert!(TAA_SHADER_WGSL.contains("let settled_static_phase_lock ="));
+        assert!(TAA_SHADER_WGSL.contains(
+            "let static_current_cap = mix(0.041666667, 0.015625, settled_static_phase_lock);"
+        ));
         assert!(
             TAA_SHADER_WGSL.contains("let color_motion_ramped = max(motion_ramped, disocclusion);")
         );
+        assert!(TAA_SHADER_WGSL.contains("abs(dpdx(vec2<f32>(expected_prev_depth, disocclusion)))"));
+        assert!(TAA_SHADER_WGSL.contains("temporal_gradients.y"));
+        assert!(!TAA_SHADER_WGSL.contains("dpdx(disocclusion)"));
         assert!(TAA_SHADER_WGSL.contains("min(color_motion_ramped, settled_current_cap)"));
         assert!(TAA_SHADER_WGSL.contains("min(bootstrap_alpha, settled_current_cap)"));
+        assert!(TAA_SHADER_WGSL.contains(
+            "let stable_history = mix(clamped_history, history, settled_static_phase_lock);"
+        ));
         assert!(!TAA_SHADER_WGSL.contains("disocclusion <= 0.01"));
     }
 }

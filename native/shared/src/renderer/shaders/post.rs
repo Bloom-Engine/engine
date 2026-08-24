@@ -996,18 +996,6 @@ fn fs_main(in: VsOut) -> TaaOut {
     // that color variance cannot provide: a pale counter and pale wall can be
     // statistically similar while belonging to different surfaces, creating
     // the translucent gray haze seen during camera motion.
-    let depth_base_tolerance = 0.02 + abs(expected_prev_depth) * 0.005;
-    let depth_gradient = abs(dpdx(expected_prev_depth)) + abs(dpdy(expected_prev_depth));
-    let depth_tolerance = max(
-        depth_base_tolerance,
-        min(depth_gradient * 2.0, depth_base_tolerance * 4.0),
-    );
-    let depth_error = abs(history_depth - expected_prev_depth);
-    let raw_depth_disocclusion = select(
-        0.0,
-        smoothstep(depth_tolerance, depth_tolerance * 2.0, depth_error),
-        history_in_bounds,
-    );
     // Variance clamp in YCoCg (Karis 2014). Per-channel RGB min/max
     // clamping was producing chromatic sparkle on the stone floor
     // at grazing angles: high-frequency normal-map specular makes
@@ -1137,6 +1125,26 @@ fn fs_main(in: VsOut) -> TaaOut {
     );
     let disocclusion = smoothstep(reject_lo, reject_hi, color_dist);
 
+    // Depth provenance needs a screen gradient to tolerate a real geometric
+    // edge. Static color-change classification needs the same quad footprint
+    // below. Take both derivatives as one vector pair so the successful narrow
+    // phase-strip detector does not add another derivative pair to full-screen
+    // TAA.
+    let temporal_gradients =
+        abs(dpdx(vec2<f32>(expected_prev_depth, disocclusion))) +
+        abs(dpdy(vec2<f32>(expected_prev_depth, disocclusion)));
+    let depth_base_tolerance = 0.02 + abs(expected_prev_depth) * 0.005;
+    let depth_tolerance = max(
+        depth_base_tolerance,
+        min(temporal_gradients.x * 2.0, depth_base_tolerance * 4.0),
+    );
+    let depth_error = abs(history_depth - expected_prev_depth);
+    let raw_depth_disocclusion = select(
+        0.0,
+        smoothstep(depth_tolerance, depth_tolerance * 2.0, depth_error),
+        history_in_bounds,
+    );
+
     // A stationary projection still jitters the low-resolution depth raster.
     // Thin geometry and grazing, finely tessellated surfaces can therefore
     // alternate which depth owns an output pixel even though their temporal
@@ -1208,17 +1216,38 @@ fn fs_main(in: VsOut) -> TaaOut {
         current_weight >= 0.095 &&
         temporal_rejection <= 0.01,
     );
-    let settled_current_cap = select(0.041666667, 0.085, camera_moving);
+    // A zero-velocity finite-depth surface is not disoccluding merely because
+    // the next finite jitter phase shades a different point inside the same
+    // output pixel. Restrict this protection to a narrow color-disocclusion
+    // footprint: ordinary static pixels keep the authored 24-frame window,
+    // broad lighting/material changes keep normal color rejection, and the
+    // procedural sky remains free to animate without geometry velocity.
+    let settled_static_phase_candidate = select(
+        0.0,
+        1.0,
+        history_confidence >= 0.999 &&
+        static_zero_velocity &&
+        depth < 0.9999 &&
+        current_weight >= 0.095 &&
+        temporal_rejection <= 0.01,
+    );
+    let rejected_color_phase = select(0.0, 1.0, disocclusion >= 0.10);
+    let narrow_color_phase =
+        rejected_color_phase * smoothstep(0.05, 0.50, temporal_gradients.y);
+    let settled_static_phase_lock = settled_static_phase_candidate * narrow_color_phase;
+    let settled_lock = max(settled_coherent_lock, settled_static_phase_lock);
+    let static_current_cap = mix(0.041666667, 0.015625, settled_static_phase_lock);
+    let settled_current_cap = select(static_current_cap, 0.085, camera_moving);
     let color_motion_ramped = max(motion_ramped, disocclusion);
     let settled_motion_ramped = mix(
         color_motion_ramped,
         min(color_motion_ramped, settled_current_cap),
-        settled_coherent_lock,
+        settled_lock,
     );
     let settled_bootstrap_alpha = mix(
         bootstrap_alpha,
         min(bootstrap_alpha, settled_current_cap),
-        settled_coherent_lock,
+        settled_lock,
     );
     let alpha = max(
         max(settled_motion_ramped, max(depth_disocclusion, reactive)),
@@ -1227,7 +1256,8 @@ fn fs_main(in: VsOut) -> TaaOut {
     let accepted_history = select(0.0, 1.0 - temporal_rejection, history_usable);
     let next_history_confidence =
         min(history_confidence + 1.0 / 16.0, 1.0) * accepted_history;
-    var blended = mix(clamped_history, current, alpha);
+    let stable_history = mix(clamped_history, history, settled_static_phase_lock);
+    var blended = mix(stable_history, current, alpha);
     // The temporal average suppresses some of the cubic reconstruction's
     // source-phase residual even after a stable surface has reached full
     // confidence. Reinject a small bounded portion of that already-computed
