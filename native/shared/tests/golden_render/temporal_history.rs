@@ -1993,10 +1993,13 @@ fn emissive_light_switches_converge_without_radiance_trails() {
         (old_state, frames)
     };
 
-    let (off_state, on_frames) = run_switch(&mut eng, false, true);
-    evaluate_motion_recovery("emissive-on", &off_state, &on_frames);
-    let (on_state, off_frames) = run_switch(&mut eng, true, false);
-    evaluate_motion_recovery("emissive-off", &on_state, &off_frames);
+    for (label, render_scale) in [("native", 1.0), ("fractional", 0.75)] {
+        eng.renderer.set_render_scale(render_scale);
+        let (off_state, on_frames) = run_switch(&mut eng, false, true);
+        evaluate_motion_recovery(&format!("emissive-on-{label}"), &off_state, &on_frames);
+        let (on_state, off_frames) = run_switch(&mut eng, true, false);
+        evaluate_motion_recovery(&format!("emissive-off-{label}"), &on_state, &off_frames);
+    }
 }
 
 #[test]
