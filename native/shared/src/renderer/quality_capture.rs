@@ -1193,6 +1193,9 @@ impl Renderer {
         out.push_str(",\"history_filter_samples\":1");
         out.push_str(",\"stationary_reconstruction_detail_strength\":0.2");
         out.push_str(",\"stationary_reconstruction_detail_clamp\":0.08");
+        out.push_str(",\"stationary_reconstruction_detail_policy\":\"alpha-weighted-high-scale\"");
+        out.push_str(",\"stationary_reconstruction_detail_alpha_gain\":3.0");
+        out.push_str(",\"stationary_reconstruction_detail_min_scale\":0.75");
         out.push_str(",\"stationary_reconstruction_additional_samples\":0");
         out.push_str(",\"stationary_reconstruction_motion_gated\":true");
         out.push_str(",\"output_detail_filter\":\"depth-aware-local-luma-hull\"");

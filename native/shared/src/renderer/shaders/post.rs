@@ -1260,11 +1260,17 @@ fn fs_main(in: VsOut) -> TaaOut {
     var blended = mix(stable_history, current, alpha);
     // The temporal average suppresses some of the cubic reconstruction's
     // source-phase residual even after a stable surface has reached full
-    // confidence. Reinject a small bounded portion of that already-computed
-    // current-vs-linear residual only on settled, stationary fractional
-    // reconstruction. This is part of reconstruction rather than a second
-    // output sharpen: it adds no samples, is disabled for camera/object
-        // motion, and vanishes at native scale.
+    // confidence. Feed a small bounded portion of that already-computed
+    // current-vs-linear residual through the temporal update only on settled,
+    // stationary fractional reconstruction. The former unconditional 0.20
+    // post-blend addition exposed each source jitter phase at full strength;
+    // tying it to alpha lets history accumulate the residual instead. Three
+    // temporal updates preserve the qualified glossy detail. Half-scale keeps
+    // its established response. Render-scale changes already rebuild the
+    // render targets and reset history, so the uniform 0.75 tier boundary
+    // cannot splice two policies into one accumulation epoch. This adds no
+    // samples, is disabled for camera/object motion, and vanishes at native
+    // scale.
     let settled_static = history_confidence
         * (1.0 - motion_alpha)
         * select(1.0, 0.0, camera_moving);
@@ -1274,8 +1280,14 @@ fn fs_main(in: VsOut) -> TaaOut {
         vec3<f32>(-0.08),
         vec3<f32>(0.08),
     );
+    let reconstruction_detail_weight = select(
+        0.20,
+        3.0 * alpha,
+        reconstruction_scale >= 0.75,
+    );
     blended = max(
-        blended + reconstruction_detail * (0.20 * settled_static * fractional_reconstruction),
+        blended + reconstruction_detail *
+            (reconstruction_detail_weight * settled_static * fractional_reconstruction),
         vec3<f32>(0.0),
     );
     let blended_w = mix(history_w, current_w, alpha);

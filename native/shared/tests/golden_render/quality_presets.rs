@@ -812,6 +812,18 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         Some(0.08)
     );
     assert_eq!(
+        reconstruction["stationary_reconstruction_detail_policy"].as_str(),
+        Some("alpha-weighted-high-scale")
+    );
+    assert_eq!(
+        reconstruction["stationary_reconstruction_detail_alpha_gain"].as_f64(),
+        Some(3.0)
+    );
+    assert_eq!(
+        reconstruction["stationary_reconstruction_detail_min_scale"].as_f64(),
+        Some(0.75)
+    );
+    assert_eq!(
         reconstruction["stationary_reconstruction_additional_samples"].as_u64(),
         Some(0)
     );

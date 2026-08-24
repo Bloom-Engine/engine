@@ -1275,10 +1275,11 @@ fn settled_static_taa_bounds_complete_jitter_cycle_flicker() {
         } else {
             // Fractional reconstruction sees a deliberately unfiltered
             // checker above its input Nyquist limit. Bound regressions against
-            // the qualified 0.75 baseline instead of forcing it into the
+            // the alpha-weighted detail-update baseline (adjacent 2.1950,
+            // range 9.3381, outliers 54.049%) instead of forcing it into the
             // native envelope or hiding instability with a broad history lock.
             assert!(
-                adjacent_mean <= 2.35 && mean_range <= 9.90 && range_outlier_fraction <= 0.58,
+                adjacent_mean <= 2.25 && mean_range <= 9.60 && range_outlier_fraction <= 0.56,
                 "settled fractional TAA amplified the complete phase cycle: \
                  adjacent={adjacent_mean:.4}, range={mean_range:.4}, \
                  outliers={:.4}%",
