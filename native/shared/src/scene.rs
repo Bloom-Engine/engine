@@ -1414,8 +1414,8 @@ impl SceneGraph {
                 // Hi-Z occlusion: only worth testing what survived the
                 // frustum; every uncertain case inside test_aabb
                 // resolves to visible.
-                node.occluded =
-                    node.in_view_frustum && occlusion.is_some_and(|o| !o.test_aabb(wmin, wmax));
+                node.occluded = node.in_view_frustum
+                    && occlusion.is_some_and(|o| !o.test_aabb(wmin, wmax, vp_matrix));
 
                 // LOD selection by projected screen coverage: longest
                 // NDC extent of the world AABB. Corners at/behind the

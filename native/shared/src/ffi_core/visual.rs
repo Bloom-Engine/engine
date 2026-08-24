@@ -409,7 +409,7 @@ macro_rules! __bloom_ffi_visual {
         #[no_mangle]
         pub extern "C" fn bloom_set_occlusion_culling(on: f64) -> f64 {
             $crate::ffi::guard_applied("bloom_set_occlusion_culling", move || {
-                engine().renderer.occlusion.enabled = on != 0.0;
+                engine().renderer.occlusion.set_enabled(on != 0.0);
             })
         }
 

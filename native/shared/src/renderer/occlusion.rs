@@ -8,12 +8,12 @@
 //! reduce: Hi-Z mip 0 → a 64×64 max-depth grid, copied to a mappable
 //! buffer and read back asynchronously.
 //!
-//! The CPU test runs one frame late (against last frame's grid and last
-//! frame's view-projection) — the standard latency trade that avoids any
-//! GPU stall. Every uncertain case resolves to "visible": no grid yet,
-//! corner behind the near plane, footprint off the captured screen,
-//! depth within the safety margin. Disocclusion artifacts from camera
-//! cuts last exactly one frame.
+//! The CPU test runs asynchronously against a previous frame's grid. To
+//! preserve the culler's "uncertain means visible" contract while the
+//! camera moves, object footprints are swept between the captured and
+//! current view-projections. Effectively planar detail meshes are never
+//! used as occludees because their zero-volume AABBs cannot establish a
+//! conservative depth interval against a coplanar surface.
 //!
 //! `bloom_set_occlusion_culling(0/1)` exposes the kill switch to games;
 //! default on.
@@ -28,7 +28,7 @@ const ROW_BYTES: u32 = GRID_W * 4;
 
 const REDUCE_SHADER: &str = "
 struct Params {
-    // xy = source (hiz mip0) size, zw = tile size in source texels
+    // xy = source (Hi-Z mip 0) size
     size: vec4<u32>,
 };
 @group(0) @binding(0) var<uniform> u: Params;
@@ -38,14 +38,19 @@ struct Params {
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= 64u || gid.y >= 64u) { return; }
-    let base = vec2<u32>(gid.x * u.size.z, gid.y * u.size.w);
+    let grid_size = vec2<u32>(64u, 64u);
+    // Partition the source in normalized grid coordinates. A fixed
+    // ceil(source / 64) tile leaves unused cells whenever the source size is
+    // not divisible by 64, while the CPU maps normalized UV across all 64
+    // cells. That producer/consumer mismatch samples unrelated depth rows.
+    // Round the end upward so adjacent cells overlap at most one source texel;
+    // overlap is conservative for a max-depth reduction.
+    let begin = gid.xy * u.size.xy / grid_size;
+    let end = ((gid.xy + vec2<u32>(1u)) * u.size.xy + grid_size - vec2<u32>(1u)) / grid_size;
     var m: f32 = 0.0;
-    for (var ty: u32 = 0u; ty < u.size.w; ty = ty + 1u) {
-        for (var tx: u32 = 0u; tx < u.size.z; tx = tx + 1u) {
-            let p = base + vec2<u32>(tx, ty);
-            if (p.x < u.size.x && p.y < u.size.y) {
-                m = max(m, textureLoad(src_tex, vec2<i32>(p), 0).r);
-            }
+    for (var y: u32 = begin.y; y < end.y; y = y + 1u) {
+        for (var x: u32 = begin.x; x < end.x; x = x + 1u) {
+            m = max(m, textureLoad(src_tex, vec2<i32>(i32(x), i32(y)), 0).r);
         }
     }
     textureStore(dst_tex, vec2<i32>(gid.xy), vec4<f32>(m, 0.0, 0.0, 0.0));
@@ -56,6 +61,8 @@ struct Readback {
     buffer: wgpu::Buffer,
     /// capture VP for the data this buffer holds
     vp: [[f32; 4]; 4],
+    /// Monotonic submission identity. Async maps may complete out of order.
+    capture_id: u64,
     /// copy submitted, map_async issued, result not yet collected
     in_flight: bool,
     map_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -74,6 +81,8 @@ pub struct OcclusionCuller {
     grid: Vec<f32>,
     grid_valid: bool,
     grid_vp: [[f32; 4]; 4],
+    grid_capture_id: u64,
+    next_capture_id: u64,
     pub enabled: bool,
     /// EN-057 — false when no rasterized scene node exists to consume the
     /// culling verdicts (e.g. a scene whose only nodes are gi_only proxies:
@@ -167,6 +176,7 @@ impl OcclusionCuller {
                 mapped_at_creation: false,
             }),
             vp: [[0.0; 4]; 4],
+            capture_id: 0,
             in_flight: false,
             map_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -182,6 +192,8 @@ impl OcclusionCuller {
             grid: vec![0.0; (GRID_W * GRID_H) as usize],
             grid_valid: false,
             grid_vp: [[0.0; 4]; 4],
+            grid_capture_id: 0,
+            next_capture_id: 1,
             enabled: true,
             has_consumers: true,
             recorded_this_frame: false,
@@ -197,8 +209,25 @@ impl OcclusionCuller {
     pub fn set_has_consumers(&mut self, has: bool) {
         if !has {
             self.grid_valid = false;
+            // Ignore captures submitted before the consumer-less interval if
+            // their async maps finish after consumers return.
+            self.grid_capture_id = self.next_capture_id.saturating_sub(1);
         }
         self.has_consumers = has;
+    }
+
+    /// Enable or disable culling. Re-enabling starts conservatively until a
+    /// fresh capture completes instead of consuming a grid from before the
+    /// toggle.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled != enabled {
+            self.grid_valid = false;
+            // A pre-toggle map may still complete later. Mark every capture
+            // allocated so far as stale; the next recorded generation is the
+            // first one eligible to restore grid_valid.
+            self.grid_capture_id = self.next_capture_id.saturating_sub(1);
+        }
+        self.enabled = enabled;
     }
 
     /// Drop cached bind group (call when the Hi-Z chain is reallocated,
@@ -215,17 +244,19 @@ impl OcclusionCuller {
         let _ = device.poll(wgpu::PollType::Poll);
         for rb in &mut self.readbacks {
             if rb.in_flight && rb.map_done.load(Ordering::Acquire) {
-                {
+                if rb.capture_id > self.grid_capture_id {
                     let n = self.grid.len();
                     let view = rb.buffer.slice(..).get_mapped_range();
                     let floats: &[f32] = bytemuck::cast_slice(&view);
                     self.grid.copy_from_slice(&floats[..n]);
+                    drop(view);
+                    self.grid_vp = rb.vp;
+                    self.grid_capture_id = rb.capture_id;
+                    self.grid_valid = true;
                 }
                 rb.buffer.unmap();
                 rb.in_flight = false;
                 rb.map_done.store(false, Ordering::Release);
-                self.grid_vp = rb.vp;
-                self.grid_valid = true;
             }
         }
     }
@@ -251,9 +282,7 @@ impl OcclusionCuller {
             // behind) — skip; the grid just stays one frame staler.
             return;
         }
-        let tile_w = src_size.0.div_ceil(GRID_W).max(1);
-        let tile_h = src_size.1.div_ceil(GRID_H).max(1);
-        let params: [u32; 4] = [src_size.0, src_size.1, tile_w, tile_h];
+        let params: [u32; 4] = [src_size.0, src_size.1, 0, 0];
         queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&params));
 
         if self.bg_cache.is_none() {
@@ -307,6 +336,8 @@ impl OcclusionCuller {
             },
         );
         rb.vp = vp;
+        rb.capture_id = self.next_capture_id;
+        self.next_capture_id = self.next_capture_id.wrapping_add(1).max(1);
         self.recorded_this_frame = true;
     }
 
@@ -335,44 +366,53 @@ impl OcclusionCuller {
 
     /// Conservative visibility test for a world-space AABB against the
     /// last completed grid. `true` = potentially visible (draw it).
-    pub fn test_aabb(&self, wmin: [f32; 3], wmax: [f32; 3]) -> bool {
+    pub fn test_aabb(&self, wmin: [f32; 3], wmax: [f32; 3], current_vp: &[[f32; 4]; 4]) -> bool {
         if !self.enabled || !self.grid_valid {
             return true;
         }
-        let vp = &self.grid_vp;
-        let mut uv_min = [f32::MAX, f32::MAX];
-        let mut uv_max = [f32::MIN, f32::MIN];
-        let mut nearest = f32::MAX;
-        for ix in 0..2 {
-            for iy in 0..2 {
-                for iz in 0..2 {
-                    let x = if ix == 0 { wmin[0] } else { wmax[0] };
-                    let y = if iy == 0 { wmin[1] } else { wmax[1] };
-                    let z = if iz == 0 { wmin[2] } else { wmax[2] };
-                    let cw = vp[0][3] * x + vp[1][3] * y + vp[2][3] * z + vp[3][3];
-                    if cw <= 0.05 {
-                        // corner at/behind the captured near plane —
-                        // can't bound the footprint; play safe
-                        return true;
-                    }
-                    let cx = vp[0][0] * x + vp[1][0] * y + vp[2][0] * z + vp[3][0];
-                    let cy = vp[0][1] * x + vp[1][1] * y + vp[2][1] * z + vp[3][1];
-                    let u = (cx / cw) * 0.5 + 0.5;
-                    let v = 1.0 - ((cy / cw) * 0.5 + 0.5);
-                    uv_min[0] = uv_min[0].min(u);
-                    uv_min[1] = uv_min[1].min(v);
-                    uv_max[0] = uv_max[0].max(u);
-                    uv_max[1] = uv_max[1].max(v);
-                    nearest = nearest.min(cw);
-                }
-            }
-        }
-        // Fully outside the captured view → last frame's depth says
-        // nothing about it. (Current-frame frustum culling handles
-        // actual offscreen-ness.)
-        if uv_max[0] <= 0.0 || uv_min[0] >= 1.0 || uv_max[1] <= 0.0 || uv_min[1] >= 1.0 {
+
+        // A zero-volume (or numerically near-zero-volume) box cannot prove
+        // that its rasterized surface is behind the depth buffer. This is
+        // common for decals and ground details: their AABB may round behind
+        // the coplanar receiver even though the biased surface is visible.
+        // Keep those details visible rather than allowing intermittent holes.
+        if (wmax[0] - wmin[0]).abs() <= 1.0e-4
+            || (wmax[1] - wmin[1]).abs() <= 1.0e-4
+            || (wmax[2] - wmin[2]).abs() <= 1.0e-4
+        {
             return true;
         }
+
+        let Some(captured) = project_aabb(&self.grid_vp, wmin, wmax) else {
+            return true;
+        };
+        let Some(current) = project_aabb(current_vp, wmin, wmax) else {
+            return true;
+        };
+
+        // A footprint outside either view cannot be conservatively classified
+        // by the captured depth grid. Current-frame frustum culling handles
+        // genuinely offscreen objects.
+        if footprint_outside(captured.uv_min, captured.uv_max)
+            || footprint_outside(current.uv_min, current.uv_max)
+        {
+            return true;
+        }
+
+        // Query the entire screen-space sweep between the captured and
+        // current cameras. Newly revealed objects therefore touch the depth
+        // region they moved into instead of being tested only where an old
+        // occluder covered them.
+        let uv_min = [
+            captured.uv_min[0].min(current.uv_min[0]),
+            captured.uv_min[1].min(current.uv_min[1]),
+        ];
+        let uv_max = [
+            captured.uv_max[0].max(current.uv_max[0]),
+            captured.uv_max[1].max(current.uv_max[1]),
+        ];
+        let nearest = captured.nearest.min(current.nearest);
+
         // Expand by one texel for footprint conservatism, clamp to grid.
         let tx0 = ((uv_min[0] * GRID_W as f32) as i32 - 1).clamp(0, GRID_W as i32 - 1) as usize;
         let tx1 = ((uv_max[0] * GRID_W as f32) as i32 + 1).clamp(0, GRID_W as i32 - 1) as usize;
@@ -384,10 +424,56 @@ impl OcclusionCuller {
                 grid_max = grid_max.max(self.grid[ty * GRID_W as usize + tx]);
             }
         }
-        // Margin: 2% relative + 0.1 absolute absorbs linearization and
-        // one frame of camera motion for typical scenes.
+        // Margin: 2% relative + 0.1 absolute absorbs depth linearization,
+        // raster/AABB disagreement, and sub-grid camera motion.
         nearest <= grid_max * 1.02 + 0.1
     }
+}
+
+#[derive(Clone, Copy)]
+struct ProjectedAabb {
+    uv_min: [f32; 2],
+    uv_max: [f32; 2],
+    nearest: f32,
+}
+
+fn project_aabb(vp: &[[f32; 4]; 4], wmin: [f32; 3], wmax: [f32; 3]) -> Option<ProjectedAabb> {
+    let mut uv_min = [f32::MAX, f32::MAX];
+    let mut uv_max = [f32::MIN, f32::MIN];
+    let mut nearest = f32::MAX;
+    for ix in 0..2 {
+        for iy in 0..2 {
+            for iz in 0..2 {
+                let x = if ix == 0 { wmin[0] } else { wmax[0] };
+                let y = if iy == 0 { wmin[1] } else { wmax[1] };
+                let z = if iz == 0 { wmin[2] } else { wmax[2] };
+                let cw = vp[0][3] * x + vp[1][3] * y + vp[2][3] * z + vp[3][3];
+                if cw <= 0.05 {
+                    // A corner at/behind the near plane prevents a finite
+                    // conservative footprint.
+                    return None;
+                }
+                let cx = vp[0][0] * x + vp[1][0] * y + vp[2][0] * z + vp[3][0];
+                let cy = vp[0][1] * x + vp[1][1] * y + vp[2][1] * z + vp[3][1];
+                let u = (cx / cw) * 0.5 + 0.5;
+                let v = 1.0 - ((cy / cw) * 0.5 + 0.5);
+                uv_min[0] = uv_min[0].min(u);
+                uv_min[1] = uv_min[1].min(v);
+                uv_max[0] = uv_max[0].max(u);
+                uv_max[1] = uv_max[1].max(v);
+                nearest = nearest.min(cw);
+            }
+        }
+    }
+    Some(ProjectedAabb {
+        uv_min,
+        uv_max,
+        nearest,
+    })
+}
+
+fn footprint_outside(uv_min: [f32; 2], uv_max: [f32; 2]) -> bool {
+    uv_max[0] <= 0.0 || uv_min[0] >= 1.0 || uv_max[1] <= 0.0 || uv_min[1] >= 1.0
 }
 
 #[cfg(test)]
@@ -430,19 +516,116 @@ mod tests {
 
         // Box fully behind that wall (depth 20..21, small footprint).
         assert!(
-            !c.test_aabb([-0.1, -0.1, -21.0], [0.1, 0.1, -20.0]),
+            !c.test_aabb([-0.1, -0.1, -21.0], [0.1, 0.1, -20.0], &look_down_neg_z(),),
             "box behind a full-screen depth-10 wall should be culled"
         );
         // Box in front of the wall (depth 5).
-        assert!(c.test_aabb([-0.1, -0.1, -5.2], [0.1, 0.1, -5.0]));
+        assert!(c.test_aabb([-0.1, -0.1, -5.2], [0.1, 0.1, -5.0], &look_down_neg_z(),));
         // Box straddling the near plane — must play safe.
-        assert!(c.test_aabb([-0.1, -0.1, -20.0], [0.1, 0.1, 1.0]));
+        assert!(c.test_aabb([-0.1, -0.1, -20.0], [0.1, 0.1, 1.0], &look_down_neg_z(),));
+        // Coplanar/planar detail cannot be proven hidden from an AABB depth
+        // interval and must remain visible.
+        assert!(c.test_aabb([-0.5, 0.0, -21.0], [0.5, 0.0, -20.0], &look_down_neg_z(),));
+
+        // A camera-shifted footprint that reaches a far-depth region is
+        // potentially visible even though the captured footprint was hidden.
+        let mut shifted = look_down_neg_z();
+        shifted[3][0] = 15.0;
+        for ty in 0..GRID_H as usize {
+            for tx in 54..GRID_W as usize {
+                c.grid[ty * GRID_W as usize + tx] = 100.0;
+            }
+        }
+        assert!(c.test_aabb([-0.1, -0.1, -21.0], [0.1, 0.1, -20.0], &shifted,));
         // Without a valid grid, never cull.
         c.grid_valid = false;
-        assert!(c.test_aabb([-0.1, -0.1, -21.0], [0.1, 0.1, -20.0]));
+        assert!(c.test_aabb([-0.1, -0.1, -21.0], [0.1, 0.1, -20.0], &look_down_neg_z(),));
         // Disabled culler never culls.
         c.grid_valid = true;
-        c.enabled = false;
-        assert!(c.test_aabb([-0.1, -0.1, -21.0], [0.1, 0.1, -20.0]));
+        c.set_enabled(false);
+        assert!(c.test_aabb([-0.1, -0.1, -21.0], [0.1, 0.1, -20.0], &look_down_neg_z(),));
+    }
+
+    #[test]
+    fn non_divisible_source_populates_the_full_normalized_grid() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("skip: no GPU adapter in this environment");
+            return;
+        };
+
+        // Neither dimension is divisible by the 64x64 destination grid. The
+        // former ceil-tile reducer covered only 44x33 cells for this source,
+        // leaving the CPU-visible tail filled with stale/unrelated depth.
+        const SRC_W: u32 = 130;
+        const SRC_H: u32 = 66;
+        const PADDED_ROW_BYTES: u32 = 768;
+        let src = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("occlusion_non_divisible_source"),
+            size: wgpu::Extent3d {
+                width: SRC_W,
+                height: SRC_H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let padded_row_floats = (PADDED_ROW_BYTES / 4) as usize;
+        let mut source = vec![0.0f32; padded_row_floats * SRC_H as usize];
+        for y in 0..SRC_H as usize {
+            let value = if y == SRC_H as usize - 1 { 77.0 } else { 1.0 };
+            source[y * padded_row_floats..y * padded_row_floats + SRC_W as usize].fill(value);
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &src,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&source),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(PADDED_ROW_BYTES),
+                rows_per_image: Some(SRC_H),
+            },
+            wgpu::Extent3d {
+                width: SRC_W,
+                height: SRC_H,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let mut culler = OcclusionCuller::new(&device);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("occlusion_non_divisible_encoder"),
+        });
+        culler.record(
+            &device,
+            &queue,
+            &mut encoder,
+            &src.create_view(&wgpu::TextureViewDescriptor::default()),
+            (SRC_W, SRC_H),
+            look_down_neg_z(),
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        culler.after_submit();
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        culler.poll(&device);
+
+        assert!(culler.grid_valid, "reduced grid did not complete");
+        assert_eq!(culler.grid[0], 1.0);
+        assert!(
+            culler.grid[(GRID_H as usize - 1) * GRID_W as usize..]
+                .iter()
+                .all(|&depth| depth == 77.0),
+            "the final normalized row must cover the source's final depth row"
+        );
     }
 }
