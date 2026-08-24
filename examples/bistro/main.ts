@@ -31,6 +31,7 @@ import {
   setAutoExposure, setAutoExposureKey, setAutoExposureRate,
   setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
   setSsgiEnabled, setSsrEnabled, setSharpenStrength, setShadowsAlwaysFresh, setMotionBlurEnabled,
+  setOcclusionCulling,
   setPathTracing,
   setBloomIntensity, setSsaoIntensity, setSsaoRadius,
   setSsgiIntensity, setSsgiRadius, setTonemap, Tonemap,
@@ -82,6 +83,7 @@ let fogOverride = -1;
 let sunShaftOverride = -1;
 let ssgiOverride = -1;
 let ssrOverride = -1;
+let occlusionOverride = -1;
 let motionBlurOverride = 0;
 let vsmMotionPath = false;
 let motionYaw = 0.0;
@@ -156,6 +158,9 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--ssr" && i + 1 < argv.length) {
     ssrOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--occlusion" && i + 1 < argv.length) {
+    occlusionOverride = parseInt(argv[i + 1]);
   }
   if (argv[i] === "--motion-blur" && i + 1 < argv.length) {
     motionBlurOverride = parseInt(argv[i + 1]);
@@ -301,6 +306,8 @@ if (ssgiOverride === 0) { setSsgiEnabled(false); }
 if (ssgiOverride === 1) { setSsgiEnabled(true); }
 if (ssrOverride === 0) { setSsrEnabled(false); }
 if (ssrOverride === 1) { setSsrEnabled(true); }
+if (occlusionOverride === 0) { setOcclusionCulling(false); }
+if (occlusionOverride === 1) { setOcclusionCulling(true); }
 if (godotReference && ssrOverride < 0) { setSsrEnabled(false); }
 
 // Same-camera image-quality isolation. These toggles deliberately live in
@@ -313,6 +320,7 @@ let diagnosticSsgiEnabled = ssgiOverride === 1
   || (ssgiOverride < 0 && (interactiveQualityPreset < 0 || interactiveQualityPreset >= 3));
 let diagnosticSsrEnabled = ssrOverride === 1
   || (ssrOverride < 0 && !godotReference && (interactiveQualityPreset < 0 || interactiveQualityPreset >= 3));
+let diagnosticOcclusionEnabled = occlusionOverride !== 0;
 const diagnosticSharpenStrengths = [0.0, 0.25, 0.40, 0.45, 0.85];
 const diagnosticSharpenStrength = interactiveSharpenStrength >= 0.0
   ? interactiveSharpenStrength
@@ -411,6 +419,10 @@ while (!windowShouldClose()) {
     diagnosticSsrEnabled = !diagnosticSsrEnabled;
     setSsrEnabled(diagnosticSsrEnabled);
   }
+  if (qualityRun === null && isKeyPressed(Key.O)) {
+    diagnosticOcclusionEnabled = !diagnosticOcclusionEnabled;
+    setOcclusionCulling(diagnosticOcclusionEnabled);
+  }
   // P is deliberately outside the WASD movement cluster. Binding this to S
   // made every fresh backward key press toggle post-process sharpening, so
   // ordinary navigation changed the apparent texture and shadow sharpness.
@@ -490,8 +502,8 @@ while (!windowShouldClose()) {
         : { r: 230, g: 120, b: 120, a: 255 };
     const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
     drawText(fpsText, 10, 35, 16, fpsColor);
-    drawText("WASD move / Mouse look / Tab cursor / N numbered capture", 10, SCREEN_H - 48, 14, { r: 180, g: 180, b: 180, a: 255 });
-    const diagnosticText = `T TAA ${diagnosticTaaEnabled ? "on" : "off"} / G SSGI ${diagnosticSsgiEnabled ? "on" : "off"} / R SSR ${diagnosticSsrEnabled ? "on" : "off"} / P sharpen ${diagnosticSharpenEnabled ? "on" : "off"}`;
+    drawText("WASD move / Mouse look / Tab cursor / N capture / O occlusion", 10, SCREEN_H - 48, 14, { r: 180, g: 180, b: 180, a: 255 });
+    const diagnosticText = `T TAA ${diagnosticTaaEnabled ? "on" : "off"} / G SSGI ${diagnosticSsgiEnabled ? "on" : "off"} / R SSR ${diagnosticSsrEnabled ? "on" : "off"} / O OCC ${diagnosticOcclusionEnabled ? "on" : "off"} / P sharpen ${diagnosticSharpenEnabled ? "on" : "off"}`;
     drawText(diagnosticText, 10, SCREEN_H - 26, 13, { r: 180, g: 210, b: 240, a: 255 });
   }
 
