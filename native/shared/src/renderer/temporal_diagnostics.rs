@@ -368,8 +368,11 @@ mod tests {
         assert!(TAA_SHADER_WGSL.contains("current_weight >= 0.095"));
         assert!(TAA_SHADER_WGSL
             .contains("let settled_current_cap = select(0.041666667, 0.085, camera_moving);"));
-        assert!(TAA_SHADER_WGSL.contains("min(motion_ramped, settled_current_cap)"));
+        assert!(
+            TAA_SHADER_WGSL.contains("let color_motion_ramped = max(motion_ramped, disocclusion);")
+        );
+        assert!(TAA_SHADER_WGSL.contains("min(color_motion_ramped, settled_current_cap)"));
         assert!(TAA_SHADER_WGSL.contains("min(bootstrap_alpha, settled_current_cap)"));
-        assert!(TAA_SHADER_WGSL.contains("disocclusion <= 0.01"));
+        assert!(!TAA_SHADER_WGSL.contains("disocclusion <= 0.01"));
     }
 }

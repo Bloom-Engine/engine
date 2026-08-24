@@ -1194,10 +1194,10 @@ fn fs_main(in: VsOut) -> TaaOut {
     let bootstrap_alpha = mix(current_weight, bootstrap_running_alpha, bootstrap_static);
     // A locked native pixel sees the same finite jitter phases repeat. The
     // authored 10% current weight makes them shimmer even when a slow pan has
-    // valid, coherent reprojection. Keep every rejection guard and the static
-    // 24-frame window. A sub-quarter-texel camera reprojection uses 8.5% current
-    // so phase shimmer falls without long-exposure blur; faster motion and
-    // fractional reconstruction retain their authored policies.
+    // valid, coherent reprojection. Keep every geometric/reactive guard and
+    // the static 24-frame window. Compatible color excursions retain that
+    // window; changes outside the band still unlock, while gradual lighting
+    // converges normally. Coherent slow motion uses the qualified 8.5% cap.
     let settled_coherent_lock = select(
         0.0,
         1.0,
@@ -1206,13 +1206,13 @@ fn fs_main(in: VsOut) -> TaaOut {
         reprojection_motion < 0.00025 &&
         jitter_coverage_compatible &&
         current_weight >= 0.095 &&
-        disocclusion <= 0.01 &&
         temporal_rejection <= 0.01,
     );
     let settled_current_cap = select(0.041666667, 0.085, camera_moving);
+    let color_motion_ramped = max(motion_ramped, disocclusion);
     let settled_motion_ramped = mix(
-        motion_ramped,
-        min(motion_ramped, settled_current_cap),
+        color_motion_ramped,
+        min(color_motion_ramped, settled_current_cap),
         settled_coherent_lock,
     );
     let settled_bootstrap_alpha = mix(
@@ -1221,7 +1221,7 @@ fn fs_main(in: VsOut) -> TaaOut {
         settled_coherent_lock,
     );
     let alpha = max(
-        max(max(settled_motion_ramped, disocclusion), max(depth_disocclusion, reactive)),
+        max(settled_motion_ramped, max(depth_disocclusion, reactive)),
         settled_bootstrap_alpha,
     );
     let accepted_history = select(0.0, 1.0 - temporal_rejection, history_usable);
