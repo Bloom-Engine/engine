@@ -1192,33 +1192,33 @@ fn fs_main(in: VsOut) -> TaaOut {
     );
     let bootstrap_static = 1.0 - smoothstep(0.00001, 0.0001, vel_len);
     let bootstrap_alpha = mix(current_weight, bootstrap_running_alpha, bootstrap_static);
-    // A fully locked static pixel sees the same finite jitter phases repeat.
-    // Continuing to inject the authored 10% native current weight turns that
-    // deterministic phase sequence into visible 16-frame shimmer even though
-    // geometry, material, and lighting history are all compatible. Preserve
-    // bootstrap and every rejection path, but lengthen only the settled,
-    // native, zero-velocity window to 24 frames. Fractional reconstruction
-    // keeps its authored blend; lighting/material changes still raise color
-    // disocclusion, while motion/reactive/depth changes clear the lock.
-    let settled_static_lock = select(
+    // A locked native pixel sees the same finite jitter phases repeat. The
+    // authored 10% current weight makes them shimmer even when a slow pan has
+    // valid, coherent reprojection. Keep every rejection guard and the static
+    // 24-frame window. A sub-quarter-texel camera reprojection uses 8.5% current
+    // so phase shimmer falls without long-exposure blur; faster motion and
+    // fractional reconstruction retain their authored policies.
+    let settled_coherent_lock = select(
         0.0,
         1.0,
         history_confidence >= 0.999 &&
-        static_zero_velocity &&
+        (!camera_moving || reconstruction_scale > 0.95) &&
+        reprojection_motion < 0.00025 &&
         jitter_coverage_compatible &&
         current_weight >= 0.095 &&
         disocclusion <= 0.01 &&
         temporal_rejection <= 0.01,
     );
+    let settled_current_cap = select(0.041666667, 0.085, camera_moving);
     let settled_motion_ramped = mix(
         motion_ramped,
-        min(motion_ramped, 0.041666667),
-        settled_static_lock,
+        min(motion_ramped, settled_current_cap),
+        settled_coherent_lock,
     );
     let settled_bootstrap_alpha = mix(
         bootstrap_alpha,
-        min(bootstrap_alpha, 0.041666667),
-        settled_static_lock,
+        min(bootstrap_alpha, settled_current_cap),
+        settled_coherent_lock,
     );
     let alpha = max(
         max(max(settled_motion_ramped, disocclusion), max(depth_disocclusion, reactive)),

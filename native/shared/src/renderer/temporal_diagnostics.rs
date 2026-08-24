@@ -362,9 +362,14 @@ mod tests {
         assert!(TAA_SHADER_WGSL.contains("static_zero_velocity && jitter_coverage_compatible,"));
         assert!(TAA_SHADER_WGSL.contains("let temporal_rejection = max(depth_disocclusion,"));
         assert!(!TAA_SHADER_WGSL.contains("let temporal_rejection = max(raw_depth_disocclusion,"));
-        assert!(TAA_SHADER_WGSL.contains("let settled_static_lock = select("));
+        assert!(TAA_SHADER_WGSL.contains("let settled_coherent_lock = select("));
+        assert!(TAA_SHADER_WGSL.contains("(!camera_moving || reconstruction_scale > 0.95)"));
+        assert!(TAA_SHADER_WGSL.contains("reprojection_motion < 0.00025"));
         assert!(TAA_SHADER_WGSL.contains("current_weight >= 0.095"));
-        assert!(TAA_SHADER_WGSL.contains("min(motion_ramped, 0.041666667)"));
-        assert!(TAA_SHADER_WGSL.contains("min(bootstrap_alpha, 0.041666667)"));
+        assert!(TAA_SHADER_WGSL
+            .contains("let settled_current_cap = select(0.041666667, 0.085, camera_moving);"));
+        assert!(TAA_SHADER_WGSL.contains("min(motion_ramped, settled_current_cap)"));
+        assert!(TAA_SHADER_WGSL.contains("min(bootstrap_alpha, settled_current_cap)"));
+        assert!(TAA_SHADER_WGSL.contains("disocclusion <= 0.01"));
     }
 }
