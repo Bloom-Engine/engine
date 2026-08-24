@@ -186,6 +186,7 @@ class ReproducibilityTests(unittest.TestCase):
             "taa-motion",
             "taa-reprojected-uv",
             "taa-temporal-confidence",
+            "taa-reconstruction-footprint",
         }
         for case in manifest["case"]:
             required = set(case["required_intermediates"])

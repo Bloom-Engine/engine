@@ -6,16 +6,17 @@
 
 use super::*;
 
-pub(super) const TAA_DIAGNOSTIC_NAMES: [&str; 6] = [
+pub(super) const TAA_DIAGNOSTIC_NAMES: [&str; 7] = [
     "taa-rejection-reason",
     "taa-motion",
     "taa-reprojected-uv",
     "taa-temporal-confidence",
     "taa-reactive-history",
     "taa-history-policy",
+    "taa-reconstruction-footprint",
 ];
 pub(super) const TAA_DIAGNOSTIC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const TAA_DIAGNOSTIC_BATCHES: [(usize, usize); 2] = [(0, 4), (4, 6)];
+const TAA_DIAGNOSTIC_BATCHES: [(usize, usize); 2] = [(0, 4), (4, 7)];
 
 pub(super) struct TaaDiagnosticResources {
     textures: Vec<wgpu::Texture>,
@@ -49,6 +50,7 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#
             r#"struct TaaDiagnosticOut {
     @location(0) reactive_history: vec4<f32>,
     @location(1) history_policy: vec4<f32>,
+    @location(2) reconstruction_footprint: vec4<f32>,
 };
 
 @fragment
@@ -125,6 +127,16 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#
             clamp(clamp_delta * 8.0, 0.0, 1.0),
             clamp(alpha, 0.0, 1.0),
             clamp(temporal_rejection, 0.0, 1.0),
+            1.0,
+        ),
+        // R = current reconstruction residual against the linear center,
+        // G = relative local luma sigma, B = rectification displacement.
+        // Together these separate authored/source detail from broad variance
+        // and the history detail actually removed by the current policy.
+        vec4<f32>(
+            clamp(length(current - center_rgb) * 8.0, 0.0, 1.0),
+            clamp(stddev.x / max(abs(mean.x), 0.05), 0.0, 1.0),
+            clamp(clamp_delta * 8.0, 0.0, 1.0),
             1.0,
         ),
     );"#

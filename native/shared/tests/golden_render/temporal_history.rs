@@ -835,6 +835,7 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
         "taa-temporal-confidence",
         "taa-reactive-history",
         "taa-history-policy",
+        "taa-reconstruction-footprint",
     ] {
         let path = directory.join(format!("{name}.png"));
         let bytes = std::fs::read(&path)
@@ -953,6 +954,25 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
                     && rejected > 0
                     && minimum_current_weight < maximum_current_weight,
                 "history-policy diagnostics must expose clamp, blend, and rejection decisions"
+            );
+        } else if name == "taa-reconstruction-footprint" {
+            let pixels = image::open(&path).unwrap().to_rgb8();
+            let reconstructed = pixels.pixels().filter(|pixel| pixel[0] > 2).count();
+            let varying = pixels.pixels().filter(|pixel| pixel[1] > 2).count();
+            let rectified = pixels.pixels().filter(|pixel| pixel[2] > 2).count();
+            let reconstructed_rectified = pixels
+                .pixels()
+                .filter(|pixel| pixel[0] > 2 && pixel[2] > 2)
+                .count();
+            eprintln!(
+                "temporal-corpus footprint_reconstructed={reconstructed} \
+                 footprint_varying={varying} footprint_rectified={rectified} \
+                 footprint_reconstructed_rectified={reconstructed_rectified}"
+            );
+            assert!(
+                reconstructed > 0 && varying > 0 && rectified > 0 && reconstructed_rectified > 0,
+                "reconstruction-footprint diagnostics must expose source residual, \
+                 local variance, rectification pressure, and their actionable overlap"
             );
         }
     }

@@ -54,6 +54,7 @@ KNOWN_INTERMEDIATE_NAMES = {
     "taa-rejection-reason",
     "taa-reprojected-uv",
     "taa-temporal-confidence",
+    "taa-reconstruction-footprint",
     "pt-motion",
     "pt-rejection-reason",
     "pt-reprojected-uv",
