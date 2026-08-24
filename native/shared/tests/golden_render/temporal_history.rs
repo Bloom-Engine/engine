@@ -836,6 +836,7 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
         "taa-reactive-history",
         "taa-history-policy",
         "taa-reconstruction-footprint",
+        "taa-thin-feature-confidence",
     ] {
         let path = directory.join(format!("{name}.png"));
         let bytes = std::fs::read(&path)
@@ -973,6 +974,19 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
                 reconstructed > 0 && varying > 0 && rectified > 0 && reconstructed_rectified > 0,
                 "reconstruction-footprint diagnostics must expose source residual, \
                  local variance, rectification pressure, and their actionable overlap"
+            );
+        } else if name == "taa-thin-feature-confidence" {
+            let pixels = image::open(&path).unwrap().to_rgb8();
+            let candidates = pixels.pixels().filter(|pixel| pixel[1] > 127).count();
+            let ranged = pixels.pixels().filter(|pixel| pixel[2] > 2).count();
+            eprintln!(
+                "temporal-corpus thin_feature_candidates={candidates} \
+                 thin_feature_ranged={ranged}"
+            );
+            assert!(
+                ranged > candidates,
+                "thin-feature diagnostics must keep ordinary local luma range \
+                 distinct from qualified ridges"
             );
         }
     }

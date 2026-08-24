@@ -90,6 +90,7 @@ required_intermediates = [
   "taa-reprojected-uv",
   "taa-temporal-confidence",
   "taa-reconstruction-footprint",
+  "taa-thin-feature-confidence",
 ]
 
 [case.camera]
@@ -238,6 +239,7 @@ required_intermediates = [
   "taa-reprojected-uv",
   "taa-temporal-confidence",
   "taa-reconstruction-footprint",
+  "taa-thin-feature-confidence",
 ]
 
 [case.camera]
@@ -325,6 +327,7 @@ required_intermediates = [
   "taa-reprojected-uv",
   "taa-temporal-confidence",
   "taa-reconstruction-footprint",
+  "taa-thin-feature-confidence",
 ]
 
 [case.fallback]
@@ -414,6 +417,7 @@ required_intermediates = [
   "taa-reprojected-uv",
   "taa-temporal-confidence",
   "taa-reconstruction-footprint",
+  "taa-thin-feature-confidence",
 ]
 
 [case.fallback]
@@ -517,6 +521,7 @@ required_intermediates = [
   "taa-reprojected-uv",
   "taa-temporal-confidence",
   "taa-reconstruction-footprint",
+  "taa-thin-feature-confidence",
 ]
 
 [case.camera]
@@ -605,6 +610,7 @@ required_intermediates = [
   "taa-reprojected-uv",
   "taa-temporal-confidence",
   "taa-reconstruction-footprint",
+  "taa-thin-feature-confidence",
 ]
 
 [case.camera]
@@ -682,6 +688,7 @@ required_intermediates = [
   "taa-reprojected-uv",
   "taa-temporal-confidence",
   "taa-reconstruction-footprint",
+  "taa-thin-feature-confidence",
 ]
 
 [case.camera]
@@ -764,6 +771,7 @@ required_intermediates = [
   "taa-reprojected-uv",
   "taa-temporal-confidence",
   "taa-reconstruction-footprint",
+  "taa-thin-feature-confidence",
 ]
 
 [case.camera]

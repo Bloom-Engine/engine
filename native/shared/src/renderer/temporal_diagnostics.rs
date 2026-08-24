@@ -6,7 +6,7 @@
 
 use super::*;
 
-pub(super) const TAA_DIAGNOSTIC_NAMES: [&str; 7] = [
+pub(super) const TAA_DIAGNOSTIC_NAMES: [&str; 8] = [
     "taa-rejection-reason",
     "taa-motion",
     "taa-reprojected-uv",
@@ -14,9 +14,10 @@ pub(super) const TAA_DIAGNOSTIC_NAMES: [&str; 7] = [
     "taa-reactive-history",
     "taa-history-policy",
     "taa-reconstruction-footprint",
+    "taa-thin-feature-confidence",
 ];
 pub(super) const TAA_DIAGNOSTIC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const TAA_DIAGNOSTIC_BATCHES: [(usize, usize); 2] = [(0, 4), (4, 7)];
+const TAA_DIAGNOSTIC_BATCHES: [(usize, usize); 2] = [(0, 4), (4, 8)];
 
 pub(super) struct TaaDiagnosticResources {
     textures: Vec<wgpu::Texture>,
@@ -51,6 +52,7 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#
     @location(0) reactive_history: vec4<f32>,
     @location(1) history_policy: vec4<f32>,
     @location(2) reconstruction_footprint: vec4<f32>,
+    @location(3) thin_feature_confidence: vec4<f32>,
 };
 
 @fragment
@@ -67,6 +69,69 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#
     let diagnostic_body = r#"    let clamped_ycocg = vec3<f32>(history_y_clamped, co_clamped, cg_clamped);
     let clamp_delta = length(history_ycocg - clamped_ycocg);
     let reactive_weight = reactive;
+
+    // AMD FSR 3's thin-feature classifier, evaluated on exact integer input
+    // texels rather than reconstructed output samples. A ridge nucleus must
+    // be an extremum among dissimilar neighbors and must not belong to any
+    // locally coherent 2x2 quadrant. This code exists only in capture
+    // pipelines; production TAA does not pay these nine input reads.
+    let thin_max_coord = vec2<i32>(input_size) - vec2<i32>(1);
+    let thin_center = clamp(
+        vec2<i32>(floor(src_uv * input_size)),
+        vec2<i32>(0),
+        thin_max_coord,
+    );
+    let thin_offsets = array<vec2<i32>, 9>(
+        vec2<i32>(0, 0),
+        vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1),
+        vec2<i32>(-1, 0),                       vec2<i32>(1, 0),
+        vec2<i32>(-1, 1),  vec2<i32>(0, 1),  vec2<i32>(1, 1),
+    );
+    var thin_luma: array<f32, 9>;
+    var thin_luma_min = 3.402823466e+38;
+    var thin_luma_max = 0.0;
+    for (var i = 0; i < 9; i = i + 1) {
+        let coord = clamp(
+            thin_center + thin_offsets[i],
+            vec2<i32>(0),
+            thin_max_coord,
+        );
+        let rgb = max(textureLoad(composed_tex, coord, 0).rgb, vec3<f32>(0.0));
+        thin_luma[i] = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        thin_luma_min = min(thin_luma_min, thin_luma[i]);
+        thin_luma_max = max(thin_luma_max, thin_luma[i]);
+    }
+    let thin_range = thin_luma_max - thin_luma_min;
+    var thin_pattern = 1u;
+    var dissimilar_min = 3.402823466e+38;
+    var dissimilar_max = 0.0;
+    for (var i = 1; i < 9; i = i + 1) {
+        let difference = abs(thin_luma[i] - thin_luma[0]) / max(thin_range, 0.000001);
+        if (difference < 0.9) {
+            thin_pattern = thin_pattern | (1u << u32(i));
+        } else {
+            dissimilar_min = min(dissimilar_min, thin_luma[i]);
+            dissimilar_max = max(dissimilar_max, thin_luma[i]);
+        }
+    }
+    let thin_is_ridge =
+        thin_luma[0] > dissimilar_max || thin_luma[0] < dissimilar_min;
+    let thin_rejection_masks = array<u32, 4>(
+        1u | (1u << 1u) | (1u << 2u) | (1u << 4u),
+        1u | (1u << 2u) | (1u << 3u) | (1u << 5u),
+        1u | (1u << 4u) | (1u << 6u) | (1u << 7u),
+        1u | (1u << 5u) | (1u << 7u) | (1u << 8u),
+    );
+    var thin_rejected = false;
+    for (var i = 0; i < 4; i = i + 1) {
+        thin_rejected = thin_rejected ||
+            ((thin_pattern & thin_rejection_masks[i]) == thin_rejection_masks[i]);
+    }
+    let thin_confidence = select(
+        0.0,
+        1.0 - thin_luma_min / max(thin_luma_max, 0.000001),
+        thin_is_ridge && !thin_rejected && thin_range > 0.000001,
+    );
 
     // Categorical dominant reason: gray seed, red off-screen, cyan reactive,
     // magenta depth/color disocclusion, yellow neighborhood clamp, blue motion,
@@ -137,6 +202,14 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#
             clamp(length(current - center_rgb) * 8.0, 0.0, 1.0),
             clamp(stddev.x / max(abs(mean.x), 0.05), 0.0, 1.0),
             clamp(clamp_delta * 8.0, 0.0, 1.0),
+            1.0,
+        ),
+        // R = continuous FSR 3 ridge confidence; G = binary >1% lock seed;
+        // B = local normalized luma range for false-positive analysis.
+        vec4<f32>(
+            clamp(thin_confidence, 0.0, 1.0),
+            select(0.0, 1.0, thin_confidence > 0.01),
+            clamp(thin_range / max(thin_luma_max, 0.000001), 0.0, 1.0),
             1.0,
         ),
     );"#
