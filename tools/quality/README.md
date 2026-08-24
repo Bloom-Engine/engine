@@ -44,6 +44,25 @@ python3 tools/quality/run.py faults
 python3 -m unittest tools/quality/test_run.py -v
 ```
 
+To isolate an intermittent detailed-Bistro temporal defect by renderer owner,
+capture the same admitted scene, camera excursion, return pose, and 32-frame
+stationary burst with TAA, SSGI, SSR, and Hi-Z occlusion removed one at a time:
+
+```sh
+python3 tools/quality/bistro_temporal_matrix.py \
+  --scene /absolute/path/to/BistroReference.gltf \
+  --output /tmp/bloom-bistro-temporal-matrix
+```
+
+The command writes each variant's images and `metrics.json`, plus a root
+`matrix.json` comparing temporal pixel range, adjacent-frame change, and the
+largest coherent changing region. It is diagnostic evidence rather than a
+quality threshold: the control reductions identify which subsystem should be
+changed before a permanent regression gate is approved. Use `--analyze-only`
+to recompute metrics without recapturing, or `--resume` after an interrupted
+matrix to retain complete variants. The underlying opt-in golden also accepts
+`BLOOM_BISTRO_PROBE_DUMP_OCCLUSION=0` for the exact visibility control.
+
 For the official Khronos alpha, transmission, volume, and ordering controls:
 
 ```sh

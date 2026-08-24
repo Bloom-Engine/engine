@@ -1337,6 +1337,9 @@ fn dump_detailed_bistro_probe_state() {
     if std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_TAA").is_some() {
         eng.renderer.set_taa_enabled(true);
     }
+    if std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_OCCLUSION").is_some_and(|value| value == "0") {
+        eng.renderer.occlusion.set_enabled(false);
+    }
     attach_model_placements(&mut eng, &scene_path);
 
     // Default pose is the shared façade oracle view; an override aims the
@@ -1365,7 +1368,21 @@ fn dump_detailed_bistro_probe_state() {
         assert!(warmup_frames < 20_000, "BLAS admission never drained");
     }
 
-    if std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_MOVE").is_some() {
+    // Hardware admission requires an active ray consumer. For the SSGI-off
+    // control, disable only after the queue drains. When movement is enabled,
+    // the matched 108-frame excursion flushes prior SSGI-composited display
+    // history without giving this control extra stationary settle frames.
+    let dump_move_enabled = std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_MOVE").is_some();
+    if !dump_ssgi_enabled {
+        eng.renderer.set_ssgi_enabled(false);
+        if !dump_move_enabled {
+            for _ in 0..64 {
+                frame(&mut eng, start_x, start_z, cam_yaw);
+            }
+        }
+    }
+
+    if dump_move_enabled {
         let end_x = start_x + 3.748170285;
         let end_z = start_z + 4.685212856;
         for step in 1..=30 {
@@ -1393,16 +1410,6 @@ fn dump_detailed_bistro_probe_state() {
         for step in 1..=24 {
             let t = step as f32 / 24.0;
             frame(&mut eng, start_x, start_z, cam_yaw + 0.45 * (1.0 - t));
-        }
-    }
-
-    // Hardware admission requires an active ray consumer. For the SSGI-off
-    // control, disable only after the queue drains, then settle TAA long
-    // enough that no prior SSGI-composited display history remains.
-    if !dump_ssgi_enabled {
-        eng.renderer.set_ssgi_enabled(false);
-        for _ in 0..64 {
-            frame(&mut eng, start_x, start_z, cam_yaw);
         }
     }
 
