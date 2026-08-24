@@ -641,6 +641,40 @@ impl Renderer {
                     0.0_f32
                 };
             self.transparent_gi_force_probe_refresh = false;
+            let (
+                probe_header_bytes,
+                probe_world_cache_offset,
+                probe_world_cache_bytes,
+                cache_capacity,
+            ) = probe_storage_buffer_layout(gw * gh, self.hw_rt_enabled);
+            let mut cache_signature = FNV_OFFSET;
+            cache_signature = fnv1a_bytes(cache_signature, &self.tlas_built_version.to_le_bytes());
+            cache_signature =
+                fnv1a_bytes(cache_signature, &self.card_light_input_hash.to_le_bytes());
+            cache_signature = fnv1a_bytes(
+                cache_signature,
+                bytemuck::bytes_of(&[self.ssgi_intensity, self.ssgi_radius]),
+            );
+            let cache_signature = ((cache_signature >> 32) as u32 ^ cache_signature as u32).max(1);
+            let cache_signature_changed = self.probe_world_cache_signature != cache_signature;
+            if use_hw && (force_refresh > 0.5 || cache_signature_changed) {
+                // A camera cut, feature transition, or lighting-mode reset
+                // invalidates both screen history and the persistent lookup.
+                // This is a buffer clear command, not a render/compute pass.
+                encoder.clear_buffer(
+                    &self.probe_header_buffer,
+                    probe_world_cache_offset,
+                    Some(probe_world_cache_bytes),
+                );
+            }
+            if use_hw {
+                self.probe_world_cache_signature = cache_signature;
+            }
+            // A hardware scene is not cacheable while BLAS/card admission is
+            // still changing its hit-lighting field. Software paths do not
+            // have that delayed handoff.
+            let cache_writes_allowed =
+                use_hw && self.card_light_coherent && self.card_light_coherent_ramp >= 0.999;
             let temporal_params = ProbeTemporalParams {
                 params: [
                     SSGI_TEMPORAL_PHASE_WEIGHT,
@@ -654,6 +688,12 @@ impl Renderer {
                     (self.probe_frame_index & 15) as f32,
                     SSGI_TEMPORAL_OUTPUT_WEIGHT,
                     0.0,
+                ],
+                world_cache: [
+                    if use_hw { cache_capacity } else { 0 },
+                    cache_signature,
+                    self.probe_frame_index,
+                    u32::from(cache_writes_allowed),
                 ],
             };
             self.queue.write_buffer(
@@ -693,13 +733,25 @@ impl Renderer {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 4,
-                                resource: self.probe_header_buffer.as_entire_binding(),
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &self.probe_header_buffer,
+                                    offset: 0,
+                                    size: std::num::NonZeroU64::new(probe_header_bytes),
+                                }),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 5,
                                 resource: wgpu::BindingResource::TextureView(
                                     &self.velocity_rt_view,
                                 ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &self.probe_header_buffer,
+                                    offset: probe_world_cache_offset,
+                                    size: std::num::NonZeroU64::new(probe_world_cache_bytes),
+                                }),
                             },
                         ],
                     }));

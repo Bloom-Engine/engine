@@ -929,6 +929,9 @@ pub struct Renderer {
     /// True after temporal writes; the index becomes next write after present.
     /// Independent from TAA because SSGI may be disabled or replaced by PT.
     pub probe_history_valid: bool,
+    /// Static scene/light signature owned by the persistent hardware SSGI
+    /// world cache. A change clears only the cache tail of the probe buffer.
+    probe_world_cache_signature: u32,
     #[cfg(not(target_arch = "wasm32"))]
     ssgi_temporal_diagnostics: Option<ssgi_temporal_diagnostics::SsgiTemporalDiagnosticResources>,
 
@@ -2474,10 +2477,11 @@ impl Renderer {
             create_probe_trace_tex(&device, surface_config.width, surface_config.height);
         let (probe_history_textures, probe_history_views) =
             create_probe_history_textures(&device, surface_config.width, surface_config.height);
+        let (_, probe_world_cache_offset, probe_world_cache_bytes, _) =
+            probe_storage_buffer_layout(probe_grid_w * probe_grid_h, hw_rt_enabled);
         let probe_header_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe_header_buffer"),
-            size: (probe_grid_w * probe_grid_h) as u64
-                * std::mem::size_of::<ProbeHeaderCpu>() as u64,
+            size: probe_world_cache_offset + probe_world_cache_bytes,
             // COPY_SRC is capture/diagnostic-only.
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
@@ -6246,6 +6250,16 @@ impl Renderer {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let probe_temporal_pl_layout =
@@ -8123,6 +8137,7 @@ impl Renderer {
             probe_history_idx: 0,
             probe_frame_index: 0,
             probe_history_valid: false,
+            probe_world_cache_signature: 0,
             #[cfg(not(target_arch = "wasm32"))]
             ssgi_temporal_diagnostics: None,
             hw_rt_enabled,
@@ -8788,15 +8803,18 @@ impl Renderer {
             self.probe_history_idx = 0;
             self.probe_frame_index = 0;
             self.probe_history_valid = false;
+            let (_, probe_world_cache_offset, probe_world_cache_bytes, _) =
+                probe_storage_buffer_layout(pg_w * pg_h, self.hw_rt_enabled);
             self.probe_header_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("probe_header_buffer"),
-                size: (pg_w * pg_h) as u64 * std::mem::size_of::<ProbeHeaderCpu>() as u64,
+                size: probe_world_cache_offset + probe_world_cache_bytes,
                 // COPY_SRC is capture/diagnostic-only.
                 usage: wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
+            self.probe_world_cache_signature = 0;
             let (dof_t, dof_v) = create_dof_rt(&self.device, width, height);
             self.dof_rt_texture = dof_t;
             self.dof_rt_view = dof_v;

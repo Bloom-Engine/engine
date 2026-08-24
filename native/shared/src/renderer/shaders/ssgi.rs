@@ -1523,6 +1523,18 @@ struct TemporalParams {
     // y = current angular phase [0, 15],
     // z = short output-blend current weight, w unused.
     confidence: vec4<f32>,
+    // x = world-cache capacity, y = static scene/lighting signature,
+    // z = monotonic probe frame, w = cache writes allowed.
+    world_cache: vec4<u32>,
+};
+
+struct ProbeWorldCacheEntry {
+    key: atomic<u32>,
+    sequence: atomic<u32>,
+    padding: vec2<u32>,
+    world_pos: vec4<f32>,
+    normal: vec4<f32>,
+    diffuse: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TemporalParams;
@@ -1531,6 +1543,24 @@ struct TemporalParams {
 @group(0) @binding(3) var history_out: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(4) var<storage, read_write> probes: array<ProbeHeader>;
 @group(0) @binding(5) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(6) var<storage, read_write> world_cache: array<ProbeWorldCacheEntry>;
+
+fn world_cache_mix(hash_in: u32, value: u32) -> u32 {
+    var hash = (hash_in ^ value) * 0x45d9f3bu;
+    hash = (hash ^ (hash >> 16u)) * 0x45d9f3bu;
+    return hash ^ (hash >> 16u);
+}
+
+fn world_cache_key(world_pos: vec3<f32>, normal: vec3<f32>) -> u32 {
+    let quantized_pos = vec3<i32>(round(world_pos * 100.0));
+    let encoded_normal = vec2<u32>(round(oct_encode(normal) * 255.0));
+    var hash = max(u.world_cache.y, 1u);
+    hash = world_cache_mix(hash, bitcast<u32>(quantized_pos.x));
+    hash = world_cache_mix(hash, bitcast<u32>(quantized_pos.y));
+    hash = world_cache_mix(hash, bitcast<u32>(quantized_pos.z));
+    hash = world_cache_mix(hash, encoded_normal.x | (encoded_normal.y << 8u));
+    return max(hash, 1u);
+}
 
 // The trace stores 32 equal-weight samples drawn from the receiver's cosine
 // hemisphere. Average those current samples and publish the temporally
@@ -1541,6 +1571,9 @@ var<workgroup> confidence_error_samples: array<f32, 64>;
 var<workgroup> robust_group_radiance: array<vec3<f32>, 8>;
 var<workgroup> independent_estimator_error: f32;
 var<workgroup> current_integrated_shared: vec3<f32>;
+var<workgroup> phase_ring_settled_shared: u32;
+var<workgroup> world_cache_hit_shared: u32;
+var<workgroup> world_cache_diffuse_shared: vec3<f32>;
 var<workgroup> reprojected_history_probe: u32;
 var<workgroup> reprojected_history_valid: u32;
 
@@ -1656,6 +1689,43 @@ fn cs_main(
         }
     }
     workgroupBarrier();
+
+    // Read a fully converged value previously published for this exact world
+    // surface. The sequence is sampled on both sides of the payload so a
+    // concurrent refresh can never expose a torn record.
+    if (u.world_cache.x > 0u) {
+        if (lane == 0u) {
+            world_cache_hit_shared = 0u;
+            world_cache_diffuse_shared = vec3<f32>(0.0);
+            let current_world_pos = probes[probe_index].world_pos;
+            let current_normal = probes[probe_index].normal;
+            if (current_world_pos.w >= 0.5) {
+                let key = world_cache_key(current_world_pos.xyz, current_normal.xyz);
+                let first_slot = key % u.world_cache.x;
+                for (var attempt = 0u; attempt < 8u; attempt = attempt + 1u) {
+                    let slot = (first_slot + attempt) % u.world_cache.x;
+                    if (atomicLoad(&world_cache[slot].key) != key) { continue; }
+                    let sequence_before = atomicLoad(&world_cache[slot].sequence);
+                    if (sequence_before == 0u || (sequence_before & 1u) != 0u) { continue; }
+                    let cached_world_pos = world_cache[slot].world_pos;
+                    let cached_normal = world_cache[slot].normal;
+                    let cached_diffuse = world_cache[slot].diffuse.rgb;
+                    let sequence_after = atomicLoad(&world_cache[slot].sequence);
+                    if (sequence_before == sequence_after &&
+                        distance(current_world_pos.xyz, cached_world_pos.xyz) <= 0.035 &&
+                        dot(current_normal.xyz, cached_normal.xyz) >= 0.98) {
+                        world_cache_hit_shared = 1u;
+                        world_cache_diffuse_shared = bounded_probe_history(cached_diffuse);
+                        break;
+                    }
+                }
+            }
+        }
+        workgroupBarrier();
+    } else if (lane == 0u) {
+        world_cache_hit_shared = 0u;
+        world_cache_diffuse_shared = vec3<f32>(0.0);
+    }
 
     // Direction samples change phase every frame. They are current-frame
     // Monte-Carlo samples, not temporal history slots. Accumulating them by
@@ -1780,6 +1850,19 @@ fn cs_main(
         let phase_slot = lane - 32u;
         let current_phase = u32(u.confidence.y) & 15u;
         var phase_integrated = current_integrated_shared;
+        // A seeded slot supplies stable first-frame output but is not a real
+        // sample of this angular phase. Its owner.w remains zero until that
+        // phase is traced at the current surface.
+        var phase_owner = vec4<f32>(0.0);
+        if (u.world_cache.x > 0u) {
+            phase_owner = vec4<f32>(probes[probe_index].world_pos.xyz, 0.0);
+            if (phase_slot == current_phase) {
+                // A hardware phase becomes publishable only after the
+                // TLAS/card-light field is coherent. Existing pre-coherence
+                // slots age out over the following complete 16-phase cycle.
+                phase_owner.w = select(0.0, 1.0, u.world_cache.w != 0u);
+            }
+        }
         if (u.params.y <= 0.5 && reprojected_history_valid != 0u &&
             phase_slot != current_phase) {
             let history_x = i32(reprojected_history_probe % grid_w);
@@ -1790,11 +1873,55 @@ fn cs_main(
                 vec3<i32>(history_x, history_y, history_layer),
                 0,
             ).rgb);
+            if (u.world_cache.x > 0u) {
+                phase_owner = textureLoad(
+                    history_in,
+                    vec3<i32>(history_x, history_y, i32(48u + phase_slot)),
+                    0,
+                );
+            }
         }
         diffuse_radiance[lane] = phase_integrated;
+        // The luminance reduction is dead after current integration. Reuse
+        // its existing 64 floats for sixteen vec4 phase owners instead of
+        // increasing workgroup memory and reducing occupancy on software GPUs.
+        let owner_base = phase_slot * 4u;
+        diffuse_luminance[owner_base] = phase_owner.x;
+        diffuse_luminance[owner_base + 1u] = phase_owner.y;
+        diffuse_luminance[owner_base + 2u] = phase_owner.z;
+        diffuse_luminance[owner_base + 3u] = phase_owner.w;
         textureStore(history_out, coord, vec4<f32>(phase_integrated, 1.0));
     }
     workgroupBarrier();
+
+    if (u.world_cache.x > 0u) {
+        if (lane == 0u) {
+            phase_ring_settled_shared = 1u;
+            let current_world_pos = probes[probe_index].world_pos;
+            if (current_world_pos.w < 0.5) {
+                phase_ring_settled_shared = 0u;
+            } else {
+                for (var phase = 0u; phase < 16u; phase = phase + 1u) {
+                    let owner_base = phase * 4u;
+                    let owner = vec4<f32>(
+                        diffuse_luminance[owner_base],
+                        diffuse_luminance[owner_base + 1u],
+                        diffuse_luminance[owner_base + 2u],
+                        diffuse_luminance[owner_base + 3u],
+                    );
+                    // Owner positions are stored in rgba16float, whose absolute
+                    // precision is about 1.6 cm around a 20 m Bistro coordinate.
+                    if (owner.w < 0.5 ||
+                        distance(owner.xyz, current_world_pos.xyz) > 0.05) {
+                        phase_ring_settled_shared = 0u;
+                    }
+                }
+            }
+        }
+        workgroupBarrier();
+    } else if (lane == 0u) {
+        phase_ring_settled_shared = 0u;
+    }
 
     if (lane == 0u) {
         var phase_sum = vec3<f32>(0.0);
@@ -1803,27 +1930,88 @@ fn cs_main(
         }
         let phase_integrated = bounded_probe_history(phase_sum * u.params.x);
         var integrated = phase_integrated;
-        if (u.params.y <= 0.5 && reprojected_history_valid != 0u) {
+        if (u.confidence.x < 0.5 && u.params.y <= 0.5 &&
+            reprojected_history_valid != 0u) {
+            // Screen/SDF traces can still change at Hi-Z silhouettes even
+            // after their angular ring is complete. Preserve the established
+            // short output blend on those approximate backends. Hardware
+            // queries are deterministic for a fixed world receiver and use
+            // the phase-stationary ring directly.
             let previous_integrated = bounded_probe_history(
                 probes[reprojected_history_probe].previous_diffuse.rgb,
             );
-            // Hi-Z silhouettes and jittered screen-probe placement can change
-            // a repeated phase slightly even after the angular ring is full.
-            // Smooth only the completed ring with a short eight-frame blend.
-            // Unlike the former 1/16 EMA over an endlessly rotating ray set,
-            // the ring cannot reintroduce a directional outlier after its
-            // 16-frame slot lifetime; the output is also neighborhood-clamped,
-            // and geometric rejection refreshes a disocclusion immediately.
             integrated = mix(
                 previous_integrated,
                 phase_integrated,
                 u.confidence.z,
             );
         }
+        // A returning surface can recover its fully converged value while the
+        // screen-owned angular ring refills. Never publish transient path
+        // samples back to the cache: all sixteen phase owners must first agree
+        // with this receiver.
+        if (phase_ring_settled_shared == 0u && world_cache_hit_shared != 0u) {
+            integrated = world_cache_diffuse_shared;
+        }
         // Confidence is populated below on the hardware path. Zero is the
         // well-converged default for Hi-Z/SDF; one would incorrectly request
         // the widest reconstruction footprint every frame.
         probes[probe_index].diffuse = vec4<f32>(integrated, 0.0);
+
+        if (phase_ring_settled_shared != 0u && u.world_cache.w != 0u &&
+            u.world_cache.x > 0u) {
+            let current_world_pos = probes[probe_index].world_pos;
+            let current_normal = probes[probe_index].normal;
+            let key = world_cache_key(current_world_pos.xyz, current_normal.xyz);
+            let first_slot = key % u.world_cache.x;
+            var destination = u.world_cache.x;
+            for (var attempt = 0u; attempt < 8u; attempt = attempt + 1u) {
+                let slot = (first_slot + attempt) % u.world_cache.x;
+                let existing_key = atomicLoad(&world_cache[slot].key);
+                if (existing_key == key) {
+                    // The completed phase ring is stationary within this
+                    // scene/light signature. Keep the first coherent value
+                    // immutable so cache hits never race a redundant refresh.
+                    destination = u.world_cache.x;
+                    break;
+                }
+                if (existing_key == 0u) {
+                    let claim = atomicCompareExchangeWeak(
+                        &world_cache[slot].key,
+                        0u,
+                        key,
+                    );
+                    if (claim.exchanged || claim.old_value == key) {
+                        destination = slot;
+                        break;
+                    }
+                }
+            }
+            if (destination < u.world_cache.x) {
+                let sequence_odd = u.world_cache.z * 2u + 1u;
+                let sequence_even = sequence_odd + 1u;
+                let old_sequence = atomicLoad(&world_cache[destination].sequence);
+                if ((old_sequence & 1u) == 0u) {
+                    let lock = atomicCompareExchangeWeak(
+                        &world_cache[destination].sequence,
+                        old_sequence,
+                        sequence_odd,
+                    );
+                    if (lock.exchanged) {
+                        world_cache[destination].world_pos = current_world_pos;
+                        world_cache[destination].normal = current_normal;
+                        world_cache[destination].diffuse = vec4<f32>(
+                            phase_integrated,
+                            1.0,
+                        );
+                        atomicStore(
+                            &world_cache[destination].sequence,
+                            sequence_even,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     workgroupBarrier();
@@ -1868,7 +2056,13 @@ fn cs_main(
     if (lane < 32u) {
         textureStore(history_out, coord, current_sample);
     } else if (lane >= 48u) {
-        textureStore(history_out, coord, vec4<f32>(0.0));
+        let owner_base = (lane - 48u) * 4u;
+        textureStore(history_out, coord, vec4<f32>(
+            diffuse_luminance[owner_base],
+            diffuse_luminance[owner_base + 1u],
+            diffuse_luminance[owner_base + 2u],
+            diffuse_luminance[owner_base + 3u],
+        ));
     }
 }
 

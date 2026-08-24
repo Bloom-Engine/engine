@@ -828,6 +828,47 @@ pub(super) struct ProbeTemporalParams {
     /// y = current angular phase [0, 15],
     /// z = short output-blend current weight, w unused.
     pub(super) confidence: [f32; 4],
+    /// x = persistent world-cache capacity, y = static lighting/scene
+    /// signature, z = monotonic probe frame, w = cache writes allowed.
+    pub(super) world_cache: [u32; 4],
+}
+
+/// Persistent SSGI world-surface cache entry. This lives in the tail of the
+/// existing probe-header buffer (not a separate allocation). The two atomics
+/// form an immutable hash key and a sequence lock; the remaining vec4 records
+/// mirror the shader ABI.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(super) struct ProbeWorldCacheEntryCpu {
+    pub(super) key: u32,
+    pub(super) sequence: u32,
+    pub(super) _padding: [u32; 2],
+    pub(super) world_pos: [f32; 4],
+    pub(super) normal: [f32; 4],
+    pub(super) diffuse: [f32; 4],
+}
+
+pub(super) const PROBE_WORLD_CACHE_FACTOR: u32 = 4;
+
+/// Returns `(header_bytes, cache_offset, cache_bytes, cache_capacity)` for the
+/// single storage buffer shared by screen-probe headers and the persistent
+/// world-surface cache. Storage-buffer binding offsets must be 256-byte
+/// aligned on every supported WebGPU adapter.
+pub(super) fn probe_storage_buffer_layout(
+    probe_count: u32,
+    world_cache_enabled: bool,
+) -> (u64, u64, u64, u32) {
+    const STORAGE_OFFSET_ALIGNMENT: u64 = 256;
+    let header_bytes = u64::from(probe_count) * std::mem::size_of::<ProbeHeaderCpu>() as u64;
+    let cache_offset = header_bytes.div_ceil(STORAGE_OFFSET_ALIGNMENT) * STORAGE_OFFSET_ALIGNMENT;
+    let cache_capacity = if world_cache_enabled {
+        probe_count.saturating_mul(PROBE_WORLD_CACHE_FACTOR).max(1)
+    } else {
+        1
+    };
+    let cache_bytes =
+        u64::from(cache_capacity) * std::mem::size_of::<ProbeWorldCacheEntryCpu>() as u64;
+    (header_bytes, cache_offset, cache_bytes, cache_capacity)
 }
 
 #[repr(C)]
@@ -1270,7 +1311,15 @@ mod physical_uv_tests {
     #[test]
     fn probe_header_matches_shader_storage_abi() {
         assert_eq!(std::mem::size_of::<ProbeHeaderCpu>(), 112);
+        assert_eq!(std::mem::size_of::<ProbeWorldCacheEntryCpu>(), 64);
         assert_eq!(std::mem::size_of::<ProbeTraceParams>(), 576);
+        assert_eq!(std::mem::size_of::<ProbeTemporalParams>(), 64);
+        let (header_bytes, cache_offset, cache_bytes, cache_capacity) =
+            probe_storage_buffer_layout(64, true);
+        assert_eq!(header_bytes, 64 * 112);
+        assert_eq!(cache_offset % 256, 0);
+        assert_eq!(cache_bytes, 64 * 4 * 64);
+        assert_eq!(cache_capacity, 64 * 4);
     }
 
     #[test]

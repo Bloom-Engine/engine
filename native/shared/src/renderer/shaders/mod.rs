@@ -203,16 +203,16 @@ mod ray_query_variant_tests {
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("phase_sum * u.params.x"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("if (lane < PROBE_TRACE_RAYS)"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("current_integrated_shared"));
-        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("previous_integrated,"));
-        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("u.confidence.z,"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("u.confidence.x < 0.5"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("mean_luminance * 5.0"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("too concentrated for this sampling density"));
         assert!(!SSGI_PROBE_TEMPORAL_WGSL.contains("spatially_filter_current_sample"));
         assert_eq!(
             SSGI_PROBE_TEMPORAL_WGSL.matches("history_in,").count(),
-            1,
-            "only the dedicated integrated phase ring may load temporal texture history",
+            2,
+            "only phase radiance and its paired world owner may load temporal texture history",
         );
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("i32(48u + phase_slot)"));
         assert!(PROBE_HELPERS_WGSL.contains("fn probe_trace_direction("));
         assert!(PROBE_HELPERS_WGSL.contains("fn probe_spatial_azimuth("));
         assert!(PROBE_HELPERS_WGSL.contains("probe_spatial_azimuth(world_pos)"));
