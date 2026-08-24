@@ -1221,6 +1221,70 @@ fn detailed_bistro_ssgi_is_camera_path_stable_at_same_endpoint() {
             staging.unmap();
             std::fs::write(directory.join("probe-headers.bin"), header_data)
                 .expect("write endpoint probe headers");
+
+            // Preserve all current-sample scratch layers and every retained
+            // phase estimate. Rows stay GPU-aligned; the sidecar records the
+            // compact extent and stride so offline analysis can compare the
+            // finite ring without adding any production diagnostic resource.
+            let probe_grid_w = eng.renderer.probe_grid_w;
+            let probe_grid_h = eng.renderer.probe_grid_h;
+            let unpadded_bytes_per_row = probe_grid_w * 8;
+            let bytes_per_row = unpadded_bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let history_bytes = u64::from(bytes_per_row) * u64::from(probe_grid_h) * 64;
+            let history_staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bistro_endpoint_probe_history_staging"),
+                size: history_bytes,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bistro_endpoint_probe_history_copy"),
+            });
+            let latest_history = 1 - eng.renderer.probe_history_idx;
+            encoder.copy_texture_to_buffer(
+                eng.renderer.probe_history_textures[latest_history].as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &history_staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(probe_grid_h),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: probe_grid_w,
+                    height: probe_grid_h,
+                    depth_or_array_layers: 64,
+                },
+            );
+            eng.renderer.queue.submit(std::iter::once(encoder.finish()));
+            let history_slice = history_staging.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            history_slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            let _ = device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+            rx.recv()
+                .expect("endpoint history map callback")
+                .expect("endpoint history map");
+            let history_data = history_slice.get_mapped_range().to_vec();
+            history_staging.unmap();
+            std::fs::write(
+                directory.join("probe-history-rgba16f-padded.bin"),
+                history_data,
+            )
+            .expect("write endpoint probe history");
+            std::fs::write(
+                directory.join("probe-history-layout.txt"),
+                format!(
+                    "width={probe_grid_w}\nheight={probe_grid_h}\nlayers=64\nbytes_per_row={bytes_per_row}\nbytes_per_texel=8\nlatest_index={latest_history}\n"
+                ),
+            )
+            .expect("write endpoint probe history layout");
         }
         let ssgi = image::open(directory.join("ssgi.png"))
             .expect("Bistro capture did not emit raw SSGI")
