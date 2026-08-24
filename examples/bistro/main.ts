@@ -66,6 +66,9 @@ let captureSequenceStart = 0;
 let captureSequenceFrames = 0;
 let captureSequenceDirectory = "";
 let diagnosticCaptureFrames = 0;
+let diagnosticCaptureSequenceStart = 0;
+let diagnosticCaptureSequenceFrames = 0;
+let diagnosticCaptureSequenceDirectory = "";
 let diagnosticCaptureIndex = 0;
 let frameCount = 0;
 let initYaw = 0.0;
@@ -120,6 +123,11 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--debug-capture" && i + 1 < argv.length) {
     diagnosticCaptureFrames = Math.floor(parseFloat(argv[i + 1]));
+  }
+  if (argv[i] === "--debug-capture-sequence" && i + 3 < argv.length) {
+    diagnosticCaptureSequenceStart = Math.max(1, Math.floor(parseFloat(argv[i + 1])));
+    diagnosticCaptureSequenceFrames = Math.max(1, Math.floor(parseFloat(argv[i + 2])));
+    diagnosticCaptureSequenceDirectory = argv[i + 3];
   }
   if (argv[i] === "--yaw" && i + 1 < argv.length) {
     initYaw = parseFloat(argv[i + 1]);
@@ -510,19 +518,33 @@ while (!windowShouldClose()) {
   if (qualityRun === null && (
     captureFrames > 0 ||
     diagnosticCaptureFrames > 0 ||
+    diagnosticCaptureSequenceFrames > 0 ||
     captureSequenceFrames > 0
   )) {
     frameCount = frameCount + 1;
     if (diagnosticCaptureFrames > 0 && frameCount === diagnosticCaptureFrames) {
       diagnosticCaptureRequested = true;
     }
+    if (
+      diagnosticCaptureSequenceFrames > 0 &&
+      frameCount >= diagnosticCaptureSequenceStart &&
+      frameCount < diagnosticCaptureSequenceStart + diagnosticCaptureSequenceFrames
+    ) {
+      diagnosticCaptureRequested = true;
+    }
   }
 
+  let diagnosticCaptureSequenceComplete = false;
   if (qualityCapture && qualityRun !== null) {
     qualityRun.requestCapture();
   } else if (diagnosticCaptureRequested) {
-    const diagnosticDirectory =
-      "/tmp/bloom-bistro-ssgi-diagnostic/capture-" + diagnosticCaptureIndex;
+    const diagnosticSequenceActive =
+      diagnosticCaptureSequenceFrames > 0 &&
+      frameCount >= diagnosticCaptureSequenceStart &&
+      frameCount < diagnosticCaptureSequenceStart + diagnosticCaptureSequenceFrames;
+    const diagnosticDirectory = diagnosticSequenceActive
+      ? diagnosticCaptureSequenceDirectory + "/capture-" + diagnosticCaptureIndex
+      : "/tmp/bloom-bistro-ssgi-diagnostic/capture-" + diagnosticCaptureIndex;
     console.error(
       "BLOOM_BISTRO_CAPTURE_CAMERA"
         + " index=" + diagnosticCaptureIndex
@@ -537,9 +559,17 @@ while (!windowShouldClose()) {
     captureFrameToPng(diagnosticDirectory + "/frame.png");
     diagnosticCaptureIndex = diagnosticCaptureIndex + 1;
     diagnosticCaptureRequested = false;
+    diagnosticCaptureSequenceComplete =
+      diagnosticSequenceActive &&
+      diagnosticCaptureIndex >= diagnosticCaptureSequenceFrames;
   } else if (qualityRun === null && captureFrames > 0) {
     if (frameCount === captureFrames) { takeScreenshot(capturePath); }
     if (frameCount > captureFrames) { endDrawing(); break; }
+  }
+
+  if (diagnosticCaptureSequenceComplete) {
+    endDrawing();
+    break;
   }
 
   if (

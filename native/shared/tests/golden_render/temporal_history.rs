@@ -1192,57 +1192,86 @@ fn settled_static_taa_bounds_complete_jitter_cycle_flicker() {
         r.set_ambient_light(255.0, 255.0, 255.0, 1.0);
     };
 
-    eng.renderer.reset_temporal_history();
-    for _ in 0..32 {
-        eng.begin_frame();
-        draw_frame(&mut eng);
-        eng.end_frame();
-    }
+    for (label, render_scale) in [("native", 1.0), ("fractional", 0.75)] {
+        eng.renderer.set_render_scale(render_scale);
+        eng.renderer.reset_temporal_history();
+        for _ in 0..32 {
+            eng.begin_frame();
+            draw_frame(&mut eng);
+            eng.end_frame();
+        }
 
-    let frames = (0..32)
-        .map(|_| render(&mut eng, 1, |eng| draw_frame(eng)).2)
-        .collect::<Vec<_>>();
-    let adjacent_mean = frames
-        .windows(2)
-        .map(|pair| calculate_diff_metrics(&pair[0], &pair[1], W, H).mean_rgb)
-        .sum::<f64>()
-        / (frames.len() - 1) as f64;
-    let mut range_sum = 0u64;
-    let mut range_outliers = 0usize;
-    let channel_count = (W * H * 3) as usize;
-    for channel in 0..channel_count {
-        let pixel = channel / 3;
-        let component = channel % 3;
-        let offset = pixel * 4 + component;
-        let minimum = frames.iter().map(|frame| frame[offset]).min().unwrap();
-        let maximum = frames.iter().map(|frame| frame[offset]).max().unwrap();
-        let range = maximum - minimum;
-        range_sum += u64::from(range);
-        range_outliers += usize::from(range > 8);
+        let frames = (0..32)
+            .map(|_| render(&mut eng, 1, |eng| draw_frame(eng)).2)
+            .collect::<Vec<_>>();
+        let adjacent_mean = frames
+            .windows(2)
+            .map(|pair| calculate_diff_metrics(&pair[0], &pair[1], W, H).mean_rgb)
+            .sum::<f64>()
+            / (frames.len() - 1) as f64;
+        let mut range_sum = 0u64;
+        let mut range_outliers = 0usize;
+        let channel_count = (W * H * 3) as usize;
+        for channel in 0..channel_count {
+            let pixel = channel / 3;
+            let component = channel % 3;
+            let offset = pixel * 4 + component;
+            let minimum = frames.iter().map(|frame| frame[offset]).min().unwrap();
+            let maximum = frames.iter().map(|frame| frame[offset]).max().unwrap();
+            let range = maximum - minimum;
+            range_sum += u64::from(range);
+            range_outliers += usize::from(range > 8);
+        }
+        let mean_range = range_sum as f64 / channel_count as f64;
+        let range_outlier_fraction = range_outliers as f64 / channel_count as f64;
+        eprintln!(
+            "temporal-corpus complete-jitter-cycle scale={label} \
+             adjacent_mean={adjacent_mean:.4} mean_range={mean_range:.4} \
+             range_outliers={:.4}%",
+            range_outlier_fraction * 100.0,
+        );
+        if label == "fractional" {
+            if let Some(root) = std::env::var_os("BLOOM_KEEP_TAA_CHECKER_DIAGNOSTIC") {
+                let directory = PathBuf::from(root);
+                for phase in 0..16 {
+                    let phase_directory = directory.join(format!("phase-{phase:02}"));
+                    eng.renderer.pending_quality_capture_dir =
+                        Some(phase_directory.to_string_lossy().into_owned());
+                    eng.begin_frame();
+                    draw_frame(&mut eng);
+                    eng.end_frame();
+                }
+                eprintln!("kept fractional checker diagnostics at {directory:?}");
+            }
+        }
+        if render_scale == 1.0 {
+            // The former perpetual 0.10 current-frame weight measures 1.3058
+            // mean adjacent change, 4.1401 range, and 4.186% range outliers.
+            assert!(
+                adjacent_mean <= 0.65,
+                "settled native TAA exposed too much current jitter phase: \
+                 {adjacent_mean:.4}"
+            );
+            assert!(
+                mean_range <= 2.5 && range_outlier_fraction <= 0.015,
+                "settled native TAA retained a visible phase-cycle range: \
+                 mean={mean_range:.4}, outliers={:.4}%",
+                range_outlier_fraction * 100.0,
+            );
+        } else {
+            // Fractional reconstruction sees a deliberately unfiltered
+            // checker above its input Nyquist limit. Bound regressions against
+            // the qualified 0.75 baseline instead of forcing it into the
+            // native envelope or hiding instability with a broad history lock.
+            assert!(
+                adjacent_mean <= 2.35 && mean_range <= 9.90 && range_outlier_fraction <= 0.58,
+                "settled fractional TAA amplified the complete phase cycle: \
+                 adjacent={adjacent_mean:.4}, range={mean_range:.4}, \
+                 outliers={:.4}%",
+                range_outlier_fraction * 100.0,
+            );
+        }
     }
-    let mean_range = range_sum as f64 / channel_count as f64;
-    let range_outlier_fraction = range_outliers as f64 / channel_count as f64;
-    eprintln!(
-        "temporal-corpus complete-jitter-cycle adjacent_mean={adjacent_mean:.4} \
-         mean_range={mean_range:.4} range_outliers={:.4}%",
-        range_outlier_fraction * 100.0,
-    );
-    // The former perpetual 0.10 current-frame weight measures 1.3058 mean
-    // adjacent change, 4.1401 range, and 4.186% range outliers on this corpus.
-    // The generic alternating checker deliberately exercises every phase over
-    // a broad surface. Thin, color-incompatible Bistro phases are gated by the
-    // exact-scene coherent-component oracle instead of tightening this
-    // different signal until it biases the ordinary jitter-cycle average.
-    assert!(
-        adjacent_mean <= 0.65,
-        "settled static TAA exposed too much current jitter phase: {adjacent_mean:.4}"
-    );
-    assert!(
-        mean_range <= 2.5 && range_outlier_fraction <= 0.015,
-        "settled static TAA retained a visible phase-cycle range: \
-         mean={mean_range:.4}, outliers={:.4}%",
-        range_outlier_fraction * 100.0,
-    );
 }
 
 #[test]
