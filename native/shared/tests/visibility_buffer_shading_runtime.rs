@@ -158,10 +158,11 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         .is_some_and(|value| value >= 32));
     assert_eq!(runtime["compatibility_draws"], 1);
     assert_eq!(runtime["allocated_bytes"], 128 * 128 * 8);
-    assert_eq!(
-        report["runtime_support"]["virtual_geometry"]["enabled"],
-        false
-    );
+    let disabled_virtual = &report["runtime_support"]["virtual_geometry"];
+    assert_eq!(disabled_virtual["enabled"], false);
+    assert_eq!(disabled_virtual["hiz_texture_bytes"], 0);
+    assert_eq!(disabled_virtual["hiz_history_valid"], false);
+    assert_eq!(disabled_virtual["last_occlusion_culled_groups"], 0);
 
     engine
         .renderer
@@ -330,6 +331,10 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     assert!(virtual_geometry["total_gpu_bytes"]
         .as_u64()
         .is_some_and(|bytes| bytes > 0));
+    assert_eq!(virtual_geometry["hiz_texture_bytes"], 349_524);
+    assert_eq!(virtual_geometry["hiz_history_valid"], true);
+    assert_eq!(virtual_geometry["hiz_captures_submitted"], 2);
+    assert_eq!(virtual_geometry["hiz_history_instances"], 1);
     let steady: serde_json::Value =
         serde_json::from_str(&engine.renderer.quality_runtime_paths_json())
             .expect("steady-state runtime report is JSON");

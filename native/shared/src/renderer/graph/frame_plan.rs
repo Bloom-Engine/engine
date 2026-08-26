@@ -548,16 +548,26 @@ pub fn build_renderer_frame_plan(
     // pyramid as GTAO. Build it whenever either consumer is enabled; tying
     // the producer to SSAO left SSGI reading stale depth when applications
     // enabled GI independently.
-    if key.feature_mask & (super::FRAME_FEATURE_SSAO | super::FRAME_FEATURE_SSGI) != 0 {
+    if key.feature_mask
+        & (super::FRAME_FEATURE_SSAO | super::FRAME_FEATURE_SSGI | super::FRAME_FEATURE_VIRTUAL_HIZ)
+        != 0
+    {
         let hiz_build = graph.add_pass("hiz_build");
         graph.after(hiz_build, previous);
         graph.read_texture(hiz_build, depth, TextureUsage::SAMPLED);
         hiz = graph.write_texture(hiz_build, hiz, TextureUsage::STORAGE_WRITE);
         previous = hiz_build;
 
+        if key.feature_mask & super::FRAME_FEATURE_VIRTUAL_HIZ != 0 {
+            let virtual_hiz_capture = graph.add_pass("virtual_hiz_capture");
+            graph.after(virtual_hiz_capture, hiz_build);
+            graph.read_texture(virtual_hiz_capture, hiz, TextureUsage::SAMPLED);
+            previous = virtual_hiz_capture;
+        }
+
         if key.feature_mask & super::FRAME_FEATURE_SSAO != 0 {
             let occlusion_capture = graph.add_pass("occlusion_capture");
-            graph.after(occlusion_capture, hiz_build);
+            graph.after(occlusion_capture, previous);
             graph.read_texture(occlusion_capture, hiz, TextureUsage::SAMPLED);
 
             let gtao = graph.add_pass("gtao");
@@ -686,6 +696,7 @@ mod tests {
     use crate::renderer::graph::{
         CapabilityTier, CompileOptions, PathTracingMode, QueueClass, ResolutionClass, SideEffects,
         FRAME_FEATURE_BLOOM, FRAME_FEATURE_SSAO, FRAME_FEATURE_SSGI, FRAME_FEATURE_SSR,
+        FRAME_FEATURE_VIRTUAL_HIZ,
     };
 
     fn key(feature_mask: u64) -> FramePlanKey {
@@ -827,6 +838,24 @@ mod tests {
             names.iter().position(|name| *name == "hiz_build").unwrap()
                 < names.iter().position(|name| *name == "ssgi").unwrap()
         );
+    }
+
+    #[test]
+    fn virtual_geometry_builds_a_private_hiz_history_without_screen_space_effects() {
+        let plan = build_renderer_frame_plan(
+            key(FRAME_FEATURE_VIRTUAL_HIZ),
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+        )
+        .compile(CompileOptions::CONSERVATIVE_ALIASING)
+        .unwrap();
+        let build = plan.pass("hiz_build").expect("virtual culling needs depth");
+        let capture = plan
+            .pass("virtual_hiz_capture")
+            .expect("virtual culling needs a max-depth history capture");
+        assert!(capture.dependencies.contains(&build.id));
+        assert!(plan.pass("occlusion_capture").is_none());
+        assert!(plan.pass("gtao").is_none());
+        assert!(plan.pass("ssgi").is_none());
     }
 
     #[test]

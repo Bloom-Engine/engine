@@ -8792,6 +8792,8 @@ impl Renderer {
             let (hiz_t, hiz_v) = create_linear_depth_hiz_chain(&self.device, rw, rh);
             self.hiz_textures = hiz_t;
             self.hiz_views = hiz_v;
+            #[cfg(feature = "models3d")]
+            self.invalidate_registered_virtual_hiz(true);
             // TAA history/output live at SURFACE size — the TAA pass is
             // also the TSR upscaler (render res in, output res out).
             let (taa_t, taa_v) = create_taa_textures(&self.device, width, height);
@@ -13142,7 +13144,13 @@ impl Renderer {
                 let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
                 let p22 = c.r.current_proj_matrix[2][2];
                 let p32 = c.r.current_proj_matrix[3][2];
-                c.r.record_hiz_chain(c.encoder, c.profiler, hw, hh, p22, p32);
+                let build_downsamples = c.r.ssao_enabled || c.r.ssgi_enabled;
+                c.r.record_hiz_chain(c.encoder, c.profiler, hw, hh, p22, p32, build_downsamples);
+            });
+            #[cfg(feature = "models3d")]
+            bind_optional_pass!("virtual_hiz_capture", |c: &mut FrameCtx2| {
+                let source_size = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
+                c.r.record_registered_virtual_hiz_capture(c.encoder, source_size);
             });
             bind_optional_pass!("occlusion_capture", |c: &mut FrameCtx2| {
                 let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));

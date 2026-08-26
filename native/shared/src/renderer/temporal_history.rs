@@ -51,6 +51,8 @@ impl Renderer {
         self.exposure_history_written = false;
         self.reset_path_tracing_history(0);
         self.immediate_motion.reset();
+        #[cfg(feature = "models3d")]
+        self.invalidate_registered_virtual_hiz(false);
         self.temporal_camera_cut_pending = true;
     }
 }

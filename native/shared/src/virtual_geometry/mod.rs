@@ -7,6 +7,7 @@ mod asset;
 mod decode;
 mod draw_emission;
 mod gpu_pool;
+mod hiz;
 mod residency;
 pub(crate) mod shading;
 mod streaming;
@@ -31,6 +32,8 @@ pub use gpu_pool::{
     VirtualMaterialBinding, VirtualMeshId, VirtualPageId, GPU_VIRTUAL_MESH_MATERIALS_BOUND,
     GPU_VIRTUAL_MESH_VALID, GPU_VIRTUAL_PAGE_PINNED, GPU_VIRTUAL_PAGE_RESIDENT,
 };
+pub use hiz::GpuVirtualHiZTelemetry;
+pub(crate) use hiz::VirtualGeometryHiZFrame;
 pub use residency::{
     ClusterGroup, PageTransition, ResidencyError, ResidencyTelemetry, ResolvedClusterGroup,
     VirtualGeometryResidency,

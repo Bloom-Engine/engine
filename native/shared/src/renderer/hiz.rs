@@ -18,6 +18,7 @@ impl Renderer {
         half_h: u32,
         p22: f32,
         p32: f32,
+        build_downsamples: bool,
     ) {
         // --- Hi-Z build: linearize depth into mip 0 -----------------
         let lin_params = HizLinearizeParams {
@@ -64,6 +65,10 @@ impl Renderer {
             pass.set_pipeline(&self.hiz_linearize_pipeline);
             pass.set_bind_group(0, bg, &[]);
             pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
+        }
+
+        if !build_downsamples {
+            return;
         }
 
         // --- Hi-Z build: downsample mip i -> mip i+1 ----------------

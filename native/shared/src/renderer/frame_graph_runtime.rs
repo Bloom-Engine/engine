@@ -23,6 +23,10 @@ impl Renderer {
         let mut feature_mask = 0;
         let imported_refraction = self.imported_refraction_enabled
             && (self.has_refractive_model_draws || self.has_refractive_scene_nodes);
+        #[cfg(feature = "models3d")]
+        let virtual_hiz = self.virtual_visibility_frame_requested();
+        #[cfg(not(feature = "models3d"))]
+        let virtual_hiz = false;
         for (enabled, bit) in [
             (self.shadow_map.enabled, FEATURE_SHADOWS),
             (self.ssao_enabled, graph::FRAME_FEATURE_SSAO),
@@ -33,6 +37,7 @@ impl Renderer {
             (self.motion_blur_enabled, FEATURE_MOTION_BLUR),
             (self.sss_enabled, FEATURE_SSS),
             (self.auto_exposure, FEATURE_AUTO_EXPOSURE),
+            (virtual_hiz, graph::FRAME_FEATURE_VIRTUAL_HIZ),
             (
                 self.material_system
                     .translucent_commands

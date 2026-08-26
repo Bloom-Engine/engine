@@ -72,6 +72,10 @@ pub struct GpuVirtualStreamingTelemetry {
     pub budget_stalls: u64,
     pub uploaded_pages: u64,
     pub uploaded_bytes: u64,
+    pub last_visible_groups: u32,
+    pub last_frustum_culled_groups: u32,
+    pub last_occlusion_culled_groups: u32,
+    pub last_occlusion_uncertain_groups: u32,
 }
 
 struct FeedbackReadback {
@@ -336,6 +340,11 @@ impl GpuVirtualPageStreamer {
     }
 
     fn ingest(&mut self, feedback: CompletedFeedback) {
+        self.telemetry.last_visible_groups = feedback.counters.visible_groups;
+        self.telemetry.last_frustum_culled_groups = feedback.counters.frustum_culled_groups;
+        self.telemetry.last_occlusion_culled_groups = feedback.counters.occlusion_culled_groups;
+        self.telemetry.last_occlusion_uncertain_groups =
+            feedback.counters.occlusion_uncertain_groups;
         let attempted = u64::from(feedback.counters.page_request_count);
         let copied = feedback.requests.len() as u64;
         self.telemetry.attempted_requests =

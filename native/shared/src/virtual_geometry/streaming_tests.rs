@@ -59,6 +59,9 @@ fn asynchronous_feedback_streams_missing_groups_without_hiding_ancestors() {
     assert_eq!(feedback.attempted_requests, 2);
     assert_eq!(feedback.copied_requests, 2);
     assert_eq!(feedback.pending_groups, 2);
+    assert!(feedback.last_visible_groups > 0);
+    assert_eq!(feedback.last_occlusion_culled_groups, 0);
+    assert_eq!(feedback.last_occlusion_uncertain_groups, 0);
 
     pool.begin_frame(4);
     streamer.service(&mut pool, &queue);

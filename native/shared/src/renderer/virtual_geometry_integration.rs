@@ -4,8 +4,8 @@ use crate::virtual_geometry::{
     GpuVirtualHierarchySelector, GpuVirtualInstance, GpuVirtualPageStreamer,
     GpuVirtualStreamingConfig, GpuVirtualStreamingError, GpuVirtualTraversalConfig,
     GpuVirtualVisibilityFrame, GpuVirtualVisibilityRaster, GpuVirtualVisibilityShading,
-    VirtualGeometryDrawEmissionError, VirtualGeometryGpuError, VirtualGeometryTraversalError,
-    VirtualGeometryView, VirtualGeometryVisibilityError,
+    VirtualGeometryDrawEmissionError, VirtualGeometryGpuError, VirtualGeometryHiZFrame,
+    VirtualGeometryTraversalError, VirtualGeometryView, VirtualGeometryVisibilityError,
 };
 use std::fmt;
 
@@ -28,6 +28,7 @@ pub(crate) struct RendererVirtualGeometry {
     submission: Option<VirtualGeometryFrameSubmission>,
     prepared: bool,
     frame: u64,
+    renderer_frame: u64,
     last_failure: Option<String>,
 }
 
@@ -53,12 +54,14 @@ impl RendererVirtualGeometry {
             submission: None,
             prepared: false,
             frame: 0,
+            renderer_frame: 0,
             last_failure: None,
         })
     }
 
     pub(crate) fn begin_frame(&mut self, device: &wgpu::Device) {
         self.streamer.poll(device);
+        self.renderer_frame = self.renderer_frame.wrapping_add(1);
         self.submission = None;
         self.prepared = false;
         self.last_failure = None;
@@ -92,20 +95,28 @@ impl RendererVirtualGeometry {
         &mut self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
+        hiz_frame: VirtualGeometryHiZFrame,
     ) -> Result<(), RendererVirtualGeometryError> {
         self.prepared = false;
-        let Some(submission) = self.submission.as_ref() else {
+        let Some(submission) = self.submission.as_mut() else {
             return Ok(());
         };
+        let hiz_valid = self.selector.previous_hiz_history_valid(hiz_frame);
+        for instance in &mut submission.instances {
+            instance.set_previous_hiz_eligible(
+                hiz_valid && self.selector.previous_hiz_contains(*instance),
+            );
+        }
         self.frame = self.frame.wrapping_add(1).max(1);
         self.pool.begin_frame(self.frame);
         self.streamer.service(&mut self.pool, queue);
-        let dispatch = self.selector.record(
+        let dispatch = self.selector.record_with_previous_hiz(
             queue,
             encoder,
             &self.pool,
             &submission.instances,
             submission.view,
+            hiz_frame,
         )?;
         if dispatch.instance_count != 0 {
             self.streamer.record(encoder, &self.selector);
@@ -135,6 +146,60 @@ impl RendererVirtualGeometry {
 
     pub(crate) fn after_submit(&mut self) {
         self.streamer.after_submit();
+        self.selector.after_submit_previous_hiz();
+    }
+
+    fn hiz_frame(
+        &self,
+        view_projection: [[f32; 4]; 4],
+        view: [[f32; 4]; 4],
+        render_extent: (u32, u32),
+        camera_cut: bool,
+    ) -> VirtualGeometryHiZFrame {
+        VirtualGeometryHiZFrame {
+            frame_index: self.renderer_frame,
+            view_projection,
+            view,
+            render_extent,
+            camera_cut,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_hiz_capture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        source_size: (u32, u32),
+        view_projection: [[f32; 4]; 4],
+        view: [[f32; 4]; 4],
+        render_extent: (u32, u32),
+    ) {
+        let Some(submission) = self.submission.as_ref().filter(|_| self.prepared) else {
+            return;
+        };
+        let frame = VirtualGeometryHiZFrame {
+            frame_index: self.renderer_frame,
+            view_projection,
+            view,
+            render_extent,
+            camera_cut: false,
+        };
+        self.selector.record_previous_hiz_capture(
+            device,
+            queue,
+            encoder,
+            source,
+            source_size,
+            frame,
+            &submission.instances,
+        );
+    }
+
+    fn invalidate_hiz(&mut self, source_recreated: bool) {
+        self.selector.invalidate_previous_hiz(source_recreated);
     }
 }
 
@@ -260,6 +325,14 @@ impl Renderer {
             .map(|state| state.streamer.telemetry())
     }
 
+    pub fn virtual_geometry_hiz_telemetry(
+        &self,
+    ) -> Option<crate::virtual_geometry::GpuVirtualHiZTelemetry> {
+        self.virtual_geometry
+            .as_ref()
+            .map(|state| state.selector.previous_hiz_telemetry())
+    }
+
     /// Submit one complete virtual instance set for the current frame. A
     /// later submission replaces the earlier one, matching retained-scene
     /// semantics without accumulating hidden per-frame work.
@@ -289,12 +362,17 @@ impl Renderer {
                 "\"instances\":0,\"total_gpu_bytes\":0,",
                 "\"streaming_pending_groups\":0,\"streaming_in_flight\":0,",
                 "\"streaming_captures_completed\":0,\"streaming_uploaded_pages\":0,",
-                "\"streaming_truncated_requests\":0,\"streaming_readback_bytes\":0}"
+                "\"streaming_truncated_requests\":0,\"streaming_readback_bytes\":0,",
+                "\"last_visible_groups\":0,\"last_frustum_culled_groups\":0,",
+                "\"last_occlusion_culled_groups\":0,\"last_occlusion_uncertain_groups\":0,",
+                "\"hiz_texture_bytes\":0,\"hiz_history_valid\":false,",
+                "\"hiz_captures_submitted\":0,\"hiz_history_instances\":0}"
             )
             .to_string();
         };
         let telemetry = state.pool.telemetry();
         let streaming = state.streamer.telemetry();
+        let hiz = state.selector.previous_hiz_telemetry();
         let submission_mode = match state.emitter.submission_mode() {
             crate::virtual_geometry::VirtualGeometrySubmissionMode::Counted => "counted",
             crate::virtual_geometry::VirtualGeometrySubmissionMode::BinnedFallback => {
@@ -315,7 +393,11 @@ impl Renderer {
                 "\"max_instances\":{},\"max_selected_clusters\":{},",
                 "\"streaming_pending_groups\":{},\"streaming_in_flight\":{},",
                 "\"streaming_captures_completed\":{},\"streaming_uploaded_pages\":{},",
-                "\"streaming_truncated_requests\":{},\"streaming_readback_bytes\":{}}}"
+                "\"streaming_truncated_requests\":{},\"streaming_readback_bytes\":{},",
+                "\"last_visible_groups\":{},\"last_frustum_culled_groups\":{},",
+                "\"last_occlusion_culled_groups\":{},\"last_occlusion_uncertain_groups\":{},",
+                "\"hiz_texture_bytes\":{},\"hiz_history_valid\":{},",
+                "\"hiz_captures_submitted\":{},\"hiz_history_instances\":{}}}"
             ),
             state.frame_requested(),
             state.prepared(),
@@ -333,6 +415,14 @@ impl Renderer {
             streaming.uploaded_pages,
             streaming.truncated_requests,
             streaming.readback_bytes,
+            streaming.last_visible_groups,
+            streaming.last_frustum_culled_groups,
+            streaming.last_occlusion_culled_groups,
+            streaming.last_occlusion_uncertain_groups,
+            hiz.texture_bytes,
+            hiz.history_valid,
+            hiz.captures_submitted,
+            hiz.history_instances,
         )
     }
 
@@ -346,10 +436,14 @@ impl Renderer {
                 state.shading = None;
             }
         }
-        let producer_result = self
-            .virtual_geometry
-            .as_mut()
-            .map(|state| state.record_producers(&self.queue, encoder));
+        let render_extent = self.render_extent();
+        let current_vp = self.current_vp_matrix;
+        let current_view = self.current_view_matrix;
+        let camera_cut = self.temporal_camera_cut_active || self.temporal_camera_cut_pending;
+        let producer_result = self.virtual_geometry.as_mut().map(|state| {
+            let hiz_frame = state.hiz_frame(current_vp, current_view, render_extent, camera_cut);
+            state.record_producers(&self.queue, encoder, hiz_frame)
+        });
         if let Some(Err(error)) = producer_result {
             self.virtual_geometry
                 .as_mut()
@@ -397,6 +491,35 @@ impl Renderer {
         self.virtual_geometry
             .as_ref()
             .is_some_and(RendererVirtualGeometry::prepared)
+    }
+
+    pub(crate) fn record_registered_virtual_hiz_capture(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        source_size: (u32, u32),
+    ) {
+        let render_extent = self.render_extent();
+        let view_projection = self.current_vp_matrix;
+        let view = self.current_view_matrix;
+        let source = &self.hiz_views[0];
+        if let Some(state) = self.virtual_geometry.as_mut() {
+            state.record_hiz_capture(
+                &self.device,
+                &self.queue,
+                encoder,
+                source,
+                source_size,
+                view_projection,
+                view,
+                render_extent,
+            );
+        }
+    }
+
+    pub(crate) fn invalidate_registered_virtual_hiz(&mut self, source_recreated: bool) {
+        if let Some(state) = self.virtual_geometry.as_mut() {
+            state.invalidate_hiz(source_recreated);
+        }
     }
 
     pub(crate) fn draw_registered_virtual_visibility_raster<'a>(

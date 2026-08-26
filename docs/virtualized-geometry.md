@@ -6,7 +6,7 @@ fixed-budget GPU residency, projected-error GPU hierarchy selection, raw-page
 vertex decoding, bounded indirect draw emission, temporal/material ABI,
 namespaced visibility raster, four-MRT PBR composition, and explicit production
 `Renderer` ownership. Ordinary glTF rendering remains the default; this does
-not yet claim complete Nanite-equivalent streaming, occlusion, stress-scale, or
+not yet claim complete Nanite-equivalent streaming, stress-scale, or
 cross-backend qualification.
 
 ## Cook and inspect
@@ -343,11 +343,24 @@ remains visible. Advanced callers can override these feedback limits through
 `enable_virtual_geometry_with_streaming`; ordinary rendering allocates and
 records none of the feedback path.
 
+An opt-in virtual submission also captures a private 256x256 previous-frame
+max-depth pyramid (349,524 texture bytes) after the renderer's current linear
+depth build. The next traversal can reject an atomic hierarchy group only when
+every in-frustum cluster is proven behind the farthest depth over its complete
+screen footprint. Camera cuts, resize, skipped frames, new instances,
+near-plane/off-screen bounds, or motion beyond one base-grid cell fail open.
+Queries union previous/current bounds, expand by two cells, and include
+relative and absolute depth bias. Consequently an uncertain group remains
+visible instead of risking a hole. Nine separate R32Float textures avoid
+Metal's sampled/written mip hazard; ordinary and virtual-idle frame plans add
+no pass or allocation. Asynchronous feedback telemetry exposes the latest
+visible, frustum-culled, occlusion-culled, and occlusion-uncertain group counts
+without synchronizing the render loop.
+
 The next #131 runtime milestones are asynchronous #136 store/index IO behind
-the GPU feedback boundary, virtual conservative previous-frame Hi-Z traversal,
-stress/motion qualification, and cross-backend timing. The compatibility
-renderer remains responsible for unsupported and not-yet-qualified content
-throughout that work.
+the GPU feedback boundary, stress/motion qualification, and cross-backend
+timing. The compatibility renderer remains responsible for unsupported and
+not-yet-qualified content throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts
@@ -355,7 +368,7 @@ zero, level/error zero). Opt-in hierarchy artifacts populate those formerly
 reserved fields without changing the 128-byte cluster record. Opt-in packed
 vertices use format version 2 so a version 1 reader can never reinterpret the
 32-byte stride as float32. Runtime activation remains explicit opt-in until
-store-backed IO, virtual occlusion, stress motion, and platform milestones are
+store-backed IO, virtual occlusion stress/motion, and platform milestones are
 independently qualified.
 
 ## Qualification

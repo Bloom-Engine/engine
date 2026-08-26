@@ -47,6 +47,9 @@ pub const FRAME_FEATURE_TRANSMITTED_SHADOWS: u64 = 1 << 22;
 /// bit is absent from ordinary plans, so normal frames gain no resource
 /// transitions or execution nodes.
 pub const FRAME_FEATURE_CAPTURE_MRT: u64 = 1 << 23;
+/// An explicitly enabled virtual-geometry submission needs a current max-depth
+/// pyramid to conservatively cull its next frame. Ordinary plans omit it.
+pub const FRAME_FEATURE_VIRTUAL_HIZ: u64 = 1 << 24;
 
 /// Coarse output class used in topology keys. Exact dimensions belong to the
 /// allocation/resize generation; topology does not rebuild for every resize.

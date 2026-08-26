@@ -9,11 +9,11 @@ use bloom_geometry_format::{
     MAGIC, MIN_PAGE_BYTES, NO_RELATION, PAGE_RECORD_BYTES, QUANTIZED_VERSION, VERSION,
 };
 use std::sync::Arc;
-
 #[cfg(not(target_arch = "wasm32"))]
 const VIRTUAL_GEOMETRY_DECODE_PROBE_WGSL: &str =
     include_str!("../../shaders/virtual_geometry/decode_probe.wgsl");
-
+#[path = "hiz_tests.rs"]
+mod hiz_tests;
 #[path = "source_routing_tests.rs"]
 mod source_routing_tests;
 #[path = "streaming_tests.rs"]
