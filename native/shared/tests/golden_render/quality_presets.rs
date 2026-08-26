@@ -232,19 +232,48 @@ fn profile_taa_reconstruction(eng: &mut EngineState, frames: u32, render_scale: 
     }
 
     eng.profiler.set_enabled(true);
-    for _ in 0..frames.max(1) {
+    // Profiler snapshots retain the latest 120 frames. Sample every complete
+    // rolling window and average those windows so a long qualification run
+    // measures its full duration instead of reporting only its final, noisy
+    // 120-frame tail.
+    let frames = frames.max(1);
+    let mut taa_gpu_windows = Vec::new();
+    for frame in 0..frames {
         eng.begin_frame();
         draw_glossy_detail_fixture(eng, 0.0);
         eng.end_frame();
+        if (frame + 1) % 120 == 0 || frame + 1 == frames {
+            if let Some(taa_gpu_us) = eng
+                .profiler
+                .snapshot()
+                .into_iter()
+                .find_map(|(label, _, gpu)| (label == "taa_pass").then_some(gpu?))
+            {
+                taa_gpu_windows.push(taa_gpu_us);
+            }
+        }
     }
-    let taa_gpu_us = eng
-        .profiler
-        .snapshot()
-        .into_iter()
-        .find_map(|(label, _, gpu)| (label == "taa_pass").then_some(gpu?))
-        .unwrap_or(0.0);
     eng.profiler.set_enabled(false);
-    taa_gpu_us
+    assert!(
+        !taa_gpu_windows.is_empty(),
+        "TAA profiling produced no GPU timestamp windows"
+    );
+    let mean = taa_gpu_windows.iter().sum::<f64>() / taa_gpu_windows.len() as f64;
+    let sample_variance = if taa_gpu_windows.len() > 1 {
+        taa_gpu_windows
+            .iter()
+            .map(|sample| (sample - mean).powi(2))
+            .sum::<f64>()
+            / (taa_gpu_windows.len() - 1) as f64
+    } else {
+        0.0
+    };
+    let standard_error = sample_variance.sqrt() / (taa_gpu_windows.len() as f64).sqrt();
+    eprintln!(
+        "fractional-reconstruction profile_windows={} standard_error_us={standard_error:.3}",
+        taa_gpu_windows.len(),
+    );
+    mean
 }
 
 fn temporal_derivative_error(
