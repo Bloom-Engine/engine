@@ -352,10 +352,10 @@ near-plane/off-screen bounds, or motion beyond one base-grid cell fail open.
 Queries union previous/current bounds, expand by two cells, and include
 relative and absolute depth bias. Consequently an uncertain group remains
 visible instead of risking a hole. Nine separate R32Float textures avoid
-Metal's sampled/written mip hazard; ordinary and virtual-idle frame plans add
-no pass or allocation. Asynchronous feedback telemetry exposes the latest
-visible, frustum-culled, occlusion-culled, and occlusion-uncertain group counts
-without synchronizing the render loop.
+Metal's sampled/written mip hazard. Ordinary frames add no pass or allocation,
+and virtual-idle frames add no pass. Asynchronous feedback telemetry exposes
+the latest visible, frustum-culled, occlusion-culled, and
+occlusion-uncertain group counts without synchronizing the render loop.
 
 The next #131 runtime milestones are asynchronous #136 store/index IO behind
 the GPU feedback boundary, stress/motion qualification, and cross-backend
