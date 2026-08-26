@@ -5,8 +5,8 @@ use super::traversal::select_cpu_reference;
 use super::*;
 use bloom_geometry_format::{
     hex_hash, sha256, CompatibilityReason, GeometryArchive, PageRecord, CLUSTER_RECORD_BYTES,
-    COMPATIBILITY_RECORD_BYTES, ENDIAN_TAG, FLAG_COARSE_ROOT, HEADER_BYTES, MAGIC, MIN_PAGE_BYTES,
-    NO_RELATION, PAGE_RECORD_BYTES, QUANTIZED_VERSION, VERSION,
+    COMPATIBILITY_RECORD_BYTES, ENDIAN_TAG, FLAG_ALPHA_MASKED, FLAG_COARSE_ROOT, HEADER_BYTES,
+    MAGIC, MIN_PAGE_BYTES, NO_RELATION, PAGE_RECORD_BYTES, QUANTIZED_VERSION, VERSION,
 };
 use std::sync::Arc;
 
@@ -14,6 +14,8 @@ use std::sync::Arc;
 const VIRTUAL_GEOMETRY_DECODE_PROBE_WGSL: &str =
     include_str!("../../shaders/virtual_geometry/decode_probe.wgsl");
 
+#[path = "source_routing_tests.rs"]
+mod source_routing_tests;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "temporal_material_tests.rs"]
 mod temporal_material_tests;
@@ -1280,8 +1282,7 @@ fn gpu_virtual_draw_emission_suppresses_the_whole_batch_on_selection_overflow() 
         VirtualGeometryDrawEmissionError::SelectorMismatch
     );
 
-    // A bounded request overflow does not invalidate the already-resident
-    // ancestor selection. It must keep drawing that complete fallback batch.
+    // A bounded request overflow keeps the complete resident ancestor batch visible.
     let mut partial_pool = GpuVirtualGeometryPool::new(&device, gpu_config(3)).unwrap();
     let partial_mesh = partial_pool
         .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))

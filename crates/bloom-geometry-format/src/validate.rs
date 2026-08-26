@@ -1,6 +1,7 @@
 use crate::hash::{hex_hash, sha256};
 use crate::types::*;
 use crate::vertex::validate_cluster_vertices;
+use std::collections::BTreeSet;
 
 pub fn validate_page_budget(page_budget_bytes: u32) -> Result<(), String> {
     if !(MIN_PAGE_BYTES..=MAX_PAGE_BYTES).contains(&page_budget_bytes)
@@ -135,6 +136,33 @@ pub(crate) fn validate_clusters(
         validate_cluster_relations(cluster_index, cluster, clusters.len())?;
     }
     validate_hierarchy(clusters)
+}
+
+pub(crate) fn validate_compatibility_partition(
+    clusters: &[ClusterRecord],
+    compatibility: &[CompatibilityRecord],
+) -> Result<(), String> {
+    let eligible = clusters
+        .iter()
+        .map(|cluster| (cluster.mesh_index, cluster.primitive_index))
+        .collect::<BTreeSet<_>>();
+    let mut routed = BTreeSet::new();
+    for (record_index, record) in compatibility.iter().enumerate() {
+        let identity = (record.mesh_index, record.primitive_index);
+        if eligible.contains(&identity) {
+            return Err(format!(
+                "compatibility record {record_index} overlaps eligible mesh {} primitive {}",
+                record.mesh_index, record.primitive_index
+            ));
+        }
+        if !routed.insert(identity) {
+            return Err(format!(
+                "compatibility record {record_index} duplicates mesh {} primitive {}",
+                record.mesh_index, record.primitive_index
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_cluster_payload(

@@ -1,7 +1,7 @@
 //! Opt-in runtime ownership and fixed-budget residency for cooked geometry.
 //!
-//! This module has no renderer registration or default-path state. A caller
-//! must explicitly load a `.bgeo` archive and create a residency plan.
+//! A caller must explicitly load a `.bgeo` archive and enable the renderer
+//! owner. The ordinary/default renderer retains no virtual-geometry state.
 
 mod asset;
 mod decode;
@@ -12,7 +12,10 @@ pub(crate) mod shading;
 mod traversal;
 mod visibility;
 
-pub use asset::{ArtifactIdentity, VirtualGeometryAsset, VirtualGeometryLoadError};
+pub use asset::{
+    ArtifactIdentity, VirtualGeometryAlphaMaskedRoute, VirtualGeometryAsset,
+    VirtualGeometryLoadError, VirtualGeometrySourceMeshRoute,
+};
 pub use bloom_geometry_format::{
     ClusterRecord, CompatibilityRecord, GeometryArchive, PageRecord, VertexEncoding,
 };

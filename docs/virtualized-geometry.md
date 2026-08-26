@@ -3,11 +3,11 @@
 Bloom's virtualized-geometry work is opt-in and staged. The #131 milestones now
 cover the deterministic meshlet/page contract, strict runtime loading,
 fixed-budget GPU residency, projected-error GPU hierarchy selection, raw-page
-vertex decoding, bounded indirect draw emission, and the temporal/material ABI
-and namespaced raw visibility raster needed by a future PBR consumer. They
-still do not enable a production renderer, change ordinary glTF loading, or
-claim complete Nanite-equivalent streaming, occlusion, material, or visibility
-integration.
+vertex decoding, bounded indirect draw emission, temporal/material ABI,
+namespaced visibility raster, four-MRT PBR composition, and explicit production
+`Renderer` ownership. Ordinary glTF rendering remains the default; this does
+not yet claim complete Nanite-equivalent streaming, occlusion, stress-scale, or
+cross-backend qualification.
 
 ## Cook and inspect
 
@@ -138,7 +138,9 @@ before constructing coarse levels. Bounds include object-space AABB/sphere and
 a conservative face-normal cone. Double-sided material clusters explicitly
 disable backface-cone rejection. Missing normals are regenerated
 deterministically with area-weighted triangle normals. Opaque and alpha-masked
-triangles are eligible.
+triangles are cooked into static clusters. Runtime ownership currently retains
+alpha-masked primitives on the ordinary renderer because virtual visibility
+does not yet own their exact texture, sampler, and cutoff test.
 
 ## Atomic coarse hierarchy
 
@@ -293,10 +295,10 @@ and one storage binding from every raster and reconstruction invocation.
 
 Construction requires `PRIMITIVE_INDEX`, `INDIRECT_FIRST_INSTANCE`, four
 vertex-stage storage buffers, and a draw capacity that fits the namespace.
-The shipping draw method additionally requires
-`MULTI_DRAW_INDIRECT_COUNT`. Its exact fixed-count form exists only in tests,
-so an adapter without count support cannot accidentally execute stale command
-slots. Alpha-masked clusters are discarded and remain compatibility-owned;
+Adapters with `MULTI_DRAW_INDIRECT_COUNT` use the exact counted stream. Other
+qualified adapters use the bounded 22-bin GPU compaction path, whose submitted
+vertex amplification is strictly below 2x and whose empty bins carry zero
+instances. Alpha-masked clusters are discarded and remain compatibility-owned;
 single-sided clusters reject back faces while double-sided clusters preserve
 the face bit for later shading. The 128-byte frame record already carries
 current and previous view-projection transforms, although this raster consumes
@@ -308,31 +310,40 @@ The renderer integration remains deliberately explicit:
   shader branches unless a caller explicitly constructs the GPU pool;
 - zero changes to existing immediate-mode or glTF selection and pixels;
 - no silent `.bgeo` replacement of an ordinary model;
-- no asynchronous file/store IO, request-feedback scheduling, production
-  renderer registration, or virtual-geometry material composition yet.
+- no asynchronous file/store IO or request-feedback scheduling yet.
 
 The opt-in virtual PBR consumer reconstructs perspective-correct current and
 previous clip positions, inverse-transpose normals, mirrored tangent
 handedness, UVs, vertex tint, remapped material identity, and face state before
-calling the authoritative scene material evaluator. Its exact production
-pipeline uses the established four MRTs and fits the renderer's eight
-fragment-stage storage-buffer contract. It remains unattached, so ordinary
-frames still construct and draw none of this work.
+calling the authoritative scene material evaluator. Its production pipeline
+uses the established four MRTs and fits the renderer's eight fragment-stage
+storage-buffer contract. `Renderer::enable_virtual_geometry` is the explicit
+attachment point, so ordinary frames still construct and draw none of this
+work.
 
-The next #131 runtime milestones are production visibility/material routing, a
-bounded non-indirect-count fallback, conservative previous-frame Hi-Z, and
-asynchronous #136 index resolution plus request feedback. The compatibility
-renderer remains responsible for unsupported and not-yet-qualified content
-throughout that work.
+Runtime model routing validates the complete glTF source closure against the
+archive, preserves source mesh/primitive/placement identity, and rejects an
+incomplete or multiply owned partition before submission. A filtered virtual
+instance traverses only its source glTF mesh within a shared scene archive.
+Cooked compatibility records, plus alpha-masked primitives deferred by the
+visibility contract, submit through an allocation-free subset of the ordinary
+cached renderer. This prevents a per-placement instance from duplicating every
+mesh in a scene archive and prevents mixed-content holes.
+
+The next #131 runtime milestones are asynchronous #136 index resolution plus
+missing-page request feedback/streaming, virtual conservative previous-frame
+Hi-Z traversal, stress/motion qualification, and cross-backend timing. The
+compatibility renderer remains responsible for unsupported and
+not-yet-qualified content throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts
 zero, level/error zero). Opt-in hierarchy artifacts populate those formerly
 reserved fields without changing the 128-byte cluster record. Opt-in packed
 vertices use format version 2 so a version 1 reader can never reinterpret the
-32-byte stride as float32. Runtime activation remains disabled until temporal
-data, visibility/material composition, streaming feedback, occlusion, and
-platform fallback milestones are independently qualified.
+32-byte stride as float32. Runtime activation remains explicit opt-in until
+streaming feedback, virtual occlusion, stress motion, and platform milestones
+are independently qualified.
 
 ## Qualification
 

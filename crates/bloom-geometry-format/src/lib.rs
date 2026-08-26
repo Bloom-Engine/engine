@@ -11,7 +11,7 @@ mod vertex;
 mod wire;
 
 pub use decode::decode_geometry;
-pub use hash::{hex_hash, sha256};
+pub use hash::{geometry_source_sha256, hex_hash, sha256};
 pub use types::{
     ClusterRecord, CompatibilityReason, CompatibilityRecord, GeometryArchive, PageRecord,
     VertexEncoding, CLUSTER_RECORD_BYTES, COMPATIBILITY_RECORD_BYTES, DEFAULT_PAGE_BYTES,

@@ -557,6 +557,10 @@ pub struct MeshData {
     pub layered_pbr: MaterialLayeredPbr,
 }
 
+#[path = "models_metadata.rs"]
+mod metadata;
+pub use metadata::*;
+
 pub struct ModelData {
     /// Ordered drawable placements. Repeated glTF nodes clone the `Arc`, not
     /// the immutable primitive payload, so CPU geometry scales with unique
@@ -571,21 +575,12 @@ pub struct ModelData {
     /// parallel to `meshes`/`mesh_transforms`; procedural and legacy models
     /// default to `true` so existing attachment behaviour is unchanged.
     pub mesh_cast_shadows: Vec<bool>,
+    /// Source identity for cooked routing; procedural/legacy models use `None`.
+    pub mesh_sources: Vec<Option<ModelPrimitiveSource>>,
+    /// Complete `.bgeo` source closure; `None` fails virtual routing closed.
+    pub source_geometry_sha256: Option<[u8; 32]>,
     pub bbox_min: [f32; 3],
     pub bbox_max: [f32; 3],
-}
-
-impl ModelData {
-    pub fn mesh_transform(&self, index: usize) -> [[f32; 4]; 4] {
-        self.mesh_transforms
-            .get(index)
-            .copied()
-            .unwrap_or(crate::renderer::IDENTITY_MAT4)
-    }
-
-    pub fn mesh_cast_shadow(&self, index: usize) -> bool {
-        self.mesh_cast_shadows.get(index).copied().unwrap_or(true)
-    }
 }
 
 pub struct JointData {
@@ -903,6 +898,8 @@ impl ModelManager {
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             mesh_cast_shadows: vec![true],
+            mesh_sources: vec![None],
+            source_geometry_sha256: None,
             bbox_min: [-hw, -hh, -hd],
             bbox_max: [hw, hh, hd],
         };
@@ -1024,6 +1021,8 @@ impl ModelManager {
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             mesh_cast_shadows: vec![true],
+            mesh_sources: vec![None],
+            source_geometry_sha256: None,
             bbox_min: [-size_x * 0.5, 0.0, -size_z * 0.5],
             bbox_max: [size_x * 0.5, size_y, size_z * 0.5],
         };
@@ -1094,6 +1093,8 @@ impl ModelManager {
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             mesh_cast_shadows: vec![true],
+            mesh_sources: vec![None],
+            source_geometry_sha256: None,
             bbox_min,
             bbox_max,
         };
@@ -1226,6 +1227,8 @@ impl ModelManager {
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             mesh_cast_shadows: vec![true],
+            mesh_sources: vec![None],
+            source_geometry_sha256: None,
             bbox_min,
             bbox_max,
         };

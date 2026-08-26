@@ -1,6 +1,8 @@
 use crate::hash::{hex_hash, sha256};
 use crate::types::*;
-use crate::validate::{validate_clusters, validate_page_budget, validate_pages};
+use crate::validate::{
+    validate_clusters, validate_compatibility_partition, validate_page_budget, validate_pages,
+};
 use crate::wire::{
     align_up, checked_table_end, read_f32, read_f32x3, read_hash, read_u32, read_u64, read_usize,
 };
@@ -135,6 +137,7 @@ pub fn decode_geometry(bytes: &[u8]) -> Result<GeometryArchive, String> {
 
     validate_pages(&pages, &clusters, payload, page_budget_bytes)?;
     validate_clusters(&clusters, &pages, payload, vertex_encoding)?;
+    validate_compatibility_partition(&clusters, &compatibility)?;
     Ok(GeometryArchive {
         format_version: version,
         vertex_encoding,

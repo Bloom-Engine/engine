@@ -541,6 +541,46 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_partition_rejects_overlap_and_duplicate_routes() {
+        let meshlets = [triangle(0.0, 0)];
+        let overlap = encode_geometry(
+            &meshlets,
+            &[CompatibilityRecord {
+                mesh_index: 0,
+                primitive_index: 0,
+                reason: CompatibilityReason::AlphaBlend,
+                detail: 0,
+            }],
+            sha256(b"overlap"),
+            DEFAULT_PAGE_BYTES,
+        )
+        .unwrap_err();
+        assert!(overlap.contains("overlaps eligible mesh 0 primitive 0"));
+
+        let duplicate = encode_geometry(
+            &[],
+            &[
+                CompatibilityRecord {
+                    mesh_index: 3,
+                    primitive_index: 2,
+                    reason: CompatibilityReason::Skinned,
+                    detail: 0,
+                },
+                CompatibilityRecord {
+                    mesh_index: 3,
+                    primitive_index: 2,
+                    reason: CompatibilityReason::MorphTargets,
+                    detail: 0,
+                },
+            ],
+            sha256(b"duplicate"),
+            DEFAULT_PAGE_BYTES,
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicates mesh 3 primitive 2"));
+    }
+
+    #[test]
     fn page_budget_is_hard_and_pages_are_independently_hashed() {
         let meshlets: Vec<_> = (0..20)
             .map(|index| triangle(index as f32 * 2.0, index))

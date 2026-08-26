@@ -1,4 +1,7 @@
-use bloom_geometry_format::{decode_geometry, hex_hash, sha256, GeometryArchive};
+use bloom_geometry_format::{
+    decode_geometry, hex_hash, sha256, CompatibilityRecord, GeometryArchive, FLAG_ALPHA_MASKED,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
@@ -18,6 +21,27 @@ pub struct ArtifactIdentity {
 pub struct VirtualGeometryAsset {
     bytes: Arc<[u8]>,
     archive: Arc<GeometryArchive>,
+}
+
+/// One source glTF mesh's explicit split between virtual and compatibility
+/// primitives. A production model loader uses this table to create filtered
+/// virtual instances and retain ordinary draws for every listed fallback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VirtualGeometrySourceMeshRoute {
+    pub source_mesh_index: u32,
+    pub virtual_primitive_count: u32,
+    pub compatibility: Vec<CompatibilityRecord>,
+    /// MASK primitives are present in older cooked archives as clusters, but
+    /// remain compatibility-owned until virtual visibility can evaluate the
+    /// exact texture/sampler/cutoff contract.
+    pub alpha_masked_compatibility: Vec<VirtualGeometryAlphaMaskedRoute>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VirtualGeometryAlphaMaskedRoute {
+    pub mesh_index: u32,
+    pub primitive_index: u32,
+    pub material_index: Option<u32>,
 }
 
 impl VirtualGeometryAsset {
@@ -87,6 +111,63 @@ impl VirtualGeometryAsset {
     pub fn page_bytes(&self, page_index: usize) -> Option<&[u8]> {
         self.page_file_range(page_index)
             .and_then(|range| self.bytes.get(range))
+    }
+
+    /// Return a canonical source-mesh routing table. Eligible primitive
+    /// identity is deduplicated across hierarchy clusters; compatibility
+    /// records remain complete and retain their stable cooker reason/detail.
+    pub fn source_mesh_routes(&self) -> Vec<VirtualGeometrySourceMeshRoute> {
+        let mut virtual_primitives = BTreeMap::<u32, BTreeSet<u32>>::new();
+        let mut alpha_masked = BTreeMap::<u32, BTreeMap<u32, Option<u32>>>::new();
+        for cluster in &self.archive.clusters {
+            if cluster.flags & FLAG_ALPHA_MASKED != 0 {
+                alpha_masked
+                    .entry(cluster.mesh_index)
+                    .or_default()
+                    .entry(cluster.primitive_index)
+                    .or_insert(cluster.material_index);
+            } else {
+                virtual_primitives
+                    .entry(cluster.mesh_index)
+                    .or_default()
+                    .insert(cluster.primitive_index);
+            }
+        }
+        let mut compatibility = BTreeMap::<u32, Vec<CompatibilityRecord>>::new();
+        for record in &self.archive.compatibility {
+            compatibility
+                .entry(record.mesh_index)
+                .or_default()
+                .push(*record);
+        }
+        let source_meshes = virtual_primitives
+            .keys()
+            .chain(compatibility.keys())
+            .chain(alpha_masked.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        source_meshes
+            .into_iter()
+            .map(|source_mesh_index| VirtualGeometrySourceMeshRoute {
+                source_mesh_index,
+                virtual_primitive_count: virtual_primitives
+                    .get(&source_mesh_index)
+                    .map_or(0, |primitives| primitives.len() as u32),
+                compatibility: compatibility.remove(&source_mesh_index).unwrap_or_default(),
+                alpha_masked_compatibility: alpha_masked
+                    .remove(&source_mesh_index)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(
+                        |(primitive_index, material_index)| VirtualGeometryAlphaMaskedRoute {
+                            mesh_index: source_mesh_index,
+                            primitive_index,
+                            material_index,
+                        },
+                    )
+                    .collect(),
+            })
+            .collect()
     }
 }
 

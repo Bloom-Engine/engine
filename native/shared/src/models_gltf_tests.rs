@@ -1125,6 +1125,12 @@ fn shared_static_node_scale_preserves_world_bounds_and_volume_contract() {
 #[test]
 fn repeated_nodes_share_one_immutable_primitive_payload() {
     let glb = minimal_instanced_triangle_glb();
+    let parsed = gltf::Gltf::from_slice(&glb).expect("instanced GLB parses");
+    let blob = parsed
+        .blob
+        .as_deref()
+        .expect("instanced GLB has a BIN chunk");
+    let expected_source_hash = bloom_geometry_format::geometry_source_sha256(&glb, &[blob]);
     for (label, model) in [
         ("plain", load_gltf(&glb).expect("plain instanced GLB load")),
         (
@@ -1143,6 +1149,29 @@ fn repeated_nodes_share_one_immutable_primitive_payload() {
         assert_eq!(model.mesh_transform(1)[3][0], 10.0, "{label}");
         assert_eq!(model.bbox_min, [0.0, 0.0, 0.0], "{label}");
         assert_eq!(model.bbox_max, [11.0, 1.0, 0.0], "{label}");
+        assert_eq!(
+            model.source_geometry_sha256,
+            Some(expected_source_hash),
+            "{label}: runtime and cooker source closures diverged"
+        );
+        assert_eq!(
+            model.mesh_source(0),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 0,
+                placement_index: 0,
+            }),
+            "{label}"
+        );
+        assert_eq!(
+            model.mesh_source(1),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 0,
+                placement_index: 1,
+            }),
+            "{label}"
+        );
     }
 }
 

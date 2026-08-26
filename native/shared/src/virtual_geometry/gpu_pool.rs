@@ -273,8 +273,9 @@ struct Counters {
 /// Explicit, lazily constructed virtual-geometry GPU residency pool.
 ///
 /// Construction allocates exactly the configured physical, mesh-table, and
-/// page-table buffers. It is not owned by `Renderer` yet, so the established
-/// compatibility path incurs no allocations, bindings, branches, or pixels.
+/// page-table buffers. `Renderer` owns it only after explicit virtual-geometry
+/// enablement, so the established compatibility path incurs no allocations,
+/// bindings, branches, or pixels.
 pub struct GpuVirtualGeometryPool {
     id: u64,
     config: GpuVirtualGeometryConfig,
@@ -886,7 +887,6 @@ impl GpuVirtualGeometryPool {
         Ok(self.cluster_entries[(mesh.cluster_table_base + cluster_index) as usize])
     }
 
-    #[cfg(test)]
     pub(super) fn asset(
         &self,
         mesh_id: VirtualMeshId,

@@ -1,8 +1,8 @@
 //! glTF-to-meshlet cooking and command-line reporting.
 
 use crate::geometry_format::{
-    decode_geometry, encode_geometry, encode_geometry_with_vertex_encoding, hex_hash,
-    measure_vertex_error, CompatibilityReason, CompatibilityRecord, DEFAULT_PAGE_BYTES,
+    decode_geometry, encode_geometry, encode_geometry_with_vertex_encoding, geometry_source_sha256,
+    hex_hash, measure_vertex_error, CompatibilityReason, CompatibilityRecord, DEFAULT_PAGE_BYTES,
 };
 use crate::geometry_quantization::VertexEncoding;
 use crate::hierarchy::{
@@ -377,16 +377,11 @@ fn load_geometry_source(path: &Path) -> Result<GeometrySource, String> {
         .filter_map(|node| node.mesh().map(|mesh| mesh.index()))
         .collect();
 
-    let mut source_hasher = Sha256::new();
-    source_hasher.update(b"bloom-static-geometry-source-v1");
-    source_hasher.update((source_bytes.len() as u64).to_le_bytes());
-    source_hasher.update(&source_bytes);
-    for (index, buffer) in buffers.iter().enumerate() {
-        source_hasher.update((index as u64).to_le_bytes());
-        source_hasher.update((buffer.0.len() as u64).to_le_bytes());
-        source_hasher.update(&buffer.0);
-    }
-    let source_sha256 = source_hasher.finalize().into();
+    let buffer_slices = buffers
+        .iter()
+        .map(|buffer| buffer.0.as_slice())
+        .collect::<Vec<_>>();
+    let source_sha256 = geometry_source_sha256(&source_bytes, &buffer_slices);
 
     let mut primitives = Vec::new();
     let mut compatibility = Vec::new();

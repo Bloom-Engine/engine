@@ -2,8 +2,29 @@ use super::transform::{
     mat3_transform_vec, mat4_inverse_transpose_3x3, mat4_mean_scale, mat4_transform_direction,
     mat4_transform_point,
 };
-use super::{walk_scene_collect_instances, MeshData, Vertex3D};
+use super::{walk_scene_collect_instances, MeshData, ModelPrimitiveSource, Vertex3D};
 use std::sync::Arc;
+
+pub(super) fn complete_geometry_source_hash(
+    source_bytes: &[u8],
+    gltf: &gltf::Gltf,
+    buffers: &[Vec<u8>],
+) -> Option<[u8; 32]> {
+    let descriptors = gltf.buffers().collect::<Vec<_>>();
+    if descriptors.len() != buffers.len()
+        || descriptors
+            .iter()
+            .zip(buffers)
+            .any(|(descriptor, bytes)| bytes.len() < descriptor.length())
+    {
+        return None;
+    }
+    let slices = buffers.iter().map(Vec::as_slice).collect::<Vec<&[u8]>>();
+    Some(bloom_geometry_format::geometry_source_sha256(
+        source_bytes,
+        &slices,
+    ))
+}
 
 fn vertex_is_skinned(vertex: &Vertex3D) -> bool {
     vertex.weights.iter().sum::<f32>() > 0.01
@@ -79,13 +100,19 @@ fn selected_scene_instances(gltf: &gltf::Gltf) -> Vec<Vec<super::MeshInstance>> 
 /// therefore clone only an `Arc`; no vertex/index payload is copied or baked.
 pub(super) fn share_scene_mesh_instances(
     gltf: &gltf::Gltf,
-    source_meshes: Vec<Vec<MeshData>>,
-) -> (Vec<Arc<MeshData>>, Vec<[[f32; 4]; 4]>, Vec<bool>) {
+    source_meshes: Vec<Vec<(u32, MeshData)>>,
+) -> (
+    Vec<Arc<MeshData>>,
+    Vec<[[f32; 4]; 4]>,
+    Vec<bool>,
+    Vec<Option<ModelPrimitiveSource>>,
+) {
     let instances = selected_scene_instances(gltf);
     let identity = crate::renderer::IDENTITY_MAT4;
     let mut output = Vec::new();
     let mut output_transforms = Vec::new();
     let mut output_cast_shadows = Vec::new();
+    let mut output_sources = Vec::new();
 
     for (mesh_index, primitives) in source_meshes.into_iter().enumerate() {
         let fallback = super::MeshInstance {
@@ -97,19 +124,32 @@ pub(super) fn share_scene_mesh_instances(
         } else {
             &instances[mesh_index]
         };
-        let primitives: Vec<Arc<MeshData>> = primitives.into_iter().map(Arc::new).collect();
+        let primitives: Vec<(u32, Arc<MeshData>)> = primitives
+            .into_iter()
+            .map(|(primitive_index, primitive)| (primitive_index, Arc::new(primitive)))
+            .collect();
 
-        for placement in placements {
-            for primitive in &primitives {
+        for (placement_index, placement) in placements.iter().enumerate() {
+            for (primitive_index, primitive) in &primitives {
                 let (instance, transform) =
                     shared_or_owned_instance(primitive, placement.transform);
                 output.push(instance);
                 output_transforms.push(transform);
                 output_cast_shadows.push(placement.cast_shadow);
+                output_sources.push(Some(ModelPrimitiveSource {
+                    mesh_index: mesh_index as u32,
+                    primitive_index: *primitive_index,
+                    placement_index: placement_index as u32,
+                }));
             }
         }
     }
-    (output, output_transforms, output_cast_shadows)
+    (
+        output,
+        output_transforms,
+        output_cast_shadows,
+        output_sources,
+    )
 }
 
 pub(super) fn model_bounds(
@@ -202,12 +242,14 @@ mod tests {
             "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]
         }"#;
         let gltf = gltf::Gltf::from_slice(document).expect("minimal glTF parses");
-        let (meshes, transforms, cast_shadows) =
-            share_scene_mesh_instances(&gltf, vec![vec![one_vertex_mesh()]]);
+        let (meshes, transforms, cast_shadows, sources) =
+            share_scene_mesh_instances(&gltf, vec![vec![(0, one_vertex_mesh())]]);
 
         assert_eq!(meshes.len(), 2);
         assert_eq!(transforms.len(), 2);
         assert_eq!(cast_shadows, vec![false, true]);
         assert_eq!(transforms[1][3][0], 4.0);
+        assert_eq!(sources[0].unwrap().placement_index, 0);
+        assert_eq!(sources[1].unwrap().placement_index, 1);
     }
 }

@@ -22,7 +22,10 @@ mod texture_io;
 mod texture_semantics;
 #[path = "models_gltf_transform.rs"]
 mod transform;
-use bake::{model_bounds, share_scene_mesh_instances, shared_or_owned_instance};
+use bake::{
+    complete_geometry_source_hash, model_bounds, share_scene_mesh_instances,
+    shared_or_owned_instance,
+};
 use texture_io::{base64_decode, decode_texture_bytes, swap_extension};
 use texture_semantics::srgb_material_image_indices;
 
@@ -486,6 +489,7 @@ pub(super) fn load_gltf_with_textures(
             }
         }
     }
+    let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     // Pre-walk materials to identify which image indices are normal
     // maps. They need LEADR-style vector-space mip generation and per-
@@ -678,6 +682,7 @@ pub(super) fn load_gltf_with_textures(
     let mut meshes: Vec<Arc<MeshData>> = Vec::new();
     let mut mesh_transforms = Vec::new();
     let mut mesh_cast_shadows = Vec::new();
+    let mut mesh_sources = Vec::new();
 
     // Walk the scene node tree to collect world-space transforms for
     // each mesh-referencing node. glTF supports instancing by having
@@ -718,7 +723,7 @@ pub(super) fn load_gltf_with_textures(
 
         let mut primitive_cache: Vec<Option<Arc<MeshData>>> =
             (0..mesh.primitives().count()).map(|_| None).collect();
-        for placement in &placements {
+        for (placement_index, placement) in placements.iter().enumerate() {
             let instance_transform = placement.transform;
             for (primitive_index, primitive) in mesh.primitives().enumerate() {
                 if let Some(source) = primitive_cache[primitive_index].as_ref() {
@@ -727,6 +732,11 @@ pub(super) fn load_gltf_with_textures(
                     meshes.push(instance);
                     mesh_transforms.push(transform);
                     mesh_cast_shadows.push(placement.cast_shadow);
+                    mesh_sources.push(Some(ModelPrimitiveSource {
+                        mesh_index: mesh.index() as u32,
+                        primitive_index: primitive_index as u32,
+                        placement_index: placement_index as u32,
+                    }));
                     continue;
                 }
                 let reader =
@@ -960,6 +970,11 @@ pub(super) fn load_gltf_with_textures(
                 meshes.push(instance);
                 mesh_transforms.push(transform);
                 mesh_cast_shadows.push(placement.cast_shadow);
+                mesh_sources.push(Some(ModelPrimitiveSource {
+                    mesh_index: mesh.index() as u32,
+                    primitive_index: primitive_index as u32,
+                    placement_index: placement_index as u32,
+                }));
             }
         } // end instance loop
     }
@@ -972,6 +987,8 @@ pub(super) fn load_gltf_with_textures(
         meshes,
         mesh_transforms,
         mesh_cast_shadows,
+        mesh_sources,
+        source_geometry_sha256,
         bbox_min,
         bbox_max,
     })
@@ -1004,6 +1021,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
             }
         }
     }
+    let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     // Pre-walk materials for the image indices used as normal maps — they
     // must be registered via register_texture_kind's linear/LEADR path at
@@ -1149,7 +1167,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         scale
     };
 
-    let mut source_meshes: Vec<Vec<MeshData>> =
+    let mut source_meshes: Vec<Vec<(u32, MeshData)>> =
         (0..gltf.meshes().count()).map(|_| Vec::new()).collect();
 
     for mesh in gltf.meshes() {
@@ -1346,30 +1364,33 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                 Some(iter) => iter.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
             };
-            source_meshes[mesh.index()].push(MeshData {
-                vertices,
-                secondary_tex_coords,
-                indices,
-                texture_idx: tex_idx,
-                normal_texture_idx: normal_tex_idx,
-                metallic_roughness_texture_idx: mr_tex_idx,
-                specular_glossiness_factor,
-                emissive_texture_idx: emissive_tex_idx,
-                occlusion_texture_idx: occlusion_tex_idx,
-                metallic_factor,
-                roughness_factor,
-                emissive_factor,
-                alpha_mode: alpha_mode_from_material(&mat),
-                alpha_cutoff: alpha_cutoff_from_material(&mat),
-                alpha_coverage_mips,
-                double_sided: mat.double_sided(),
-                transmission,
-                layered_pbr,
-            });
+            source_meshes[mesh.index()].push((
+                primitive.index() as u32,
+                MeshData {
+                    vertices,
+                    secondary_tex_coords,
+                    indices,
+                    texture_idx: tex_idx,
+                    normal_texture_idx: normal_tex_idx,
+                    metallic_roughness_texture_idx: mr_tex_idx,
+                    specular_glossiness_factor,
+                    emissive_texture_idx: emissive_tex_idx,
+                    occlusion_texture_idx: occlusion_tex_idx,
+                    metallic_factor,
+                    roughness_factor,
+                    emissive_factor,
+                    alpha_mode: alpha_mode_from_material(&mat),
+                    alpha_cutoff: alpha_cutoff_from_material(&mat),
+                    alpha_coverage_mips,
+                    double_sided: mat.double_sided(),
+                    transmission,
+                    layered_pbr,
+                },
+            ));
         }
     }
 
-    let (meshes, mesh_transforms, mesh_cast_shadows) =
+    let (meshes, mesh_transforms, mesh_cast_shadows, mesh_sources) =
         share_scene_mesh_instances(&gltf, source_meshes);
     if meshes.is_empty() {
         return None;
@@ -1380,6 +1401,8 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
             meshes,
             mesh_transforms,
             mesh_cast_shadows,
+            mesh_sources,
+            source_geometry_sha256,
             bbox_min,
             bbox_max,
         },
@@ -1412,8 +1435,9 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
             }
         }
     }
+    let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
-    let mut source_meshes: Vec<Vec<MeshData>> =
+    let mut source_meshes: Vec<Vec<(u32, MeshData)>> =
         (0..gltf.meshes().count()).map(|_| Vec::new()).collect();
 
     for mesh in gltf.meshes() {
@@ -1505,30 +1529,33 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 None => (0..positions.len() as u32).collect(),
             };
 
-            source_meshes[mesh.index()].push(MeshData {
-                vertices,
-                secondary_tex_coords,
-                indices,
-                texture_idx: None,
-                normal_texture_idx: None,
-                metallic_roughness_texture_idx: None,
-                specular_glossiness_factor: None,
-                emissive_texture_idx: None,
-                occlusion_texture_idx: None,
-                metallic_factor: 0.0,
-                roughness_factor: 1.0,
-                emissive_factor: [0.0; 3],
-                alpha_mode: alpha_mode_from_material(&mat),
-                alpha_cutoff: alpha_cutoff_from_material(&mat),
-                alpha_coverage_mips: false,
-                double_sided: mat.double_sided(),
-                transmission,
-                layered_pbr,
-            });
+            source_meshes[mesh.index()].push((
+                primitive.index() as u32,
+                MeshData {
+                    vertices,
+                    secondary_tex_coords,
+                    indices,
+                    texture_idx: None,
+                    normal_texture_idx: None,
+                    metallic_roughness_texture_idx: None,
+                    specular_glossiness_factor: None,
+                    emissive_texture_idx: None,
+                    occlusion_texture_idx: None,
+                    metallic_factor: 0.0,
+                    roughness_factor: 1.0,
+                    emissive_factor: [0.0; 3],
+                    alpha_mode: alpha_mode_from_material(&mat),
+                    alpha_cutoff: alpha_cutoff_from_material(&mat),
+                    alpha_coverage_mips: false,
+                    double_sided: mat.double_sided(),
+                    transmission,
+                    layered_pbr,
+                },
+            ));
         }
     }
 
-    let (meshes, mesh_transforms, mesh_cast_shadows) =
+    let (meshes, mesh_transforms, mesh_cast_shadows, mesh_sources) =
         share_scene_mesh_instances(&gltf, source_meshes);
     if meshes.is_empty() {
         return None;
@@ -1538,6 +1565,8 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
         meshes,
         mesh_transforms,
         mesh_cast_shadows,
+        mesh_sources,
+        source_geometry_sha256,
         bbox_min,
         bbox_max,
     })

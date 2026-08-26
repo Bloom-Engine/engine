@@ -23,6 +23,20 @@ pub(super) struct CachedModelMotionHistory {
     slot: usize,
 }
 
+fn cached_model_subset_is_canonical<I>(mesh_count: usize, mesh_indices: I) -> bool
+where
+    I: Iterator<Item = usize>,
+{
+    let mut previous = None;
+    for mesh_index in mesh_indices {
+        if mesh_index >= mesh_count || previous.is_some_and(|value| mesh_index <= value) {
+            return false;
+        }
+        previous = Some(mesh_index);
+    }
+    true
+}
+
 impl Renderer {
     pub(super) fn begin_skin_motion_frame(&mut self) {
         self.skin_motion_epoch = self.skin_motion_epoch.wrapping_add(1);
@@ -265,6 +279,176 @@ impl Renderer {
                 bounds_override: None,
             });
         }
+    }
+
+    /// Record only a canonical subset of one cached model. This is the
+    /// established renderer path for primitives that a mixed `.bgeo` archive
+    /// explicitly retained as compatibility geometry. The ordinary
+    /// `draw_model_cached` path remains unchanged and allocation-free.
+    ///
+    /// Returns `false` without recording anything when the cache is absent or
+    /// the indices are out of range, duplicated, or unordered. An empty subset
+    /// is a successful no-op.
+    pub fn draw_model_cached_meshes(
+        &mut self,
+        handle_bits: u64,
+        position: [f32; 3],
+        scale: f32,
+        tint: [f32; 4],
+        mesh_indices: &[usize],
+    ) -> bool {
+        self.draw_model_cached_mesh_subset(
+            handle_bits,
+            position,
+            scale,
+            tint,
+            mesh_indices.iter().copied(),
+        )
+    }
+
+    /// Full-transform form of `draw_model_cached_meshes` for rotated, pitched,
+    /// or otherwise authored placements.
+    pub fn draw_model_cached_meshes_transform(
+        &mut self,
+        handle_bits: u64,
+        model_matrix: [[f32; 4]; 4],
+        tint: [f32; 4],
+        mesh_indices: &[usize],
+    ) -> bool {
+        self.draw_model_cached_mesh_subset_transform(
+            handle_bits,
+            model_matrix,
+            tint,
+            mesh_indices.iter().copied(),
+        )
+    }
+
+    /// Allocation-free bridge from the model/archive ownership route to the
+    /// compatibility renderer. Virtual placements from the same route are
+    /// submitted separately through `submit_virtual_geometry`.
+    #[cfg(feature = "models3d")]
+    pub fn draw_model_cached_compatibility(
+        &mut self,
+        handle_bits: u64,
+        position: [f32; 3],
+        scale: f32,
+        tint: [f32; 4],
+        route: &crate::models::ModelVirtualGeometryRoute,
+    ) -> bool {
+        self.draw_model_cached_mesh_subset(
+            handle_bits,
+            position,
+            scale,
+            tint,
+            route
+                .compatibility_placements
+                .iter()
+                .map(|placement| placement.model_mesh_index),
+        )
+    }
+
+    /// Full-transform form of `draw_model_cached_compatibility`.
+    #[cfg(feature = "models3d")]
+    pub fn draw_model_cached_compatibility_transform(
+        &mut self,
+        handle_bits: u64,
+        model_matrix: [[f32; 4]; 4],
+        tint: [f32; 4],
+        route: &crate::models::ModelVirtualGeometryRoute,
+    ) -> bool {
+        self.draw_model_cached_mesh_subset_transform(
+            handle_bits,
+            model_matrix,
+            tint,
+            route
+                .compatibility_placements
+                .iter()
+                .map(|placement| placement.model_mesh_index),
+        )
+    }
+
+    fn draw_model_cached_mesh_subset<I>(
+        &mut self,
+        handle_bits: u64,
+        position: [f32; 3],
+        scale: f32,
+        tint: [f32; 4],
+        mesh_indices: I,
+    ) -> bool
+    where
+        I: Iterator<Item = usize> + Clone,
+    {
+        let model_matrix = mat4_multiply(
+            mat4_translate(IDENTITY_MAT4, position),
+            mat4_scale(IDENTITY_MAT4, [scale, scale, scale]),
+        );
+        self.draw_model_cached_mesh_subset_transform(handle_bits, model_matrix, tint, mesh_indices)
+    }
+
+    fn draw_model_cached_mesh_subset_transform<I>(
+        &mut self,
+        handle_bits: u64,
+        model_matrix: [[f32; 4]; 4],
+        tint: [f32; 4],
+        mesh_indices: I,
+    ) -> bool
+    where
+        I: Iterator<Item = usize> + Clone,
+    {
+        let mesh_count = match self.model_gpu_cache.get(&handle_bits) {
+            Some(Some(meshes)) => meshes.len(),
+            _ => return false,
+        };
+        if !cached_model_subset_is_canonical(mesh_count, mesh_indices.clone()) {
+            return false;
+        }
+        if mesh_indices.clone().next().is_none() {
+            return true;
+        }
+
+        self.has_blend_model_draws |= self.model_blended.contains(&handle_bits);
+        self.has_layered_blend_model_draws |= self.model_layered_blended.contains(&handle_bits);
+        self.has_refractive_model_draws |=
+            self.imported_refraction_enabled && self.model_refractive.contains(&handle_bits);
+        let foliage = self.foliage_wind.get(&handle_bits).copied().unwrap_or(0.0);
+        let previous_model = self.track_cached_model_motion(handle_bits, model_matrix);
+
+        for mesh_idx in mesh_indices {
+            let source_transform = self
+                .model_gpu_cache
+                .get(&handle_bits)
+                .and_then(Option::as_ref)
+                .map(|meshes| meshes[mesh_idx].source_transform)
+                .unwrap_or(IDENTITY_MAT4);
+            let mesh_model = mat4_multiply(model_matrix, source_transform);
+            let previous_mesh_model = mat4_multiply(previous_model, source_transform);
+            let model_mvp = mat4_multiply(self.current_vp_matrix, mesh_model);
+            let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_mesh_model);
+            let slot = self.next_model_uniform_slot;
+            self.next_model_uniform_slot += 1;
+            self.ensure_model_uniform_slot(slot);
+            self.stage_model_uniform(
+                slot,
+                &Uniforms3D {
+                    mvp: model_mvp,
+                    model: mesh_model,
+                    prev_mvp: previous_mvp,
+                    model_tint: tint,
+                    misc: [0.0, 0.0, foliage, 0.0],
+                },
+            );
+            self.model_draw_commands.push(CachedModelDraw {
+                uniform_slot: slot,
+                cache_handle: handle_bits,
+                mesh_idx,
+                model: mesh_model,
+                tint,
+                skinned: false,
+                joint_offset: 0.0,
+                bounds_override: None,
+            });
+        }
+        true
     }
 
     /// `draw_model_cached` with a Y-axis rotation folded into the model
@@ -961,6 +1145,20 @@ impl Renderer {
             call.wmin = wmin;
             call.wmax = wmax;
         }
+    }
+}
+
+#[cfg(test)]
+mod subset_tests {
+    use super::cached_model_subset_is_canonical;
+
+    #[test]
+    fn cached_model_subset_preflight_is_atomic_and_canonical() {
+        assert!(cached_model_subset_is_canonical(5, [].into_iter()));
+        assert!(cached_model_subset_is_canonical(5, [0, 2, 4].into_iter()));
+        assert!(!cached_model_subset_is_canonical(5, [0, 5].into_iter()));
+        assert!(!cached_model_subset_is_canonical(5, [2, 2].into_iter()));
+        assert!(!cached_model_subset_is_canonical(5, [3, 1].into_iter()));
     }
 }
 

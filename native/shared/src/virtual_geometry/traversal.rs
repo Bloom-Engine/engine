@@ -14,6 +14,7 @@ const INSTANCE_NEGATIVE_DETERMINANT: u32 = 1 << 1;
 const SELECTED_VERTEX_ENCODING_SHIFT: u32 = 28;
 const SELECTED_VERTEX_ENCODING_MASK: u32 = 3;
 const ID_SLOT_MASK: u32 = (1 << 20) - 1;
+const ALL_SOURCE_MESHES: u32 = u32::MAX;
 static NEXT_SELECTOR_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Fixed GPU input record for one virtual-geometry instance (208 bytes).
@@ -27,7 +28,8 @@ static NEXT_SELECTOR_ID: AtomicU64 = AtomicU64::new(1);
 pub struct GpuVirtualInstance {
     model: [[f32; 4]; 4],
     normal_rows: [[f32; 4]; 3],
-    /// mesh ID, caller-stable instance ID, flags, reserved.
+    /// mesh ID, caller-stable instance ID, flags, source glTF mesh filter.
+    /// `u32::MAX` admits every source mesh for single-mesh/procedural assets.
     instance_info: [u32; 4],
     previous_model: [[f32; 4]; 4],
     model_tint: [f32; 4],
@@ -49,6 +51,45 @@ impl GpuVirtualInstance {
         previous_model: [[f32; 4]; 4],
         model_tint: [f32; 4],
     ) -> Result<Self, VirtualGeometryTraversalError> {
+        Self::with_source_mesh_render_state(
+            mesh,
+            ALL_SOURCE_MESHES,
+            instance_id,
+            model,
+            previous_model,
+            model_tint,
+        )
+    }
+
+    /// Create one placement of a specific source glTF mesh within a shared
+    /// multi-mesh `.bgeo` archive. Traversal admits only clusters whose cooked
+    /// `mesh_index` matches `source_mesh_index`; compatibility primitives from
+    /// that source mesh remain owned by the ordinary renderer.
+    pub fn for_source_mesh(
+        mesh: VirtualMeshId,
+        source_mesh_index: u32,
+        instance_id: u32,
+        model: [[f32; 4]; 4],
+    ) -> Result<Self, VirtualGeometryTraversalError> {
+        Self::with_source_mesh_render_state(
+            mesh,
+            source_mesh_index,
+            instance_id,
+            model,
+            model,
+            [1.0; 4],
+        )
+    }
+
+    /// Source-mesh-filtered form with the complete temporal/material state.
+    pub fn with_source_mesh_render_state(
+        mesh: VirtualMeshId,
+        source_mesh_index: u32,
+        instance_id: u32,
+        model: [[f32; 4]; 4],
+        previous_model: [[f32; 4]; 4],
+        model_tint: [f32; 4],
+    ) -> Result<Self, VirtualGeometryTraversalError> {
         let (normal_rows, cone_safe, negative_determinant) = normal_rows_and_cone_safety(model)
             .ok_or(VirtualGeometryTraversalError::InvalidInstanceTransform {
                 instance: instance_id,
@@ -64,9 +105,9 @@ impl GpuVirtualInstance {
             instance_info: [
                 mesh.raw(),
                 instance_id,
-                u32::from(cone_safe) * INSTANCE_CONE_CULL_SAFE
-                    | u32::from(negative_determinant) * INSTANCE_NEGATIVE_DETERMINANT,
-                0,
+                (u32::from(cone_safe) * INSTANCE_CONE_CULL_SAFE)
+                    | (u32::from(negative_determinant) * INSTANCE_NEGATIVE_DETERMINANT),
+                source_mesh_index,
             ],
             previous_model,
             model_tint,
@@ -93,6 +134,16 @@ impl GpuVirtualInstance {
 
     pub const fn instance_id(self) -> u32 {
         self.instance_info[1]
+    }
+
+    /// The selected source glTF mesh, or `None` when this instance admits the
+    /// complete archive (the established single-mesh/procedural behavior).
+    pub const fn source_mesh_index(self) -> Option<u32> {
+        if self.instance_info[3] == ALL_SOURCE_MESHES {
+            None
+        } else {
+            Some(self.instance_info[3])
+        }
     }
 
     pub const fn cone_cull_safe(self) -> bool {
@@ -362,6 +413,7 @@ impl GpuVirtualHierarchySelector {
         let mut maximum_root_clusters = 0;
         for instance in instances {
             validate_instance(*instance)?;
+            validate_source_mesh_filter(pool, *instance)?;
             let mesh = pool.mesh_entry(instance.mesh_id())?;
             if mesh.flags & GPU_VIRTUAL_MESH_MATERIALS_BOUND == 0 {
                 return Err(VirtualGeometryTraversalError::UnboundMaterials {
@@ -590,13 +642,12 @@ fn validate_instance(instance: GpuVirtualInstance) -> Result<(), VirtualGeometry
             instance: instance.instance_id(),
         });
     };
-    let expected_flags = u32::from(expected_cone_safe) * INSTANCE_CONE_CULL_SAFE
-        | u32::from(expected_negative_determinant) * INSTANCE_NEGATIVE_DETERMINANT;
+    let expected_flags = (u32::from(expected_cone_safe) * INSTANCE_CONE_CULL_SAFE)
+        | (u32::from(expected_negative_determinant) * INSTANCE_NEGATIVE_DETERMINANT);
     if !finite
         || instance.instance_info[0] & ID_SLOT_MASK == 0
         || instance.normal_rows != expected_normal_rows
         || instance.instance_info[2] != expected_flags
-        || instance.instance_info[3] != 0
         || !finite_affine(instance.previous_model)
     {
         return Err(VirtualGeometryTraversalError::InvalidInstanceTransform {
@@ -604,6 +655,46 @@ fn validate_instance(instance: GpuVirtualInstance) -> Result<(), VirtualGeometry
         });
     }
     Ok(())
+}
+
+fn validate_source_mesh_filter(
+    pool: &GpuVirtualGeometryPool,
+    instance: GpuVirtualInstance,
+) -> Result<(), VirtualGeometryTraversalError> {
+    let mesh = instance.mesh_id();
+    let archive = pool.asset(mesh)?.archive();
+    match instance.source_mesh_index() {
+        Some(source_mesh_index) => {
+            if archive
+                .clusters
+                .iter()
+                .any(|cluster| cluster.mesh_index == source_mesh_index)
+            {
+                Ok(())
+            } else {
+                Err(VirtualGeometryTraversalError::SourceMeshNotVirtual {
+                    mesh,
+                    source_mesh_index,
+                })
+            }
+        }
+        None => {
+            let first_source_mesh = archive
+                .clusters
+                .first()
+                .map(|cluster| cluster.mesh_index)
+                .unwrap_or(0);
+            if archive
+                .clusters
+                .iter()
+                .any(|cluster| cluster.mesh_index != first_source_mesh)
+            {
+                Err(VirtualGeometryTraversalError::SourceMeshFilterRequired { mesh })
+            } else {
+                Ok(())
+            }
+        }
+    }
 }
 
 fn finite_affine(model: [[f32; 4]; 4]) -> bool {
@@ -696,6 +787,13 @@ pub enum VirtualGeometryTraversalError {
     UnboundMaterials {
         mesh: VirtualMeshId,
     },
+    SourceMeshFilterRequired {
+        mesh: VirtualMeshId,
+    },
+    SourceMeshNotVirtual {
+        mesh: VirtualMeshId,
+        source_mesh_index: u32,
+    },
     DispatchLimitExceeded {
         requested: u32,
         maximum: u32,
@@ -746,6 +844,19 @@ impl fmt::Display for VirtualGeometryTraversalError {
                 "virtual mesh {} has no complete GPU material binding",
                 mesh.raw()
             ),
+            Self::SourceMeshFilterRequired { mesh } => write!(
+                formatter,
+                "multi-source virtual mesh {} requires an explicit source glTF mesh filter",
+                mesh.raw()
+            ),
+            Self::SourceMeshNotVirtual {
+                mesh,
+                source_mesh_index,
+            } => write!(
+                formatter,
+                "virtual mesh {} has no eligible clusters for source glTF mesh {}",
+                mesh.raw(), source_mesh_index
+            ),
             Self::DispatchLimitExceeded { requested, maximum } => write!(
                 formatter,
                 "virtual-geometry traversal needs {requested} workgroups in one dimension but the device limit is {maximum}"
@@ -780,6 +891,7 @@ pub(super) fn select_cpu_reference(
     let mut result = CpuTraversalResult::default();
     for (instance_index, instance) in instances.iter().enumerate() {
         validate_instance(*instance)?;
+        validate_source_mesh_filter(pool, *instance)?;
         let mesh_id = instance.mesh_id();
         let mesh_entry = pool.mesh_entry(mesh_id)?;
         if mesh_entry.flags & GPU_VIRTUAL_MESH_MATERIALS_BOUND == 0 {
@@ -788,6 +900,12 @@ pub(super) fn select_cpu_reference(
         let archive = pool.asset(mesh_id)?.archive();
         for root_index in 0..mesh_entry.root_cluster_count {
             let root = &archive.clusters[root_index as usize];
+            if instance
+                .source_mesh_index()
+                .is_some_and(|source_mesh| root.mesh_index != source_mesh)
+            {
+                continue;
+            }
             let (mut group_first, mut group_count) = (root_index, 1u32);
             if root.child_count != 0 {
                 let first_child = &archive.clusters[root.first_child as usize];
@@ -1172,6 +1290,7 @@ fn cpu_cone_culled(
 
 const TRAVERSAL_SHADER: &str = r#"
 const NO_RELATION: u32 = 0xffffffffu;
+const ALL_SOURCE_MESHES: u32 = 0xffffffffu;
 const INSTANCE_CONE_CULL_SAFE: u32 = 1u;
 
 struct GpuVirtualMeshEntry {
@@ -1509,6 +1628,10 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let root = clusters.records[mesh.cluster_table_base + root_index];
+    let source_mesh_filter = instance.instance_info.w;
+    if (source_mesh_filter != ALL_SOURCE_MESHES && root.identity.x != source_mesh_filter) {
+        return;
+    }
     var group_first = root_index;
     var group_count = 1u;
     if (root.relations.w != 0u && valid_cluster(mesh, root.relations.z)) {
