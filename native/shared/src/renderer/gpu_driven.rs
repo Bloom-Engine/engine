@@ -845,6 +845,11 @@ impl GpuDrivenRenderer {
         self.visibility.enabled()
     }
 
+    #[cfg(feature = "models3d")]
+    pub(crate) const fn visibility_shading_requested(&self) -> bool {
+        self.visibility.shading_requested()
+    }
+
     fn update_visibility_draw_counts(&mut self) -> u32 {
         let eligible = self
             .draw_scratch
@@ -861,6 +866,32 @@ impl GpuDrivenRenderer {
         eligible
     }
 
+    #[cfg(feature = "models3d")]
+    pub(crate) fn prepare_visibility_shading(
+        &mut self,
+        device: &wgpu::Device,
+        extent: (u32, u32),
+        force_target: bool,
+    ) -> super::visibility_buffer::ResourceCreations {
+        if !self.visibility.shading_requested() {
+            return super::visibility_buffer::ResourceCreations::default();
+        }
+        let eligible = self.update_visibility_draw_counts();
+        if eligible == 0 && !force_target {
+            return super::visibility_buffer::ResourceCreations::default();
+        }
+        self.visibility.ensure_resources(
+            device,
+            extent,
+            &self.arena.vertex,
+            &self.arena.index,
+            &self.draw_buffer,
+            self.draw_capacity,
+            self.arena.generation,
+        )
+    }
+
+    #[cfg(not(feature = "models3d"))]
     pub(crate) fn prepare_visibility_shading(
         &mut self,
         device: &wgpu::Device,
@@ -890,6 +921,11 @@ impl GpuDrivenRenderer {
             .shading_requested()
             .then(|| self.visibility.raster_attachment())
             .flatten()
+    }
+
+    #[cfg(feature = "models3d")]
+    pub(crate) fn visibility_texture(&self) -> Option<&wgpu::Texture> {
+        self.visibility.visibility_texture()
     }
 
     pub(crate) fn finish_visibility_raster_inline(&mut self, recorded: bool) {

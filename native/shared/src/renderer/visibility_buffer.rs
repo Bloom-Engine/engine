@@ -599,6 +599,13 @@ impl VisibilityBufferRuntime {
         })
     }
 
+    #[cfg(feature = "models3d")]
+    pub(crate) fn visibility_texture(&self) -> Option<&wgpu::Texture> {
+        self.resources
+            .as_ref()
+            .map(|resources| &resources._visibility_texture)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_raster<'a>(
         &'a self,

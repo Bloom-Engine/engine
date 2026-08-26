@@ -87,6 +87,15 @@ impl Renderer {
         }
         self.prepare_gpu_driven_camera(encoder, scene);
         let render_extent = self.render_extent();
+        #[cfg(feature = "models3d")]
+        let virtual_visibility_requested = self.virtual_visibility_frame_requested();
+        #[cfg(feature = "models3d")]
+        let visibility_creations = self.gpu_driven.prepare_visibility_shading(
+            &self.device,
+            render_extent,
+            virtual_visibility_requested,
+        );
+        #[cfg(not(feature = "models3d"))]
         let visibility_creations = self
             .gpu_driven
             .prepare_visibility_shading(&self.device, render_extent);
@@ -96,6 +105,10 @@ impl Renderer {
             self.frame_resource_stats
                 .created_bind_group(frame_resource_stats::BindGroupCreationSite::VisibilityBuffer);
         }
+        #[cfg(feature = "models3d")]
+        let virtual_visibility_prepared = virtual_visibility_requested
+            && self
+                .prepare_registered_virtual_visibility(encoder, visibility_creations.textures != 0);
 
         // EN-044 — DEPTH PREPASS over the cached-model draws.
         //
@@ -125,6 +138,8 @@ impl Renderer {
         let mut inline_visibility_recorded = false;
         #[cfg(target_arch = "wasm32")]
         let inline_visibility_recorded = false;
+        #[cfg(feature = "models3d")]
+        let mut virtual_visibility_recorded = false;
         if !self.dbg_skip("prepass") {
             let prepass_ts = profiler.pass_timestamp_writes("depth_prepass");
             let color_attachments = [self.gpu_driven.visibility_raster_attachment()];
@@ -216,6 +231,12 @@ impl Renderer {
                             pass.draw_indexed(draw.index_range(), draw.base_vertex, 0..1);
                         }
                     }
+                }
+                #[cfg(feature = "models3d")]
+                if virtual_visibility_prepared {
+                    virtual_visibility_recorded =
+                        self.draw_registered_virtual_visibility_raster(&mut pass);
+                    inline_visibility_recorded |= virtual_visibility_recorded;
                 }
             }
         }
@@ -417,6 +438,10 @@ impl Renderer {
                     global_materials,
                     &self.joint_bind_group,
                 );
+            }
+            #[cfg(feature = "models3d")]
+            if virtual_visibility_recorded {
+                self.draw_registered_virtual_visibility_shading(&mut pass);
             }
 
             if has_3d && !self.dbg_skip("imm3d") {

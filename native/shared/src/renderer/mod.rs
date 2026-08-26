@@ -92,6 +92,8 @@ mod transmitted_shadows;
 mod transparent_gi;
 #[cfg(feature = "models3d")]
 mod virtual_geometry_integration;
+#[cfg(feature = "models3d")]
+pub use virtual_geometry_integration::RendererVirtualGeometryError;
 pub(crate) mod visibility_buffer;
 mod visibility_ids;
 pub(crate) mod visibility_shading;
@@ -1342,6 +1344,10 @@ pub struct Renderer {
     model_gpu_cache: HashMap<u64, Option<Vec<GpuMesh>>>,
     /// Shared static geometry, GPU culling, and indirect submission.
     gpu_driven: gpu_driven::GpuDrivenRenderer,
+    /// Explicit opt-in virtual producer chain. `None` is the shipping default
+    /// and owns no pool, transient buffer, visibility target, or pipeline.
+    #[cfg(feature = "models3d")]
+    virtual_geometry: Option<virtual_geometry_integration::RendererVirtualGeometry>,
     /// Lazy buffers for workload-gated per-page VSM indirect submission.
     vsm_gpu_casters: vsm_gpu_casters::VsmGpuCasters,
     /// Handles whose cached meshes carry skin weights, recorded at cache
@@ -8360,6 +8366,8 @@ impl Renderer {
             persistent_ib_3d_capacity: ib_3d_cap,
             model_gpu_cache: HashMap::new(),
             gpu_driven,
+            #[cfg(feature = "models3d")]
+            virtual_geometry: None,
             vsm_gpu_casters,
             model_skinned: std::collections::HashSet::new(),
             model_blended: std::collections::HashSet::new(),
@@ -12427,6 +12435,10 @@ impl Renderer {
         self.indices_3d.clear();
         self.draw_calls_3d.clear();
         self.immediate_motion.begin_frame();
+        #[cfg(feature = "models3d")]
+        if let Some(virtual_geometry) = self.virtual_geometry.as_mut() {
+            virtual_geometry.begin_frame();
+        }
         self.begin_skin_motion_frame();
         self.begin_cached_model_frame();
         self.has_blend_model_draws = false;

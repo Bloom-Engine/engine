@@ -1881,6 +1881,11 @@ impl Renderer {
         out.push('}');
         out.push_str(",\"gpu_driven\":");
         out.push_str(&self.gpu_driven.report_json());
+        #[cfg(feature = "models3d")]
+        {
+            out.push_str(",\"virtual_geometry\":");
+            out.push_str(&self.virtual_geometry_report_json());
+        }
         out.push_str(",\"vsm_gpu_casters\":");
         out.push_str(&self.vsm_gpu_casters.report_json());
         out.push_str(",\"virtual_shadows\":");
