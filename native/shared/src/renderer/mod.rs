@@ -12437,7 +12437,7 @@ impl Renderer {
         self.immediate_motion.begin_frame();
         #[cfg(feature = "models3d")]
         if let Some(virtual_geometry) = self.virtual_geometry.as_mut() {
-            virtual_geometry.begin_frame();
+            virtual_geometry.begin_frame(&self.device);
         }
         self.begin_skin_motion_frame();
         self.begin_cached_model_frame();
@@ -13269,11 +13269,19 @@ impl Renderer {
             self.submit_frame_commands(encoder.finish());
             profiler.end("queue_submit");
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
 
         // Map the occlusion-grid readback recorded this frame (no-op if
         // none was recorded).
         self.occlusion.after_submit();
         self.shadow_map.virtual_map.after_submit_gpu_receiver();
+        #[cfg(feature = "models3d")]
+        if let Some(virtual_geometry) = self.virtual_geometry.as_mut() {
+            virtual_geometry.after_submit();
+        }
 
         // Ticket 022 — drain freshly-baked SDFs to the on-disk cache.
         // No-op on cache-hit frames (queue is empty); on cold-launch
@@ -13285,11 +13293,6 @@ impl Renderer {
             profiler.begin("sdf_cache_write");
             self.flush_sdf_cache_writes();
             profiler.end("sdf_cache_write");
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.queue.submit(std::iter::once(encoder.finish()));
         }
 
         profiler.begin("swap_present");

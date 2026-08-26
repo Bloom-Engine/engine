@@ -16,6 +16,8 @@ const VIRTUAL_GEOMETRY_DECODE_PROBE_WGSL: &str =
 
 #[path = "source_routing_tests.rs"]
 mod source_routing_tests;
+#[path = "streaming_tests.rs"]
+mod streaming_tests;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "temporal_material_tests.rs"]
 mod temporal_material_tests;
@@ -579,7 +581,6 @@ struct GpuDecodedVirtualVertex {
     previous_world: [f32; 4],
     tinted_color: [f32; 4],
     world_normal: [f32; 4],
-    /// Selected record, cluster, corner, and page-local vertex index.
     info: [u32; 4],
 }
 
@@ -1282,7 +1283,6 @@ fn gpu_virtual_draw_emission_suppresses_the_whole_batch_on_selection_overflow() 
         VirtualGeometryDrawEmissionError::SelectorMismatch
     );
 
-    // A bounded request overflow keeps the complete resident ancestor batch visible.
     let mut partial_pool = GpuVirtualGeometryPool::new(&device, gpu_config(3)).unwrap();
     let partial_mesh = partial_pool
         .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))

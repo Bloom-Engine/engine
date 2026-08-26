@@ -9,6 +9,7 @@ mod draw_emission;
 mod gpu_pool;
 mod residency;
 pub(crate) mod shading;
+mod streaming;
 mod traversal;
 mod visibility;
 
@@ -35,6 +36,10 @@ pub use residency::{
     VirtualGeometryResidency,
 };
 pub use shading::GpuVirtualVisibilityShading;
+pub use streaming::{
+    GpuVirtualPageStreamer, GpuVirtualStreamingConfig, GpuVirtualStreamingError,
+    GpuVirtualStreamingTelemetry,
+};
 pub use traversal::{
     GpuSelectedVirtualCluster, GpuVirtualHierarchySelector, GpuVirtualInstance,
     GpuVirtualPageRequest, GpuVirtualTraversalConfig, GpuVirtualTraversalCounters,

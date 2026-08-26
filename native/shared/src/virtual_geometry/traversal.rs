@@ -288,9 +288,9 @@ struct TraversalParams {
 
 const _: () = assert!(std::mem::size_of::<TraversalParams>() == 224);
 
-/// Explicit GPU hierarchy selector. It owns fixed-capacity transient buffers
-/// but is not registered with `Renderer`, so constructing the page pool alone
-/// still has no shipping-path cost or pixel effect.
+/// Explicit GPU hierarchy selector with fixed-capacity transient buffers.
+/// `Renderer` owns it only after virtual geometry is explicitly enabled, so an
+/// ordinary renderer retains no selector cost or pixel effect.
 pub struct GpuVirtualHierarchySelector {
     id: u64,
     config: GpuVirtualTraversalConfig,

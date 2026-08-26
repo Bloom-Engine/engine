@@ -310,7 +310,8 @@ The renderer integration remains deliberately explicit:
   shader branches unless a caller explicitly constructs the GPU pool;
 - zero changes to existing immediate-mode or glTF selection and pixels;
 - no silent `.bgeo` replacement of an ordinary model;
-- no asynchronous file/store IO or request-feedback scheduling yet.
+- no asynchronous file/store IO; validated archive bytes remain memory-owned
+  while GPU request feedback and fixed-budget uploads run asynchronously.
 
 The opt-in virtual PBR consumer reconstructs perspective-correct current and
 previous clip positions, inverse-transpose normals, mirrored tangent
@@ -330,11 +331,23 @@ visibility contract, submit through an allocation-free subset of the ordinary
 cached renderer. This prevents a per-placement instance from duplicating every
 mesh in a scene archive and prevents mixed-content holes.
 
-The next #131 runtime milestones are asynchronous #136 index resolution plus
-missing-page request feedback/streaming, virtual conservative previous-frame
-Hi-Z traversal, stress/motion qualification, and cross-backend timing. The
-compatibility renderer remains responsible for unsupported and
-not-yet-qualified content throughout that work.
+Missing-page feedback uses two fixed MAP_READ buffers and never waits in the
+render loop. Each completed traversal copies at most 4,096 request records by
+default (clamped to the traversal capacity), rejects out-of-order camera
+completions, canonicalizes repeated instances to one mesh/group request, and
+retains at most 8,192 pending groups. Newest feedback is serviced first;
+generation-stale or malformed requests are discarded. Atomic group uploads
+continue to obey the pool's existing per-frame byte, page, and eviction limits,
+and budget-blocked groups stay pending while the nearest resident ancestor
+remains visible. Advanced callers can override these feedback limits through
+`enable_virtual_geometry_with_streaming`; ordinary rendering allocates and
+records none of the feedback path.
+
+The next #131 runtime milestones are asynchronous #136 store/index IO behind
+the GPU feedback boundary, virtual conservative previous-frame Hi-Z traversal,
+stress/motion qualification, and cross-backend timing. The compatibility
+renderer remains responsible for unsupported and not-yet-qualified content
+throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts
@@ -342,8 +355,8 @@ zero, level/error zero). Opt-in hierarchy artifacts populate those formerly
 reserved fields without changing the 128-byte cluster record. Opt-in packed
 vertices use format version 2 so a version 1 reader can never reinterpret the
 32-byte stride as float32. Runtime activation remains explicit opt-in until
-streaming feedback, virtual occlusion, stress motion, and platform milestones
-are independently qualified.
+store-backed IO, virtual occlusion, stress motion, and platform milestones are
+independently qualified.
 
 ## Qualification
 
