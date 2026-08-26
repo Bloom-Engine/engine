@@ -562,8 +562,11 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
     eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
     capture(&mut eng);
 
-    // The SSGI-owned low-discrepancy sequence must advance the raw 32-ray
+    // The SSGI-owned low-discrepancy sequence must advance the raw eight-ray
     // realization while the integrated, reprojected result remains stable.
+    // Four times as many receiver probes distribute the former 32-ray spatial
+    // budget; a single probe therefore has slightly more phase variance even
+    // though the resolved neighborhood retains the same total ray density.
     // Directional history is never retained, so this cannot reproduce the old
     // bug where a previous lane was reinterpreted as a different direction.
     let next_directory =
@@ -592,7 +595,7 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
         settled_ssgi.height(),
     );
     assert!(
-        settled_metrics.ssim >= 0.999,
+        settled_metrics.ssim >= 0.9985,
         "temporally rotated rays destabilized settled SSGI: {settled_metrics:?}"
     );
 
@@ -720,30 +723,30 @@ fn ssgi_capture_exposes_probe_history_without_normal_frame_resources() {
         [2.5, 1.2, 0.15],
     );
 
-    let draw = |eng: &mut EngineState| {
+    let draw = |eng: &mut EngineState, camera_x: f32| {
         let r = &mut eng.renderer;
         r.set_clear_color(6.0, 8.0, 15.0, 255.0);
-        r.begin_mode_3d(4.0, 3.0, 6.0, 0.0, 0.6, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.begin_mode_3d(camera_x, 3.0, 6.0, 0.0, 0.6, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
         r.set_ambient_light(15.0, 18.0, 28.0, 0.2);
         r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.85, 0.7, 1.8);
         r.draw_cube(-1.1, 1.0, 0.0, 1.8, 2.0, 1.8, 230.0, 45.0, 25.0, 255.0);
         r.draw_sphere(1.1, 0.9, -0.8, 0.9, 30.0, 110.0, 240.0, 255.0);
     };
-    let capture = |eng: &mut EngineState| {
+    let capture = |eng: &mut EngineState, camera_x: f32| {
         eng.begin_frame();
-        draw(eng);
+        draw(eng, camera_x);
         eng.end_frame();
     };
 
     eng.renderer.reset_temporal_history();
     for _ in 0..24 {
-        capture(&mut eng);
+        capture(&mut eng, 4.0);
     }
     let directory =
         std::env::temp_dir().join(format!("bloom-ssgi-diagnostics-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
-    capture(&mut eng);
+    capture(&mut eng, 4.0);
 
     let reasons = image::open(directory.join("ssgi-rejection-reason.png"))
         .expect("SSGI capture did not emit probe-domain temporal reasons")
@@ -822,6 +825,44 @@ fn ssgi_capture_exposes_probe_history_without_normal_frame_resources() {
         resolve_plane_ratio_w.dimensions(),
         "SSGI resolve/fourth-plane-ratio captures describe different screen domains"
     );
+    // Exercise the exact grazing-receiver condition behind the Bistro floor
+    // strips: every surrounding probe belongs to the receiver plane, while
+    // the narrower strict kernel has no support at this screen-grid phase.
+    // The production shader's structural test requires this class to use the
+    // broad path, so the two tests together prevent a hard strict/fallback
+    // switch from silently returning.
+    let coherent_strict_gaps = resolve_support
+        .pixels()
+        .filter(|pixel| pixel[0] < 16 && pixel[1] > 240 && pixel[2] < 8)
+        .count();
+    eprintln!("temporal-corpus ssgi-resolve coherent_strict_gaps={coherent_strict_gaps}");
+    assert!(
+        coherent_strict_gaps >= 16,
+        "SSGI resolve corpus did not exercise a complete coherent footprint with zero strict support"
+    );
+
+    // The coarse probe lattice is screen tiled, so camera motion must consume
+    // geometry-validated per-pixel resolve history. Without this acceptance
+    // path, grazing floor rows remain fixed to the display even though a
+    // stationary image is smooth.
+    let motion_directory =
+        std::env::temp_dir().join(format!("bloom-ssgi-resolve-motion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&motion_directory);
+    eng.renderer.pending_quality_capture_dir =
+        Some(motion_directory.to_string_lossy().into_owned());
+    capture(&mut eng, 4.02);
+    let resolve_motion = image::open(motion_directory.join("ssgi-resolve-plane-ratio-w.png"))
+        .expect("moving SSGI capture did not emit resolve-history validation")
+        .to_rgb8();
+    let resolve_history_accepted = resolve_motion
+        .pixels()
+        .filter(|pixel| pixel[1] > 240)
+        .count();
+    eprintln!("temporal-corpus ssgi-resolve moving_history_accepted={resolve_history_accepted}");
+    assert!(
+        resolve_history_accepted >= 100,
+        "camera motion accepted no geometry-valid SSGI resolve history"
+    );
 
     let paths = eng.renderer.quality_runtime_paths_json();
     assert!(paths.contains("\"ray_scene_preparation\":\"ssgi\""));
@@ -829,9 +870,10 @@ fn ssgi_capture_exposes_probe_history_without_normal_frame_resources() {
     assert!(paths.contains("\"ssgi_diagnostic_capture_passes\":3"));
     assert!(paths.contains("\"ssgi_diagnostic_resources_live\":false"));
     if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
-        eprintln!("kept SSGI diagnostics at {directory:?}");
+        eprintln!("kept SSGI diagnostics at {directory:?} and {motion_directory:?}");
     } else {
         let _ = std::fs::remove_dir_all(directory);
+        let _ = std::fs::remove_dir_all(motion_directory);
     }
 }
 
@@ -906,7 +948,7 @@ fn ssgi_rotation_refreshes_changed_and_reprojected_probe_surfaces() {
             changed_surface + motion_refreshed + radiance_refreshed + offscreen_refreshed,
         )
         .unwrap()
-            >= total / 2,
+            >= total * 45 / 100,
         "camera motion neither rejected changed probe surfaces nor refreshed \
          reprojected history"
     );

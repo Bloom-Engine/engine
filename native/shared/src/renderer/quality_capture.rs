@@ -370,7 +370,7 @@ impl Renderer {
                 ),
                 "ssgi" => self.record_quality_texture(
                     encoder,
-                    &self.ssgi_rt_texture,
+                    &self.ssgi_rt_textures[self.probe_history_idx],
                     name,
                     ReadbackKind::Hdr,
                     wgpu::TextureAspect::All,
@@ -1124,7 +1124,7 @@ impl Renderer {
         let ssgi_probe_diagnostic_count =
             super::ssgi_temporal_diagnostics::SSGI_TEMPORAL_DIAGNOSTIC_NAMES.len() as u64
                 - ssgi_resolve_diagnostic_count;
-        let ssgi_resolve_size = self.ssgi_rt_texture.size();
+        let ssgi_resolve_size = self.ssgi_rt_textures[self.probe_history_idx].size();
         let ssgi_diagnostic_texture_bytes = u64::from(ssgi_diagnostic_width)
             * u64::from(ssgi_diagnostic_height)
             * ssgi_probe_diagnostic_count

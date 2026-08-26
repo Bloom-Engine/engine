@@ -4,7 +4,7 @@
 // ============================================================================
 // Ticket 007a — Lumen-style screen-probe SSGI (software Hi-Z trace)
 //
-// One probe per 16×16 half-res-pixel tile. Each probe traces 32
+// One probe per 8×8 half-res-pixel tile. Each probe traces 8
 // cosine-hemisphere rays into an 8×8 scratch atlas, integrates them in probe
 // space, then reprojects only that final diffuse estimate. Passes: place →
 // trace → temporal → spatial reconstruction → resolve. Resolve writes the
@@ -16,13 +16,13 @@
 /// the Hi-Z sample helper. Kept as a Rust &str so it can be prepended
 /// in the shader-module setup without a WGSL include mechanism.
 pub(in crate::renderer) const PROBE_HELPERS_WGSL: &str = "
-const PROBE_TILE_SIZE: u32 = 16u;
+const PROBE_TILE_SIZE: u32 = 8u;
 const PROBE_OCT_SIZE: u32 = 8u;
 const PROBE_OCT_TEXELS: u32 = 64u;
-// The former sphere distribution sent approximately half of its 64 lanes
-// below the receiver and exited before tracing. Preserve that 32-ray query
-// budget while redistributing every traced ray over the useful hemisphere.
-const PROBE_TRACE_RAYS: u32 = 32u;
+// Distribute the established total ray budget over four times as many spatial
+// probes. Eight cosine-hemisphere rays per 8x8 tile equal the query density of
+// 32 rays per former 16x16 tile while resolving four times more receiver sites.
+const PROBE_TRACE_RAYS: u32 = 8u;
 const HIZ_SKY_Z: f32 = 10000.0;
 const PI: f32 = 3.14159265;
 
@@ -131,6 +131,22 @@ fn probe_spatial_azimuth(world_pos: vec3<f32>) -> f32 {
         world_pos,
         vec3<f32>(0.754877666, 0.569840296, 0.438289017),
     );
+}
+
+// Sixteen zero-mean Hammersley samples cover one complete screen-probe tile.
+// The finite sequence repeats with the angular phase ring, so settled output
+// is deterministic while temporal reprojection integrates sub-tile coverage.
+// Keep this independent of ray-direction sampling: placement changes where a
+// receiver is measured, never what an existing directional history slot means.
+fn probe_lattice_jitter(phase_in: u32) -> vec2<f32> {
+    let phase = phase_in & 15u;
+    let reversed =
+        ((phase & 1u) << 3u) |
+        ((phase & 2u) << 1u) |
+        ((phase & 4u) >> 1u) |
+        ((phase & 8u) >> 3u);
+    return (vec2<f32>(f32(phase), f32(reversed)) + vec2<f32>(0.5)) /
+        16.0 - vec2<f32>(0.5);
 }
 
 fn probe_trace_direction(
@@ -249,8 +265,9 @@ fn safe_probe_direction(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
 
 /// Probe placement. One workgroup invocation per probe tile writes a
 /// ProbeHeader (world position + world normal + linear view-z). Sky
-/// probes are flagged invalid (world_pos.w = 0). A stable tile centre chooses
-/// the visible surface without per-frame placement dithering.
+/// probes are flagged invalid (world_pos.w = 0). A finite low-discrepancy
+/// sequence moves the sample inside each tile; world-space reprojection then
+/// integrates that coverage without a permanently screen-locked lattice.
 pub(in crate::renderer) const SSGI_PROBE_PLACE_WGSL: &str = "
 struct PlaceParams {
     // Full inverse view matrix — used to lift view-space positions/normals
@@ -260,7 +277,8 @@ struct PlaceParams {
     proj_row01: vec4<f32>,
     // x = half_w, y = half_h, z = grid_w, w = grid_h
     size: vec4<u32>,
-    // x = reserved, y = tile_size_f (16.0), zw unused
+    // x = finite placement phase, y = tile_size_f (8.0),
+    // z = camera moving, w unused
     params: vec4<f32>,
 };
 
@@ -283,8 +301,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let half_w = f32(u.size.x);
     let half_h = f32(u.size.y);
     let tile = u.params.y;
-    let px_x = f32(gid.x) * tile + tile * 0.5;
-    let px_y = f32(gid.y) * tile + tile * 0.5;
+    let placement_jitter = probe_lattice_jitter(u32(round(u.params.x))) *
+        select(0.0, 1.0, u.params.z > 0.5);
+    let px_x = f32(gid.x) * tile + tile * (0.5 + placement_jitter.x);
+    let px_y = f32(gid.y) * tile + tile * (0.5 + placement_jitter.y);
     let uv = vec2<f32>(px_x / half_w, px_y / half_h);
 
     let linear_z = textureSampleLevel(hiz0, hiz_samp, uv, 0.0).r;
@@ -384,7 +404,7 @@ fn hiz_sample(uv: vec2<f32>, mip: i32) -> f32 {
     }
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(8, 1, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
@@ -392,7 +412,7 @@ fn cs_main(
     let grid_w = u.size.z;
     let grid_h = u.size.w;
     if (wg.x >= grid_w || wg.y >= grid_h) { return; }
-    if (lid.x >= PROBE_OCT_SIZE || lid.y >= PROBE_OCT_SIZE) { return; }
+    if (lid.x >= PROBE_TRACE_RAYS) { return; }
 
     let probe_idx = wg.y * grid_w + wg.x;
     let header = probes[probe_idx];
@@ -404,11 +424,6 @@ fn cs_main(
         textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
         return;
     }
-    if (lid.y >= PROBE_OCT_SIZE / 2u) {
-        textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
-        return;
-    }
-
     let n_ws = header.normal.xyz;
     // Cosine-hemisphere sampling keeps every ray above the receiver and folds
     // the Lambertian cosine/pdf term into the distribution itself.
@@ -982,7 +997,7 @@ fn hw_gi_trace_sample(
     return HwGiSample(radiance, hit_distance, source_id);
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(8, 1, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
@@ -990,7 +1005,7 @@ fn cs_main(
     let grid_w = u.size.z;
     let grid_h = u.size.w;
     if (wg.x >= grid_w || wg.y >= grid_h) { return; }
-    if (lid.x >= PROBE_OCT_SIZE || lid.y >= PROBE_OCT_SIZE) { return; }
+    if (lid.x >= PROBE_TRACE_RAYS) { return; }
 
     let probe_idx = wg.y * grid_w + wg.x;
     let header = probes[probe_idx];
@@ -1002,7 +1017,7 @@ fn cs_main(
         textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
         return;
     }
-    // Temporally stratified 32-ray diffuse estimate. Only its integral is
+    // Temporally stratified 8-ray diffuse estimate. Only its integral is
     // accumulated; individual directional lanes are current-frame scratch.
     let n_ws = header.normal.xyz;
     let origin_ws = header.world_pos.xyz + n_ws * 0.02;
@@ -1244,7 +1259,7 @@ fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
          + c01 * (ix * fy) + c11 * (fx * fy);
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(8, 1, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
@@ -1252,7 +1267,7 @@ fn cs_main(
     let grid_w = u.size.z;
     let grid_h = u.size.w;
     if (wg.x >= grid_w || wg.y >= grid_h) { return; }
-    if (lid.x >= PROBE_OCT_SIZE || lid.y >= PROBE_OCT_SIZE) { return; }
+    if (lid.x >= PROBE_TRACE_RAYS) { return; }
 
     let probe_idx = wg.y * grid_w + wg.x;
     let header = probes[probe_idx];
@@ -1262,12 +1277,7 @@ fn cs_main(
         textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
         return;
     }
-    if (lid.y >= PROBE_OCT_SIZE / 2u) {
-        textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
-        return;
-    }
-
-    // Temporally stratified 32-ray diffuse estimate. See the HW path.
+    // Temporally stratified 8-ray diffuse estimate. See the HW path.
     let n_ws = header.normal.xyz;
     let dir_ws = probe_trace_direction(
         lid.xy,
@@ -1521,7 +1531,7 @@ struct TemporalParams {
     size: vec4<f32>,
     // x = hardware ray provenance/confidence available,
     // y = current angular phase [0, 15],
-    // z = short output-blend current weight, w unused.
+    // z = short output-blend current weight, w = camera moving.
     confidence: vec4<f32>,
     // x = world-cache capacity, y = static scene/lighting signature,
     // z = monotonic probe frame, w = cache writes allowed.
@@ -1562,13 +1572,12 @@ fn world_cache_key(world_pos: vec3<f32>, normal: vec3<f32>) -> u32 {
     return max(hash, 1u);
 }
 
-// The trace stores 32 equal-weight samples drawn from the receiver's cosine
+// The trace stores eight equal-weight samples drawn from the receiver's cosine
 // hemisphere. Average those current samples and publish the temporally
 // filtered diffuse convolution through ProbeHeader.
 var<workgroup> diffuse_radiance: array<vec3<f32>, 64>;
 var<workgroup> diffuse_luminance: array<f32, 64>;
 var<workgroup> confidence_error_samples: array<f32, 64>;
-var<workgroup> robust_group_radiance: array<vec3<f32>, 8>;
 var<workgroup> independent_estimator_error: f32;
 var<workgroup> current_integrated_shared: vec3<f32>;
 var<workgroup> phase_ring_settled_shared: u32;
@@ -1577,7 +1586,7 @@ var<workgroup> world_cache_diffuse_shared: vec3<f32>;
 var<workgroup> reprojected_history_probe: u32;
 var<workgroup> reprojected_history_valid: u32;
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(8, 2, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
@@ -1589,10 +1598,8 @@ fn cs_main(
     let probe_index = wg.y * grid_w + wg.x;
     let coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
     let lane = lid.y * PROBE_OCT_SIZE + lid.x;
-    // Trace owns only 32 cosine-hemisphere rays. The remaining workgroup
-    // lanes reduce/shared-state and integrated-phase history; loading their
-    // guaranteed-zero trace texels wasted twice as many reads as the phase
-    // ring adds below.
+    // Trace owns eight cosine-hemisphere rays. The other eight lanes own the
+    // remaining integrated-phase slots; they never read stale trace layers.
     var current_sample = vec4<f32>(0.0);
     if (lane < PROBE_TRACE_RAYS) {
         let raw_current_sample = textureLoad(radiance_in, coord, 0);
@@ -1610,8 +1617,12 @@ fn cs_main(
         let current_world_pos = probes[probe_index].world_pos;
         let current_normal = probes[probe_index].normal;
         if (current_world_pos.w >= 0.5) {
+            let current_phase = u32(round(u.confidence.y)) & 15u;
+            let placement_motion = select(0.0, 1.0, u.confidence.w > 0.5);
+            let current_jitter = probe_lattice_jitter(current_phase) * placement_motion;
             let current_uv = (
-                vec2<f32>(wg.xy) * u.size.z + vec2<f32>(u.size.z * 0.5)
+                vec2<f32>(wg.xy) * u.size.z +
+                u.size.z * (vec2<f32>(0.5) + current_jitter)
             ) / u.size.xy;
             let velocity_size = vec2<i32>(textureDimensions(velocity_tex));
             let velocity_coord = clamp(
@@ -1628,8 +1639,15 @@ fn cs_main(
             );
             if (all(previous_uv >= vec2<f32>(0.0)) &&
                 all(previous_uv <= vec2<f32>(1.0))) {
+                let previous_phase = (current_phase + 15u) & 15u;
+                // A start/stop transition can differ by at most half a tile;
+                // the existing 3x3 same-plane search below covers it. During
+                // continuous motion this is the exact prior lattice phase.
+                let previous_jitter =
+                    probe_lattice_jitter(previous_phase) * placement_motion;
                 let previous_grid_position =
-                    previous_uv * u.size.xy / u.size.z - vec2<f32>(0.5);
+                    previous_uv * u.size.xy / u.size.z -
+                    vec2<f32>(0.5) - previous_jitter;
                 let previous_grid_center = vec2<i32>(
                     floor(previous_grid_position + vec2<f32>(0.5)),
                 );
@@ -1732,35 +1750,33 @@ fn cs_main(
     // octel would assign old radiance to a new direction and turn a sparse
     // bright hit into a persistent projector-shaped strip.
     diffuse_radiance[lane] = curr;
-    diffuse_luminance[lane] = dot(
-        curr,
-        vec3<f32>(0.2126, 0.7152, 0.0722),
+    diffuse_luminance[lane] = select(
+        0.0,
+        dot(curr, vec3<f32>(0.2126, 0.7152, 0.0722)),
+        lane < PROBE_TRACE_RAYS,
     );
     workgroupBarrier();
-    if (lane < 8u) {
-        var row_sum = 0.0;
-        let row_start = lane * 8u;
-        for (var column = 0u; column < 8u; column = column + 1u) {
-            row_sum = row_sum + diffuse_luminance[row_start + column];
-        }
-        diffuse_luminance[lane] = row_sum;
+    if (lane < 4u) {
+        diffuse_luminance[lane] =
+            diffuse_luminance[lane] + diffuse_luminance[lane + 4u];
+    }
+    workgroupBarrier();
+    if (lane < 2u) {
+        diffuse_luminance[lane] =
+            diffuse_luminance[lane] + diffuse_luminance[lane + 2u];
     }
     workgroupBarrier();
     if (lane == 0u) {
-        var probe_sum = 0.0;
-        for (var row = 0u; row < 8u; row = row + 1u) {
-            probe_sum = probe_sum + diffuse_luminance[row];
-        }
-        diffuse_luminance[0] = probe_sum;
+        diffuse_luminance[0] =
+            diffuse_luminance[0] + diffuse_luminance[1];
     }
     workgroupBarrier();
 
     // One fixed ray that happens to intersect a tiny bright texture or lamp
-    // represents 1/64 of the sphere even when the source covers far less
-    // solid angle. Prevent that quadrature outlier from becoming a whole
-    // 16-pixel probe streak. The 8x8 octahedral grid's worst smooth cosine
-    // field is 4.21x its mean, so 5x preserves every smooth sky/sun field and
-    // only winsorizes energy too concentrated for this sampling density.
+    // can represent far more solid angle than the source covers. Prevent that
+    // quadrature outlier from becoming a whole probe streak. A 5x mean cap
+    // preserves broad sky/sun fields and only winsorizes energy too
+    // concentrated for this sampling density.
     let ray_luminance = dot(
         diffuse_radiance[lane],
         vec3<f32>(0.2126, 0.7152, 0.0722),
@@ -1771,83 +1787,48 @@ fn cs_main(
         ray_luminance - mean_luminance * 2.5,
         0.0,
     ) / (0.05 + ray_luminance);
-    confidence_error_samples[lane] = max(
-        confidence_error_samples[lane],
-        angular_outlier * angular_outlier,
-    );
-    if (ray_luminance > solid_angle_cap && ray_luminance > 0.0) {
-        diffuse_radiance[lane] =
-            diffuse_radiance[lane] * (solid_angle_cap / ray_luminance);
-    }
-    // Build eight interleaved, individually unbiased estimates of the same
-    // diffuse integral. `group = (low + 3*band) mod 8` gives every group one
-    // ray from each elevation band while decorrelating azimuth. A tiny bright
-    // card can dominate only one group; broad real bounce reaches several.
-    if (lane < 8u) {
-        var group_sum = vec3<f32>(0.0);
-        for (var band = 0u; band < 4u; band = band + 1u) {
-            let low = (lane + 8u - ((3u * band) & 7u)) & 7u;
-            group_sum = group_sum +
-                diffuse_radiance[band * 8u + low];
-        }
-        // With a cosine-weighted hemisphere PDF, each group's sample mean is
-        // already an unbiased estimate of the Lambertian diffuse convolution.
-        robust_group_radiance[lane] = bounded_probe_history(
-            group_sum / 4.0,
+    if (lane < PROBE_TRACE_RAYS) {
+        confidence_error_samples[lane] = max(
+            confidence_error_samples[lane],
+            angular_outlier * angular_outlier,
         );
+        if (ray_luminance > solid_angle_cap && ray_luminance > 0.0) {
+            diffuse_radiance[lane] =
+                diffuse_radiance[lane] * (solid_angle_cap / ray_luminance);
+        }
     }
     workgroupBarrier();
     if (lane == 0u) {
-        var estimate_sum = vec3<f32>(0.0);
-        for (var group = 0u; group < 8u; group = group + 1u) {
-            estimate_sum = estimate_sum + robust_group_radiance[group];
+        var sample_sum = vec3<f32>(0.0);
+        for (var ray = 0u; ray < PROBE_TRACE_RAYS; ray = ray + 1u) {
+            sample_sum = sample_sum + diffuse_radiance[ray];
         }
-        // These eight strata are independent estimates of the same integral,
-        // so their vector RMS is a direct confidence signal. The former policy
-        // measured only per-ray and
-        // spatial RMS over all 32 traced directions; that diluted a sparse colored
-        // awning hit until it could remain visible as a confident estimate.
-        // Broad, well-sampled bounce makes the strata agree even when the
-        // directional field itself is non-uniform.
-        let group_mean = estimate_sum / 8.0;
+        let sample_mean = sample_sum / f32(PROBE_TRACE_RAYS);
         var estimator_variance = 0.0;
-        for (var group = 0u; group < 8u; group = group + 1u) {
-            let delta = robust_group_radiance[group] - group_mean;
+        for (var ray = 0u; ray < PROBE_TRACE_RAYS; ray = ray + 1u) {
+            let delta = diffuse_radiance[ray] - sample_mean;
             estimator_variance = estimator_variance + dot(delta, delta);
         }
-        // Confidence uses the relative standard error of the eight-estimator
-        // mean, not the spread of one estimator. Dividing the
-        // sample RMS by sqrt(8) keeps broad Monte-Carlo variation on the
-        // narrow spatial footprint while a lone dominant stratum remains close
-        // to unit error and receives the wider reconstruction footprint.
+        // Relative standard error of the eight-ray mean drives only the
+        // geometry-aware reconstruction footprint. Temporal phase accumulation
+        // supplies 128 angular samples per receiver over a complete cycle.
         independent_estimator_error =
-            sqrt(estimator_variance / 64.0) / (0.05 + length(group_mean));
-        // The strata feed only that confidence signal. The former one-sided
-        // winsorization of the output to the third-highest stratum was
-        // discontinuous in the number of supporting strata: a genuinely
-        // bright nearby source (Bistro's sun-lit red awnings fill a third of
-        // the hemisphere of the wall probes directly above them) flipped
-        // whole probes between suppressed and retained regimes as binomial
-        // sample counts fluctuated, carving the real bounce into hard-edged
-        // patches that moved with the camera and pumped over time. The
-        // per-ray solid-angle cap above is continuous in the hit fraction
-        // and already reduces an isolated firefly by more than an order of
-        // magnitude, so the stratum mean is integrated unmodified and the
-        // temporal estimate converges to the true bounce.
-        current_integrated_shared = bounded_probe_history(group_mean);
+            sqrt(estimator_variance / 64.0) /
+            (0.05 + length(sample_mean));
+        current_integrated_shared = bounded_probe_history(sample_mean);
         probes[probe_index].current_diffuse = vec4<f32>(current_integrated_shared, 1.0);
     }
     workgroupBarrier();
 
     // Layers 32..47 are a ring of complete, equal-weight diffuse estimates,
     // one for each angular phase.
-    // Layers 0..31 remain current directional samples for capture-only
+    // Layers 0..7 remain current directional samples for capture-only
     // diagnostics. Reproject the integrated ring as a
     // unit onto the compatible prior world surface; never read a directional
     // lane as history. Invalid history seeds the whole ring with the current
     // estimate, avoiding both stale light and a dark 16-frame warm-up.
-    if (lane >= 32u && lane < 48u) {
-        let phase_slot = lane - 32u;
+    if (lane < 16u) {
+        let phase_slot = lane;
         let current_phase = u32(u.confidence.y) & 15u;
         var phase_integrated = current_integrated_shared;
         // A seeded slot supplies stable first-frame output but is not a real
@@ -1881,7 +1862,7 @@ fn cs_main(
                 );
             }
         }
-        diffuse_radiance[lane] = phase_integrated;
+        diffuse_radiance[32u + phase_slot] = phase_integrated;
         // The luminance reduction is dead after current integration. Reuse
         // its existing 64 floats for sixteen vec4 phase owners instead of
         // increasing workgroup memory and reducing occupancy on software GPUs.
@@ -1890,7 +1871,11 @@ fn cs_main(
         diffuse_luminance[owner_base + 1u] = phase_owner.y;
         diffuse_luminance[owner_base + 2u] = phase_owner.z;
         diffuse_luminance[owner_base + 3u] = phase_owner.w;
-        textureStore(history_out, coord, vec4<f32>(phase_integrated, 1.0));
+        textureStore(
+            history_out,
+            vec3<i32>(i32(wg.x), i32(wg.y), i32(32u + phase_slot)),
+            vec4<f32>(phase_integrated, 1.0),
+        );
     }
     workgroupBarrier();
 
@@ -2015,18 +2000,6 @@ fn cs_main(
     }
 
     workgroupBarrier();
-    if (lane < 32u) {
-        confidence_error_samples[lane] = confidence_error_samples[lane] + confidence_error_samples[lane + 32u];
-    }
-    workgroupBarrier();
-    if (lane < 16u) {
-        confidence_error_samples[lane] = confidence_error_samples[lane] + confidence_error_samples[lane + 16u];
-    }
-    workgroupBarrier();
-    if (lane < 8u) {
-        confidence_error_samples[lane] = confidence_error_samples[lane] + confidence_error_samples[lane + 8u];
-    }
-    workgroupBarrier();
     if (lane < 4u) {
         confidence_error_samples[lane] = confidence_error_samples[lane] + confidence_error_samples[lane + 4u];
     }
@@ -2053,22 +2026,27 @@ fn cs_main(
     // Preserve current samples for capture-only diagnostics. They are never
     // interpreted as matching temporal directions by the production path.
     // Layers 32..47 were written above by the integrated phase ring.
-    if (lane < 32u) {
+    if (lane < PROBE_TRACE_RAYS) {
         textureStore(history_out, coord, current_sample);
-    } else if (lane >= 48u) {
-        let owner_base = (lane - 48u) * 4u;
-        textureStore(history_out, coord, vec4<f32>(
+    }
+    if (lane < 16u) {
+        let owner_base = lane * 4u;
+        textureStore(
+            history_out,
+            vec3<i32>(i32(wg.x), i32(wg.y), i32(48u + lane)),
+            vec4<f32>(
             diffuse_luminance[owner_base],
             diffuse_luminance[owner_base + 1u],
             diffuse_luminance[owner_base + 2u],
             diffuse_luminance[owner_base + 3u],
-        ));
+            ),
+        );
     }
 }
 
 // Filter the completed irradiance estimate in probe space, after every probe
 // has published its current result. Doing this in a second tiny dispatch avoids
-// cross-workgroup races and costs only one invocation per 16x16 half-resolution
+// cross-workgroup races and costs only one invocation per 8x8 half-resolution
 // tile. The geometry-clamped reconstruction occupies layer zero of history_out.
 // ProbeHeader.previous_diffuse retains unfiltered temporal RGB plus a scalar
 // reconstruction energy ratio for fallback resolve. This dispatch reads the
@@ -2090,11 +2068,26 @@ fn cs_spatial(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let confidence_error = max(center.diffuse.w, 0.0);
-    // Ordinary well-converged probes get only a mild reconstruction filter.
-    // Under-resolved angular estimates use the wider footprint used by modern
-    // screen-probe GI denoisers, while remaining strictly on the same surface.
-    let radius = select(1, 2, confidence_error > 0.08);
-    let filter_strength = clamp(0.30 + confidence_error * 2.5, 0.30, 0.90);
+    // Hardware's complete 128-direction phase ring is intrinsically
+    // low-frequency. Let the full geometry-clamped 5x5 footprint own it;
+    // retaining a portion of the screen-tiled centre leaves a camera-fixed
+    // lattice. Approximate Hi-Z/SDF histories remain variance-adaptive: their
+    // current-neighborhood clamp changes every angular phase, so forcing the
+    // widest filter there amplifies rather than suppresses settled variation.
+    // This is still a tiny probe-domain dispatch (one invocation per 8x8
+    // half-res tile), and the normal/plane tests below keep every contribution
+    // on the same surface and preserve its boundaries.
+    let hardware_history = u.confidence.x > 0.5;
+    let radius = select(
+        select(1, 2, confidence_error > 0.08),
+        2,
+        hardware_history,
+    );
+    let filter_strength = select(
+        clamp(0.30 + confidence_error * 4.0, 0.30, 1.0),
+        1.0,
+        hardware_history,
+    );
     let probe_world_spacing =
         2.0 * max(center.normal.w, 0.1) * u.size.z /
         max(abs(u.size.w) * u.size.x, 0.0001);
@@ -2150,8 +2143,9 @@ fn cs_spatial(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // Bound retained history by the current-frame neighborhood's mean and
-    // spread rather than its hard min/max. A 32-ray estimate of a bright
+    // Approximate Hi-Z/SDF histories still need a current-frame safety bound.
+    // Bound them by the current neighborhood's mean and spread rather than its
+    // hard min/max. A sparse estimate of a bright
     // nearby source (the sun-lit Bistro awnings under their façade) is
     // binomially noisy per probe, so a min/max clamp repeatedly crushed the
     // converged EMA toward whichever realization the current frame produced —
@@ -2159,12 +2153,18 @@ fn cs_spatial(@builtin(global_invocation_id) gid: vec3<u32>) {
     // bounds, a noisy-but-consistent neighborhood keeps its converged mean,
     // while genuinely stale history (disocclusion ghosts, lighting changes)
     // still gets pulled to current evidence because agreement between
-    // neighbors shrinks the spread toward zero. Keep the floor relative to
+    // neighbors shrinks the spread toward zero. Hardware ray queries already
+    // maintain a geometry-reprojected finite phase ring; clamping that stable
+    // 128-direction estimate to the fresh eight-ray screen cells nearly
+    // doubles its measured motion error and reintroduces the probe lattice.
+    // The ring seeds current on disocclusion and refreshes one complete phase
+    // per frame, so the hardware path must not apply this second estimator.
+    // Keep the software-path floor relative to
     // HDR signal scale: the former absolute 0.005 allowance exceeded the
     // complete indirect signal on many Bistro facade probes and therefore
     // admitted old path-dependent light without clipping it at all.
     var history_clamped = center.diffuse.rgb;
-    if (weight_sum > 0.0001) {
+    if (u.confidence.x < 0.5 && weight_sum > 0.0001) {
         let current_mean = current_first / weight_sum;
         let current_sigma = sqrt(max(
             current_second / weight_sum - current_mean * current_mean,

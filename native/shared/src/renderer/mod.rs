@@ -564,7 +564,7 @@ pub struct Renderer {
     pub scene_compose_layout: wgpu::BindGroupLayout,
     pub scene_compose_uniform_buffer: wgpu::Buffer,
     scene_compose_bind_group_cache:
-        [Option<wgpu::BindGroup>; postfx_chain::SsrCompositeSource::COUNT],
+        [Option<wgpu::BindGroup>; postfx_chain::SsrCompositeSource::COUNT * 2],
     /// Composite-tonemap pipeline + bind group layout. Single full-
     /// screen draw that samples hdr_rt and writes ACES-tonemapped
     /// linear-rgb (sRGB hardware encode handles the transfer fn).
@@ -878,8 +878,8 @@ pub struct Renderer {
 
     /// Half-res HDR SSGI indirect diffuse output. Ticket 007a: written by probe
     /// resolve and composited by TAA; no other code path touches the view.
-    pub ssgi_rt_texture: wgpu::Texture,
-    pub ssgi_rt_view: wgpu::TextureView,
+    pub ssgi_rt_textures: [wgpu::Texture; 2],
+    pub ssgi_rt_views: [wgpu::TextureView; 2],
     /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
     pub ssgi_intensity: f32,
     /// SSGI max march distance in view-space meters.
@@ -2469,7 +2469,7 @@ impl Renderer {
             create_ssr_rt(&device, surface_config.width, surface_config.height);
         let (ssr_history_textures, ssr_history_views) =
             create_ssr_history_textures(&device, surface_config.width, surface_config.height);
-        let (ssgi_rt_texture, ssgi_rt_view) =
+        let (ssgi_rt_textures, ssgi_rt_views) =
             create_ssgi_rt(&device, surface_config.width, surface_config.height);
         let (probe_grid_w, probe_grid_h) =
             probe_grid_dims(surface_config.width, surface_config.height);
@@ -6349,6 +6349,26 @@ impl Renderer {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let probe_resolve_pl_layout =
@@ -8102,8 +8122,8 @@ impl Renderer {
             ssr_temporal_bind_group_cache: [None, None],
             #[cfg(not(target_arch = "wasm32"))]
             ssr_temporal_diagnostics: None,
-            ssgi_rt_texture,
-            ssgi_rt_view,
+            ssgi_rt_textures,
+            ssgi_rt_views,
             // 1.0 — stronger bounce than the earlier 0.5 default so
             // shadowed regions pick up visible color from nearby lit
             // surfaces (red awning tinting wall behind it, ground
@@ -8786,8 +8806,8 @@ impl Renderer {
             self.ssr_history_idx = 0;
             self.ssr_history_valid = false;
             let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, rw, rh);
-            self.ssgi_rt_texture = ssgi_t;
-            self.ssgi_rt_view = ssgi_v;
+            self.ssgi_rt_textures = ssgi_t;
+            self.ssgi_rt_views = ssgi_v;
             // Ticket 007a: rebuild the probe grid + 3D radiance textures
             // whenever the render size changes. Probe count scales with
             // half-res resolution, so the header buffer is resized too.

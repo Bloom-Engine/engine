@@ -37,6 +37,10 @@ pub(super) enum SsrCompositeSource {
 
 impl SsrCompositeSource {
     pub(super) const COUNT: usize = 3;
+
+    pub(super) const fn bind_group_cache_index(self, ssgi_idx: usize) -> usize {
+        self as usize * 2 + ssgi_idx
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -406,17 +410,22 @@ mod tests {
     }
 
     #[test]
-    fn scene_compose_cache_has_one_slot_for_every_ssr_source() {
+    fn scene_compose_cache_covers_ssr_and_ssgi_history_sources() {
         let sources = [
             SsrCompositeSource::Fallback,
             SsrCompositeSource::History0,
             SsrCompositeSource::History1,
         ];
-        let mut keys: Vec<_> = sources.into_iter().map(|source| source as usize).collect();
+        let mut keys = Vec::new();
+        for source in sources {
+            for ssgi_idx in 0..2 {
+                keys.push(source.bind_group_cache_index(ssgi_idx));
+            }
+        }
         keys.sort_unstable();
         keys.dedup();
 
-        assert_eq!(keys, (0..SsrCompositeSource::COUNT).collect::<Vec<_>>());
+        assert_eq!(keys, (0..SsrCompositeSource::COUNT * 2).collect::<Vec<_>>());
     }
 
     #[test]
@@ -613,7 +622,7 @@ impl Renderer {
             bytemuck::bytes_of(&cp),
         );
         {
-            let cache_index = ssr_composite_source as usize;
+            let cache_index = ssr_composite_source.bind_group_cache_index(self.probe_history_idx);
             if self.scene_compose_bind_group_cache[cache_index].is_none() {
                 self.frame_resource_stats
                     .created_bind_group(frame_resource_stats::BindGroupCreationSite::SceneCompose);
@@ -644,7 +653,9 @@ impl Renderer {
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: wgpu::BindingResource::TextureView(&self.ssgi_rt_view),
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.ssgi_rt_views[self.probe_history_idx],
+                            ),
                         },
                         wgpu::BindGroupEntry {
                             binding: 6,

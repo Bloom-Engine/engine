@@ -875,11 +875,16 @@ pub(super) fn probe_storage_buffer_layout(
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeResolveParams {
     pub(super) inv_view: [[f32; 4]; 4],
+    /// Previous camera view used to validate the reprojected resolve depth.
+    pub(super) prev_view: [[f32; 4]; 4],
     pub(super) proj_row01: [f32; 4],
     /// x = half_w, y = half_h, z = grid_w, w = grid_h
     pub(super) size: [u32; 4],
-    /// x = tile_size (16.0), y = intensity, zw unused
+    /// x = tile_size, y = intensity, z = minimum current resolve weight
+    /// (1 = reject history), w = camera moving.
     pub(super) params: [f32; 4],
+    /// x = finite placement phase [0, 15], y = sub-tile jitter active.
+    pub(super) temporal: [f32; 4],
 }
 
 /// On-GPU `ProbeHeader` layout (must match PROBE_HELPERS_WGSL's struct).

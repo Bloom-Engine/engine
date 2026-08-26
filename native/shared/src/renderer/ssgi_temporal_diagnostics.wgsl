@@ -15,6 +15,8 @@ struct TemporalParams {
 @group(0) @binding(8) var source_identity_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(9) var current_integrated_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(10) var history_integrated_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(11) var spatial_integrated_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(12) var ring_integrated_out: texture_storage_2d<rgba8unorm, write>;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -34,8 +36,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var motion_length = 0.0;
     if (valid_probe) {
         reprojection_stage = 1u;
+        let current_phase = u32(round(u.confidence.y)) & 15u;
+        let placement_motion = select(0.0, 1.0, u.confidence.w > 0.5);
+        let current_jitter = probe_lattice_jitter(current_phase) * placement_motion;
         let current_uv = (
-            vec2<f32>(probe) * u.size.z + vec2<f32>(u.size.z * 0.5)
+            vec2<f32>(probe) * u.size.z +
+            u.size.z * (vec2<f32>(0.5) + current_jitter)
         ) / u.size.xy;
         let velocity_size = vec2<i32>(textureDimensions(velocity_tex));
         let velocity_coord = clamp(
@@ -52,8 +58,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (all(previous_uv >= vec2<f32>(0.0)) &&
             all(previous_uv <= vec2<f32>(1.0))) {
             reprojection_stage = 3u;
+            let previous_phase = (current_phase + 15u) & 15u;
+            let previous_jitter =
+                probe_lattice_jitter(previous_phase) * placement_motion;
             let previous_grid_position =
-                previous_uv * u.size.xy / u.size.z - vec2<f32>(0.5);
+                previous_uv * u.size.xy / u.size.z -
+                vec2<f32>(0.5) - previous_jitter;
             let previous_grid_center = vec2<i32>(
                 floor(previous_grid_position + vec2<f32>(0.5)),
             );
@@ -162,12 +172,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // `instance_custom_data` in alpha; other backends retain their ordinary
     // scalar diagnostic and are deliberately shown as misses here.
     let probe_octel = gid.xy % vec2<u32>(8u);
+    let trace_lane = probe_octel.y * 8u + probe_octel.x;
     let trace_coord = vec3<i32>(
         i32(probe.x),
         i32(probe.y),
-        i32(probe_octel.y * 8u + probe_octel.x),
+        i32(trace_lane),
     );
-    let raw_sample = textureLoad(radiance_in, trace_coord, 0);
+    var raw_sample = vec4<f32>(0.0);
+    if (trace_lane < PROBE_TRACE_RAYS) {
+        raw_sample = textureLoad(radiance_in, trace_coord, 0);
+    }
     let display_radiance = vec3<f32>(1.0) - exp(-max(raw_sample.rgb, vec3<f32>(0.0)) * 2.0);
     textureStore(
         current_radiance_out,
@@ -204,9 +218,19 @@ fn cs_integrated(@builtin(global_invocation_id) gid: vec3<u32>) {
     let current_integrated = bounded_probe_history(
         current_probe.current_diffuse.rgb,
     );
+    let ring_integrated = bounded_probe_history(current_probe.diffuse.rgb);
     let history_integrated = bounded_probe_history(
         current_probe.previous_diffuse.rgb,
     );
+    // Layer zero is the geometry-aware spatial estimate actually sampled by
+    // production resolve. Keep it separate from the raw current and temporal
+    // probe estimates so motion captures can identify the first stage that
+    // retains a screen-cell pattern.
+    let spatial_integrated = bounded_probe_history(textureLoad(
+        history_in,
+        vec3<i32>(vec2<i32>(probe), 0),
+        0,
+    ).rgb);
     textureStore(
         current_integrated_out,
         vec2<i32>(gid.xy),
@@ -220,6 +244,22 @@ fn cs_integrated(@builtin(global_invocation_id) gid: vec3<u32>) {
         vec2<i32>(gid.xy),
         vec4<f32>(
             vec3<f32>(1.0) - exp(-max(history_integrated, vec3<f32>(0.0)) * 2.0),
+            1.0,
+        ),
+    );
+    textureStore(
+        spatial_integrated_out,
+        vec2<i32>(gid.xy),
+        vec4<f32>(
+            vec3<f32>(1.0) - exp(-max(spatial_integrated, vec3<f32>(0.0)) * 2.0),
+            1.0,
+        ),
+    );
+    textureStore(
+        ring_integrated_out,
+        vec2<i32>(gid.xy),
+        vec4<f32>(
+            vec3<f32>(1.0) - exp(-max(ring_integrated, vec3<f32>(0.0)) * 2.0),
             1.0,
         ),
     );

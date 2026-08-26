@@ -92,6 +92,18 @@ impl Renderer {
             let p11 = self.current_proj_matrix[1][1];
             let p20 = self.current_proj_matrix[2][0];
             let p21 = self.current_proj_matrix[2][1];
+            let camera_moving = postfx_chain::taa_camera_moving(
+                &self.current_view_matrix,
+                &self.prev_view_matrix,
+                &self.current_proj_matrix_unjittered,
+                &self.prev_proj_matrix_unjittered,
+            );
+            // The dense 8x8 lattice already supplies four receiver sites in
+            // each former probe footprint. Keep those sites centered during
+            // motion: shifting the whole screen lattice every frame changes
+            // the measured world receivers and exposes the sampling pattern
+            // that temporal resolve is trying to anchor to the scene.
+            let probe_lattice_jitter_active = false;
             // `mat4_invert` lands transposed relative to WGSL's `M * v`
             // convention (the path tracer has the same upload boundary).
             // Uploading it raw mirrored screen-probe world positions across
@@ -109,7 +121,11 @@ impl Renderer {
                 params: [
                     (self.probe_frame_index & 4095) as f32,
                     PROBE_TILE_SIZE as f32,
-                    0.0,
+                    if probe_lattice_jitter_active {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     0.0,
                 ],
             };
@@ -687,7 +703,11 @@ impl Renderer {
                     if use_hw { 1.0 } else { 0.0 },
                     (self.probe_frame_index & 15) as f32,
                     SSGI_TEMPORAL_OUTPUT_WEIGHT,
-                    0.0,
+                    if probe_lattice_jitter_active {
+                        1.0
+                    } else {
+                        0.0
+                    },
                 ],
                 world_cache: [
                     if use_hw { cache_capacity } else { 0 },
@@ -787,11 +807,41 @@ impl Renderer {
             self.probe_history_valid = true;
 
             // ---- resolve ----
+            // Progressive HW scene admission changes the cache signature once
+            // per newly admitted BLAS. That is a radiance update, not a
+            // receiver-history discontinuity: hard-resetting the per-pixel
+            // resolve on every one of those frames exposes the screen-space
+            // probe rows whenever the camera moves. Follow the probe-domain
+            // temporal window (1/8 current) while the ray scene grows. True
+            // feature/camera-cut invalidation still requests a full refresh.
+            let resolve_history_current_floor = if force_refresh > 0.5 {
+                1.0
+            } else if use_hw && cache_signature_changed {
+                SSGI_TEMPORAL_OUTPUT_WEIGHT
+            } else {
+                0.0
+            };
             let resolve_params = ProbeResolveParams {
                 inv_view,
+                prev_view: self.prev_view_matrix,
                 proj_row01: [p00, p11, p20, p21],
                 size: [half_w, half_h, gw, gh],
-                params: [PROBE_TILE_SIZE as f32, 1.0, 0.0, 0.0],
+                params: [
+                    PROBE_TILE_SIZE as f32,
+                    1.0,
+                    resolve_history_current_floor,
+                    if camera_moving { 1.0 } else { 0.0 },
+                ],
+                temporal: [
+                    (self.probe_frame_index & 15) as f32,
+                    if probe_lattice_jitter_active {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                    0.0,
+                ],
             };
             self.queue.write_buffer(
                 &self.probe_resolve_uniform,
@@ -800,8 +850,8 @@ impl Renderer {
             );
             #[cfg(not(target_arch = "wasm32"))]
             if self.pending_quality_capture_dir.is_some() {
-                self.record_ssgi_temporal_diagnostics(encoder, prev_idx, gw, gh, half_w, half_h);
-                self.record_ssgi_resolve_support_diagnostic(encoder);
+                self.record_ssgi_temporal_diagnostics(encoder, write_idx, gw, gh, half_w, half_h);
+                self.record_ssgi_resolve_support_diagnostic(encoder, prev_idx);
             }
             if self.probe_resolve_bg_cache[write_idx].is_none() {
                 self.probe_resolve_bg_cache[write_idx] =
@@ -835,6 +885,18 @@ impl Renderer {
                                 binding: 5,
                                 resource: wgpu::BindingResource::Sampler(&self.hiz_sampler),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.ssgi_rt_views[prev_idx],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.velocity_rt_view,
+                                ),
+                            },
                         ],
                     }));
             }
@@ -842,7 +904,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("probe_resolve_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.ssgi_rt_view,
+                    view: &self.ssgi_rt_views[write_idx],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -871,7 +933,7 @@ impl Renderer {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ssgi_clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.ssgi_rt_view,
+                    view: &self.ssgi_rt_views[write_idx],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {

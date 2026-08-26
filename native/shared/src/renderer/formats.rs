@@ -386,35 +386,42 @@ pub(super) fn create_ssgi_rt(
     device: &wgpu::Device,
     width: u32,
     height: u32,
-) -> (wgpu::Texture, wgpu::TextureView) {
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
     let w = (width / 2).max(1);
     let h = (height / 2).max(1);
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("ssgi_rt"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: HDR_FORMAT,
-        // COPY_SRC is inert during normal frames and lets qualification retain
-        // raw HDR evidence for the probe resolve without another shader pass.
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
+    let make = || {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ssgi_rt"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            // Resolve ping-pongs these textures so the shader can reproject
+            // last frame's per-pixel result while writing the current frame.
+            // COPY_SRC is inert during normal frames and lets qualification
+            // retain the resolved HDR evidence without another shader pass.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    };
+    let (texture_0, view_0) = make();
+    let (texture_1, view_1) = make();
+    ([texture_0, texture_1], [view_0, view_1])
 }
 
-/// Probe grid = ceil(half_w / 16) × ceil(half_h / 16). 50×29 on a
-/// 800×450 half-res Sponza RT = 1450 probes, each holding an 8×8
+/// Probe grid = ceil(half_w / 8) × ceil(half_h / 8). 100×57 on an
+/// 800×450 half-res Sponza RT = 5700 probes, each holding an 8×8
 /// octahedral atlas = 64 radiance samples (ticket 007a).
-pub(super) const PROBE_TILE_SIZE: u32 = 16;
+pub(super) const PROBE_TILE_SIZE: u32 = 8;
 pub(super) const PROBE_OCT_SIZE: u32 = 8;
 pub(super) const PROBE_OCT_TEXELS: u32 = PROBE_OCT_SIZE * PROBE_OCT_SIZE;
 

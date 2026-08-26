@@ -6,7 +6,7 @@
 
 use super::*;
 
-const PROBE_DIAGNOSTIC_COUNT: usize = 6;
+const PROBE_DIAGNOSTIC_COUNT: usize = 8;
 const RESOLVE_DIAGNOSTIC_COUNT: usize = 4;
 pub(super) const SSGI_TEMPORAL_DIAGNOSTIC_NAMES: [&str;
     PROBE_DIAGNOSTIC_COUNT + RESOLVE_DIAGNOSTIC_COUNT] = [
@@ -16,6 +16,8 @@ pub(super) const SSGI_TEMPORAL_DIAGNOSTIC_NAMES: [&str;
     "ssgi-source-identity",
     "ssgi-current-integrated",
     "ssgi-history-integrated",
+    "ssgi-spatial-integrated",
+    "ssgi-ring-integrated",
     "ssgi-resolve-support",
     "ssgi-resolve-geometry",
     "ssgi-resolve-plane-ratios",
@@ -154,7 +156,14 @@ impl SsgiTemporalDiagnosticResources {
         });
         let integrated_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ssgi_integrated_diagnostic_layout"),
-            entries: &[storage_buffer(3), storage(9), storage(10)],
+            entries: &[
+                texture(2),
+                storage_buffer(3),
+                storage(9),
+                storage(10),
+                storage(11),
+                storage(12),
+            ],
         });
         let resolve_support_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -167,6 +176,8 @@ impl SsgiTemporalDiagnosticResources {
                     storage(4),
                     storage(5),
                     storage(6),
+                    texture_2d(7),
+                    texture_2d(8),
                 ],
             });
         let source = format!("{}{}", PROBE_HELPERS_WGSL, SHADER);
@@ -330,6 +341,12 @@ impl Renderer {
             layout: &resources.integrated_layout,
             entries: &[
                 wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(
+                        &self.probe_history_views[previous_history_index],
+                    ),
+                },
+                wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.probe_header_buffer.as_entire_binding(),
                 },
@@ -340,6 +357,14 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 10,
                     resource: wgpu::BindingResource::TextureView(&resources.views[5]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&resources.views[6]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&resources.views[7]),
                 },
             ],
         });
@@ -359,6 +384,7 @@ impl Renderer {
     pub(super) fn record_ssgi_resolve_support_diagnostic(
         &self,
         encoder: &mut wgpu::CommandEncoder,
+        previous_resolve_idx: usize,
     ) {
         let Some(resources) = self.ssgi_temporal_diagnostics.as_ref() else {
             return;
@@ -403,6 +429,16 @@ impl Renderer {
                         &resources.views[PROBE_DIAGNOSTIC_COUNT + 3],
                     ),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(
+                        &self.ssgi_rt_views[previous_resolve_idx],
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view),
+                },
             ],
         });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -441,6 +477,8 @@ mod tests {
         assert!(SHADER.contains("let estimator_uncertainty = max(current_probe.diffuse.w"));
         assert!(SHADER.contains("previous_diffuse.rgb"));
         assert!(SHADER.contains("current_probe.current_diffuse.rgb"));
+        assert!(SHADER.contains("let spatial_integrated = bounded_probe_history(textureLoad("));
+        assert!(SHADER.contains("let ring_integrated = bounded_probe_history"));
         assert!(SHADER.contains("var alpha = u.confidence.z"));
         assert!(SHADER.contains("one_based_source"));
     }
@@ -453,13 +491,22 @@ mod tests {
         assert!(RESOLVE_SUPPORT_SHADER.contains("fallback_count >= 2u"));
         assert!(RESOLVE_SUPPORT_SHADER.contains("fallback_weight >= 0.25"));
         assert!(RESOLVE_SUPPORT_SHADER.contains("w_corner * w_plane * w_normal"));
-        assert!(
-            RESOLVE_SUPPORT_SHADER.contains("let fallback_corner_weight = max(w_corner, 0.125)")
-        );
+        assert!(RESOLVE_SUPPORT_SHADER.contains("let fallback_corner_weight = select("));
         assert!(RESOLVE_SUPPORT_SHADER.contains("(0.08 + probe_world_spacing * 0.85) * 3.0"));
         assert!(RESOLVE_SUPPORT_SHADER.contains("plane_error / max(fallback_plane_limit"));
         assert!(RESOLVE_SUPPORT_SHADER.contains("normal_compatible && plane_ratio <= 1.0"));
         assert!(RESOLVE_SUPPORT_SHADER.contains("best_normal_plane_ratio * 0.25"));
         assert!(RESOLVE_SUPPORT_SHADER.contains("plane_ratios[corner_index]"));
+        assert!(
+            RESOLVE_SUPPORT_SHADER.contains("coherent_count == 4u"),
+            "a fully coherent receiver footprint must not switch reconstruction kernels with strict probe-grid support",
+        );
+        assert!(
+            RESOLVE_SUPPORT_SHADER.contains("f32(coherent_count) * 0.25"),
+            "capture diagnostics must expose the complete coherent footprint, including strict samples",
+        );
+        assert!(RESOLVE_SUPPORT_SHADER.contains("u.prev_view * vec4<f32>(P_ws, 1.0)"));
+        assert!(RESOLVE_SUPPORT_SHADER.contains("history_accepted = history_depth > 0.0"));
+        assert!(RESOLVE_SUPPORT_SHADER.contains("normalized_history_depth_error * 0.25"));
     }
 }
