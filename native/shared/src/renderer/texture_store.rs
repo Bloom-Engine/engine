@@ -578,6 +578,11 @@ impl Renderer {
         }
         self.model_skinned.remove(&handle_bits);
         self.model_blended.remove(&handle_bits);
+        self.model_layered_blended.remove(&handle_bits);
+        self.model_refractive.remove(&handle_bits);
+        #[cfg(feature = "models3d")]
+        self.model_virtual_compatibility_sources
+            .remove(&handle_bits);
     }
 
     pub fn set_texture_filter(&mut self, idx: u32, nearest: bool) {

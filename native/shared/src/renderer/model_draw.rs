@@ -23,7 +23,7 @@ pub(super) struct CachedModelMotionHistory {
     slot: usize,
 }
 
-fn cached_model_subset_is_canonical<I>(mesh_count: usize, mesh_indices: I) -> bool
+pub(super) fn cached_model_subset_is_canonical<I>(mesh_count: usize, mesh_indices: I) -> bool
 where
     I: Iterator<Item = usize>,
 {
@@ -335,6 +335,21 @@ impl Renderer {
         tint: [f32; 4],
         route: &crate::models::ModelVirtualGeometryRoute,
     ) -> bool {
+        if let Some(source_indices) = self.model_virtual_compatibility_sources.get(&handle_bits) {
+            if source_indices.len() != route.compatibility_placements.len()
+                || source_indices.iter().copied().ne(route
+                    .compatibility_placements
+                    .iter()
+                    .map(|placement| placement.model_mesh_index))
+            {
+                return false;
+            }
+            if source_indices.is_empty() {
+                return true;
+            }
+            self.draw_model_cached(handle_bits, position, scale, tint);
+            return true;
+        }
         self.draw_model_cached_mesh_subset(
             handle_bits,
             position,
@@ -356,6 +371,21 @@ impl Renderer {
         tint: [f32; 4],
         route: &crate::models::ModelVirtualGeometryRoute,
     ) -> bool {
+        if let Some(source_indices) = self.model_virtual_compatibility_sources.get(&handle_bits) {
+            if source_indices.len() != route.compatibility_placements.len()
+                || source_indices.iter().copied().ne(route
+                    .compatibility_placements
+                    .iter()
+                    .map(|placement| placement.model_mesh_index))
+            {
+                return false;
+            }
+            if source_indices.is_empty() {
+                return true;
+            }
+            self.draw_model_cached_transform(handle_bits, model_matrix, tint);
+            return true;
+        }
         self.draw_model_cached_mesh_subset_transform(
             handle_bits,
             model_matrix,

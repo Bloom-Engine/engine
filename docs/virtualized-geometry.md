@@ -252,11 +252,17 @@ consume no prior selection state.
 Selected-cluster records address instances by their dense dispatch index, not
 the caller's stable instance ID. This keeps vertex pulling exact when stable IDs
 are sparse. Page requests retain the stable ID for asynchronous feedback.
-Before traversal, `bind_mesh_materials` must atomically map every archive
-material slot—including the glTF default slot—to a nonzero generation-safe
-renderer material ID. Duplicate, missing, unused, or zero bindings change no
-CPU or GPU table. Traversal rejects an unbound mesh before dispatch, so streamed
-geometry cannot silently shade through material zero.
+Before traversal, material binding must atomically map every archive material
+slot—including the glTF default slot—to a nonzero generation-safe renderer
+material ID. Production model callers use `bind_model_virtual_materials`, which
+verifies the model/archive source closure, derives exact base-PBR records from
+the loaded glTF meshes and renderer texture IDs, owns those IDs until rebind or
+virtual shutdown, and rejects transmission/layered materials that are not yet
+virtual-authoritative. The lower-level `bind_mesh_materials` remains available
+for procedural and tooling assets. Duplicate, missing, unused, conflicting, or
+zero bindings change no CPU or GPU table. Traversal rejects an unbound mesh
+before dispatch, so streamed geometry cannot silently shade through material
+zero.
 
 `GpuVirtualDrawEmitter` converts the bounded selected table into compact
 16-byte non-indexed indirect commands. `first_instance` addresses the matching
@@ -320,16 +326,21 @@ calling the authoritative scene material evaluator. Its production pipeline
 uses the established four MRTs and fits the renderer's eight fragment-stage
 storage-buffer contract. `Renderer::enable_virtual_geometry` is the explicit
 attachment point, so ordinary frames still construct and draw none of this
-work.
+work. Normal callers use `submit_virtual_geometry_current_view`: hierarchy
+selection receives the renderer-owned unjittered frustum/projection scale while
+visibility and velocity receive the exact current/previous jittered transforms.
+The fully explicit view form remains available for offline tools.
 
 Runtime model routing validates the complete glTF source closure against the
 archive, preserves source mesh/primitive/placement identity, and rejects an
 incomplete or multiply owned partition before submission. A filtered virtual
 instance traverses only its source glTF mesh within a shared scene archive.
 Cooked compatibility records, plus alpha-masked primitives deferred by the
-visibility contract, submit through an allocation-free subset of the ordinary
-cached renderer. This prevents a per-placement instance from duplicating every
-mesh in a scene archive and prevents mixed-content holes.
+visibility contract, enter a compact compatibility-only cache and submit
+allocation-free through the ordinary renderer. Virtual-eligible vertex/index
+payloads are not uploaded to the ordinary static arena. This prevents both a
+per-placement instance from duplicating every mesh in a scene archive and the
+compatibility bridge from quietly duplicating the complete model on the GPU.
 
 Missing-page feedback uses two fixed MAP_READ buffers and never waits in the
 render loop. Each completed traversal copies at most 4,096 request records by
@@ -357,10 +368,11 @@ and virtual-idle frames add no pass. Asynchronous feedback telemetry exposes
 the latest visible, frustum-culled, occlusion-culled, and
 occlusion-uncertain group counts without synchronizing the render loop.
 
-The next #131 runtime milestones are asynchronous #136 store/index IO behind
-the GPU feedback boundary, stress/motion qualification, and cross-backend
-timing. The compatibility renderer remains responsible for unsupported and
-not-yet-qualified content throughout that work.
+The next #131 runtime milestones are detailed-Bistro camera-motion/pixel
+qualification, a 10M-source-triangle residency stress, asynchronous #136
+store/index IO behind the GPU feedback boundary, and cross-backend timing. The
+compatibility renderer remains responsible for unsupported and not-yet-qualified
+content throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts

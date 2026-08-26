@@ -1,3 +1,4 @@
+use super::material_indirection::MaterialId;
 use super::{gpu_driven, specialized_scene_shader_source, Renderer};
 use crate::virtual_geometry::{
     GpuVirtualDrawEmitter, GpuVirtualGeometryConfig, GpuVirtualGeometryPool,
@@ -6,7 +7,10 @@ use crate::virtual_geometry::{
     GpuVirtualVisibilityFrame, GpuVirtualVisibilityRaster, GpuVirtualVisibilityShading,
     VirtualGeometryDrawEmissionError, VirtualGeometryGpuError, VirtualGeometryHiZFrame,
     VirtualGeometryTraversalError, VirtualGeometryView, VirtualGeometryVisibilityError,
+    VirtualMaterialBinding, VirtualMeshId,
 };
+use bloom_geometry_format::FLAG_ALPHA_MASKED;
+use std::collections::BTreeMap;
 use std::fmt;
 
 struct VirtualGeometryFrameSubmission {
@@ -30,6 +34,7 @@ pub(crate) struct RendererVirtualGeometry {
     frame: u64,
     renderer_frame: u64,
     last_failure: Option<String>,
+    owned_materials: BTreeMap<VirtualMeshId, Vec<MaterialId>>,
 }
 
 impl RendererVirtualGeometry {
@@ -56,6 +61,7 @@ impl RendererVirtualGeometry {
             frame: 0,
             renderer_frame: 0,
             last_failure: None,
+            owned_materials: BTreeMap::new(),
         })
     }
 
@@ -210,6 +216,26 @@ pub enum RendererVirtualGeometryError {
     AlreadyEnabled,
     NotEnabled,
     VisibilityShadingRequired,
+    MissingModelSourceClosure,
+    ModelSourceClosureMismatch,
+    MissingModelPrimitive {
+        mesh_index: u32,
+        primitive_index: u32,
+    },
+    InconsistentModelPrimitive {
+        mesh_index: u32,
+        primitive_index: u32,
+    },
+    UnsupportedModelMaterial {
+        mesh_index: u32,
+        primitive_index: u32,
+    },
+    ConflictingSourceMaterial {
+        material_index: Option<u32>,
+    },
+    MaterialAllocationFailed {
+        material_index: Option<u32>,
+    },
     Pool(VirtualGeometryGpuError),
     Traversal(VirtualGeometryTraversalError),
     DrawEmission(VirtualGeometryDrawEmissionError),
@@ -256,6 +282,43 @@ impl fmt::Display for RendererVirtualGeometryError {
                 formatter,
                 "virtual geometry requires the opt-in visibility shade path"
             ),
+            Self::MissingModelSourceClosure => write!(
+                formatter,
+                "model loader did not resolve the complete virtual-geometry source closure"
+            ),
+            Self::ModelSourceClosureMismatch => write!(
+                formatter,
+                "model and registered virtual archive have different source closures"
+            ),
+            Self::MissingModelPrimitive {
+                mesh_index,
+                primitive_index,
+            } => write!(
+                formatter,
+                "cooked glTF mesh {mesh_index} primitive {primitive_index} is absent from the runtime model"
+            ),
+            Self::InconsistentModelPrimitive {
+                mesh_index,
+                primitive_index,
+            } => write!(
+                formatter,
+                "runtime placements disagree on glTF mesh {mesh_index} primitive {primitive_index}"
+            ),
+            Self::UnsupportedModelMaterial {
+                mesh_index,
+                primitive_index,
+            } => write!(
+                formatter,
+                "virtual glTF mesh {mesh_index} primitive {primitive_index} uses transmission or layered PBR that remains compatibility-owned"
+            ),
+            Self::ConflictingSourceMaterial { material_index } => write!(
+                formatter,
+                "runtime primitives disagree on cooked material slot {material_index:?}"
+            ),
+            Self::MaterialAllocationFailed { material_index } => write!(
+                formatter,
+                "global material allocation failed for cooked material slot {material_index:?}"
+            ),
             Self::Pool(error) => error.fmt(formatter),
             Self::Traversal(error) => error.fmt(formatter),
             Self::DrawEmission(error) => error.fmt(formatter),
@@ -268,6 +331,59 @@ impl fmt::Display for RendererVirtualGeometryError {
 impl std::error::Error for RendererVirtualGeometryError {}
 
 impl Renderer {
+    /// Cache only the ordinary-renderer half of an exact virtual-geometry
+    /// route. The cache is compact: virtual-eligible vertex/index payloads are
+    /// never uploaded to the ordinary static arena just to preserve source
+    /// mesh indexing.
+    pub fn cache_model_virtual_compatibility(
+        &mut self,
+        handle_bits: u64,
+        model: &crate::models::ModelData,
+        route: &crate::models::ModelVirtualGeometryRoute,
+    ) -> bool {
+        let source_indices = route.compatibility_model_mesh_indices();
+        if !super::model_draw::cached_model_subset_is_canonical(
+            model.meshes.len(),
+            source_indices.iter().copied(),
+        ) {
+            return false;
+        }
+        if model.mesh_transforms.len() != model.meshes.len()
+            || model.mesh_cast_shadows.len() != model.meshes.len()
+            || model.mesh_sources.len() != model.meshes.len()
+            || route.compatibility_placements.iter().any(|placement| {
+                model.mesh_source(placement.model_mesh_index) != Some(placement.source)
+            })
+        {
+            return false;
+        }
+        if let Some(cached_sources) = self.model_virtual_compatibility_sources.get(&handle_bits) {
+            return cached_sources == &source_indices
+                && self
+                    .model_gpu_cache
+                    .get(&handle_bits)
+                    .is_some_and(Option::is_some);
+        }
+        if self.model_gpu_cache.contains_key(&handle_bits) {
+            return false;
+        }
+
+        let meshes = source_indices
+            .iter()
+            .map(|&index| model.meshes[index].as_ref())
+            .collect::<Vec<_>>();
+        let transforms = source_indices
+            .iter()
+            .map(|&index| model.mesh_transform(index))
+            .collect::<Vec<_>>();
+        if !self.cache_model_if_static_with_transforms(handle_bits, &meshes, &transforms) {
+            return false;
+        }
+        self.model_virtual_compatibility_sources
+            .insert(handle_bits, source_indices);
+        true
+    }
+
     /// Create the complete fixed-budget virtual producer chain. This remains
     /// opt-in and requires `BLOOM_VISIBILITY_BUFFER=shade` at renderer startup;
     /// no virtual pool, transient buffers, pipeline, or target is allocated by
@@ -307,13 +423,146 @@ impl Renderer {
     /// Drop every renderer-owned virtual resource and return to the ordinary
     /// visibility path. Existing non-virtual scene routing is untouched.
     pub fn disable_virtual_geometry(&mut self) -> bool {
-        self.virtual_geometry.take().is_some()
+        let Some(state) = self.virtual_geometry.take() else {
+            return false;
+        };
+        self.material_system
+            .indirection
+            .retire_materials(&self.queue, state.owned_materials.into_values().flatten());
+        true
     }
 
     /// Mutable residency/asset owner for explicit `.bgeo` registration and
     /// page streaming. It is unavailable until virtual geometry is enabled.
     pub fn virtual_geometry_pool_mut(&mut self) -> Option<&mut GpuVirtualGeometryPool> {
         self.virtual_geometry.as_mut().map(|state| &mut state.pool)
+    }
+
+    /// Allocate and bind the exact base-PBR material table for one registered
+    /// cooked model. Source material indices are recovered from the archive;
+    /// callers never manufacture renderer-global IDs. Masked clusters receive
+    /// a valid (unused) binding because virtual raster discards them and the
+    /// compatibility cache remains authoritative for their pixels.
+    pub fn bind_model_virtual_materials(
+        &mut self,
+        virtual_mesh: VirtualMeshId,
+        model: &crate::models::ModelData,
+    ) -> Result<(), RendererVirtualGeometryError> {
+        let asset = self
+            .virtual_geometry
+            .as_ref()
+            .ok_or(RendererVirtualGeometryError::NotEnabled)?
+            .pool
+            .asset(virtual_mesh)?
+            .clone();
+        let source_hash = model
+            .source_geometry_sha256
+            .ok_or(RendererVirtualGeometryError::MissingModelSourceClosure)?;
+        if source_hash != asset.archive().source_sha256 {
+            return Err(RendererVirtualGeometryError::ModelSourceClosureMismatch);
+        }
+
+        let mut primitives = BTreeMap::<(u32, u32), &crate::models::MeshData>::new();
+        for (model_mesh_index, mesh) in model.meshes.iter().enumerate() {
+            let Some(source) = model.mesh_source(model_mesh_index) else {
+                continue;
+            };
+            let key = (source.mesh_index, source.primitive_index);
+            if let Some(previous) = primitives.get(&key).copied() {
+                let previous_record = self.model_gpu_material_record(previous);
+                let current_record = self.model_gpu_material_record(mesh);
+                let previous_extended =
+                    previous.transmission.is_active() || previous.layered_pbr.is_active();
+                let current_extended =
+                    mesh.transmission.is_active() || mesh.layered_pbr.is_active();
+                if bytemuck::bytes_of(&previous_record) != bytemuck::bytes_of(&current_record)
+                    || previous_extended != current_extended
+                {
+                    return Err(RendererVirtualGeometryError::InconsistentModelPrimitive {
+                        mesh_index: source.mesh_index,
+                        primitive_index: source.primitive_index,
+                    });
+                }
+            } else {
+                primitives.insert(key, mesh.as_ref());
+            }
+        }
+
+        let mut records =
+            BTreeMap::<Option<u32>, super::material_indirection::GpuMaterialRecord>::new();
+        for cluster in &asset.archive().clusters {
+            let key = (cluster.mesh_index, cluster.primitive_index);
+            let mesh = primitives.get(&key).copied().ok_or(
+                RendererVirtualGeometryError::MissingModelPrimitive {
+                    mesh_index: cluster.mesh_index,
+                    primitive_index: cluster.primitive_index,
+                },
+            )?;
+            if cluster.flags & FLAG_ALPHA_MASKED == 0
+                && ((self.imported_refraction_enabled && mesh.transmission.is_active())
+                    || mesh.layered_pbr.is_active())
+            {
+                return Err(RendererVirtualGeometryError::UnsupportedModelMaterial {
+                    mesh_index: cluster.mesh_index,
+                    primitive_index: cluster.primitive_index,
+                });
+            }
+            let record = self.model_gpu_material_record(mesh);
+            if let Some(previous) = records.insert(cluster.material_index, record) {
+                if bytemuck::bytes_of(&previous) != bytemuck::bytes_of(&record) {
+                    return Err(RendererVirtualGeometryError::ConflictingSourceMaterial {
+                        material_index: cluster.material_index,
+                    });
+                }
+            }
+        }
+
+        let mut material_ids = Vec::with_capacity(records.len());
+        let mut bindings = Vec::with_capacity(records.len());
+        for (source_material_index, record) in records {
+            let material_id = self
+                .material_system
+                .indirection
+                .allocate_material(&self.device, record);
+            if material_id == MaterialId::FALLBACK {
+                self.material_system
+                    .indirection
+                    .retire_materials(&self.queue, material_ids);
+                return Err(RendererVirtualGeometryError::MaterialAllocationFailed {
+                    material_index: source_material_index,
+                });
+            }
+            bindings.push(VirtualMaterialBinding {
+                source_material_index,
+                material_id: material_id.raw(),
+            });
+            material_ids.push(material_id);
+        }
+
+        let bind_result = self
+            .virtual_geometry
+            .as_mut()
+            .expect("virtual state remained enabled while binding")
+            .pool
+            .bind_mesh_materials(&self.queue, virtual_mesh, &bindings);
+        if let Err(error) = bind_result {
+            self.material_system
+                .indirection
+                .retire_materials(&self.queue, material_ids);
+            return Err(error.into());
+        }
+        let old = self
+            .virtual_geometry
+            .as_mut()
+            .expect("virtual state remained enabled while recording ownership")
+            .owned_materials
+            .insert(virtual_mesh, material_ids);
+        if let Some(old) = old {
+            self.material_system
+                .indirection
+                .retire_materials(&self.queue, old);
+        }
+        Ok(())
     }
 
     /// Bounded feedback/readback/upload counters for debug UIs and captures.
@@ -346,6 +595,34 @@ impl Renderer {
             .as_mut()
             .ok_or(RendererVirtualGeometryError::NotEnabled)?
             .submit(instances, view, visibility)
+    }
+
+    /// Submit against the renderer's current camera with stable unjittered LOD
+    /// selection and the exact jittered current/previous transforms used by
+    /// Bloom's velocity buffer. This is the normal raylib/Unity-like entry
+    /// point; the fully explicit form remains available for advanced tooling.
+    pub fn submit_virtual_geometry_current_view(
+        &mut self,
+        instances: &[GpuVirtualInstance],
+        target_error_pixels: f32,
+    ) -> Result<(), RendererVirtualGeometryError> {
+        let view_projection = super::mat4_multiply(
+            self.current_proj_matrix_unjittered,
+            self.current_view_matrix,
+        );
+        let (_, render_height) = self.render_extent();
+        let view = VirtualGeometryView {
+            frustum_planes: crate::scene::extract_frustum_planes(&view_projection),
+            view_projection,
+            camera_position: self.current_camera_pos,
+            projection_scale: render_height as f32
+                * 0.5
+                * self.current_proj_matrix_unjittered[1][1].abs(),
+            target_error_pixels,
+        };
+        let visibility =
+            GpuVirtualVisibilityFrame::new(self.current_vp_matrix, self.velocity_ref_vp)?;
+        self.submit_virtual_geometry(instances, view, visibility)
     }
 
     pub(crate) fn virtual_visibility_frame_requested(&self) -> bool {

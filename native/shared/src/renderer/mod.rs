@@ -60,6 +60,8 @@ mod material_api;
 pub mod material_indirection;
 mod material_instancing;
 mod model_draw;
+#[cfg(feature = "models3d")]
+mod model_material;
 mod occlusion;
 mod opaque_material_pass;
 mod planar_pass;
@@ -1342,6 +1344,10 @@ pub struct Renderer {
     // Cached model GPU buffers (static AND skinned — skinned VBs keep
     // raw bind-pose joint indices; the scene VS skins them per draw)
     model_gpu_cache: HashMap<u64, Option<Vec<GpuMesh>>>,
+    /// Original model-mesh indices represented by a compact compatibility-only
+    /// cache. Absent means the handle owns an ordinary complete model cache.
+    #[cfg(feature = "models3d")]
+    model_virtual_compatibility_sources: HashMap<u64, Vec<usize>>,
     /// Shared static geometry, GPU culling, and indirect submission.
     gpu_driven: gpu_driven::GpuDrivenRenderer,
     /// Explicit opt-in virtual producer chain. `None` is the shipping default
@@ -8365,6 +8371,8 @@ impl Renderer {
             persistent_vb_3d_capacity: vb_3d_cap,
             persistent_ib_3d_capacity: ib_3d_cap,
             model_gpu_cache: HashMap::new(),
+            #[cfg(feature = "models3d")]
+            model_virtual_compatibility_sources: HashMap::new(),
             gpu_driven,
             #[cfg(feature = "models3d")]
             virtual_geometry: None,
@@ -14044,50 +14052,8 @@ impl Renderer {
                 let mr_idx = mesh.metallic_roughness_texture_idx.unwrap_or(0);
                 let em_idx = mesh.emissive_texture_idx.unwrap_or(0);
                 let occ_idx = mesh.occlusion_texture_idx.unwrap_or(0);
-                let texture_id = |index: u32| {
-                    self.global_texture_ids
-                        .get(index as usize)
-                        .copied()
-                        .unwrap_or(material_indirection::TextureId::FALLBACK)
-                };
-                let mut gpu_material = material_indirection::GpuMaterialRecord::default();
                 let shader_alpha = mesh.alpha_mode.shader_alpha_value(mesh.alpha_cutoff);
-                gpu_material.metal_rough = [
-                    mesh.metallic_factor,
-                    mesh.roughness_factor,
-                    if mesh.specular_glossiness_factor.is_some() {
-                        2.0
-                    } else {
-                        mesh.metallic_roughness_texture_idx.is_some() as u8 as f32
-                    },
-                    shader_alpha,
-                ];
-                gpu_material.emissive = [
-                    mesh.emissive_factor[0],
-                    mesh.emissive_factor[1],
-                    mesh.emissive_factor[2],
-                    if mesh.alpha_coverage_mips { 1.0 } else { 0.0 },
-                ];
-                gpu_material.spec_gloss = mesh.specular_glossiness_factor.unwrap_or([1.0; 4]);
-                gpu_material.texture_ids_0 = [
-                    texture_id(base_color_idx).raw(),
-                    texture_id(normal_idx).raw(),
-                    texture_id(mr_idx).raw(),
-                    texture_id(em_idx).raw(),
-                ];
-                gpu_material.texture_ids_1[0] = texture_id(occ_idx).raw();
-                gpu_material.sampler_ids_0 = [self.global_linear_sampler_id.raw(); 4];
-                gpu_material.sampler_ids_1[0] = self.global_linear_sampler_id.raw();
-                let material_id = if (self.imported_refraction_enabled
-                    && mesh.transmission.is_active())
-                    || mesh.layered_pbr.is_active()
-                {
-                    material_indirection::MaterialId::FALLBACK
-                } else {
-                    self.material_system
-                        .indirection
-                        .allocate_material(&self.device, gpu_material)
-                };
+                let material_id = self.allocate_model_gpu_material(mesh);
                 let mesh_id = self.material_system.indirection.register_mesh(
                     material_indirection::ResidentMesh {
                         vertex_count: mesh.vertices.len() as u32,

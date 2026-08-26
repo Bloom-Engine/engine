@@ -887,7 +887,7 @@ impl GpuVirtualGeometryPool {
         Ok(self.cluster_entries[(mesh.cluster_table_base + cluster_index) as usize])
     }
 
-    pub(super) fn asset(
+    pub(crate) fn asset(
         &self,
         mesh_id: VirtualMeshId,
     ) -> Result<&Arc<VirtualGeometryAsset>, VirtualGeometryGpuError> {

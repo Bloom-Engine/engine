@@ -10,12 +10,14 @@ use bloom_geometry_format::{
     MAGIC, MIN_PAGE_BYTES, NO_RELATION, PAGE_RECORD_BYTES, VERSION,
 };
 use bloom_shared::{
-    models::MaterialLayeredPbr,
+    models::{
+        MaterialAlphaMode, MaterialLayeredPbr, MaterialTransmission, MeshData, ModelData,
+        ModelPrimitiveSource,
+    },
     renderer::Vertex3D,
     virtual_geometry::{
         GpuVirtualGeometryConfig, GpuVirtualInstance, GpuVirtualTraversalConfig,
-        GpuVirtualVisibilityFrame, VirtualGeometryAsset, VirtualGeometryView,
-        VirtualMaterialBinding,
+        VirtualGeometryAsset,
     },
 };
 use std::sync::Arc;
@@ -186,12 +188,6 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
             },
         )
         .expect("the negotiated visibility-shade device accepts virtual registration");
-    let identity = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
     engine.begin_frame();
     engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
     engine
@@ -200,17 +196,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
     engine
         .renderer
-        .submit_virtual_geometry(
-            &[],
-            VirtualGeometryView {
-                frustum_planes: [[0.0; 4]; 6],
-                view_projection: identity,
-                camera_position: [0.0, 0.0, 6.0],
-                projection_scale: 64.0,
-                target_error_pixels: 1.0,
-            },
-            GpuVirtualVisibilityFrame::new(identity, identity).unwrap(),
-        )
+        .submit_virtual_geometry_current_view(&[], 1.0)
         .expect("empty virtual batches are valid and preserve ordinary routing");
     engine.renderer.screenshot_requested = true;
     engine.end_frame();
@@ -241,22 +227,49 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         let mesh = pool
             .register_mesh(&queue, Arc::new(virtual_triangle_asset()))
             .expect("minimal virtual triangle registers");
-        pool.bind_mesh_materials(
-            &queue,
-            mesh,
-            &[VirtualMaterialBinding {
-                source_material_index: Some(0),
-                material_id: 1,
-            }],
-        )
-        .expect("virtual triangle maps to the renderer's default material");
         mesh
     };
+    let material_model = ModelData {
+        meshes: vec![Arc::new(MeshData {
+            vertices: vertices.clone(),
+            secondary_tex_coords: None,
+            indices: vec![0, 1, 2],
+            texture_idx: None,
+            normal_texture_idx: None,
+            metallic_roughness_texture_idx: None,
+            specular_glossiness_factor: None,
+            emissive_texture_idx: None,
+            occlusion_texture_idx: None,
+            metallic_factor: 0.0,
+            roughness_factor: 1.0,
+            emissive_factor: [0.0; 3],
+            alpha_mode: MaterialAlphaMode::Opaque,
+            alpha_cutoff: 0.0,
+            alpha_coverage_mips: false,
+            double_sided: true,
+            transmission: MaterialTransmission::default(),
+            layered_pbr: MaterialLayeredPbr::default(),
+        })],
+        mesh_transforms: vec![bloom_shared::renderer::IDENTITY_MAT4],
+        mesh_cast_shadows: vec![true],
+        mesh_sources: vec![Some(ModelPrimitiveSource {
+            mesh_index: 0,
+            primitive_index: 0,
+            placement_index: 0,
+        })],
+        source_geometry_sha256: Some([1; 32]),
+        bbox_min: [0.0; 3],
+        bbox_max: [1.0, 1.0, 0.0],
+    };
+    engine
+        .renderer
+        .bind_model_virtual_materials(virtual_mesh, &material_model)
+        .expect("virtual triangle derives its global material binding from the model");
     let model = [
-        [0.8, 0.0, 0.0, 0.0],
-        [0.0, 0.8, 0.0, 0.0],
+        [1.5, 0.0, 0.0, 0.0],
+        [0.0, 1.5, 0.0, 0.0],
         [0.0, 0.0, 1.0, 0.0],
-        [-0.4, -0.4, 0.0, 1.0],
+        [-0.75, -0.75, 0.0, 1.0],
     ];
     let virtual_instance =
         GpuVirtualInstance::with_render_state(virtual_mesh, 7, model, model, [1.0, 1.0, 1.0, 1.0])
@@ -269,17 +282,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
     engine
         .renderer
-        .submit_virtual_geometry(
-            &[virtual_instance],
-            VirtualGeometryView {
-                frustum_planes: [[0.0; 4]; 6],
-                view_projection: identity,
-                camera_position: [0.0, 0.0, 6.0],
-                projection_scale: 64.0,
-                target_error_pixels: 1.0,
-            },
-            GpuVirtualVisibilityFrame::new(identity, identity).unwrap(),
-        )
+        .submit_virtual_geometry_current_view(&[virtual_instance], 1.0)
         .expect("virtual triangle frame submission is bounded");
     engine.renderer.screenshot_requested = true;
     engine.end_frame();
