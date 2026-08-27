@@ -267,6 +267,12 @@ archive reader. GPU-visible entries expose slot, payload length, ownership,
 resident state, and pinned state. Telemetry distinguishes allocated GPU bytes,
 resident slot bytes, useful payload bytes, pinned/retiring slots, frame and
 lifetime upload/eviction counts, denials, and exact/ancestor fallback results.
+It also preserves lifetime peak resident-slot bytes, rather than inferring a
+peak from the final frame. Streaming telemetry separately reports the fixed
+double-buffered GPU feedback allocation, the configured CPU page-I/O budget,
+the current reservation, and its lifetime peak. The renderer capability report
+publishes the physical-pool, page/mesh/cluster metadata, useful-payload, and
+staging breakdowns so a budget regression cannot hide inside one aggregate.
 
 `GpuVirtualHierarchySelector` consumes fixed 208-byte instance records and
 walks each atomic hierarchy group on the GPU. The traversal-hot 128-byte prefix
