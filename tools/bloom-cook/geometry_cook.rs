@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
-pub(crate) const GEOMETRY_RECIPE_VERSION: u32 = 1;
+pub(crate) const GEOMETRY_RECIPE_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CookOptions {

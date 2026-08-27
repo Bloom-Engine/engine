@@ -6,6 +6,7 @@
 //! Parents keep the full child-group bounds and accumulated absolute error for
 //! conservative culling and future projected-pixel selection.
 
+use crate::geometric_error::maximum_vertex_deviation;
 use crate::meshlet::{
     build_leaf_meshlets, Meshlet, MeshletBounds, MeshletLimits, StaticPrimitive, StaticVertex,
     FLAG_COARSE_ROOT, NO_RELATION,
@@ -546,6 +547,10 @@ fn simplify_group(
     {
         return Ok(None);
     }
+    // meshoptimizer's quadric result is an ordering/error-limit metric, not a
+    // strict one-sided source-vertex distance bound. Measure that positional
+    // bound independently so projected LOD thresholds cannot understate it.
+    added_error = added_error.max(maximum_vertex_deviation(&combined.vertices, &simplified)?);
 
     let first = &children[0];
     let primitive = StaticPrimitive {
@@ -675,6 +680,7 @@ fn distance3(a: [f32; 3], b: [f32; 3]) -> f32 {
 mod tests {
     use super::*;
     use crate::geometry_format::{decode_geometry, encode_geometry, sha256, DEFAULT_PAGE_BYTES};
+    use std::collections::BTreeSet;
 
     fn grid_primitive(width: usize, height: usize) -> StaticPrimitive {
         let mut vertices = Vec::new();
@@ -852,5 +858,173 @@ mod tests {
                 "coarse hierarchy dropped locked boundary vertex {boundary:?}"
             );
         }
+    }
+
+    #[test]
+    fn accumulated_error_bounds_source_vertices_and_projected_pixel_error() {
+        let limits = MeshletLimits {
+            max_vertices: 64,
+            max_triangles: 64,
+        };
+        let leaves = build_spatial_leaf_meshlets(&grid_primitive(32, 32), limits).unwrap();
+        let (nodes, stats) = build_meshlet_hierarchy(leaves, limits, 8).unwrap();
+        assert!(stats.maximum_error > 0.0);
+
+        let parent_groups = nodes
+            .iter()
+            .filter(|node| node.parent != NO_RELATION)
+            .map(|node| (node.parent as usize, node.parent_count as usize))
+            .collect::<BTreeSet<_>>();
+        assert!(!parent_groups.is_empty());
+        for group in parent_groups {
+            let parent_surface = meshlet_triangles(&nodes[group.0..group.0 + group.1]);
+            let source_samples = nodes
+                .iter()
+                .enumerate()
+                .filter(|(index, node)| node.lod_level == 0 && descends_from(&nodes, *index, group))
+                .flat_map(|(_, node)| meshlet_samples(node))
+                .collect::<Vec<_>>();
+            assert!(!parent_surface.is_empty());
+            assert!(!source_samples.is_empty());
+
+            let measured_error = source_samples
+                .iter()
+                .map(|sample| {
+                    parent_surface
+                        .iter()
+                        .map(|triangle| point_triangle_distance_squared(*sample, *triangle))
+                        .fold(f32::INFINITY, f32::min)
+                        .sqrt()
+                })
+                .fold(0.0, f32::max);
+            let recorded_error = nodes[group.0..group.0 + group.1]
+                .iter()
+                .map(|node| node.geometric_error)
+                .fold(0.0, f32::max);
+            assert!(
+                measured_error <= recorded_error + 1.0e-5,
+                "parent group {group:?} measured source deviation {measured_error} exceeds recorded {recorded_error}"
+            );
+
+            // At the exact distance where the runtime's conservative recorded
+            // error reaches the one-pixel target, the independently measured
+            // source-surface deviation must remain inside that target too.
+            let projection_scale = 1080.0;
+            let target_pixels = 1.0;
+            let nearest_clip_w = (recorded_error * projection_scale / target_pixels).max(1.0e-5);
+            let measured_pixels = measured_error * projection_scale / nearest_clip_w;
+            assert!(measured_pixels <= target_pixels + 1.0e-4);
+        }
+    }
+
+    fn descends_from(nodes: &[Meshlet], mut node: usize, target: (usize, usize)) -> bool {
+        for _ in 0..=nodes.len() {
+            let current = &nodes[node];
+            if current.parent == NO_RELATION {
+                return false;
+            }
+            let group = (current.parent as usize, current.parent_count as usize);
+            if group == target {
+                return true;
+            }
+            node = group.0;
+        }
+        panic!("hierarchy ancestry contains a cycle")
+    }
+
+    fn meshlet_triangles(meshlets: &[Meshlet]) -> Vec<[[f32; 3]; 3]> {
+        meshlets
+            .iter()
+            .flat_map(|meshlet| {
+                meshlet
+                    .local_indices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|triangle| {
+                        [
+                            meshlet.vertices[triangle[0] as usize].position,
+                            meshlet.vertices[triangle[1] as usize].position,
+                            meshlet.vertices[triangle[2] as usize].position,
+                        ]
+                    })
+            })
+            .collect()
+    }
+
+    fn meshlet_samples(meshlet: &Meshlet) -> Vec<[f32; 3]> {
+        meshlet
+            .vertices
+            .iter()
+            .map(|vertex| vertex.position)
+            .collect()
+    }
+
+    fn point_triangle_distance_squared(point: [f32; 3], triangle: [[f32; 3]; 3]) -> f32 {
+        let [a, b, c] = triangle;
+        let ab = sub3(b, a);
+        let ac = sub3(c, a);
+        let ap = sub3(point, a);
+        let d1 = dot3(ab, ap);
+        let d2 = dot3(ac, ap);
+        if d1 <= 0.0 && d2 <= 0.0 {
+            return dot3(ap, ap);
+        }
+
+        let bp = sub3(point, b);
+        let d3 = dot3(ab, bp);
+        let d4 = dot3(ac, bp);
+        if d3 >= 0.0 && d4 <= d3 {
+            return dot3(bp, bp);
+        }
+        let vc = d1 * d4 - d3 * d2;
+        if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            let v = d1 / (d1 - d3);
+            let offset = sub3(point, add3(a, mul3(ab, v)));
+            return dot3(offset, offset);
+        }
+
+        let cp = sub3(point, c);
+        let d5 = dot3(ab, cp);
+        let d6 = dot3(ac, cp);
+        if d6 >= 0.0 && d5 <= d6 {
+            return dot3(cp, cp);
+        }
+        let vb = d5 * d2 - d1 * d6;
+        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            let w = d2 / (d2 - d6);
+            let offset = sub3(point, add3(a, mul3(ac, w)));
+            return dot3(offset, offset);
+        }
+        let va = d3 * d6 - d5 * d4;
+        if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 {
+            let edge = sub3(c, b);
+            let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+            let offset = sub3(point, add3(b, mul3(edge, w)));
+            return dot3(offset, offset);
+        }
+
+        let denominator = (va + vb + vc).recip();
+        let v = vb * denominator;
+        let w = vc * denominator;
+        let closest = add3(a, add3(mul3(ab, v), mul3(ac, w)));
+        let offset = sub3(point, closest);
+        dot3(offset, offset)
+    }
+
+    fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    }
+
+    fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+
+    fn mul3(value: [f32; 3], factor: f32) -> [f32; 3] {
+        [value[0] * factor, value[1] * factor, value[2] * factor]
+    }
+
+    fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
     }
 }

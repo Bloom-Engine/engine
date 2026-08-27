@@ -176,8 +176,14 @@ refinable boundary or a gap in the lower ranges ends the partition. This keeps
 multi-level traversal from following only the first sibling's children and
 silently dropping the others.
 
-The simplifier reports absolute object-space error. Each parent group stores
-that error plus the maximum error accumulated by its children. Parent
+The simplifier's quadric result is retained as an ordering metric, but it is
+not treated as a strict positional bound. Geometry recipe v2 independently
+measures the maximum one-sided distance from every source-group vertex to the
+simplified parent triangle surface and uses the larger result. Each parent
+group stores that measured edge error plus the maximum error accumulated by
+its children. An automated hierarchy oracle independently walks every LOD0
+descendant, measures it against each parent surface, and verifies both the
+stored object-space bound and the projected one-pixel threshold. Parent
 AABB/sphere bounds conservatively cover the complete replaced child group;
 normal cones remain per rendered parent meshlet. The cook report exposes root
 cluster/payload counts by level so an always-resident budget cannot be hidden

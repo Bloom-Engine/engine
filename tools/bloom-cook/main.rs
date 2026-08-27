@@ -33,6 +33,7 @@ mod asset_index;
 mod asset_profile;
 mod asset_resolver;
 mod asset_store;
+mod geometric_error;
 mod geometry_cook;
 mod geometry_format;
 mod geometry_quantization;
