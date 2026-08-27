@@ -350,8 +350,9 @@ pub fn offset_relations(meshlets: &mut [Meshlet], base: usize) -> Result<(), Str
     Ok(())
 }
 
-/// Put all coarse roots first, followed by non-root clusters from coarse to
-/// fine, while preserving the contiguity of every atomic relation range.
+/// Put all coarse roots first and group them by source mesh so filtered runtime
+/// instances can dispatch only their compact root range. Non-root clusters stay
+/// coarse-to-fine, and every atomic relation range remains contiguous.
 pub fn order_for_streaming(meshlets: &mut Vec<Meshlet>) -> Result<(), String> {
     if meshlets.len() <= 1 {
         return Ok(());
@@ -359,10 +360,12 @@ pub fn order_for_streaming(meshlets: &mut Vec<Meshlet>) -> Result<(), String> {
     let mut order: Vec<_> = (0..meshlets.len()).collect();
     order.sort_by_key(|index| {
         let meshlet = &meshlets[*index];
+        let coarse_root = meshlet.flags & FLAG_COARSE_ROOT != 0;
         (
-            u8::from(meshlet.flags & FLAG_COARSE_ROOT == 0),
+            u8::from(!coarse_root),
+            if coarse_root { meshlet.mesh_index } else { 0 },
             Reverse(meshlet.lod_level),
-            meshlet.mesh_index,
+            if coarse_root { 0 } else { meshlet.mesh_index },
             meshlet.primitive_index,
             meshlet.material_index,
             *index,
@@ -786,6 +789,36 @@ mod tests {
                 .count(),
             stats.root_clusters as usize
         );
+    }
+
+    #[test]
+    fn streaming_order_groups_source_roots_even_when_lod_levels_differ() {
+        let limits = MeshletLimits {
+            max_vertices: 64,
+            max_triangles: 64,
+        };
+        let leaves = build_spatial_leaf_meshlets(&grid_primitive(16, 16), limits).unwrap();
+        let (mut first, _) = build_meshlet_hierarchy(leaves, limits, 8).unwrap();
+        let mut second = first.clone();
+        for meshlet in &mut second {
+            meshlet.mesh_index = 1;
+            if meshlet.flags & FLAG_COARSE_ROOT != 0 {
+                meshlet.lod_level += 1;
+            }
+        }
+        offset_relations(&mut second, first.len()).unwrap();
+        first.extend(second);
+        order_for_streaming(&mut first).unwrap();
+
+        let root_meshes = first
+            .iter()
+            .take_while(|meshlet| meshlet.flags & FLAG_COARSE_ROOT != 0)
+            .map(|meshlet| meshlet.mesh_index)
+            .collect::<Vec<_>>();
+        assert!(!root_meshes.is_empty());
+        assert!(root_meshes.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(root_meshes.contains(&0));
+        assert!(root_meshes.contains(&1));
     }
 
     #[test]

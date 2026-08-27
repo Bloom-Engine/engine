@@ -21,6 +21,7 @@ pub struct ArtifactIdentity {
 pub struct VirtualGeometryAsset {
     bytes: Arc<[u8]>,
     archive: Arc<GeometryArchive>,
+    source_root_spans: Arc<BTreeMap<u32, Range<u32>>>,
 }
 
 /// One source glTF mesh's explicit split between virtual and compatibility
@@ -50,9 +51,11 @@ impl VirtualGeometryAsset {
     pub fn from_bytes(bytes: impl Into<Arc<[u8]>>) -> Result<Self, VirtualGeometryLoadError> {
         let bytes = bytes.into();
         let archive = decode_geometry(&bytes).map_err(VirtualGeometryLoadError::Format)?;
+        let source_root_spans = source_root_spans(&archive);
         Ok(Self {
             bytes,
             archive: Arc::new(archive),
+            source_root_spans: Arc::new(source_root_spans),
         })
     }
 
@@ -113,6 +116,13 @@ impl VirtualGeometryAsset {
             .and_then(|range| self.bytes.get(range))
     }
 
+    /// Smallest root-table span containing every coarse root for one source
+    /// mesh. Current cookers make this range exact; older archives remain
+    /// correct because traversal still verifies each root's source identity.
+    pub(crate) fn source_root_span(&self, source_mesh_index: u32) -> Option<Range<u32>> {
+        self.source_root_spans.get(&source_mesh_index).cloned()
+    }
+
     /// Return a canonical source-mesh routing table. Eligible primitive
     /// identity is deduplicated across hierarchy clusters; compatibility
     /// records remain complete and retain their stable cooker reason/detail.
@@ -169,6 +179,23 @@ impl VirtualGeometryAsset {
             })
             .collect()
     }
+}
+
+fn source_root_spans(archive: &GeometryArchive) -> BTreeMap<u32, Range<u32>> {
+    let root_count = archive.pages[..archive.coarse_root_page_count()]
+        .iter()
+        .map(|page| page.cluster_count as usize)
+        .sum::<usize>()
+        .min(archive.clusters.len());
+    let mut spans = BTreeMap::<u32, Range<u32>>::new();
+    for (root_index, cluster) in archive.clusters[..root_count].iter().enumerate() {
+        let root_index = root_index as u32;
+        spans
+            .entry(cluster.mesh_index)
+            .and_modify(|span| span.end = root_index + 1)
+            .or_insert(root_index..root_index + 1);
+    }
+    spans
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

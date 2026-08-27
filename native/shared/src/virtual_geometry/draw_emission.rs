@@ -248,6 +248,31 @@ impl GpuVirtualDrawEmitter {
         encoder: &mut wgpu::CommandEncoder,
         selector: &GpuVirtualHierarchySelector,
     ) -> Result<(), VirtualGeometryDrawEmissionError> {
+        self.record_internal(queue, encoder, selector, None)
+    }
+
+    pub(crate) fn record_profiled(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        selector: &GpuVirtualHierarchySelector,
+        profiler: &mut crate::profiler::Profiler,
+    ) -> Result<(), VirtualGeometryDrawEmissionError> {
+        const LABEL: &str = "virtual_geometry_draw_emission";
+        profiler.begin(LABEL);
+        let result = self.record_internal(queue, encoder, selector, Some(profiler));
+        profiler.end(LABEL);
+        result
+    }
+
+    fn record_internal(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        selector: &GpuVirtualHierarchySelector,
+        mut profiler: Option<&mut crate::profiler::Profiler>,
+    ) -> Result<(), VirtualGeometryDrawEmissionError> {
+        const PROFILE_LABEL: &str = "virtual_geometry_draw_emission";
         if selector.id() != self.selector_id {
             return Err(VirtualGeometryDrawEmissionError::SelectorMismatch);
         }
@@ -264,18 +289,24 @@ impl GpuVirtualDrawEmitter {
             );
         }
         {
+            let timestamp_writes = profiler
+                .as_deref_mut()
+                .and_then(|profiler| profiler.compute_pass_timestamp_writes(PROFILE_LABEL));
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("virtual_geometry_draw_prepare"),
-                timestamp_writes: None,
+                timestamp_writes,
             });
             pass.set_pipeline(&self.prepare_pipeline);
             pass.set_bind_group(0, &self.prepare_bind_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
         {
+            let timestamp_writes = profiler
+                .as_deref_mut()
+                .and_then(|profiler| profiler.compute_pass_timestamp_writes(PROFILE_LABEL));
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("virtual_geometry_draw_emit"),
-                timestamp_writes: None,
+                timestamp_writes,
             });
             pass.set_pipeline(&self.emit_pipeline);
             pass.set_bind_group(0, &self.emit_bind_group, &[]);
@@ -283,27 +314,36 @@ impl GpuVirtualDrawEmitter {
         }
         if let Some(fallback) = self.binned_fallback.as_ref() {
             {
+                let timestamp_writes = profiler
+                    .as_deref_mut()
+                    .and_then(|profiler| profiler.compute_pass_timestamp_writes(PROFILE_LABEL));
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("virtual_geometry_binned_count"),
-                    timestamp_writes: None,
+                    timestamp_writes,
                 });
                 pass.set_pipeline(&fallback.count_pipeline);
                 pass.set_bind_group(0, &fallback.bind_group, &[]);
                 pass.dispatch_workgroups_indirect(&self.dispatch_buffer, 0);
             }
             {
+                let timestamp_writes = profiler
+                    .as_deref_mut()
+                    .and_then(|profiler| profiler.compute_pass_timestamp_writes(PROFILE_LABEL));
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("virtual_geometry_binned_finalize"),
-                    timestamp_writes: None,
+                    timestamp_writes,
                 });
                 pass.set_pipeline(&fallback.finalize_pipeline);
                 pass.set_bind_group(0, &fallback.bind_group, &[]);
                 pass.dispatch_workgroups(1, 1, 1);
             }
             {
+                let timestamp_writes = profiler
+                    .as_deref_mut()
+                    .and_then(|profiler| profiler.compute_pass_timestamp_writes(PROFILE_LABEL));
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("virtual_geometry_binned_scatter"),
-                    timestamp_writes: None,
+                    timestamp_writes,
                 });
                 pass.set_pipeline(&fallback.scatter_pipeline);
                 pass.set_bind_group(0, &fallback.bind_group, &[]);

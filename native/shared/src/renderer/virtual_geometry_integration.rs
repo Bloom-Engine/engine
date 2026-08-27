@@ -102,6 +102,7 @@ impl RendererVirtualGeometry {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         hiz_frame: VirtualGeometryHiZFrame,
+        profiler: &mut crate::profiler::Profiler,
     ) -> Result<(), RendererVirtualGeometryError> {
         self.prepared = false;
         let Some(submission) = self.submission.as_mut() else {
@@ -115,19 +116,25 @@ impl RendererVirtualGeometry {
         }
         self.frame = self.frame.wrapping_add(1).max(1);
         self.pool.begin_frame(self.frame);
+        profiler.begin("virtual_geometry_streaming_service");
         self.streamer.service(&mut self.pool, queue);
-        let dispatch = self.selector.record_with_previous_hiz(
+        profiler.end("virtual_geometry_streaming_service");
+        let dispatch = self.selector.record_with_previous_hiz_profiled(
             queue,
             encoder,
             &self.pool,
             &submission.instances,
             submission.view,
             hiz_frame,
+            profiler,
         )?;
         if dispatch.instance_count != 0 {
+            profiler.begin("virtual_geometry_feedback_copy");
             self.streamer.record(encoder, &self.selector);
+            profiler.end("virtual_geometry_feedback_copy");
         }
-        self.emitter.record(queue, encoder, &self.selector)?;
+        self.emitter
+            .record_profiled(queue, encoder, &self.selector, profiler)?;
         self.raster.prepare_frame(queue, submission.visibility)?;
         self.prepared = true;
         Ok(())
@@ -725,6 +732,7 @@ impl Renderer {
     pub(crate) fn prepare_registered_virtual_visibility(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
         visibility_target_recreated: bool,
     ) -> bool {
         if visibility_target_recreated {
@@ -738,7 +746,7 @@ impl Renderer {
         let camera_cut = self.temporal_camera_cut_active || self.temporal_camera_cut_pending;
         let producer_result = self.virtual_geometry.as_mut().map(|state| {
             let hiz_frame = state.hiz_frame(current_vp, current_view, render_extent, camera_cut);
-            state.record_producers(&self.queue, encoder, hiz_frame)
+            state.record_producers(&self.queue, encoder, hiz_frame, profiler)
         });
         if let Some(Err(error)) = producer_result {
             self.virtual_geometry

@@ -107,7 +107,7 @@ fn temporal_instance_state_is_finite_affine_and_preserves_the_traversal_prefix()
     let tint = [0.25, 0.5, 0.75, 0.9];
     let instance =
         GpuVirtualInstance::with_render_state(mesh, 41, current, previous, tint).unwrap();
-    assert_eq!(std::mem::size_of::<GpuVirtualInstance>(), 208);
+    assert_eq!(std::mem::size_of::<GpuVirtualInstance>(), 224);
     assert_eq!(instance.mesh_id(), mesh);
     assert_eq!(instance.instance_id(), 41);
     assert_eq!(instance.model(), current);

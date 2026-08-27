@@ -1,5 +1,40 @@
-use super::{VirtualGeometryGpuError, VirtualGeometryTraversalError};
+use super::{VirtualGeometryGpuError, VirtualMeshId};
 use std::fmt;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VirtualGeometryTraversalError {
+    InvalidConfig,
+    DeviceUnsupported,
+    DeviceLimitExceeded {
+        resource: &'static str,
+        requested_bytes: u64,
+        maximum_bytes: u64,
+    },
+    PoolMismatch,
+    TooManyInstances {
+        requested: usize,
+        capacity: u32,
+    },
+    InvalidView,
+    InvalidInstanceTransform {
+        instance: u32,
+    },
+    UnboundMaterials {
+        mesh: VirtualMeshId,
+    },
+    SourceMeshFilterRequired {
+        mesh: VirtualMeshId,
+    },
+    SourceMeshNotVirtual {
+        mesh: VirtualMeshId,
+        source_mesh_index: u32,
+    },
+    DispatchLimitExceeded {
+        requested: u32,
+        maximum: u32,
+    },
+    Pool(VirtualGeometryGpuError),
+}
 
 impl From<VirtualGeometryGpuError> for VirtualGeometryTraversalError {
     fn from(value: VirtualGeometryGpuError) -> Self {

@@ -107,8 +107,11 @@ impl Renderer {
         }
         #[cfg(feature = "models3d")]
         let virtual_visibility_prepared = virtual_visibility_requested
-            && self
-                .prepare_registered_virtual_visibility(encoder, visibility_creations.textures != 0);
+            && self.prepare_registered_virtual_visibility(
+                encoder,
+                profiler,
+                visibility_creations.textures != 0,
+            );
 
         // EN-044 — DEPTH PREPASS over the cached-model draws.
         //

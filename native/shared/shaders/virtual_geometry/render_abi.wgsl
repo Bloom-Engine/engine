@@ -32,6 +32,7 @@ struct GpuVirtualInstance {
     model: mat4x4<f32>,
     normal_rows: array<vec4<f32>, 3>,
     instance_info: vec4<u32>,
+    root_span: vec4<u32>,
     previous_model: mat4x4<f32>,
     model_tint: vec4<f32>,
 };

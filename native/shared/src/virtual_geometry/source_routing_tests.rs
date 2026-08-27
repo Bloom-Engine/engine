@@ -23,6 +23,9 @@ fn runtime_asset_reports_canonical_source_mesh_routes() {
         cluster.material_index = Some(17);
     }
     let asset = hierarchy_asset(archive);
+    assert_eq!(asset.source_root_span(0), Some(0..1));
+    assert_eq!(asset.source_root_span(1), Some(1..2));
+    assert_eq!(asset.source_root_span(7), None);
     let routes = asset.source_mesh_routes();
     assert_eq!(routes.len(), 3);
     assert_eq!(routes[0].source_mesh_index, 0);

@@ -10,6 +10,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "traversal_error.rs"]
 mod error_impl;
+pub use error_impl::VirtualGeometryTraversalError;
+#[path = "traversal_math.rs"]
+mod math_impl;
+#[cfg(test)]
+use math_impl::dot3;
+use math_impl::{finite_affine, normal_rows_and_cone_safety};
 
 #[cfg(test)]
 use super::gpu_pool::MAX_GPU_HIERARCHY_LEVELS;
@@ -24,7 +30,7 @@ const ID_SLOT_MASK: u32 = (1 << 20) - 1;
 const ALL_SOURCE_MESHES: u32 = u32::MAX;
 static NEXT_SELECTOR_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Fixed GPU input record for one virtual-geometry instance (208 bytes).
+/// Fixed GPU input record for one virtual-geometry instance (224 bytes).
 ///
 /// The first 128 bytes are the traversal-hot current transform, normal rows,
 /// and identity. Previous transform and tint are an appended render prefix so
@@ -38,6 +44,8 @@ pub struct GpuVirtualInstance {
     /// mesh ID, caller-stable instance ID, flags, source glTF mesh filter.
     /// `u32::MAX` admits every source mesh for single-mesh/procedural assets.
     instance_info: [u32; 4],
+    /// Runtime-populated root-table start/count, followed by reserved words.
+    root_span: [u32; 4],
     previous_model: [[f32; 4]; 4],
     model_tint: [f32; 4],
 }
@@ -116,6 +124,7 @@ impl GpuVirtualInstance {
                     | (u32::from(negative_determinant) * INSTANCE_NEGATIVE_DETERMINANT),
                 source_mesh_index,
             ],
+            root_span: [0; 4],
             previous_model,
             model_tint,
         })
@@ -189,9 +198,13 @@ impl GpuVirtualInstance {
         self.instance_info[2] = (self.instance_info[2] & !INSTANCE_PREVIOUS_HIZ_ELIGIBLE)
             | u32::from(eligible) * INSTANCE_PREVIOUS_HIZ_ELIGIBLE;
     }
+
+    fn set_root_span(&mut self, start: u32, count: u32) {
+        self.root_span = [start, count, 0, 0];
+    }
 }
 
-const _: () = assert!(std::mem::size_of::<GpuVirtualInstance>() == 208);
+const _: () = assert!(std::mem::size_of::<GpuVirtualInstance>() == 224);
 
 /// Camera data for projected-error hierarchy selection.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -424,9 +437,10 @@ impl GpuVirtualHierarchySelector {
         instances: &[GpuVirtualInstance],
         view: VirtualGeometryView,
     ) -> Result<VirtualGeometryTraversalDispatch, VirtualGeometryTraversalError> {
-        self.record_internal(queue, encoder, pool, instances, view, None)
+        self.record_internal(queue, encoder, pool, instances, view, None, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn record_with_previous_hiz(
         &self,
         queue: &wgpu::Queue,
@@ -436,7 +450,33 @@ impl GpuVirtualHierarchySelector {
         view: VirtualGeometryView,
         hiz_frame: VirtualGeometryHiZFrame,
     ) -> Result<VirtualGeometryTraversalDispatch, VirtualGeometryTraversalError> {
-        self.record_internal(queue, encoder, pool, instances, view, Some(hiz_frame))
+        self.record_internal(queue, encoder, pool, instances, view, Some(hiz_frame), None)
+    }
+
+    pub(crate) fn record_with_previous_hiz_profiled(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        pool: &GpuVirtualGeometryPool,
+        instances: &[GpuVirtualInstance],
+        view: VirtualGeometryView,
+        hiz_frame: VirtualGeometryHiZFrame,
+        profiler: &mut crate::profiler::Profiler,
+    ) -> Result<VirtualGeometryTraversalDispatch, VirtualGeometryTraversalError> {
+        const LABEL: &str = "virtual_geometry_hierarchy_selection";
+        profiler.begin(LABEL);
+        let timestamp_writes = profiler.compute_pass_timestamp_writes(LABEL);
+        let result = self.record_internal(
+            queue,
+            encoder,
+            pool,
+            instances,
+            view,
+            Some(hiz_frame),
+            timestamp_writes,
+        );
+        profiler.end(LABEL);
+        result
     }
 
     fn record_internal(
@@ -447,6 +487,7 @@ impl GpuVirtualHierarchySelector {
         instances: &[GpuVirtualInstance],
         view: VirtualGeometryView,
         hiz_frame: Option<VirtualGeometryHiZFrame>,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) -> Result<VirtualGeometryTraversalDispatch, VirtualGeometryTraversalError> {
         if pool.id() != self.pool_id {
             return Err(VirtualGeometryTraversalError::PoolMismatch);
@@ -460,16 +501,20 @@ impl GpuVirtualHierarchySelector {
         }
 
         let mut maximum_root_clusters = 0;
+        let mut prepared_instances = Vec::with_capacity(instances.len());
         for instance in instances {
             validate_instance(*instance)?;
-            validate_source_mesh_filter(pool, *instance)?;
+            let (root_start, root_count) = instance_root_span(pool, *instance)?;
             let mesh = pool.mesh_entry(instance.mesh_id())?;
             if mesh.flags & GPU_VIRTUAL_MESH_MATERIALS_BOUND == 0 {
                 return Err(VirtualGeometryTraversalError::UnboundMaterials {
                     mesh: instance.mesh_id(),
                 });
             }
-            maximum_root_clusters = maximum_root_clusters.max(mesh.root_cluster_count);
+            maximum_root_clusters = maximum_root_clusters.max(root_count);
+            let mut prepared = *instance;
+            prepared.set_root_span(root_start, root_count);
+            prepared_instances.push(prepared);
         }
         let workgroups_x = maximum_root_clusters.div_ceil(WORKGROUP_SIZE);
         if workgroups_x > self.max_workgroups_per_dimension {
@@ -522,13 +567,17 @@ impl GpuVirtualHierarchySelector {
             hiz_frame.frame_index != 0 && self.hiz.history_valid_for(hiz_frame),
         );
 
-        if !instances.is_empty() {
-            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
+        if !prepared_instances.is_empty() {
+            queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&prepared_instances),
+            );
         }
         if workgroups_x != 0 && !instances.is_empty() {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("virtual_geometry_hierarchy_selection"),
-                timestamp_writes: None,
+                timestamp_writes,
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
@@ -815,108 +864,25 @@ fn validate_source_mesh_filter(
     }
 }
 
-fn finite_affine(model: [[f32; 4]; 4]) -> bool {
-    model.iter().flatten().all(|value| value.is_finite())
-        && model[0][3].abs() <= 1.0e-6
-        && model[1][3].abs() <= 1.0e-6
-        && model[2][3].abs() <= 1.0e-6
-        && (model[3][3] - 1.0).abs() <= 1.0e-6
-}
-
-fn normal_rows_and_cone_safety(model: [[f32; 4]; 4]) -> Option<([[f32; 4]; 3], bool, bool)> {
-    if !finite_affine(model) {
-        return None;
+fn instance_root_span(
+    pool: &GpuVirtualGeometryPool,
+    instance: GpuVirtualInstance,
+) -> Result<(u32, u32), VirtualGeometryTraversalError> {
+    validate_source_mesh_filter(pool, instance)?;
+    let mesh = pool.mesh_entry(instance.mesh_id())?;
+    match instance.source_mesh_index() {
+        Some(source_mesh_index) => {
+            let span = pool
+                .asset(instance.mesh_id())?
+                .source_root_span(source_mesh_index)
+                .ok_or(VirtualGeometryTraversalError::SourceMeshNotVirtual {
+                    mesh: instance.mesh_id(),
+                    source_mesh_index,
+                })?;
+            Ok((span.start, span.end - span.start))
+        }
+        None => Ok((0, mesh.root_cluster_count)),
     }
-    let a00 = model[0][0];
-    let a01 = model[1][0];
-    let a02 = model[2][0];
-    let a10 = model[0][1];
-    let a11 = model[1][1];
-    let a12 = model[2][1];
-    let a20 = model[0][2];
-    let a21 = model[1][2];
-    let a22 = model[2][2];
-    let cofactors = [
-        [
-            a11 * a22 - a12 * a21,
-            a12 * a20 - a10 * a22,
-            a10 * a21 - a11 * a20,
-        ],
-        [
-            a02 * a21 - a01 * a22,
-            a00 * a22 - a02 * a20,
-            a01 * a20 - a00 * a21,
-        ],
-        [
-            a01 * a12 - a02 * a11,
-            a02 * a10 - a00 * a12,
-            a00 * a11 - a01 * a10,
-        ],
-    ];
-    let determinant = a00 * cofactors[0][0] + a01 * cofactors[0][1] + a02 * cofactors[0][2];
-    if !determinant.is_finite() || determinant.abs() <= 1.0e-12 {
-        return None;
-    }
-    let inverse_determinant = determinant.recip();
-    let normal_rows = std::array::from_fn(|row| {
-        [
-            cofactors[row][0] * inverse_determinant,
-            cofactors[row][1] * inverse_determinant,
-            cofactors[row][2] * inverse_determinant,
-            0.0,
-        ]
-    });
-
-    let columns = [[a00, a10, a20], [a01, a11, a21], [a02, a12, a22]];
-    let squared = columns.map(|column| dot3(column, column));
-    let scale2 = squared.into_iter().fold(0.0, f32::max);
-    let tolerance = scale2.max(1.0) * 1.0e-4;
-    let cone_safe = squared
-        .iter()
-        .all(|length2| (*length2 - scale2).abs() <= tolerance)
-        && dot3(columns[0], columns[1]).abs() <= tolerance
-        && dot3(columns[0], columns[2]).abs() <= tolerance
-        && dot3(columns[1], columns[2]).abs() <= tolerance;
-    Some((normal_rows, cone_safe, determinant < 0.0))
-}
-
-const fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum VirtualGeometryTraversalError {
-    InvalidConfig,
-    DeviceUnsupported,
-    DeviceLimitExceeded {
-        resource: &'static str,
-        requested_bytes: u64,
-        maximum_bytes: u64,
-    },
-    PoolMismatch,
-    TooManyInstances {
-        requested: usize,
-        capacity: u32,
-    },
-    InvalidView,
-    InvalidInstanceTransform {
-        instance: u32,
-    },
-    UnboundMaterials {
-        mesh: VirtualMeshId,
-    },
-    SourceMeshFilterRequired {
-        mesh: VirtualMeshId,
-    },
-    SourceMeshNotVirtual {
-        mesh: VirtualMeshId,
-        source_mesh_index: u32,
-    },
-    DispatchLimitExceeded {
-        requested: u32,
-        maximum: u32,
-    },
-    Pool(VirtualGeometryGpuError),
 }
 
 #[cfg(test)]
@@ -944,14 +910,14 @@ pub(super) fn select_cpu_reference(
     let mut result = CpuTraversalResult::default();
     for (instance_index, instance) in instances.iter().enumerate() {
         validate_instance(*instance)?;
-        validate_source_mesh_filter(pool, *instance)?;
+        let (root_start, root_count) = instance_root_span(pool, *instance)?;
         let mesh_id = instance.mesh_id();
         let mesh_entry = pool.mesh_entry(mesh_id)?;
         if mesh_entry.flags & GPU_VIRTUAL_MESH_MATERIALS_BOUND == 0 {
             return Err(VirtualGeometryTraversalError::UnboundMaterials { mesh: mesh_id });
         }
         let archive = pool.asset(mesh_id)?.archive();
-        for root_index in 0..mesh_entry.root_cluster_count {
+        for root_index in root_start..root_start + root_count {
             let root = &archive.clusters[root_index as usize];
             if instance
                 .source_mesh_index()
@@ -1422,6 +1388,7 @@ struct GpuVirtualInstance {
     model: mat4x4<f32>,
     normal_rows: array<vec4<f32>, 3>,
     instance_info: vec4<u32>,
+    root_span: vec4<u32>,
     previous_model: mat4x4<f32>,
     model_tint: vec4<f32>,
 };
@@ -1483,7 +1450,7 @@ struct HiZParams {
     extent: vec4<u32>,
     thresholds: vec4<f32>,
 };
-struct ProjectedSphere {
+struct ProjectedBounds {
     uv_min: vec2<f32>,
     uv_max: vec2<f32>,
     nearest_depth: f32,
@@ -1544,46 +1511,37 @@ fn world_sphere(
     );
 }
 
-fn transformed_sphere(
-    cluster: GpuVirtualClusterEntry,
+fn project_hiz_bounds(
+    local_min: vec3<f32>,
+    local_max: vec3<f32>,
     model: mat4x4<f32>,
-    scale: f32,
-) -> WorldSphere {
-    return WorldSphere(
-        (model * vec4<f32>(cluster.sphere.xyz, 1.0)).xyz,
-        cluster.aabb_max_radius.w * scale
-    );
-}
-
-fn project_hiz_sphere(
-    sphere: WorldSphere,
     view_projection: mat4x4<f32>,
     view: mat4x4<f32>,
-) -> ProjectedSphere {
+) -> ProjectedBounds {
     var uv_min = vec2<f32>(1.0e30);
     var uv_max = vec2<f32>(-1.0e30);
+    var nearest_depth = 1.0e30;
     for (var corner = 0u; corner < 8u; corner++) {
-        let signs = vec3<f32>(
-            select(-1.0, 1.0, (corner & 1u) != 0u),
-            select(-1.0, 1.0, (corner & 2u) != 0u),
-            select(-1.0, 1.0, (corner & 4u) != 0u)
+        let local = vec3<f32>(
+            select(local_min.x, local_max.x, (corner & 1u) != 0u),
+            select(local_min.y, local_max.y, (corner & 2u) != 0u),
+            select(local_min.z, local_max.z, (corner & 4u) != 0u)
         );
-        let clip = view_projection
-            * vec4<f32>(sphere.center + signs * sphere.radius, 1.0);
+        let world = model * vec4<f32>(local, 1.0);
+        let clip = view_projection * world;
         if (clip.w <= 0.05 || clip.w != clip.w || any(abs(clip.xyz) > vec3<f32>(1.0e30))) {
-            return ProjectedSphere(uv_min, uv_max, 0.0, 0u);
+            return ProjectedBounds(uv_min, uv_max, 0.0, 0u);
         }
         let ndc = clip.xy / clip.w;
         let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
         uv_min = min(uv_min, uv);
         uv_max = max(uv_max, uv);
+        nearest_depth = min(nearest_depth, -(view * world).z);
     }
-    let view_center = view * vec4<f32>(sphere.center, 1.0);
-    let nearest_depth = -view_center.z - sphere.radius;
     if (nearest_depth != nearest_depth || nearest_depth <= 0.0) {
-        return ProjectedSphere(uv_min, uv_max, nearest_depth, 0u);
+        return ProjectedBounds(uv_min, uv_max, nearest_depth, 0u);
     }
-    return ProjectedSphere(uv_min, uv_max, nearest_depth, 1u);
+    return ProjectedBounds(uv_min, uv_max, nearest_depth, 1u);
 }
 
 fn hiz_depth(mip: u32, coordinate: vec2<i32>) -> f32 {
@@ -1601,24 +1559,26 @@ fn hiz_depth(mip: u32, coordinate: vec2<i32>) -> f32 {
 }
 
 // 0 = proven occluded, 1 = sampled and visible, 2 = uncertain/visible.
-fn previous_hiz_result(
-    cluster: GpuVirtualClusterEntry,
+fn previous_hiz_group_result(
+    local_min: vec3<f32>,
+    local_max: vec3<f32>,
     instance: GpuVirtualInstance,
-    current_sphere: WorldSphere,
 ) -> u32 {
     if (hiz_params.extent.w == 0u
         || (instance.instance_info.z & INSTANCE_PREVIOUS_HIZ_ELIGIBLE) == 0u) {
         return 2u;
     }
-    let previous_scale = scale_bound(instance.previous_model);
-    let previous_sphere = transformed_sphere(cluster, instance.previous_model, previous_scale);
-    let previous = project_hiz_sphere(
-        previous_sphere,
+    let previous = project_hiz_bounds(
+        local_min,
+        local_max,
+        instance.previous_model,
         hiz_params.previous_view_projection,
         hiz_params.previous_view
     );
-    let current = project_hiz_sphere(
-        current_sphere,
+    let current = project_hiz_bounds(
+        local_min,
+        local_max,
+        instance.model,
         hiz_params.current_view_projection,
         hiz_params.current_view
     );
@@ -1868,8 +1828,8 @@ fn select_group(
 @compute @workgroup_size(64)
 fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
     let instance_index = gid.y;
-    let root_index = gid.x;
-    if (instance_index >= params.dispatch.x || root_index >= params.dispatch.y) {
+    let root_ordinal = gid.x;
+    if (instance_index >= params.dispatch.x || root_ordinal >= params.dispatch.y) {
         return;
     }
     if (instance_index >= arrayLength(&instances.records)) {
@@ -1877,6 +1837,10 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let instance = instances.records[instance_index];
+    if (root_ordinal >= instance.root_span.y) {
+        return;
+    }
+    let root_index = instance.root_span.x + root_ordinal;
     let descriptor_index = instance.instance_info.x & 0xfffffu;
     if (descriptor_index == 0u || descriptor_index - 1u >= arrayLength(&meshes.records)) {
         atomicAdd(&counters.invalid_records, 1u);
@@ -1926,6 +1890,8 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
         var occlusion_uncertain = false;
         var intersecting_error = 0.0;
         var group_error = 0.0;
+        var intersecting_min = vec3<f32>(1.0e30);
+        var intersecting_max = vec3<f32>(-1.0e30);
         for (var offset = 0u; offset < group_count; offset++) {
             let local_cluster = group_first + offset;
             if (!valid_cluster(mesh, local_cluster)) {
@@ -1941,11 +1907,8 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (outside_mask == 0u) {
                 has_intersecting_cluster = true;
                 intersecting_error = max(intersecting_error, error);
-                if (hiz_params.extent.w != 0u) {
-                    let hiz_result = previous_hiz_result(cluster, instance, sphere);
-                    occlusion_visible = occlusion_visible || hiz_result != 0u;
-                    occlusion_uncertain = occlusion_uncertain || hiz_result == 2u;
-                }
+                intersecting_min = min(intersecting_min, cluster.aabb_min_error.xyz);
+                intersecting_max = max(intersecting_max, cluster.aabb_max_radius.xyz);
             }
         }
         if (common_outside_mask != 0u) {
@@ -1953,9 +1916,19 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
             return;
         }
         let maximum_error = select(group_error, intersecting_error, has_intersecting_cluster);
-        if (!has_intersecting_cluster && hiz_params.extent.w != 0u) {
-            occlusion_visible = true;
-            occlusion_uncertain = true;
+        if (hiz_params.extent.w != 0u) {
+            if (has_intersecting_cluster) {
+                let hiz_result = previous_hiz_group_result(
+                    intersecting_min,
+                    intersecting_max,
+                    instance
+                );
+                occlusion_visible = hiz_result != 0u;
+                occlusion_uncertain = hiz_result == 2u;
+            } else {
+                occlusion_visible = true;
+                occlusion_uncertain = true;
+            }
         }
         if (!occlusion_visible) {
             atomicAdd(&counters.occlusion_culled_groups, 1u);
