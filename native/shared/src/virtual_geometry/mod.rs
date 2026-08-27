@@ -10,6 +10,8 @@ mod gpu_pool;
 mod hiz;
 mod residency;
 pub(crate) mod shading;
+#[cfg(not(target_arch = "wasm32"))]
+mod store;
 mod streaming;
 mod traversal;
 mod visibility;
@@ -39,6 +41,13 @@ pub use residency::{
     VirtualGeometryResidency,
 };
 pub use shading::GpuVirtualVisibilityShading;
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::{
+    ResolvedVirtualGeometryAsset, VirtualGeometryAssetProfile, VirtualGeometrySelectionKind,
+    VirtualGeometryStoreConfig, VirtualGeometryStoreError, VirtualGeometryStoreLoader,
+    VirtualGeometryStoreRequest, VirtualGeometryStoreSelection, VirtualGeometryStoreTelemetry,
+    VirtualGeometryStoreTicket,
+};
 pub use streaming::{
     GpuVirtualPageStreamer, GpuVirtualStreamingConfig, GpuVirtualStreamingError,
     GpuVirtualStreamingTelemetry,

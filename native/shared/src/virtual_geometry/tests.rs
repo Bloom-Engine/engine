@@ -18,6 +18,9 @@ mod gpu_pool_budget_tests;
 mod hiz_tests;
 #[path = "source_routing_tests.rs"]
 mod source_routing_tests;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "store_tests.rs"]
+mod store_tests;
 #[path = "streaming_tests.rs"]
 mod streaming_tests;
 #[cfg(not(target_arch = "wasm32"))]

@@ -149,6 +149,28 @@ returns the validated manifest/artifact identity. If nothing allowed exists,
 the command fails and lists the available profiles. There is deliberately no
 implicit cross-platform, lower-quality, or legacy fallback.
 
+## Native runtime resolution
+
+`VirtualGeometryStoreLoader` is the source-free native runtime counterpart to
+`asset-resolve`. It owns one bounded worker and exposes a non-blocking
+`request`/`poll` interface. The caller supplies the logical ID, requested
+platform/quality, ordered fallbacks, and whether an unprofiled legacy entry is
+allowed. Selection follows exactly the offline resolver contract: exact first,
+caller-ordered fallbacks next, and unprofiled only when explicitly enabled.
+
+The worker performs every potentially blocking operation: reading and parsing
+`index.json`, checking its schema/count/duplicate identities, resolving the
+variant, rejecting non-canonical or symlinked chunk paths, reading the immutable
+chunk, and validating its complete file/payload/source identity. The update or
+render thread only enqueues and polls. Completed assets use the existing
+`Arc<VirtualGeometryAsset>` registration path, so renderer setup remains simple
+and existing direct-byte callers are unchanged.
+
+This runtime intentionally does not rebuild the index from manifests. Shipping
+stores may omit manifests and all source assets; `index.json` plus its immutable
+`chunks/` references are the runtime contract. Installers and development
+workflows should continue to run `asset-index-inspect` before packaging.
+
 ## Current boundary
 
 This checkpoint is geometry-only and loose-store-only. It does not yet add:
@@ -156,11 +178,12 @@ This checkpoint is geometry-only and loose-store-only. It does not yet add:
 - texture, material, animation, environment, or world recipes;
 - source path/license provenance;
 - dependency-graph invalidation beyond one geometry source closure;
-- garbage collection or packed shipping archives;
-- production runtime index loading, asynchronous IO, or residency.
+- garbage collection, packed shipping archives, or network-backed stores;
+- demand-page file reads behind GPU feedback (the native worker currently
+  validates and materializes the selected archive before registration).
 
-It changes no production renderer path, buffers, shaders, passes, draws,
-pixels, or frame-time behavior.
+The runtime loader remains opt-in. It changes no default renderer path,
+buffers, shaders, passes, draws, pixels, or frame-time behavior.
 
 The canonical variant, fallback, deduplication, and Bistro qualification is
 recorded in `docs/evidence/issue-136-asset-variants-v2.{md,json}`.
