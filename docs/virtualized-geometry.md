@@ -402,9 +402,13 @@ Asynchronous feedback telemetry exposes the latest visible, frustum-culled,
 occlusion-culled, and occlusion-uncertain group counts without synchronizing
 the render loop.
 
-The next #131 runtime milestone is discrete/cross-backend timing. The
-compatibility renderer remains responsible for unsupported and
-not-yet-qualified content throughout that work.
+The versioned hardware driver now rebuilds this deterministic workload and
+requires explicit Metal, Vulkan, or Direct3D 12 selection before capturing its
+frame, timing, residency, and I/O bundle. Metal and Vulkan jobs are wired to
+the quality runners; discrete/cross-backend results and a Direct3D 12 hardware
+runner remain the next #131 qualification milestone. The compatibility
+renderer remains responsible for unsupported and not-yet-qualified content
+throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts

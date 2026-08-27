@@ -81,7 +81,7 @@ lane_components() {
     full) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory host-build wasm-build" ;;
     web) printf '%s\n' "wasm-check wasm-build browser-smoke" ;;
     cross) printf '%s\n' "target-check" ;;
-    hardware) printf '%s\n' "example-compile quality-check quality-faults quality-run" ;;
+    hardware) printf '%s\n' "example-compile quality-check quality-faults quality-run virtual-geometry-stress" ;;
     *)
       echo "unknown lane: $1" >&2
       return 2
@@ -250,6 +250,7 @@ run_component() {
         tools/quality/khronos_materials.py \
         tools/quality/shadow_detail.py \
         tools/quality/prepare_virtual_geometry_stress.py \
+        tools/quality/virtual_geometry_stress.py \
         tools/quality/vsm_caster_coverage.py \
         tools/quality/vsm_debug_views.py \
         tools/quality/vsm_motion_corpus.py \
@@ -259,6 +260,7 @@ run_component() {
         tools/quality/test_khronos_materials.py \
         tools/quality/test_shadow_detail.py \
         tools/quality/test_prepare_virtual_geometry_stress.py \
+        tools/quality/test_virtual_geometry_stress.py \
         tools/quality/test_vsm_caster_coverage.py \
         tools/quality/test_vsm_debug_views.py \
         tools/quality/test_vsm_motion_corpus.py \
@@ -394,6 +396,20 @@ run_component() {
           --out "$quality_out" \
           --timeout "${BLOOM_QUALITY_TIMEOUT:-1800}"
       fi
+      ;;
+    virtual-geometry-stress)
+      if [ -z "${BLOOM_VIRTUAL_STRESS_PLATFORM:-}" ] || [ -z "${BLOOM_VIRTUAL_STRESS_BACKEND:-}" ]; then
+        echo "BLOOM_VIRTUAL_STRESS_PLATFORM and BLOOM_VIRTUAL_STRESS_BACKEND are required" >&2
+        return 2
+      fi
+      vg_stress_out="${BLOOM_VIRTUAL_STRESS_OUT:-tools/quality/out/ci-virtual-geometry}"
+      vg_stress_work="${BLOOM_VIRTUAL_STRESS_WORK:-${RUNNER_TEMP:-/tmp}/bloom-virtual-geometry-stress}"
+      hr "run 10M virtual-geometry stress on $BLOOM_VIRTUAL_STRESS_BACKEND"
+      python3 tools/quality/virtual_geometry_stress.py \
+        --platform "$BLOOM_VIRTUAL_STRESS_PLATFORM" \
+        --backend "$BLOOM_VIRTUAL_STRESS_BACKEND" \
+        --work "$vg_stress_work" \
+        --out "$vg_stress_out"
       ;;
     *)
       echo "unknown component: $CURRENT_COMPONENT" >&2

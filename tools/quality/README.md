@@ -343,6 +343,25 @@ Defined classes:
 - `nvidia-rtx4080-vulkan`: Vulkan discrete high-end baseline, including VRAM;
 - `apple-m1-metal-constrained`: constrained preset/render-scale gate.
 
+The virtual-geometry portability gate is separate from the ordinary scene
+manifest because it deterministically generates and cooks a 10M-source-
+triangle asset before rendering it. Run it with an explicit backend so the
+test can assert the selected adapter path rather than merely accepting wgpu's
+primary choice:
+
+```sh
+python3 tools/quality/virtual_geometry_stress.py \
+  --platform macos --backend metal \
+  --work /tmp/bloom-vg-stress-work \
+  --out tools/quality/out/virtual-geometry-metal
+```
+
+The hardware workflow runs the same driver as `macos/metal` and
+`linux/vulkan`, uploads the final frame and complete timing/residency/I/O
+telemetry, and publishes a compact job summary. A future Windows hardware
+runner uses `--platform windows --backend dx12`; the runtime gate already
+rejects a result if the requested backend was not actually selected.
+
 Runs without a machine class still record timings and visual failures, but
 performance is report-only. VRAM must come from the hardware runner when wgpu
 cannot report it:

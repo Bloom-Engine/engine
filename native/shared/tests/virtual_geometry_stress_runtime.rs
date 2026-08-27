@@ -3,6 +3,7 @@
 //! Run with:
 //! BLOOM_VIRTUAL_STRESS_SCENE=/path/stress-10m.gltf \
 //! BLOOM_VIRTUAL_STRESS_ARCHIVE=/path/stress-10m.bgeo \
+//! BLOOM_VIRTUAL_STRESS_BACKEND=metal \
 //! cargo test --release --test virtual_geometry_stress_runtime \
 //!   --features models3d -- --nocapture
 
@@ -51,9 +52,11 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
         std::env::remove_var("BLOOM_GPU_DRIVEN");
         std::env::set_var("BLOOM_SKIP_SKY", "1");
     }
-    let mut engine =
-        bloom_shared::attach::attach_headless_engine(wgpu::Backends::PRIMARY, WIDTH, HEIGHT)
-            .unwrap_or_else(|error| panic!("virtual stress device setup failed: {error}"));
+    let (requested_backend, requested_backend_name) = requested_backend();
+    let mut engine = bloom_shared::attach::attach_headless_engine(requested_backend, WIDTH, HEIGHT)
+        .unwrap_or_else(|error| {
+            panic!("virtual stress {requested_backend_name} device setup failed: {error}")
+        });
     configure(&mut engine.renderer);
     let model_handle = load_model(&mut engine, &scene_path);
     let (asset, load_metrics) = load_stress_asset(&archive_path);
@@ -232,6 +235,11 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
     );
     let profile: serde_json::Value =
         serde_json::from_str(&profile_report).expect("parse virtual stress profile");
+    assert_eq!(
+        profile["adapter"]["backend"].as_str(),
+        Some(requested_backend_name),
+        "virtual stress selected a different backend than requested"
+    );
     assert_eq!(profile["uncapped"].as_bool(), Some(true));
     assert_eq!(profile["gpu_timestamps_available"].as_bool(), Some(true));
     let pass_gpu_mean = |label: &str| {
@@ -267,6 +275,7 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
         diagnostics.join("summary.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "schema": "bloom-virtual-geometry-stress-result-v1",
+            "requested_backend": requested_backend_name,
             "source_triangles": source_triangles,
             "placements": route.virtual_placements.len(),
             "archive_clusters": archive.clusters.len(),
@@ -295,6 +304,41 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
         "virtual-geometry-stress source_triangles={source_triangles} resident_pages={resident_pages} wall_ms={measurement_wall_ms:.3} diagnostics={}",
         diagnostics.display()
     );
+}
+
+fn requested_backend() -> (wgpu::Backends, &'static str) {
+    match std::env::var("BLOOM_VIRTUAL_STRESS_BACKEND")
+        .unwrap_or_else(|_| default_backend_name().to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "metal" => (wgpu::Backends::METAL, "metal"),
+        "vulkan" => (wgpu::Backends::VULKAN, "vulkan"),
+        "dx12" | "d3d12" => (wgpu::Backends::DX12, "dx12"),
+        backend => panic!(
+            "unsupported BLOOM_VIRTUAL_STRESS_BACKEND {backend:?}; expected metal, vulkan, or dx12"
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn default_backend_name() -> &'static str {
+    "metal"
+}
+
+#[cfg(target_os = "linux")]
+fn default_backend_name() -> &'static str {
+    "vulkan"
+}
+
+#[cfg(target_os = "windows")]
+fn default_backend_name() -> &'static str {
+    "dx12"
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn default_backend_name() -> &'static str {
+    panic!("virtual geometry stress has no default backend on this operating system")
 }
 
 #[derive(Clone, Copy, Debug, Default)]

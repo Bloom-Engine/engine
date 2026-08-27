@@ -12,7 +12,7 @@ on:
       suite:
         description: Qualification suite
         type: choice
-        options: [full, quick]
+        options: [full, quick, virtual-geometry]
         default: full
       machine:
         description: Hardware runner
@@ -72,19 +72,22 @@ jobs:
           command -v perry
 
       - name: Compile every canonical TypeScript example
+        if: inputs.suite != 'virtual-geometry'
         run: ./scripts/ci-check.sh --hardware --component example-compile
 
       - name: Validate manifest, assets, and approved baselines
+        if: inputs.suite != 'virtual-geometry'
         run: ./scripts/ci-check.sh --hardware --component quality-check
 
       - name: Prove seeded regressions are detected
+        if: inputs.suite != 'virtual-geometry'
         env:
           BLOOM_QUALITY_FAULTS_OUT: tools/quality/out/ci-faults
           BLOOM_QUALITY_TIMEOUT: "900"
         run: ./scripts/ci-check.sh --hardware --component quality-faults
 
       - name: Run selected high-end suite
-        if: always()
+        if: always() && inputs.suite != 'virtual-geometry'
         env:
           BLOOM_QUALITY_SUITE: ${{ inputs.suite || 'full' }}
           BLOOM_QUALITY_MACHINE_CLASS: apple-m1-max-metal
@@ -92,8 +95,17 @@ jobs:
           BLOOM_QUALITY_TIMEOUT: "1800"
         run: ./scripts/ci-check.sh --hardware --component quality-run
 
-      - name: Hard-gate the constrained tier
+      - name: Qualify 10M virtual geometry on Metal
         if: always()
+        env:
+          BLOOM_VIRTUAL_STRESS_PLATFORM: macos
+          BLOOM_VIRTUAL_STRESS_BACKEND: metal
+          BLOOM_VIRTUAL_STRESS_OUT: tools/quality/out/ci-virtual-geometry-metal
+          BLOOM_VIRTUAL_STRESS_WORK: ${{ runner.temp }}/bloom-virtual-geometry-stress-metal
+        run: ./scripts/ci-check.sh --hardware --component virtual-geometry-stress
+
+      - name: Hard-gate the constrained tier
+        if: always() && inputs.suite != 'virtual-geometry'
         env:
           BLOOM_QUALITY_SUITE: full
           BLOOM_QUALITY_CASE: pbr-spheres-constrained
@@ -111,6 +123,9 @@ jobs:
           if [[ -f tools/quality/out/ci-metal-constrained/summary.md ]]; then
             cat tools/quality/out/ci-metal-constrained/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [[ -f tools/quality/out/ci-virtual-geometry-metal/qualification.md ]]; then
+            cat tools/quality/out/ci-virtual-geometry-metal/qualification.md >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload all success/failure evidence
         if: always()
@@ -121,6 +136,7 @@ jobs:
             target/ci/examples
             tools/quality/out/ci-metal
             tools/quality/out/ci-metal-constrained
+            tools/quality/out/ci-virtual-geometry-metal
             tools/quality/out/ci-faults
           if-no-files-found: warn
           retention-days: 30
@@ -148,16 +164,18 @@ jobs:
           nvidia-smi
 
       - name: Validate manifest, assets, and approved baselines
+        if: inputs.suite != 'virtual-geometry'
         run: ./scripts/ci-check.sh --hardware --component quality-check
 
       - name: Prove seeded regressions are detected
+        if: inputs.suite != 'virtual-geometry'
         env:
           BLOOM_QUALITY_FAULTS_OUT: tools/quality/out/ci-faults
           BLOOM_QUALITY_TIMEOUT: "900"
         run: ./scripts/ci-check.sh --hardware --component quality-faults
 
       - name: Run selected high-end suite
-        if: always()
+        if: always() && inputs.suite != 'virtual-geometry'
         env:
           BLOOM_QUALITY_SUITE: ${{ inputs.suite || 'full' }}
           BLOOM_QUALITY_MACHINE_CLASS: nvidia-rtx4080-vulkan
@@ -165,11 +183,23 @@ jobs:
           BLOOM_QUALITY_TIMEOUT: "1800"
         run: ./scripts/ci-check.sh --hardware --component quality-run
 
+      - name: Qualify 10M virtual geometry on Vulkan
+        if: always()
+        env:
+          BLOOM_VIRTUAL_STRESS_PLATFORM: linux
+          BLOOM_VIRTUAL_STRESS_BACKEND: vulkan
+          BLOOM_VIRTUAL_STRESS_OUT: tools/quality/out/ci-virtual-geometry-vulkan
+          BLOOM_VIRTUAL_STRESS_WORK: ${{ runner.temp }}/bloom-virtual-geometry-stress-vulkan
+        run: ./scripts/ci-check.sh --hardware --component virtual-geometry-stress
+
       - name: Publish compact job summary
         if: always()
         run: |
           if [[ -f tools/quality/out/ci-vulkan/summary.md ]]; then
             cat tools/quality/out/ci-vulkan/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f tools/quality/out/ci-virtual-geometry-vulkan/qualification.md ]]; then
+            cat tools/quality/out/ci-virtual-geometry-vulkan/qualification.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload all success/failure evidence
@@ -179,6 +209,7 @@ jobs:
           name: quality-nvidia-rtx4080-vulkan-${{ github.run_attempt }}
           path: |
             tools/quality/out/ci-vulkan
+            tools/quality/out/ci-virtual-geometry-vulkan
             tools/quality/out/ci-faults
           if-no-files-found: warn
           retention-days: 30
