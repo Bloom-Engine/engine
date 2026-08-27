@@ -23,6 +23,7 @@ from tools.quality.prepare_virtual_geometry_stress import build_stress_scene
 
 LOGICAL_ID = "stress/10m"
 QUALITY = "high"
+DEFAULT_SCALING_INSTANCES = (1, 10, 100)
 
 
 class StressQualificationError(RuntimeError):
@@ -102,6 +103,114 @@ def run_step(
     return {"name": name, "duration_ms": duration_ms}
 
 
+def pass_gpu_mean(summary: Mapping[str, Any], label: str) -> float:
+    passes = summary.get("profile", {}).get("passes")
+    if not isinstance(passes, list):
+        raise StressQualificationError("stress summary has no profiler pass array")
+    selected = [
+        record
+        for record in passes
+        if isinstance(record, dict) and record.get("label") == label
+    ]
+    if len(selected) != 1 or not isinstance(selected[0].get("gpu_mean_ms"), (int, float)):
+        raise StressQualificationError(f"stress summary has no exact {label} GPU mean")
+    value = float(selected[0]["gpu_mean_ms"])
+    if value <= 0.0:
+        raise StressQualificationError(f"stress {label} GPU mean is not positive")
+    return value
+
+
+def evaluate_scaling(
+    summaries: Sequence[Mapping[str, Any]], expected_instances: Sequence[int]
+) -> dict[str, Any]:
+    expected = sorted(set(expected_instances))
+    by_instances: dict[int, Mapping[str, Any]] = {}
+    for summary in summaries:
+        placements = summary.get("placements")
+        if not isinstance(placements, int):
+            raise StressQualificationError("scaling summary has no integer placement count")
+        if placements in by_instances:
+            raise StressQualificationError(f"duplicate scaling point for {placements} instances")
+        by_instances[placements] = summary
+    if sorted(by_instances) != expected:
+        raise StressQualificationError(
+            f"scaling instances {sorted(by_instances)} do not match {expected}"
+        )
+
+    source_triangles = {summary.get("source_triangles") for summary in summaries}
+    archive_clusters = {summary.get("archive_clusters") for summary in summaries}
+    archive_pages = {summary.get("archive_pages") for summary in summaries}
+    if len(source_triangles) != 1 or next(iter(source_triangles), 0) < 10_000_000:
+        raise StressQualificationError("scaling sweep did not retain the same 10M source archive")
+    if len(archive_clusters) != 1 or len(archive_pages) != 1:
+        raise StressQualificationError("scaling sweep changed archive topology")
+
+    points: list[dict[str, Any]] = []
+    for instances in expected:
+        summary = by_instances[instances]
+        runtime = summary.get("runtime")
+        profile = summary.get("profile")
+        if not isinstance(runtime, dict) or not isinstance(profile, dict):
+            raise StressQualificationError("scaling summary is missing runtime/profile telemetry")
+        visible = runtime.get("last_visible_groups")
+        frustum = runtime.get("last_frustum_culled_groups")
+        selected = runtime.get("last_selected_count")
+        measured_frames = summary.get("measured_frames")
+        wall_ms = summary.get("measurement_wall_ms")
+        if not all(isinstance(value, int) and value >= 0 for value in (visible, frustum, selected)):
+            raise StressQualificationError("scaling summary has invalid cluster counters")
+        if not isinstance(measured_frames, int) or measured_frames < 1:
+            raise StressQualificationError("scaling summary has invalid measured frame count")
+        if not isinstance(wall_ms, (int, float)) or wall_ms <= 0.0:
+            raise StressQualificationError("scaling summary has invalid wall duration")
+        candidate_groups = visible + frustum
+        if candidate_groups < 1 or selected < 1:
+            raise StressQualificationError("scaling point submitted no candidate/selected geometry")
+        points.append(
+            {
+                "instances": instances,
+                "candidate_groups": candidate_groups,
+                "visible_groups": visible,
+                "frustum_culled_groups": frustum,
+                "selected_clusters": selected,
+                "resident_pages": runtime.get("resident_pages"),
+                "wall_frame_mean_ms": float(wall_ms) / measured_frames,
+                "gpu_frame_mean_ms": profile.get("gpu_frame_mean_ms"),
+                "selector_gpu_mean_ms": pass_gpu_mean(
+                    summary, "virtual_geometry_hierarchy_selection"
+                ),
+                "draw_emission_gpu_mean_ms": pass_gpu_mean(
+                    summary, "virtual_geometry_draw_emission"
+                ),
+            }
+        )
+
+    candidate_growth = points[-1]["candidate_groups"] / points[0]["candidate_groups"]
+    selected_growth = points[-1]["selected_clusters"] / points[0]["selected_clusters"]
+    selector_growth = points[-1]["selector_gpu_mean_ms"] / points[0]["selector_gpu_mean_ms"]
+    instance_growth = points[-1]["instances"] / points[0]["instances"]
+    if candidate_growth < instance_growth * 0.5 or selected_growth < instance_growth * 0.5:
+        raise StressQualificationError(
+            "fixed scaling sweep did not materially increase candidate/selected work"
+        )
+    if selector_growth > max(4.0, candidate_growth * 0.25):
+        raise StressQualificationError(
+            "hierarchy selection grew disproportionately to candidate groups"
+        )
+    return {
+        "schema": "bloom-virtual-geometry-scaling-v1",
+        "source_triangles": next(iter(source_triangles)),
+        "archive_clusters": next(iter(archive_clusters)),
+        "archive_pages": next(iter(archive_pages)),
+        "instance_growth": instance_growth,
+        "candidate_group_growth": candidate_growth,
+        "selected_cluster_growth": selected_growth,
+        "selector_gpu_growth": selector_growth,
+        "points": points,
+        "validation": "pass",
+    }
+
+
 def write_json(path: Path, value: Any) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(
@@ -126,7 +235,15 @@ def write_markdown_summary(path: Path, qualification: Mapping[str, Any]) -> None
         f"| Wall mean | {runtime['measurement_wall_ms'] / runtime['measured_frames']:.4f} ms |",
         f"| GPU mean / p95 | {profile['gpu_frame_mean_ms']:.4f} / {profile['gpu_frame_p95_ms']:.4f} ms |",
         "",
+        "| Instances | Candidate groups | Selected clusters | Selector GPU |",
+        "|---:|---:|---:|---:|",
     ]
+    for point in qualification["scaling"]["points"]:
+        lines.append(
+            f"| {point['instances']:,} | {point['candidate_groups']:,} | "
+            f"{point['selected_clusters']:,} | {point['selector_gpu_mean_ms']:.4f} ms |"
+        )
+    lines.append("")
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text("\n".join(lines), encoding="utf-8")
     os.replace(temporary, path)
@@ -196,6 +313,7 @@ def qualify(arguments: argparse.Namespace) -> Path:
         raise StressQualificationError(f"indexed stress artifact is missing: {artifact_path}")
 
     environment = dict(os.environ)
+    full_instance_count = max(arguments.scaling_instances)
     environment.update(
         {
             "BLOOM_VIRTUAL_STRESS_SCENE": str(source_path),
@@ -208,6 +326,7 @@ def qualify(arguments: argparse.Namespace) -> Path:
             "BLOOM_VIRTUAL_STRESS_DIAGNOSTICS": str(output),
             "BLOOM_VIRTUAL_STRESS_WARMUP_FRAMES": str(arguments.warmup_frames),
             "BLOOM_VIRTUAL_STRESS_MEASURED_FRAMES": str(arguments.measured_frames),
+            "BLOOM_VIRTUAL_STRESS_INSTANCE_LIMIT": str(full_instance_count),
         }
     )
     steps.append(
@@ -232,8 +351,39 @@ def qualify(arguments: argparse.Namespace) -> Path:
 
     runtime_summary_path = output / "summary.json"
     runtime_summary = json.loads(runtime_summary_path.read_text(encoding="utf-8"))
+    scaling_summaries = [runtime_summary]
+    for instance_count in arguments.scaling_instances:
+        if instance_count == full_instance_count:
+            continue
+        scaling_output = output / "scaling" / f"instances-{instance_count}"
+        scaling_environment = dict(environment)
+        scaling_environment["BLOOM_VIRTUAL_STRESS_DIAGNOSTICS"] = str(scaling_output)
+        scaling_environment["BLOOM_VIRTUAL_STRESS_INSTANCE_LIMIT"] = str(instance_count)
+        steps.append(
+            run_step(
+                f"run {arguments.backend} virtual-geometry scaling at {instance_count} instances",
+                [
+                    "cargo",
+                    "test",
+                    "--release",
+                    "--manifest-path",
+                    "native/shared/Cargo.toml",
+                    "--test",
+                    "virtual_geometry_stress_runtime",
+                    "--features",
+                    "models3d",
+                    "--",
+                    "--nocapture",
+                ],
+                environment=scaling_environment,
+            )
+        )
+        scaling_summaries.append(
+            json.loads((scaling_output / "summary.json").read_text(encoding="utf-8"))
+        )
+    scaling = evaluate_scaling(scaling_summaries, arguments.scaling_instances)
     qualification = {
-        "schema": "bloom-cross-backend-virtual-geometry-stress-v1",
+        "schema": "bloom-cross-backend-virtual-geometry-stress-v2",
         "platform": arguments.platform,
         "backend": arguments.backend,
         "logical_id": arguments.logical_id,
@@ -251,6 +401,7 @@ def qualify(arguments: argparse.Namespace) -> Path:
         },
         "steps": steps,
         "runtime": runtime_summary,
+        "scaling": scaling,
     }
     report = output / "qualification.json"
     write_json(report, qualification)
@@ -270,11 +421,20 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--logical-id", default=LOGICAL_ID)
     parser.add_argument("--warmup-frames", type=int, default=180)
     parser.add_argument("--measured-frames", type=int, default=120)
+    parser.add_argument(
+        "--scaling-instances",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_SCALING_INSTANCES),
+    )
     arguments = parser.parse_args()
     if arguments.backend is None:
         arguments.backend = default_backend(arguments.platform)
     if arguments.warmup_frames < 1 or arguments.measured_frames < 1:
         parser.error("frame counts must be positive")
+    arguments.scaling_instances = sorted(set(arguments.scaling_instances))
+    if arguments.scaling_instances[0] < 1 or arguments.scaling_instances[-1] != 100:
+        parser.error("scaling instances must be positive and include the full 100-instance point")
     return arguments
 
 

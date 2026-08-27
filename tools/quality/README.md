@@ -358,9 +358,14 @@ python3 tools/quality/virtual_geometry_stress.py \
 
 The hardware workflow runs the same driver as `macos/metal` and
 `linux/vulkan`, uploads the final frame and complete timing/residency/I/O
-telemetry, and publishes a compact job summary. A future Windows hardware
-runner uses `--platform windows --backend dx12`; the runtime gate already
-rejects a result if the requested backend was not actually selected.
+telemetry, and publishes a compact job summary. Each run also reuses the exact
+10M archive for a 1/10/100-instance uncapped scaling sweep. The sweep requires
+candidate groups and selected clusters to grow with the submitted instance
+set while hierarchy-selection GPU time remains bounded by that candidate
+growth; unrelated clusters elsewhere in the archive therefore cannot hide a
+source-triangle scan. A future Windows hardware runner uses `--platform
+windows --backend dx12`; the runtime gate already rejects a result if the
+requested backend was not actually selected.
 
 Runs without a machine class still record timings and visual failures, but
 performance is report-only. VRAM must come from the hardware runner when wgpu

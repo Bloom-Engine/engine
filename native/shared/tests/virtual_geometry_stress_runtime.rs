@@ -131,12 +131,13 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
             .renderer
             .bind_model_virtual_materials(virtual_mesh, model)
             .expect("bind stress material table");
-        let instances = route
+        let all_instances = route
             .virtual_instances(virtual_mesh, 0, IDENTITY_MAT4, IDENTITY_MAT4, [1.0; 4])
             .expect("build stress virtual instances");
+        let instances = select_stress_instances(&route, &all_instances);
         (route, instances)
     };
-    assert_eq!(instances.len(), 100);
+    assert!(!instances.is_empty());
 
     let warmup_frames = environment_frames("BLOOM_VIRTUAL_STRESS_WARMUP_FRAMES", 180);
     for frame in 0..warmup_frames {
@@ -162,7 +163,7 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
     }
     let measurement_wall_ms = measurement_start.elapsed().as_secs_f64() * 1000.0;
     let screenshot = screenshot.expect("capture final virtual stress frame");
-    assert_rendered_pixels(&screenshot);
+    assert_rendered_pixels(&screenshot, instances.len());
     image::save_buffer(
         diagnostics.join("stress-frame.png"),
         &screenshot,
@@ -277,7 +278,8 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
             "schema": "bloom-virtual-geometry-stress-result-v1",
             "requested_backend": requested_backend_name,
             "source_triangles": source_triangles,
-            "placements": route.virtual_placements.len(),
+            "available_placements": route.virtual_placements.len(),
+            "placements": instances.len(),
             "archive_clusters": archive.clusters.len(),
             "archive_pages": archive.pages.len(),
             "pool_capacity_bytes": POOL_BYTES,
@@ -301,9 +303,55 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
     )
     .expect("write virtual stress summary");
     eprintln!(
-        "virtual-geometry-stress source_triangles={source_triangles} resident_pages={resident_pages} wall_ms={measurement_wall_ms:.3} diagnostics={}",
+        "virtual-geometry-stress source_triangles={source_triangles} placements={} resident_pages={resident_pages} wall_ms={measurement_wall_ms:.3} diagnostics={}",
+        instances.len(),
         diagnostics.display()
     );
+}
+
+fn select_stress_instances(
+    route: &bloom_shared::models::ModelVirtualGeometryRoute,
+    all_instances: &[bloom_shared::virtual_geometry::GpuVirtualInstance],
+) -> Vec<bloom_shared::virtual_geometry::GpuVirtualInstance> {
+    assert_eq!(route.virtual_placements.len(), all_instances.len());
+    let requested = std::env::var("BLOOM_VIRTUAL_STRESS_INSTANCE_LIMIT")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .unwrap_or_else(|_| panic!("invalid virtual stress instance limit {value:?}"))
+        })
+        .unwrap_or(all_instances.len());
+    assert!(
+        (1..=all_instances.len()).contains(&requested),
+        "virtual stress instance limit {requested} is outside 1..={}",
+        all_instances.len()
+    );
+    if requested == all_instances.len() {
+        return all_instances.to_vec();
+    }
+
+    // Select placements nearest the fixed camera target. This keeps reduced
+    // scaling points visible while preserving the same 10M-triangle archive,
+    // root table, GPU pool allocation, and camera path as the full run.
+    let mut order = route
+        .virtual_placements
+        .iter()
+        .enumerate()
+        .map(|(index, placement)| {
+            let center_x = placement.model_transform[3][0] + 5.0;
+            let center_z = placement.model_transform[3][2] + 5.0;
+            let distance_squared =
+                (center_x - CAMERA_CENTER[0]).powi(2) + (center_z - CAMERA_CENTER[2]).powi(2);
+            (distance_squared, placement.source_mesh_index, index)
+        })
+        .collect::<Vec<_>>();
+    order.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    order
+        .into_iter()
+        .take(requested)
+        .map(|(_, _, index)| all_instances[index])
+        .collect()
 }
 
 fn requested_backend() -> (wgpu::Backends, &'static str) {
@@ -516,13 +564,19 @@ fn render_frame(
     })
 }
 
-fn assert_rendered_pixels(pixels: &[u8]) {
+fn assert_rendered_pixels(pixels: &[u8], instance_count: usize) {
     let bright = pixels
         .chunks_exact(4)
         .filter(|pixel| u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2]) > 120)
         .count();
+    let pixels = pixels.len() / 4;
+    let minimum_bright = if instance_count == 100 {
+        pixels / 20
+    } else {
+        (pixels / 2_000).max(64)
+    };
     assert!(
-        bright > pixels.len() / 4 / 20,
-        "10M virtual stress frame did not render enough geometry"
+        bright > minimum_bright,
+        "10M virtual stress frame with {instance_count} instances rendered only {bright} bright pixels"
     );
 }
