@@ -396,6 +396,7 @@ fn load_geometry_source(path: &Path) -> Result<GeometrySource, String> {
             let primitive_index = primitive.index() as u32;
             let material = primitive.material();
             let material_index = material.index().map(|index| index as u32);
+            let base_color_factor = runtime_base_color_factor(&material);
 
             let compatibility_reason = if primitive.mode() != gltf::mesh::Mode::Triangles {
                 Some((
@@ -523,7 +524,7 @@ fn load_geometry_source(path: &Path) -> Result<GeometrySource, String> {
                         tangent,
                         uv0,
                         uv1,
-                        color,
+                        color: multiply_rgba(color, base_color_factor),
                     },
                 )
                 .collect();
@@ -591,6 +592,67 @@ fn generate_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
         };
     }
     normals
+}
+
+/// Match the runtime glTF loader's vertex-color contract. Bloom carries the
+/// material base/diffuse factor in `Vertex3D::color`; the global material
+/// record intentionally contains only texture/scalar response state. Virtual
+/// vertices therefore have to bake the same factor or residency changes the
+/// authored color.
+fn runtime_base_color_factor(material: &gltf::Material<'_>) -> [f32; 4] {
+    let pbr = material.pbr_metallic_roughness();
+    if pbr.base_color_texture().is_none() {
+        if let Some(spec_gloss) = material.pbr_specular_glossiness() {
+            let diffuse = spec_gloss.diffuse_factor();
+            if spec_gloss.specular_glossiness_texture().is_some() {
+                return diffuse;
+            }
+            return specgloss_to_metalrough(diffuse, spec_gloss.specular_factor()).0;
+        }
+    }
+    pbr.base_color_factor()
+}
+
+fn multiply_rgba(lhs: [f32; 4], rhs: [f32; 4]) -> [f32; 4] {
+    [
+        lhs[0] * rhs[0],
+        lhs[1] * rhs[1],
+        lhs[2] * rhs[2],
+        lhs[3] * rhs[3],
+    ]
+}
+
+/// Khronos' reference specular-glossiness to metallic-roughness base-color
+/// conversion, kept byte-for-byte equivalent to the runtime importer.
+fn specgloss_to_metalrough(diffuse: [f32; 4], specular: [f32; 3]) -> ([f32; 4], f32) {
+    let dielectric_specular = 0.04_f32;
+    let epsilon = 1e-6_f32;
+    let one_minus_dielectric = 1.0 - dielectric_specular;
+    let diffuse_max = diffuse[0].max(diffuse[1]).max(diffuse[2]);
+    let specular_max = specular[0].max(specular[1]).max(specular[2]);
+    let a = dielectric_specular;
+    let b = diffuse_max * one_minus_dielectric / dielectric_specular.max(epsilon) + specular_max
+        - 2.0 * dielectric_specular;
+    let c = dielectric_specular - specular_max;
+    let discriminant = (b * b - 4.0 * a * c).max(0.0);
+    let metallic = if specular_max < dielectric_specular {
+        0.0
+    } else {
+        (((-b + discriminant.sqrt()) / (2.0 * a)).clamp(0.0, 1.0)).min(1.0)
+    };
+    let diffuse_branch_scale =
+        one_minus_dielectric / (1.0 - metallic * dielectric_specular).max(epsilon);
+    let metal_weight = metallic * metallic;
+    let lerp = |a: f32, b: f32, t: f32| a * (1.0 - t) + b * t;
+    (
+        [
+            lerp(diffuse[0] * diffuse_branch_scale, specular[0], metal_weight).clamp(0.0, 1.0),
+            lerp(diffuse[1] * diffuse_branch_scale, specular[1], metal_weight).clamp(0.0, 1.0),
+            lerp(diffuse[2] * diffuse_branch_scale, specular[2], metal_weight).clamp(0.0, 1.0),
+            diffuse[3],
+        ],
+        metallic,
+    )
 }
 
 fn mode_code(mode: gltf::mesh::Mode) -> u32 {
@@ -782,6 +844,27 @@ mod tests {
     }
 
     #[test]
+    fn cooked_vertex_colors_include_runtime_material_factor() {
+        let factor = [0.5, 0.25, 0.75, 0.8];
+        let bytes = minimal_triangle_glb_with_material(Some(factor));
+        let path = std::env::temp_dir().join(format!(
+            "bloom-cook-color-factor-{}-{}.glb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let source = load_geometry_source(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(source.primitives[0]
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == factor));
+    }
+
+    #[test]
     fn atomic_output_can_replace_an_existing_artifact() {
         let path = std::env::temp_dir().join(format!(
             "bloom-cook-atomic-{}-{}.bgeo",
@@ -798,6 +881,10 @@ mod tests {
     }
 
     fn minimal_triangle_glb() -> Vec<u8> {
+        minimal_triangle_glb_with_material(None)
+    }
+
+    fn minimal_triangle_glb_with_material(base_color_factor: Option<[f32; 4]>) -> Vec<u8> {
         let mut binary = Vec::new();
         for value in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
             binary.extend_from_slice(&value.to_le_bytes());
@@ -806,6 +893,19 @@ mod tests {
             binary.extend_from_slice(&index.to_le_bytes());
         }
         binary.resize(binary.len().div_ceil(4) * 4, 0);
+        let material_json = base_color_factor.map_or_else(String::new, |factor| {
+            format!(
+                "\"materials\":{},",
+                serde_json::json!([{
+                    "pbrMetallicRoughness": { "baseColorFactor": factor }
+                }])
+            )
+        });
+        let primitive_material = if base_color_factor.is_some() {
+            r#", "material":0"#
+        } else {
+            ""
+        };
         let json = format!(
             r#"{{
                 "asset":{{"version":"2.0"}},
@@ -819,7 +919,8 @@ mod tests {
                       "min":[0,0,0],"max":[1,1,0]}},
                     {{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}}
                 ],
-                "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1}}]}}],
+                {material_json}
+                "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1{primitive_material}}}]}}],
                 "nodes":[{{"mesh":0}}],
                 "scenes":[{{"nodes":[0]}}],
                 "scene":0

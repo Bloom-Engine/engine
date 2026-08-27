@@ -2,6 +2,8 @@ use super::GpuVirtualInstance;
 
 pub(crate) const VIRTUAL_HIZ_BASE_SIZE: u32 = 256;
 pub(crate) const VIRTUAL_HIZ_MIP_COUNT: u32 = 9;
+const VIRTUAL_HIZ_RELATIVE_DEPTH_BIAS: f32 = 0.02;
+const VIRTUAL_HIZ_ABSOLUTE_DEPTH_BIAS: f32 = 0.1;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct VirtualGeometryHiZFrame {
@@ -260,7 +262,12 @@ impl GpuVirtualHiZ {
                 extent: [width, height, VIRTUAL_HIZ_MIP_COUNT, u32::from(enabled)],
                 // One base-grid texel of accepted screen motion, then a
                 // two-texel query expansion plus relative/absolute depth bias.
-                thresholds: [1.0 / width as f32, 1.0 / height as f32, 0.02, 0.1],
+                thresholds: [
+                    1.0 / width as f32,
+                    1.0 / height as f32,
+                    VIRTUAL_HIZ_RELATIVE_DEPTH_BIAS,
+                    VIRTUAL_HIZ_ABSOLUTE_DEPTH_BIAS,
+                ],
             }),
         );
     }
@@ -567,6 +574,8 @@ mod shader_tests {
         wgpu::naga::front::wgsl::parse_str(DOWNSAMPLE_SHADER).unwrap();
         assert_eq!(VIRTUAL_HIZ_BASE_SIZE, 256);
         assert_eq!(VIRTUAL_HIZ_MIP_COUNT, 9);
+        assert_eq!(VIRTUAL_HIZ_RELATIVE_DEPTH_BIAS, 0.02);
+        assert_eq!(VIRTUAL_HIZ_ABSOLUTE_DEPTH_BIAS, 0.1);
         assert_eq!(virtual_hiz_texture_bytes(), 349_524);
     }
 }

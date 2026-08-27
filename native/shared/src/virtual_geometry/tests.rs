@@ -12,6 +12,8 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 const VIRTUAL_GEOMETRY_DECODE_PROBE_WGSL: &str =
     include_str!("../../shaders/virtual_geometry/decode_probe.wgsl");
+#[path = "gpu_pool_budget_tests.rs"]
+mod gpu_pool_budget_tests;
 #[path = "hiz_tests.rs"]
 mod hiz_tests;
 #[path = "source_routing_tests.rs"]
@@ -1398,6 +1400,60 @@ fn gpu_hierarchy_selector_matches_cpu_across_lod_and_frustum_decisions() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn gpu_hierarchy_selector_refines_atomic_groups_that_straddle_frustum_planes() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping group-frustum oracle");
+        return;
+    };
+    let mut archive = hierarchy_archive();
+    for root in &mut archive.clusters[0..2] {
+        root.first_child = 2;
+        root.child_count = 2;
+    }
+    for middle in &mut archive.clusters[2..4] {
+        middle.parent = 0;
+        middle.parent_count = 2;
+        middle.first_child = 4;
+        middle.child_count = 4;
+    }
+    for leaf in &mut archive.clusters[4..8] {
+        leaf.parent = 2;
+        leaf.parent_count = 2;
+    }
+    archive.clusters[2].aabb_min = [-2.0, 0.0, 0.0];
+    archive.clusters[2].aabb_max = [-1.0, 1.0, 1.0];
+    archive.clusters[2].sphere_center = [-1.5, 0.5, 0.5];
+    archive.clusters[3].aabb_min = [2.0, 0.0, 0.0];
+    archive.clusters[3].aabb_max = [3.0, 1.0, 1.0];
+    archive.clusters[3].sphere_center = [2.5, 0.5, 0.5];
+
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(archive))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, mesh);
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let instances = [GpuVirtualInstance::identity(mesh, 19)];
+    let mut view = traversal_view(50.0);
+    view.frustum_planes = [[0.0, 0.0, 0.0, 1.0]; 6];
+    view.frustum_planes[0] = [1.0, 0.0, 0.0, 0.0];
+    view.frustum_planes[1] = [-1.0, 0.0, 0.0, 1.0];
+
+    let (selected, requests, counters) =
+        assert_traversal_matches_cpu(&device, &queue, &pool, &selector, &instances, view);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|record| record.cluster_table_index)
+            .collect::<Vec<_>>(),
+        [4, 5, 6, 7]
+    );
+    assert!(requests.is_empty());
+    assert_eq!(counters.frustum_culled_groups, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn gpu_hierarchy_selector_keeps_resident_ancestors_and_requests_missing_pages() {
     let Some((device, queue)) = try_traversal_device() else {
         eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy fallback oracle");
@@ -1894,107 +1950,4 @@ fn retired_mesh_ids_and_slots_are_reused_only_after_gpu_completion() {
         Err(VirtualGeometryGpuError::StaleMesh(id)) if id == old
     ));
     assert_eq!(new.descriptor_index(), old.descriptor_index());
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn gpu_pool_enforces_frame_upload_and_eviction_limits_without_partial_pages() {
-    let Some((device, queue)) = try_device() else {
-        eprintln!("no GPU adapter — skipping virtual-geometry budget oracle");
-        return;
-    };
-    let asset = hierarchy_asset(hierarchy_archive());
-    let mut upload_config = gpu_config(3);
-    upload_config.max_upload_pages_per_frame = 1;
-    let mut upload_limited = GpuVirtualGeometryPool::new(&device, upload_config).unwrap();
-    let mesh = upload_limited
-        .register_mesh(&queue, Arc::clone(&asset))
-        .unwrap();
-    upload_limited.begin_frame(2);
-    upload_limited.make_group_resident(&queue, mesh, 2).unwrap();
-    let before_denial = upload_limited.telemetry();
-    assert!(matches!(
-        upload_limited.make_group_resident(&queue, mesh, 3),
-        Err(VirtualGeometryGpuError::UploadBudgetExceeded { .. })
-    ));
-    let after_denial = upload_limited.telemetry();
-    assert_eq!(
-        after_denial.frame_upload_pages,
-        before_denial.frame_upload_pages
-    );
-    assert_eq!(
-        after_denial.frame_upload_bytes,
-        before_denial.frame_upload_bytes
-    );
-    assert_eq!(after_denial.resident_pages, before_denial.resident_pages);
-    assert_eq!(
-        after_denial.denied_uploads,
-        before_denial.denied_uploads + 1
-    );
-    assert!(!upload_limited
-        .is_page_resident(VirtualPageId {
-            mesh,
-            page_index: 2,
-        })
-        .unwrap());
-
-    let mut byte_config = gpu_config(3);
-    byte_config.max_upload_bytes_per_frame = u64::from(MIN_PAGE_BYTES);
-    let mut byte_limited = GpuVirtualGeometryPool::new(&device, byte_config).unwrap();
-    let mesh = byte_limited
-        .register_mesh(&queue, hierarchy_asset(large_intermediate_page_archive()))
-        .unwrap();
-    byte_limited.make_group_resident(&queue, mesh, 2).unwrap();
-    let before_denial = byte_limited.telemetry();
-    assert_eq!(before_denial.frame_upload_bytes, 3_920);
-    assert!(matches!(
-        byte_limited.make_group_resident(&queue, mesh, 3),
-        Err(VirtualGeometryGpuError::UploadBudgetExceeded {
-            requested_bytes: 224,
-            remaining_bytes: 176,
-            ..
-        })
-    ));
-    let after_denial = byte_limited.telemetry();
-    assert_eq!(
-        after_denial.frame_upload_bytes,
-        before_denial.frame_upload_bytes
-    );
-    assert_eq!(after_denial.resident_pages, before_denial.resident_pages);
-    assert_eq!(
-        after_denial.denied_uploads,
-        before_denial.denied_uploads + 1
-    );
-
-    let mut eviction_config = gpu_config(3);
-    eviction_config.max_evictions_per_frame = 0;
-    let mut eviction_limited = GpuVirtualGeometryPool::new(&device, eviction_config).unwrap();
-    let mesh = eviction_limited.register_mesh(&queue, asset).unwrap();
-    eviction_limited.begin_frame(2);
-    eviction_limited
-        .make_group_resident(&queue, mesh, 2)
-        .unwrap();
-    eviction_limited
-        .make_group_resident(&queue, mesh, 3)
-        .unwrap();
-    let before_denial = eviction_limited.telemetry();
-    assert_eq!(
-        eviction_limited
-            .make_group_resident(&queue, mesh, 4)
-            .unwrap_err(),
-        VirtualGeometryGpuError::EvictionBudgetExceeded
-    );
-    let after_denial = eviction_limited.telemetry();
-    assert_eq!(after_denial.resident_pages, before_denial.resident_pages);
-    assert_eq!(after_denial.frame_evictions, 0);
-    assert_eq!(
-        after_denial.denied_uploads,
-        before_denial.denied_uploads + 1
-    );
-    assert!(!eviction_limited
-        .is_page_resident(VirtualPageId {
-            mesh,
-            page_index: 3,
-        })
-        .unwrap());
 }

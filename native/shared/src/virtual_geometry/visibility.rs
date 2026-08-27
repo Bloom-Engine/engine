@@ -378,5 +378,6 @@ mod shader_tests {
         assert!(source.contains("bloom_encode_virtual_visibility"));
         assert!(source.contains("previous_model: mat4x4<f32>"));
         assert!(source.contains("BLOOM_VIRTUAL_FLAG_ALPHA_MASKED) != 0u"));
+        assert!(!source.contains("BLOOM_VIRTUAL_FLAG_DOUBLE_SIDED) == 0u && !front_facing"));
     }
 }

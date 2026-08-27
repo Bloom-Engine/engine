@@ -74,6 +74,15 @@ pub struct GpuVirtualStreamingTelemetry {
     pub uploaded_bytes: u64,
     pub last_visible_groups: u32,
     pub last_frustum_culled_groups: u32,
+    pub last_cone_culled_clusters: u32,
+    pub last_refined_groups: u32,
+    pub last_fallback_groups: u32,
+    pub last_missing_current_pages: u32,
+    pub last_selected_count: u32,
+    pub last_selected_overflow: u32,
+    pub last_request_overflow: u32,
+    pub last_invalid_records: u32,
+    pub last_depth_limit_fallbacks: u32,
     pub last_occlusion_culled_groups: u32,
     pub last_occlusion_uncertain_groups: u32,
 }
@@ -342,6 +351,15 @@ impl GpuVirtualPageStreamer {
     fn ingest(&mut self, feedback: CompletedFeedback) {
         self.telemetry.last_visible_groups = feedback.counters.visible_groups;
         self.telemetry.last_frustum_culled_groups = feedback.counters.frustum_culled_groups;
+        self.telemetry.last_cone_culled_clusters = feedback.counters.cone_culled_clusters;
+        self.telemetry.last_refined_groups = feedback.counters.refined_groups;
+        self.telemetry.last_fallback_groups = feedback.counters.fallback_groups;
+        self.telemetry.last_missing_current_pages = feedback.counters.missing_current_pages;
+        self.telemetry.last_selected_count = feedback.counters.selected_count;
+        self.telemetry.last_selected_overflow = feedback.counters.selected_overflow;
+        self.telemetry.last_request_overflow = feedback.counters.request_overflow;
+        self.telemetry.last_invalid_records = feedback.counters.invalid_records;
+        self.telemetry.last_depth_limit_fallbacks = feedback.counters.depth_limit_fallbacks;
         self.telemetry.last_occlusion_culled_groups = feedback.counters.occlusion_culled_groups;
         self.telemetry.last_occlusion_uncertain_groups =
             feedback.counters.occlusion_uncertain_groups;

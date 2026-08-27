@@ -6,8 +6,10 @@ use super::{
     GpuVirtualGeometryPool, VirtualGeometryGpuError, VirtualMeshId,
     GPU_VIRTUAL_MESH_MATERIALS_BOUND,
 };
-use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[path = "traversal_error.rs"]
+mod error_impl;
 
 #[cfg(test)]
 use super::gpu_pool::MAX_GPU_HIERARCHY_LEVELS;
@@ -917,71 +919,6 @@ pub enum VirtualGeometryTraversalError {
     Pool(VirtualGeometryGpuError),
 }
 
-impl From<VirtualGeometryGpuError> for VirtualGeometryTraversalError {
-    fn from(value: VirtualGeometryGpuError) -> Self {
-        Self::Pool(value)
-    }
-}
-
-impl fmt::Display for VirtualGeometryTraversalError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidConfig => write!(formatter, "invalid virtual-geometry traversal config"),
-            Self::DeviceUnsupported => write!(
-                formatter,
-                "device lacks the storage-buffer or compute limits required by virtual-geometry traversal"
-            ),
-            Self::DeviceLimitExceeded {
-                resource,
-                requested_bytes,
-                maximum_bytes,
-            } => write!(
-                formatter,
-                "virtual-geometry traversal {resource} requires {requested_bytes} bytes but the device limit is {maximum_bytes}"
-            ),
-            Self::PoolMismatch => write!(
-                formatter,
-                "virtual-geometry selector was recorded with a different page pool"
-            ),
-            Self::TooManyInstances {
-                requested,
-                capacity,
-            } => write!(
-                formatter,
-                "virtual-geometry traversal received {requested} instances but has capacity for {capacity}"
-            ),
-            Self::InvalidView => write!(formatter, "invalid virtual-geometry camera data"),
-            Self::InvalidInstanceTransform { instance } => write!(
-                formatter,
-                "virtual-geometry instance {instance} has a non-finite or singular transform"
-            ),
-            Self::UnboundMaterials { mesh } => write!(
-                formatter,
-                "virtual mesh {} has no complete GPU material binding",
-                mesh.raw()
-            ),
-            Self::SourceMeshFilterRequired { mesh } => write!(
-                formatter,
-                "multi-source virtual mesh {} requires an explicit source glTF mesh filter",
-                mesh.raw()
-            ),
-            Self::SourceMeshNotVirtual {
-                mesh,
-                source_mesh_index,
-            } => write!(
-                formatter,
-                "virtual mesh {} has no eligible clusters for source glTF mesh {}",
-                mesh.raw(), source_mesh_index
-            ),
-            Self::DispatchLimitExceeded { requested, maximum } => write!(
-                formatter,
-                "virtual-geometry traversal needs {requested} workgroups in one dimension but the device limit is {maximum}"
-            ),
-            Self::Pool(error) => error.fmt(formatter),
-        }
-    }
-}
-
 #[cfg(test)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct CpuTraversalResult {
@@ -1040,21 +977,32 @@ pub(super) fn select_cpu_reference(
             let mut exhausted_depth = true;
             for _depth in 0..pool.config().max_hierarchy_levels {
                 let range = group_first as usize..(group_first + group_count) as usize;
-                let mut visible = false;
-                let mut maximum_error = 0.0f32;
+                let mut common_outside_mask = (1u32 << view.frustum_planes.len()) - 1;
+                let mut intersecting_error = 0.0f32;
+                let mut group_error = 0.0f32;
+                let mut has_intersecting_cluster = false;
                 for cluster in &archive.clusters[range.clone()] {
                     let sphere = cpu_world_sphere(cluster, *instance, scale);
-                    if !cpu_sphere_outside_frustum(sphere, view.frustum_planes) {
-                        visible = true;
-                        maximum_error =
-                            maximum_error.max(cpu_projected_error(cluster, sphere, scale, view));
+                    let outside_mask =
+                        cpu_cluster_frustum_outside_mask(cluster, *instance, view.frustum_planes);
+                    let error = cpu_projected_error(cluster, sphere, scale, view);
+                    common_outside_mask &= outside_mask;
+                    group_error = group_error.max(error);
+                    if outside_mask == 0 {
+                        has_intersecting_cluster = true;
+                        intersecting_error = intersecting_error.max(error);
                     }
                 }
-                if !visible {
+                if common_outside_mask != 0 {
                     result.counters.frustum_culled_groups += 1;
                     exhausted_depth = false;
                     break;
                 }
+                let maximum_error = if has_intersecting_cluster {
+                    intersecting_error
+                } else {
+                    group_error
+                };
                 result.counters.visible_groups += 1;
 
                 let first = &archive.clusters[group_first as usize];
@@ -1212,7 +1160,7 @@ fn cpu_select_group(
         .enumerate()
     {
         let sphere = cpu_world_sphere(cluster, instance, scale);
-        if cpu_sphere_outside_frustum(sphere, view.frustum_planes) {
+        if cpu_cluster_frustum_outside_mask(cluster, instance, view.frustum_planes) != 0 {
             continue;
         }
         if cpu_cone_culled(cluster, instance, sphere, view.camera_position) {
@@ -1318,11 +1266,42 @@ fn cpu_scale_bound(model: [[f32; 4]; 4]) -> f32 {
 }
 
 #[cfg(test)]
-fn cpu_sphere_outside_frustum(sphere: CpuWorldSphere, planes: [[f32; 4]; 6]) -> bool {
-    planes.into_iter().any(|plane| {
-        let normal = [plane[0], plane[1], plane[2]];
-        dot3(normal, sphere.center) + plane[3] < -sphere.radius * dot3(normal, normal).sqrt()
-    })
+fn cpu_cluster_frustum_outside_mask(
+    cluster: &bloom_geometry_format::ClusterRecord,
+    instance: GpuVirtualInstance,
+    planes: [[f32; 4]; 6],
+) -> u32 {
+    let local_center: [f32; 3] =
+        std::array::from_fn(|axis| (cluster.aabb_min[axis] + cluster.aabb_max[axis]) * 0.5);
+    let local_extent: [f32; 3] =
+        std::array::from_fn(|axis| (cluster.aabb_max[axis] - cluster.aabb_min[axis]) * 0.5);
+    let model = instance.model();
+    let world_center = [
+        model[0][0] * local_center[0]
+            + model[1][0] * local_center[1]
+            + model[2][0] * local_center[2]
+            + model[3][0],
+        model[0][1] * local_center[0]
+            + model[1][1] * local_center[1]
+            + model[2][1] * local_center[2]
+            + model[3][1],
+        model[0][2] * local_center[0]
+            + model[1][2] * local_center[1]
+            + model[2][2] * local_center[2]
+            + model[3][2],
+    ];
+    planes
+        .into_iter()
+        .enumerate()
+        .fold(0u32, |mask, (plane_index, plane)| {
+            let normal = [plane[0], plane[1], plane[2]];
+            let projected_radius = (dot3(normal, [model[0][0], model[0][1], model[0][2]]).abs()
+                * local_extent[0])
+                + (dot3(normal, [model[1][0], model[1][1], model[1][2]]).abs() * local_extent[1])
+                + (dot3(normal, [model[2][0], model[2][1], model[2][2]]).abs() * local_extent[2]);
+            mask | (u32::from(dot3(normal, world_center) + plane[3] < -projected_radius)
+                << plane_index)
+        })
 }
 
 #[cfg(test)]
@@ -1693,15 +1672,29 @@ fn previous_hiz_result(
     return select(1u, 0u, occluded);
 }
 
-fn sphere_outside_frustum(sphere: WorldSphere) -> bool {
+fn cluster_frustum_outside_mask(
+    cluster: GpuVirtualClusterEntry,
+    instance: GpuVirtualInstance,
+) -> u32 {
+    let local_center = (cluster.aabb_min_error.xyz + cluster.aabb_max_radius.xyz) * 0.5;
+    let local_extent = (cluster.aabb_max_radius.xyz - cluster.aabb_min_error.xyz) * 0.5;
+    let world_center = (instance.model * vec4<f32>(local_center, 1.0)).xyz;
+    var outside_mask = 0u;
     for (var plane_index = 0u; plane_index < 6u; plane_index++) {
         let plane = params.planes[plane_index];
-        let normal_length = length(plane.xyz);
-        if (dot(plane.xyz, sphere.center) + plane.w < -sphere.radius * normal_length) {
-            return true;
+        let projected_radius = dot(
+            abs(vec3<f32>(
+                dot(plane.xyz, instance.model[0].xyz),
+                dot(plane.xyz, instance.model[1].xyz),
+                dot(plane.xyz, instance.model[2].xyz)
+            )),
+            local_extent
+        );
+        if (dot(plane.xyz, world_center) + plane.w < -projected_radius) {
+            outside_mask |= 1u << plane_index;
         }
     }
-    return false;
+    return outside_mask;
 }
 
 fn projected_error(
@@ -1836,7 +1829,7 @@ fn select_group(
         }
         let cluster = clusters.records[mesh.cluster_table_base + local_cluster];
         let sphere = world_sphere(cluster, instance, scale);
-        if (sphere_outside_frustum(sphere)) {
+        if (cluster_frustum_outside_mask(cluster, instance) != 0u) {
             continue;
         }
         if (cone_culled(cluster, instance, sphere)) {
@@ -1927,10 +1920,12 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
             return;
         }
 
-        var frustum_visible = false;
+        var common_outside_mask = 0x3fu;
+        var has_intersecting_cluster = false;
         var occlusion_visible = hiz_params.extent.w == 0u;
         var occlusion_uncertain = false;
-        var maximum_error = 0.0;
+        var intersecting_error = 0.0;
+        var group_error = 0.0;
         for (var offset = 0u; offset < group_count; offset++) {
             let local_cluster = group_first + offset;
             if (!valid_cluster(mesh, local_cluster)) {
@@ -1939,9 +1934,13 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             let cluster = clusters.records[mesh.cluster_table_base + local_cluster];
             let sphere = world_sphere(cluster, instance, scale);
-            if (!sphere_outside_frustum(sphere)) {
-                frustum_visible = true;
-                maximum_error = max(maximum_error, projected_error(cluster, sphere, scale));
+            let outside_mask = cluster_frustum_outside_mask(cluster, instance);
+            let error = projected_error(cluster, sphere, scale);
+            common_outside_mask &= outside_mask;
+            group_error = max(group_error, error);
+            if (outside_mask == 0u) {
+                has_intersecting_cluster = true;
+                intersecting_error = max(intersecting_error, error);
                 if (hiz_params.extent.w != 0u) {
                     let hiz_result = previous_hiz_result(cluster, instance, sphere);
                     occlusion_visible = occlusion_visible || hiz_result != 0u;
@@ -1949,9 +1948,14 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         }
-        if (!frustum_visible) {
+        if (common_outside_mask != 0u) {
             atomicAdd(&counters.frustum_culled_groups, 1u);
             return;
+        }
+        let maximum_error = select(group_error, intersecting_error, has_intersecting_cluster);
+        if (!has_intersecting_cluster && hiz_params.extent.w != 0u) {
+            occlusion_visible = true;
+            occlusion_uncertain = true;
         }
         if (!occlusion_visible) {
             atomicAdd(&counters.occlusion_culled_groups, 1u);

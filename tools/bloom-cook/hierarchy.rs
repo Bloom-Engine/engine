@@ -165,10 +165,7 @@ pub fn build_meshlet_hierarchy(
             break;
         }
         let mut next = Vec::<ClusterGroup>::new();
-        let partitions = current
-            .chunks(GROUP_FANOUT)
-            .map(merge_contiguous_groups)
-            .collect::<Result<Vec<_>, _>>()?;
+        let partitions = partition_atomic_groups(&current, &nodes)?;
         for child_group in partitions {
             if child_group.count == 1 {
                 roots.push(child_group.start);
@@ -184,6 +181,8 @@ pub fn build_meshlet_hierarchy(
                 roots.extend(child_group.start..child_end);
                 continue;
             }
+
+            coalesce_atomic_replacement(&mut nodes, child_group)?;
 
             let parent_start = nodes.len();
             let parent_count =
@@ -261,6 +260,73 @@ pub fn build_meshlet_hierarchy(
             root_payload_bytes_by_level,
         },
     ))
+}
+
+/// Once several lower groups become the atomic child side of one hierarchy
+/// edge, refining that side must replace the complete group again. Preserve
+/// the union of their lower replacement ranges on every sibling and point
+/// those grandchildren back at the complete atomic group. Without this
+/// coalescing, multi-level traversal follows the first sibling's children and
+/// silently drops the remaining siblings during the next refinement.
+fn coalesce_atomic_replacement(nodes: &mut [Meshlet], group: ClusterGroup) -> Result<(), String> {
+    let group_end = group.end()?;
+    let mut ranges = nodes[group.start..group_end]
+        .iter()
+        .filter_map(|node| {
+            (node.first_child != NO_RELATION && node.child_count != 0)
+                .then_some((node.first_child as usize, node.child_count as usize))
+        })
+        .collect::<Vec<_>>();
+    if ranges.is_empty() {
+        return Ok(());
+    }
+    if ranges.len() != group.count {
+        return Err("atomic child group mixes terminal and refinable clusters".to_string());
+    }
+    ranges.sort_unstable();
+    ranges.dedup();
+    let replacement_start = ranges[0].0;
+    let mut replacement_end = replacement_start;
+    for (start, count) in ranges {
+        if start != replacement_end {
+            return Err("atomic child replacement ranges are not contiguous".to_string());
+        }
+        replacement_end = start
+            .checked_add(count)
+            .ok_or("atomic child replacement range overflow".to_string())?;
+    }
+    if replacement_end > nodes.len() {
+        return Err("atomic child replacement exceeds hierarchy nodes".to_string());
+    }
+    let replacement_count = replacement_end - replacement_start;
+    let replacement_start_u32 = u32::try_from(replacement_start)
+        .map_err(|_| "atomic child replacement start exceeds u32")?;
+    let replacement_count_u32 = u32::try_from(replacement_count)
+        .map_err(|_| "atomic child replacement count exceeds u32")?;
+    let group_start_u32 =
+        u32::try_from(group.start).map_err(|_| "atomic child group start exceeds u32")?;
+    let group_count_u32 =
+        u32::try_from(group.count).map_err(|_| "atomic child group count exceeds u32")?;
+    let shared_error = nodes[group.start..group_end]
+        .iter()
+        .map(|node| node.geometric_error)
+        .fold(0.0, f32::max);
+    let shared_bounds = hierarchy_bounds(&nodes[group.start..group_end]);
+
+    for node in &mut nodes[group.start..group_end] {
+        node.first_child = replacement_start_u32;
+        node.child_count = replacement_count_u32;
+        node.geometric_error = shared_error;
+        node.bounds.aabb_min = shared_bounds.aabb_min;
+        node.bounds.aabb_max = shared_bounds.aabb_max;
+        node.bounds.sphere_center = shared_bounds.sphere_center;
+        node.bounds.sphere_radius = shared_bounds.sphere_radius;
+    }
+    for child in &mut nodes[replacement_start..replacement_end] {
+        child.parent = group_start_u32;
+        child.parent_count = group_count_u32;
+    }
+    Ok(())
 }
 
 /// Offset local relation indices after appending one primitive hierarchy to a
@@ -350,6 +416,66 @@ fn remap_contiguous_range(
         }
     }
     u32::try_from(new_start).map_err(|_| format!("{label} relation start exceeds u32"))
+}
+
+fn partition_atomic_groups(
+    groups: &[ClusterGroup],
+    nodes: &[Meshlet],
+) -> Result<Vec<ClusterGroup>, String> {
+    let mut partitions = Vec::new();
+    let mut begin = 0usize;
+    while begin < groups.len() {
+        let mut end = begin + 1;
+        while end < groups.len() && end - begin < GROUP_FANOUT {
+            let previous = group_replacement_range(groups[end - 1], nodes)?;
+            let next = group_replacement_range(groups[end], nodes)?;
+            let replacement_contiguous = match (previous, next) {
+                (None, None) => true,
+                (Some((_, previous_end)), Some((next_start, _))) => previous_end == next_start,
+                _ => false,
+            };
+            if !replacement_contiguous {
+                break;
+            }
+            end += 1;
+        }
+        partitions.push(merge_contiguous_groups(&groups[begin..end])?);
+        begin = end;
+    }
+    Ok(partitions)
+}
+
+fn group_replacement_range(
+    group: ClusterGroup,
+    nodes: &[Meshlet],
+) -> Result<Option<(usize, usize)>, String> {
+    let end = group.end()?;
+    let first = nodes
+        .get(group.start)
+        .ok_or("atomic group start exceeds hierarchy nodes".to_string())?;
+    if first.first_child == NO_RELATION || first.child_count == 0 {
+        if nodes[group.start..end]
+            .iter()
+            .any(|node| node.first_child != NO_RELATION || node.child_count != 0)
+        {
+            return Err("atomic group mixes terminal and refinable siblings".to_string());
+        }
+        return Ok(None);
+    }
+    if nodes[group.start..end]
+        .iter()
+        .any(|node| node.first_child != first.first_child || node.child_count != first.child_count)
+    {
+        return Err("atomic siblings disagree on their replacement range".to_string());
+    }
+    let start = first.first_child as usize;
+    let replacement_end = start
+        .checked_add(first.child_count as usize)
+        .ok_or("atomic replacement range overflow".to_string())?;
+    if replacement_end > nodes.len() {
+        return Err("atomic replacement range exceeds hierarchy nodes".to_string());
+    }
+    Ok(Some((start, replacement_end)))
 }
 
 fn merge_contiguous_groups(groups: &[ClusterGroup]) -> Result<ClusterGroup, String> {
@@ -599,7 +725,7 @@ mod tests {
         assert_eq!(stats, other_stats);
         assert!(stats.parent_clusters > 0);
         assert!(stats.root_clusters < leaf_count as u32);
-        assert!(stats.maximum_level > 0);
+        assert!(stats.maximum_level >= 2);
 
         order_for_streaming(&mut a).unwrap();
         order_for_streaming(&mut b).unwrap();
@@ -623,6 +749,25 @@ mod tests {
             assert!(node.parent_count > 0);
             let parents =
                 &a[node.parent as usize..node.parent as usize + node.parent_count as usize];
+            let atomic_children = parents[0].first_child as usize
+                ..parents[0].first_child as usize + parents[0].child_count as usize;
+            if a[atomic_children.clone()]
+                .iter()
+                .all(|child| child.child_count != 0)
+            {
+                let lower = (
+                    a[atomic_children.start].first_child,
+                    a[atomic_children.start].child_count,
+                );
+                assert!(a[atomic_children.clone()]
+                    .iter()
+                    .all(|child| (child.first_child, child.child_count) == lower));
+                let lower_range = lower.0 as usize..(lower.0 + lower.1) as usize;
+                assert!(a[lower_range].iter().all(|grandchild| {
+                    grandchild.parent == parents[0].first_child
+                        && grandchild.parent_count == parents[0].child_count
+                }));
+            }
             for parent in parents {
                 assert!(parent.lod_level > node.lod_level);
                 let children = parent.first_child as usize
