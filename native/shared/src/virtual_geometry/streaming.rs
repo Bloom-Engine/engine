@@ -66,6 +66,7 @@ impl GpuVirtualStreamingConfig {
 pub struct GpuVirtualStreamingTelemetry {
     pub readback_capacity: u32,
     pub readback_bytes: u64,
+    pub io_budget_bytes: u64,
     pub pending_groups: u32,
     pub in_flight_readbacks: u32,
     pub captures_recorded: u64,
@@ -87,6 +88,7 @@ pub struct GpuVirtualStreamingTelemetry {
     pub in_flight_io_groups: u32,
     pub ready_io_groups: u32,
     pub reserved_io_bytes: u64,
+    pub peak_reserved_io_bytes: u64,
     pub io_requests: u64,
     pub io_completions: u64,
     pub io_failures: u64,
@@ -214,6 +216,7 @@ impl GpuVirtualPageStreamer {
             telemetry: GpuVirtualStreamingTelemetry {
                 readback_capacity: config.max_readback_requests,
                 readback_bytes: readback_bytes.saturating_mul(READBACK_SLOTS as u64),
+                io_budget_bytes: config.max_io_bytes,
                 ..GpuVirtualStreamingTelemetry::default()
             },
         })
@@ -512,6 +515,10 @@ impl GpuVirtualPageStreamer {
                 self.page_io.in_flight.insert(key, reserved_bytes);
                 self.page_io.reserved_bytes =
                     self.page_io.reserved_bytes.saturating_add(reserved_bytes);
+                self.telemetry.peak_reserved_io_bytes = self
+                    .telemetry
+                    .peak_reserved_io_bytes
+                    .max(self.page_io.reserved_bytes);
                 self.telemetry.io_requests = self.telemetry.io_requests.saturating_add(1);
                 blocked.insert(key);
             }

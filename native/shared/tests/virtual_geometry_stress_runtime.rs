@@ -184,9 +184,59 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
         virtual_runtime["pool_capacity_bytes"].as_u64(),
         Some(POOL_BYTES)
     );
+    let page_stride_bytes = virtual_runtime["pool_page_stride_bytes"]
+        .as_u64()
+        .expect("stress page-stride telemetry");
+    let resident_slot_bytes = virtual_runtime["resident_slot_bytes"]
+        .as_u64()
+        .expect("stress resident-slot telemetry");
+    let peak_resident_slot_bytes = virtual_runtime["peak_resident_slot_bytes"]
+        .as_u64()
+        .expect("stress peak-resident telemetry");
+    assert_eq!(page_stride_bytes, u64::from(archive.page_budget_bytes));
+    assert_eq!(resident_slot_bytes, resident_pages * page_stride_bytes);
     assert!(
-        resident_pages * u64::from(archive.page_budget_bytes) <= POOL_BYTES,
-        "resident physical pages exceeded the fixed pool"
+        resident_slot_bytes <= peak_resident_slot_bytes,
+        "current residency exceeded the recorded lifetime peak"
+    );
+    assert!(
+        peak_resident_slot_bytes <= POOL_BYTES,
+        "peak physical-page residency exceeded the fixed pool"
+    );
+    let metadata_gpu_bytes = virtual_runtime["metadata_gpu_bytes"]
+        .as_u64()
+        .expect("stress metadata allocation telemetry");
+    assert_eq!(
+        metadata_gpu_bytes,
+        [
+            "page_table_bytes",
+            "mesh_table_bytes",
+            "cluster_table_bytes"
+        ]
+        .into_iter()
+        .map(|field| virtual_runtime[field].as_u64().expect(field))
+        .sum::<u64>()
+    );
+    assert_eq!(
+        virtual_runtime["total_gpu_bytes"].as_u64(),
+        Some(POOL_BYTES + metadata_gpu_bytes),
+        "reported GPU allocation did not match pool plus metadata"
+    );
+    let readback_capacity = virtual_runtime["streaming_readback_capacity"]
+        .as_u64()
+        .expect("streaming readback capacity telemetry");
+    let readback_bytes = virtual_runtime["streaming_readback_bytes"]
+        .as_u64()
+        .expect("streaming readback allocation telemetry");
+    assert_eq!(readback_capacity, 4_096);
+    assert_eq!(
+        readback_bytes,
+        2 * (std::mem::size_of::<bloom_shared::virtual_geometry::GpuVirtualTraversalCounters>()
+            as u64
+            + readback_capacity
+                * std::mem::size_of::<bloom_shared::virtual_geometry::GpuVirtualPageRequest>()
+                    as u64),
+        "reported readback staging did not match its fixed allocation"
     );
     for counter in [
         "last_selected_overflow",
@@ -213,11 +263,21 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
             Some(0),
             "file-backed stress run reported page I/O failures"
         );
+        let io_budget_bytes = virtual_runtime["streaming_io_budget_bytes"]
+            .as_u64()
+            .expect("streaming I/O budget telemetry");
+        let peak_reserved_io_bytes = virtual_runtime["streaming_io_peak_reserved_bytes"]
+            .as_u64()
+            .expect("streaming peak I/O reservation telemetry");
+        assert_eq!(io_budget_bytes, 32 * 1024 * 1024);
         assert!(
-            virtual_runtime["streaming_io_reserved_bytes"]
-                .as_u64()
-                .is_some_and(|bytes| bytes <= 32 * 1024 * 1024),
+            peak_reserved_io_bytes <= io_budget_bytes,
             "file-backed stress run exceeded its CPU I/O budget"
+        );
+        assert_eq!(
+            virtual_runtime["streaming_peak_staging_bytes"].as_u64(),
+            Some(readback_bytes + peak_reserved_io_bytes),
+            "reported staging peak did not include readback plus CPU I/O reservation"
         );
     }
 

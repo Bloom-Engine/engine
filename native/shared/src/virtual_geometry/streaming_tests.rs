@@ -212,6 +212,9 @@ fn file_backed_feedback_reads_only_requested_pages_off_thread() {
     assert_eq!(telemetry.in_flight_io_groups, 0);
     assert_eq!(telemetry.ready_io_groups, 0);
     assert_eq!(telemetry.reserved_io_bytes, 0);
+    assert_eq!(telemetry.io_budget_bytes, 8 * u64::from(MIN_PAGE_BYTES));
+    assert!(telemetry.peak_reserved_io_bytes > 0);
+    assert!(telemetry.peak_reserved_io_bytes <= telemetry.io_budget_bytes);
     assert_eq!(telemetry.io_bytes_read, telemetry.uploaded_bytes);
     assert!(telemetry.uploaded_pages > 0);
     assert!(pool

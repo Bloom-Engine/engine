@@ -183,9 +183,11 @@ pub struct GpuPageTransition {
 pub struct GpuVirtualGeometryTelemetry {
     pub frame: u64,
     pub capacity_bytes: u64,
+    pub page_stride_bytes: u32,
     pub page_table_bytes: u64,
     pub mesh_table_bytes: u64,
     pub cluster_table_bytes: u64,
+    pub metadata_gpu_bytes: u64,
     pub total_gpu_bytes: u64,
     pub slot_count: u32,
     pub active_meshes: u32,
@@ -193,6 +195,7 @@ pub struct GpuVirtualGeometryTelemetry {
     pub live_cluster_records: u32,
     pub resident_pages: u32,
     pub resident_slot_bytes: u64,
+    pub peak_resident_slot_bytes: u64,
     pub resident_payload_bytes: u64,
     pub pinned_pages: u32,
     pub pinned_slot_bytes: u64,
@@ -268,6 +271,7 @@ struct Counters {
     exact_resolutions: u64,
     fallback_resolutions: u64,
     unresolved_requests: u64,
+    peak_resident_slot_bytes: u64,
 }
 
 /// Explicit, lazily constructed virtual-geometry GPU residency pool.
@@ -492,6 +496,8 @@ impl GpuVirtualGeometryPool {
         self.counters.frame_evictions += root_evictions;
         self.counters.uploads += u64::from(root_page_count);
         self.counters.evictions += u64::from(root_evictions);
+        let resident_slot_bytes = self.resident_slot_bytes();
+        self.record_peak_resident_slot_bytes(resident_slot_bytes);
         Ok(mesh_id)
     }
 
@@ -705,11 +711,13 @@ impl GpuVirtualGeometryPool {
         self.counters.frame_evictions += evicted.len() as u32;
         self.counters.uploads += uploaded.len() as u64;
         self.counters.evictions += evicted.len() as u64;
+        let resident_slot_bytes = self.resident_slot_bytes();
+        self.record_peak_resident_slot_bytes(resident_slot_bytes);
         Ok(GpuPageTransition {
             group,
             uploaded,
             evicted,
-            resident_slot_bytes: self.resident_slot_bytes(),
+            resident_slot_bytes,
         })
     }
 
@@ -871,19 +879,26 @@ impl GpuVirtualGeometryPool {
     }
 
     pub fn telemetry(&self) -> GpuVirtualGeometryTelemetry {
+        let page_table_bytes = self.page_table_bytes();
+        let mesh_table_bytes = self.mesh_table_bytes();
+        let cluster_table_bytes = self.cluster_table_bytes();
+        let metadata_gpu_bytes = page_table_bytes
+            .saturating_add(mesh_table_bytes)
+            .saturating_add(cluster_table_bytes);
         let mut telemetry = GpuVirtualGeometryTelemetry {
             frame: self.frame,
             capacity_bytes: self.config.capacity_bytes,
-            page_table_bytes: self.page_table_bytes(),
-            mesh_table_bytes: self.mesh_table_bytes(),
-            cluster_table_bytes: self.cluster_table_bytes(),
+            page_stride_bytes: self.config.page_stride_bytes,
+            page_table_bytes,
+            mesh_table_bytes,
+            cluster_table_bytes,
+            metadata_gpu_bytes,
             total_gpu_bytes: self
                 .config
                 .capacity_bytes
-                .saturating_add(self.page_table_bytes())
-                .saturating_add(self.mesh_table_bytes())
-                .saturating_add(self.cluster_table_bytes()),
+                .saturating_add(metadata_gpu_bytes),
             slot_count: self.physical_slots.len() as u32,
+            peak_resident_slot_bytes: self.counters.peak_resident_slot_bytes,
             frame_upload_pages: self.counters.frame_upload_pages,
             frame_upload_bytes: self.counters.frame_upload_bytes,
             frame_evictions: self.counters.frame_evictions,
@@ -1311,6 +1326,13 @@ impl GpuVirtualGeometryPool {
             .filter(|slot| slot.owner.is_some() && slot.retiring_until.is_none())
             .count() as u64
             * u64::from(self.config.page_stride_bytes)
+    }
+
+    fn record_peak_resident_slot_bytes(&mut self, resident_slot_bytes: u64) {
+        self.counters.peak_resident_slot_bytes = self
+            .counters
+            .peak_resident_slot_bytes
+            .max(resident_slot_bytes);
     }
 
     fn mesh_table_bytes(&self) -> u64 {

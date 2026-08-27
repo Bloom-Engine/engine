@@ -1791,11 +1791,17 @@ fn gpu_pool_uploads_validated_pages_and_matches_its_gpu_tables() {
 
     let telemetry = pool.telemetry();
     assert_eq!(telemetry.capacity_bytes, 3 * u64::from(MIN_PAGE_BYTES));
+    assert_eq!(telemetry.page_stride_bytes, MIN_PAGE_BYTES);
     assert_eq!(telemetry.resident_slot_bytes, telemetry.capacity_bytes);
+    assert_eq!(
+        telemetry.peak_resident_slot_bytes,
+        telemetry.resident_slot_bytes
+    );
     assert_eq!(telemetry.resident_payload_bytes, 1_120);
     assert_eq!(telemetry.page_table_bytes, 256);
     assert_eq!(telemetry.mesh_table_bytes, 96);
     assert_eq!(telemetry.cluster_table_bytes, 4_096);
+    assert_eq!(telemetry.metadata_gpu_bytes, 4_448);
     assert_eq!(telemetry.total_gpu_bytes, 16_736);
     assert_eq!(telemetry.live_cluster_records, 8);
     assert_eq!(telemetry.frame_upload_pages, 3);
