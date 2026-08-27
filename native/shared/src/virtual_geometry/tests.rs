@@ -1457,6 +1457,61 @@ fn gpu_hierarchy_selector_refines_atomic_groups_that_straddle_frustum_planes() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn gpu_hierarchy_selector_fails_open_laterally_for_near_clipped_groups() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping near-clip frustum oracle");
+        return;
+    };
+    let mut archive = hierarchy_archive();
+    for cluster in &mut archive.clusters {
+        cluster.aabb_min = [0.02, -0.005, -0.03];
+        cluster.aabb_max = [0.03, 0.005, 0.0];
+        cluster.sphere_center = [0.025, 0.0, -0.015];
+        cluster.sphere_radius = 0.0175;
+    }
+
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(archive))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, mesh);
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let view_projection =
+        crate::renderer::mat4_perspective(60.0_f32.to_radians(), 1.0, 0.01, 1_000.0);
+    let view = VirtualGeometryView {
+        frustum_planes: crate::scene::extract_frustum_planes(&view_projection),
+        view_projection,
+        camera_position: [0.0; 3],
+        projection_scale: 100.0,
+        target_error_pixels: 1.0,
+    };
+
+    let near_clipped = [GpuVirtualInstance::identity(mesh, 20)];
+    let (selected, requests, counters) =
+        assert_traversal_matches_cpu(&device, &queue, &pool, &selector, &near_clipped, view);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|record| record.cluster_table_index)
+            .collect::<Vec<_>>(),
+        [4, 5, 6, 7]
+    );
+    assert!(requests.is_empty());
+    assert_eq!(counters.frustum_culled_groups, 0);
+
+    let mut far_offscreen_model = crate::renderer::IDENTITY_MAT4;
+    far_offscreen_model[3][0] = 5.0;
+    far_offscreen_model[3][2] = -2.0;
+    let far_offscreen = [GpuVirtualInstance::new(mesh, 21, far_offscreen_model).unwrap()];
+    let (selected, requests, counters) =
+        assert_traversal_matches_cpu(&device, &queue, &pool, &selector, &far_offscreen, view);
+    assert!(selected.is_empty());
+    assert!(requests.is_empty());
+    assert_eq!(counters.frustum_culled_groups, 2);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn gpu_hierarchy_selector_keeps_resident_ancestors_and_requests_missing_pages() {
     let Some((device, queue)) = try_traversal_device() else {
         eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy fallback oracle");

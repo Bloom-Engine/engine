@@ -13,9 +13,7 @@ mod error_impl;
 pub use error_impl::VirtualGeometryTraversalError;
 #[path = "traversal_math.rs"]
 mod math_impl;
-#[cfg(test)]
-use math_impl::dot3;
-use math_impl::{finite_affine, normal_rows_and_cone_safety};
+use math_impl::{dot3, finite_affine, normal_rows_and_cone_safety};
 
 #[cfg(test)]
 use super::gpu_pool::MAX_GPU_HIERARCHY_LEVELS;
@@ -538,7 +536,12 @@ impl GpuVirtualHierarchySelector {
                 view.camera_position[2],
                 view.projection_scale,
             ],
-            thresholds: [view.target_error_pixels, 1.0e-5, 0.0, 0.0],
+            thresholds: [
+                view.target_error_pixels,
+                1.0e-5,
+                lateral_frustum_guard_w(view),
+                0.0,
+            ],
             dispatch: [
                 instances.len() as u32,
                 maximum_root_clusters,
@@ -784,6 +787,25 @@ fn validate_view(view: VirtualGeometryView) -> Result<(), VirtualGeometryTravers
     Ok(())
 }
 
+fn lateral_frustum_guard_w(view: VirtualGeometryView) -> f32 {
+    const MINIMUM_GUARD_W: f32 = 1.0e-5;
+    let near = view.frustum_planes[4];
+    let near_normal = [near[0], near[1], near[2]];
+    let near_normal_length = dot3(near_normal, near_normal).sqrt();
+    let w_gradient = [
+        view.view_projection[0][3],
+        view.view_projection[1][3],
+        view.view_projection[2][3],
+    ];
+    let w_gradient_length = dot3(w_gradient, w_gradient).sqrt();
+    if near_normal_length <= MINIMUM_GUARD_W || w_gradient_length <= MINIMUM_GUARD_W {
+        return MINIMUM_GUARD_W;
+    }
+    let camera_near_signed_distance =
+        (dot3(near_normal, view.camera_position) + near[3]) / near_normal_length;
+    (-camera_near_signed_distance * w_gradient_length).max(MINIMUM_GUARD_W)
+}
+
 fn validate_instance(instance: GpuVirtualInstance) -> Result<(), VirtualGeometryTraversalError> {
     let finite = instance
         .model
@@ -950,7 +972,7 @@ pub(super) fn select_cpu_reference(
                 for cluster in &archive.clusters[range.clone()] {
                     let sphere = cpu_world_sphere(cluster, *instance, scale);
                     let outside_mask =
-                        cpu_cluster_frustum_outside_mask(cluster, *instance, view.frustum_planes);
+                        cpu_cluster_frustum_outside_mask(cluster, *instance, sphere, view);
                     let error = cpu_projected_error(cluster, sphere, scale, view);
                     common_outside_mask &= outside_mask;
                     group_error = group_error.max(error);
@@ -1126,7 +1148,7 @@ fn cpu_select_group(
         .enumerate()
     {
         let sphere = cpu_world_sphere(cluster, instance, scale);
-        if cpu_cluster_frustum_outside_mask(cluster, instance, view.frustum_planes) != 0 {
+        if cpu_cluster_frustum_outside_mask(cluster, instance, sphere, view) != 0 {
             continue;
         }
         if cpu_cone_culled(cluster, instance, sphere, view.camera_position) {
@@ -1235,7 +1257,8 @@ fn cpu_scale_bound(model: [[f32; 4]; 4]) -> f32 {
 fn cpu_cluster_frustum_outside_mask(
     cluster: &bloom_geometry_format::ClusterRecord,
     instance: GpuVirtualInstance,
-    planes: [[f32; 4]; 6],
+    sphere: CpuWorldSphere,
+    view: VirtualGeometryView,
 ) -> u32 {
     let local_center: [f32; 3] =
         std::array::from_fn(|axis| (cluster.aabb_min[axis] + cluster.aabb_max[axis]) * 0.5);
@@ -1256,18 +1279,42 @@ fn cpu_cluster_frustum_outside_mask(
             + model[2][2] * local_center[2]
             + model[3][2],
     ];
-    planes
-        .into_iter()
-        .enumerate()
-        .fold(0u32, |mask, (plane_index, plane)| {
-            let normal = [plane[0], plane[1], plane[2]];
-            let projected_radius = (dot3(normal, [model[0][0], model[0][1], model[0][2]]).abs()
-                * local_extent[0])
-                + (dot3(normal, [model[1][0], model[1][1], model[1][2]]).abs() * local_extent[1])
-                + (dot3(normal, [model[2][0], model[2][1], model[2][2]]).abs() * local_extent[2]);
-            mask | (u32::from(dot3(normal, world_center) + plane[3] < -projected_radius)
-                << plane_index)
-        })
+    let outside_mask =
+        view.frustum_planes
+            .into_iter()
+            .enumerate()
+            .fold(0u32, |mask, (plane_index, plane)| {
+                let normal = [plane[0], plane[1], plane[2]];
+                let projected_radius =
+                    (dot3(normal, [model[0][0], model[0][1], model[0][2]]).abs() * local_extent[0])
+                        + (dot3(normal, [model[1][0], model[1][1], model[1][2]]).abs()
+                            * local_extent[1])
+                        + (dot3(normal, [model[2][0], model[2][1], model[2][2]]).abs()
+                            * local_extent[2]);
+                mask | (u32::from(dot3(normal, world_center) + plane[3] < -projected_radius)
+                    << plane_index)
+            });
+
+    // Hardware clips a primitive that crosses the near plane before rasterization. Its
+    // un-clipped cluster bound can simultaneously classify outside a lateral homogeneous plane,
+    // so rejecting it here can punch camera-adjacent holes. Fail open only for the four lateral
+    // planes when the conservative sphere reaches the view's actual near-clip distance; near and
+    // far rejection remain active.
+    let clip_w = view.view_projection[0][3] * sphere.center[0]
+        + view.view_projection[1][3] * sphere.center[1]
+        + view.view_projection[2][3] * sphere.center[2]
+        + view.view_projection[3][3];
+    let w_gradient = [
+        view.view_projection[0][3],
+        view.view_projection[1][3],
+        view.view_projection[2][3],
+    ];
+    let nearest_w = clip_w - sphere.radius * dot3(w_gradient, w_gradient).sqrt();
+    if nearest_w <= lateral_frustum_guard_w(view) {
+        outside_mask & !0x0f
+    } else {
+        outside_mask
+    }
 }
 
 #[cfg(test)]
@@ -1635,6 +1682,7 @@ fn previous_hiz_group_result(
 fn cluster_frustum_outside_mask(
     cluster: GpuVirtualClusterEntry,
     instance: GpuVirtualInstance,
+    sphere: WorldSphere,
 ) -> u32 {
     let local_center = (cluster.aabb_min_error.xyz + cluster.aabb_max_radius.xyz) * 0.5;
     let local_extent = (cluster.aabb_max_radius.xyz - cluster.aabb_min_error.xyz) * 0.5;
@@ -1653,6 +1701,16 @@ fn cluster_frustum_outside_mask(
         if (dot(plane.xyz, world_center) + plane.w < -projected_radius) {
             outside_mask |= 1u << plane_index;
         }
+    }
+    let clip = params.view_projection * vec4<f32>(sphere.center, 1.0);
+    let w_gradient = vec3<f32>(
+        params.view_projection[0].w,
+        params.view_projection[1].w,
+        params.view_projection[2].w
+    );
+    let nearest_w = clip.w - sphere.radius * length(w_gradient);
+    if (nearest_w <= params.thresholds.z) {
+        outside_mask &= 0x30u;
     }
     return outside_mask;
 }
@@ -1789,7 +1847,7 @@ fn select_group(
         }
         let cluster = clusters.records[mesh.cluster_table_base + local_cluster];
         let sphere = world_sphere(cluster, instance, scale);
-        if (cluster_frustum_outside_mask(cluster, instance) != 0u) {
+        if (cluster_frustum_outside_mask(cluster, instance, sphere) != 0u) {
             continue;
         }
         if (cone_culled(cluster, instance, sphere)) {
@@ -1900,7 +1958,7 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             let cluster = clusters.records[mesh.cluster_table_base + local_cluster];
             let sphere = world_sphere(cluster, instance, scale);
-            let outside_mask = cluster_frustum_outside_mask(cluster, instance);
+            let outside_mask = cluster_frustum_outside_mask(cluster, instance, sphere);
             let error = projected_error(cluster, sphere, scale);
             common_outside_mask &= outside_mask;
             group_error = max(group_error, error);
