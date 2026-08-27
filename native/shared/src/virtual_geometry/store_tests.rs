@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::{json, Value};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -10,7 +11,7 @@ static NEXT_STORE_TEST: AtomicU64 = AtomicU64::new(1);
 fn native_store_loader_resolves_explicit_profiles_without_blocking_poll() {
     let root = temporary_store("profiles");
     let asset = hierarchy_asset(hierarchy_archive());
-    let artifact = install_artifact(&root, asset.file_bytes());
+    let artifact = install_artifact(&root, asset.file_bytes().unwrap());
     write_index(
         &root,
         vec![
@@ -48,6 +49,14 @@ fn native_store_loader_resolves_explicit_profiles_without_blocking_poll() {
         "macos/high"
     );
     assert_eq!(exact.asset.archive(), asset.archive());
+    assert!(exact.asset.is_file_backed());
+    assert!(exact.asset.file_bytes().is_none());
+    assert_eq!(exact.asset.page_bytes(0), asset.page_bytes(0));
+    assert!(exact.asset.page_bytes(3).is_none());
+    assert_eq!(
+        exact.asset.read_page_owned(3).unwrap(),
+        asset.page_bytes(3).unwrap()
+    );
 
     let fallback = wait_for(&mut loader, fallback).unwrap();
     assert_eq!(
@@ -67,7 +76,7 @@ fn native_store_loader_resolves_explicit_profiles_without_blocking_poll() {
     assert_eq!(telemetry.failed_requests, 0);
     assert_eq!(
         telemetry.loaded_artifact_bytes,
-        2 * asset.file_bytes().len() as u64
+        2 * asset.file_bytes().unwrap().len() as u64
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -76,7 +85,7 @@ fn native_store_loader_resolves_explicit_profiles_without_blocking_poll() {
 fn native_store_loader_requires_opt_in_for_unprofiled_and_fails_closed() {
     let root = temporary_store("unprofiled");
     let asset = hierarchy_asset(hierarchy_archive());
-    let artifact = install_artifact(&root, asset.file_bytes());
+    let artifact = install_artifact(&root, asset.file_bytes().unwrap());
     write_index(&root, vec![index_entry("props/bench", None, &artifact)]);
     let mut loader =
         VirtualGeometryStoreLoader::new(&root, VirtualGeometryStoreConfig::default()).unwrap();
@@ -111,7 +120,7 @@ fn native_store_loader_requires_opt_in_for_unprofiled_and_fails_closed() {
 fn native_store_loader_rejects_corrupt_index_selected_chunks() {
     let root = temporary_store("corrupt");
     let asset = hierarchy_asset(hierarchy_archive());
-    let mut corrupt = asset.file_bytes().to_vec();
+    let mut corrupt = asset.file_bytes().unwrap().to_vec();
     *corrupt.last_mut().unwrap() ^= 0x80;
     let artifact = install_artifact(&root, &corrupt);
     let mut entry = index_entry("props/corrupt", Some(("macos", "high")), &artifact);
@@ -139,7 +148,7 @@ fn native_store_loader_rejects_corrupt_index_selected_chunks() {
 fn native_store_loader_bounds_unclaimed_completions() {
     let root = temporary_store("bounded");
     let asset = hierarchy_asset(hierarchy_archive());
-    let artifact = install_artifact(&root, asset.file_bytes());
+    let artifact = install_artifact(&root, asset.file_bytes().unwrap());
     write_index(
         &root,
         vec![index_entry("props/box", Some(("macos", "high")), &artifact)],
@@ -181,6 +190,45 @@ fn native_store_loader_bounds_unclaimed_completions() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn file_backed_pages_reject_damage_after_initial_validation() {
+    let root = temporary_store("page-damage");
+    let memory = hierarchy_asset(hierarchy_archive());
+    let artifact = install_artifact(&root, memory.file_bytes().unwrap());
+    write_index(
+        &root,
+        vec![index_entry(
+            "props/arch",
+            Some(("macos", "high")),
+            &artifact,
+        )],
+    );
+    let mut loader =
+        VirtualGeometryStoreLoader::new(&root, VirtualGeometryStoreConfig::default()).unwrap();
+    let ticket = loader
+        .request(VirtualGeometryStoreRequest::new(
+            "props/arch",
+            profile("macos", "high"),
+        ))
+        .unwrap();
+    let resolved = wait_for(&mut loader, ticket).unwrap();
+    let range = resolved.asset.page_file_range(3).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&resolved.artifact_path)
+        .unwrap();
+    file.seek(SeekFrom::Start(range.start as u64)).unwrap();
+    file.write_all(&[0xff]).unwrap();
+    file.flush().unwrap();
+
+    assert!(matches!(
+        resolved.asset.read_page_owned(3),
+        Err(VirtualGeometryLoadError::Identity(_))
+    ));
+    assert_eq!(resolved.asset.page_bytes(0), memory.page_bytes(0));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 struct InstalledArtifact {
     bytes: u64,
     format_version: u32,
@@ -193,8 +241,8 @@ struct InstalledArtifact {
 fn install_artifact(root: &Path, bytes: &[u8]) -> InstalledArtifact {
     let archive = bloom_geometry_format::decode_geometry(bytes);
     let file_hash = sha256(bytes);
-    let path = format!("chunks/{}.bgeo", hex_hash(file_hash));
-    std::fs::create_dir_all(root.join("chunks")).unwrap();
+    let path = format!("chunks/sha256/{}.bgeo", hex_hash(file_hash));
+    std::fs::create_dir_all(root.join("chunks/sha256")).unwrap();
     std::fs::write(root.join(&path), bytes).unwrap();
     match archive {
         Ok(archive) => InstalledArtifact {

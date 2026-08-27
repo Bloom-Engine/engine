@@ -2,9 +2,13 @@ use super::{
     GpuVirtualGeometryPool, GpuVirtualHierarchySelector, GpuVirtualPageRequest,
     GpuVirtualTraversalCounters, VirtualGeometryGpuError, VirtualMeshId, VirtualPageId,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use super::{VirtualGeometryAsset, VirtualGeometryLoadError};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -25,6 +29,10 @@ pub struct GpuVirtualStreamingConfig {
     pub max_pending_groups: u32,
     /// Maximum atomic residency attempts made during one renderer frame.
     pub max_group_attempts_per_frame: u32,
+    /// Maximum file-backed atomic groups with unclaimed I/O work.
+    pub max_io_requests: u32,
+    /// Maximum payload bytes reserved across in-flight and ready file reads.
+    pub max_io_bytes: u64,
 }
 
 impl Default for GpuVirtualStreamingConfig {
@@ -33,6 +41,8 @@ impl Default for GpuVirtualStreamingConfig {
             max_readback_requests: 4_096,
             max_pending_groups: 8_192,
             max_group_attempts_per_frame: 256,
+            max_io_requests: 128,
+            max_io_bytes: 32 * 1024 * 1024,
         }
     }
 }
@@ -46,6 +56,8 @@ impl GpuVirtualStreamingConfig {
             max_readback_requests,
             max_pending_groups: max_readback_requests.saturating_mul(2).max(1),
             max_group_attempts_per_frame: max_readback_requests.min(256).max(1),
+            max_io_requests: max_readback_requests.min(128).max(1),
+            max_io_bytes: 32 * 1024 * 1024,
         }
     }
 }
@@ -72,6 +84,14 @@ pub struct GpuVirtualStreamingTelemetry {
     pub budget_stalls: u64,
     pub uploaded_pages: u64,
     pub uploaded_bytes: u64,
+    pub in_flight_io_groups: u32,
+    pub ready_io_groups: u32,
+    pub reserved_io_bytes: u64,
+    pub io_requests: u64,
+    pub io_completions: u64,
+    pub io_failures: u64,
+    pub io_queue_stalls: u64,
+    pub io_bytes_read: u64,
     pub last_visible_groups: u32,
     pub last_frustum_culled_groups: u32,
     pub last_cone_culled_clusters: u32,
@@ -106,6 +126,38 @@ struct CompletedFeedback {
     requests: Vec<GpuVirtualPageRequest>,
 }
 
+type GroupKey = (u32, u32);
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PageIoRequest {
+    key: GroupKey,
+    asset: Arc<VirtualGeometryAsset>,
+    pages: Vec<u32>,
+    reserved_bytes: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PageIoCompletion {
+    key: GroupKey,
+    reserved_bytes: u64,
+    result: Result<BTreeMap<u32, Vec<u8>>, VirtualGeometryLoadError>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ReadyPageGroup {
+    reserved_bytes: u64,
+    payloads: BTreeMap<u32, Vec<u8>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PageIoState {
+    request_tx: SyncSender<PageIoRequest>,
+    completion_rx: Receiver<PageIoCompletion>,
+    in_flight: BTreeMap<GroupKey, u64>,
+    ready: BTreeMap<GroupKey, ReadyPageGroup>,
+    reserved_bytes: u64,
+}
+
 /// Renderer-owned asynchronous bridge from traversal requests to the fixed
 /// page pool. Copies and mappings are double-buffered; polling is non-blocking,
 /// and all uploads remain constrained by the pool's per-frame budgets.
@@ -117,7 +169,9 @@ pub struct GpuVirtualPageStreamer {
     recorded_slot: Option<usize>,
     next_sequence: u64,
     latest_consumed_sequence: u64,
-    pending: BTreeMap<(u32, u32), PendingGroup>,
+    pending: BTreeMap<GroupKey, PendingGroup>,
+    #[cfg(not(target_arch = "wasm32"))]
+    page_io: PageIoState,
     telemetry: GpuVirtualStreamingTelemetry,
 }
 
@@ -144,6 +198,8 @@ impl GpuVirtualPageStreamer {
             status: Arc::new(AtomicU8::new(0)),
             sequence: 0,
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        let page_io = create_page_io(config.max_io_requests)?;
         Ok(Self {
             config,
             selector_request_capacity: selector.config().max_page_requests,
@@ -153,6 +209,8 @@ impl GpuVirtualPageStreamer {
             next_sequence: 1,
             latest_consumed_sequence: 0,
             pending: BTreeMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            page_io,
             telemetry: GpuVirtualStreamingTelemetry {
                 readback_capacity: config.max_readback_requests,
                 readback_bytes: readback_bytes.saturating_mul(READBACK_SLOTS as u64),
@@ -277,6 +335,8 @@ impl GpuVirtualPageStreamer {
     /// caused only by this frame's residency budgets is retained for a later
     /// frame; malformed or generation-stale requests are removed.
     pub fn service(&mut self, pool: &mut GpuVirtualGeometryPool, queue: &wgpu::Queue) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.drain_page_io();
         let mut blocked = BTreeSet::new();
         for _ in 0..self.config.max_group_attempts_per_frame {
             let Some(key) = self.next_pending_key(&blocked) else {
@@ -294,30 +354,20 @@ impl GpuVirtualPageStreamer {
                 .is_err()
             {
                 self.pending.remove(&key);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.discard_ready_group(key);
                 self.telemetry.groups_rejected = self.telemetry.groups_rejected.saturating_add(1);
+                continue;
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if pool.asset(mesh).is_ok_and(|asset| asset.is_file_backed()) {
+                self.service_file_group(pool, queue, key, request, &mut blocked);
                 continue;
             }
             match pool.make_group_resident(queue, mesh, request.source_cluster) {
                 Ok(transition) => {
-                    self.pending.remove(&key);
-                    self.telemetry.groups_resolved =
-                        self.telemetry.groups_resolved.saturating_add(1);
-                    self.telemetry.uploaded_pages = self
-                        .telemetry
-                        .uploaded_pages
-                        .saturating_add(transition.uploaded.len() as u64);
-                    self.telemetry.uploaded_bytes = self.telemetry.uploaded_bytes.saturating_add(
-                        transition
-                            .uploaded
-                            .iter()
-                            .filter_map(|(page, _)| {
-                                pool.asset(page.mesh).ok().map(|asset| {
-                                    asset.archive().pages[page.page_index as usize].payload_bytes
-                                        as u64
-                                })
-                            })
-                            .sum::<u64>(),
-                    );
+                    self.record_resolved_group(pool, key, &transition);
                 }
                 Err(
                     VirtualGeometryGpuError::UploadBudgetExceeded { .. }
@@ -337,6 +387,200 @@ impl GpuVirtualPageStreamer {
         self.refresh_live_telemetry();
     }
 
+    fn record_resolved_group(
+        &mut self,
+        pool: &GpuVirtualGeometryPool,
+        key: GroupKey,
+        transition: &super::GpuPageTransition,
+    ) {
+        self.pending.remove(&key);
+        self.telemetry.groups_resolved = self.telemetry.groups_resolved.saturating_add(1);
+        self.telemetry.uploaded_pages = self
+            .telemetry
+            .uploaded_pages
+            .saturating_add(transition.uploaded.len() as u64);
+        self.telemetry.uploaded_bytes = self.telemetry.uploaded_bytes.saturating_add(
+            transition
+                .uploaded
+                .iter()
+                .filter_map(|(page, _)| {
+                    pool.asset(page.mesh).ok().map(|asset| {
+                        asset.archive().pages[page.page_index as usize].payload_bytes as u64
+                    })
+                })
+                .sum::<u64>(),
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn service_file_group(
+        &mut self,
+        pool: &mut GpuVirtualGeometryPool,
+        queue: &wgpu::Queue,
+        key: GroupKey,
+        request: GpuVirtualPageRequest,
+        blocked: &mut BTreeSet<GroupKey>,
+    ) {
+        let mesh = VirtualMeshId::from_raw(request.mesh_id);
+        if let Some(ready) = self.page_io.ready.remove(&key) {
+            let result = pool.make_group_resident_with_pages(
+                queue,
+                mesh,
+                request.source_cluster,
+                &ready.payloads,
+            );
+            match result {
+                Ok(transition) => {
+                    self.release_io_reservation(ready.reserved_bytes);
+                    self.record_resolved_group(pool, key, &transition);
+                }
+                Err(
+                    VirtualGeometryGpuError::UploadBudgetExceeded { .. }
+                    | VirtualGeometryGpuError::EvictionBudgetExceeded
+                    | VirtualGeometryGpuError::PhysicalPoolExhausted { .. },
+                ) => {
+                    self.page_io.ready.insert(key, ready);
+                    blocked.insert(key);
+                    self.telemetry.budget_stalls = self.telemetry.budget_stalls.saturating_add(1);
+                }
+                Err(_) => {
+                    self.release_io_reservation(ready.reserved_bytes);
+                    self.pending.remove(&key);
+                    self.telemetry.groups_rejected =
+                        self.telemetry.groups_rejected.saturating_add(1);
+                }
+            }
+            return;
+        }
+        if self.page_io.in_flight.contains_key(&key) {
+            blocked.insert(key);
+            return;
+        }
+
+        let missing_pages = match pool.missing_group_pages(mesh, request.source_cluster) {
+            Ok(pages) => pages,
+            Err(_) => {
+                self.pending.remove(&key);
+                self.telemetry.groups_rejected = self.telemetry.groups_rejected.saturating_add(1);
+                return;
+            }
+        };
+        if missing_pages.is_empty() {
+            match pool.make_group_resident_with_pages(
+                queue,
+                mesh,
+                request.source_cluster,
+                &BTreeMap::new(),
+            ) {
+                Ok(transition) => self.record_resolved_group(pool, key, &transition),
+                Err(_) => {
+                    self.pending.remove(&key);
+                    self.telemetry.groups_rejected =
+                        self.telemetry.groups_rejected.saturating_add(1);
+                }
+            }
+            return;
+        }
+        let asset = match pool.asset(mesh) {
+            Ok(asset) => Arc::clone(asset),
+            Err(_) => {
+                self.pending.remove(&key);
+                self.telemetry.groups_rejected = self.telemetry.groups_rejected.saturating_add(1);
+                return;
+            }
+        };
+        let reserved_bytes = missing_pages
+            .iter()
+            .map(|page| asset.archive().pages[*page as usize].payload_bytes as u64)
+            .sum::<u64>();
+        let outstanding = self.page_io.in_flight.len() + self.page_io.ready.len();
+        if outstanding >= self.config.max_io_requests as usize
+            || self.page_io.reserved_bytes.saturating_add(reserved_bytes) > self.config.max_io_bytes
+        {
+            blocked.insert(key);
+            self.telemetry.io_queue_stalls = self.telemetry.io_queue_stalls.saturating_add(1);
+            return;
+        }
+        let io_request = PageIoRequest {
+            key,
+            asset,
+            pages: missing_pages,
+            reserved_bytes,
+        };
+        match self.page_io.request_tx.try_send(io_request) {
+            Ok(()) => {
+                self.page_io.in_flight.insert(key, reserved_bytes);
+                self.page_io.reserved_bytes =
+                    self.page_io.reserved_bytes.saturating_add(reserved_bytes);
+                self.telemetry.io_requests = self.telemetry.io_requests.saturating_add(1);
+                blocked.insert(key);
+            }
+            Err(TrySendError::Full(_)) => {
+                blocked.insert(key);
+                self.telemetry.io_queue_stalls = self.telemetry.io_queue_stalls.saturating_add(1);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.pending.remove(&key);
+                self.telemetry.io_failures = self.telemetry.io_failures.saturating_add(1);
+                self.telemetry.groups_rejected = self.telemetry.groups_rejected.saturating_add(1);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drain_page_io(&mut self) {
+        loop {
+            let completion = match self.page_io.completion_rx.try_recv() {
+                Ok(completion) => completion,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            };
+            self.page_io.in_flight.remove(&completion.key);
+            self.telemetry.io_completions = self.telemetry.io_completions.saturating_add(1);
+            if !self.pending.contains_key(&completion.key) {
+                self.release_io_reservation(completion.reserved_bytes);
+                continue;
+            }
+            match completion.result {
+                Ok(payloads) => {
+                    self.telemetry.io_bytes_read = self.telemetry.io_bytes_read.saturating_add(
+                        payloads.values().map(|payload| payload.len() as u64).sum(),
+                    );
+                    self.page_io.ready.insert(
+                        completion.key,
+                        ReadyPageGroup {
+                            reserved_bytes: completion.reserved_bytes,
+                            payloads,
+                        },
+                    );
+                }
+                Err(error) => {
+                    log::error!(
+                        "bloom: virtual-geometry page I/O failed for mesh {} group {}: {error}",
+                        completion.key.0,
+                        completion.key.1
+                    );
+                    self.release_io_reservation(completion.reserved_bytes);
+                    self.pending.remove(&completion.key);
+                    self.telemetry.io_failures = self.telemetry.io_failures.saturating_add(1);
+                    self.telemetry.groups_rejected =
+                        self.telemetry.groups_rejected.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn discard_ready_group(&mut self, key: GroupKey) {
+        if let Some(ready) = self.page_io.ready.remove(&key) {
+            self.release_io_reservation(ready.reserved_bytes);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn release_io_reservation(&mut self, bytes: u64) {
+        self.page_io.reserved_bytes = self.page_io.reserved_bytes.saturating_sub(bytes);
+    }
+
     pub fn telemetry(&self) -> GpuVirtualStreamingTelemetry {
         let mut telemetry = self.telemetry;
         telemetry.pending_groups = self.pending.len() as u32;
@@ -345,6 +589,12 @@ impl GpuVirtualPageStreamer {
             .iter()
             .filter(|readback| readback.in_flight)
             .count() as u32;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            telemetry.in_flight_io_groups = self.page_io.in_flight.len() as u32;
+            telemetry.ready_io_groups = self.page_io.ready.len() as u32;
+            telemetry.reserved_io_bytes = self.page_io.reserved_bytes;
+        }
         telemetry
     }
 
@@ -413,12 +663,14 @@ impl GpuVirtualPageStreamer {
         priority.sort_unstable();
         for (_, key) in priority.into_iter().skip(capacity) {
             self.pending.remove(&key);
+            #[cfg(not(target_arch = "wasm32"))]
+            self.discard_ready_group(key);
             self.telemetry.dropped_pending_groups =
                 self.telemetry.dropped_pending_groups.saturating_add(1);
         }
     }
 
-    fn next_pending_key(&self, blocked: &BTreeSet<(u32, u32)>) -> Option<(u32, u32)> {
+    fn next_pending_key(&self, blocked: &BTreeSet<GroupKey>) -> Option<GroupKey> {
         self.pending
             .iter()
             .filter(|(key, _)| !blocked.contains(key))
@@ -433,6 +685,49 @@ impl GpuVirtualPageStreamer {
             .iter()
             .filter(|readback| readback.in_flight)
             .count() as u32;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.telemetry.in_flight_io_groups = self.page_io.in_flight.len() as u32;
+            self.telemetry.ready_io_groups = self.page_io.ready.len() as u32;
+            self.telemetry.reserved_io_bytes = self.page_io.reserved_bytes;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn create_page_io(max_requests: u32) -> Result<PageIoState, GpuVirtualStreamingError> {
+    let (request_tx, request_rx) = mpsc::sync_channel::<PageIoRequest>(max_requests as usize);
+    let (completion_tx, completion_rx) = mpsc::channel::<PageIoCompletion>();
+    std::thread::Builder::new()
+        .name("bloom-vg-pages".to_string())
+        .spawn(move || page_io_worker(request_rx, completion_tx))
+        .map_err(|error| GpuVirtualStreamingError::WorkerStart(error.to_string()))?;
+    Ok(PageIoState {
+        request_tx,
+        completion_rx,
+        in_flight: BTreeMap::new(),
+        ready: BTreeMap::new(),
+        reserved_bytes: 0,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn page_io_worker(
+    request_rx: Receiver<PageIoRequest>,
+    completion_tx: mpsc::Sender<PageIoCompletion>,
+) {
+    while let Ok(request) = request_rx.recv() {
+        let result = request.asset.read_pages_owned(&request.pages);
+        if completion_tx
+            .send(PageIoCompletion {
+                key: request.key,
+                reserved_bytes: request.reserved_bytes,
+                result,
+            })
+            .is_err()
+        {
+            break;
+        }
     }
 }
 
@@ -449,6 +744,8 @@ fn validate_config(
         || config.max_readback_requests > selector.config().max_page_requests
         || config.max_pending_groups < config.max_readback_requests
         || config.max_group_attempts_per_frame == 0
+        || config.max_io_requests == 0
+        || config.max_io_bytes == 0
     {
         return Err(GpuVirtualStreamingError::InvalidConfig);
     }
@@ -492,6 +789,7 @@ fn decode_readback(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GpuVirtualStreamingError {
     InvalidConfig,
+    WorkerStart(String),
     DeviceLimitExceeded {
         requested_bytes: u64,
         maximum_bytes: u64,
@@ -502,6 +800,9 @@ impl fmt::Display for GpuVirtualStreamingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConfig => write!(formatter, "invalid virtual-geometry streaming config"),
+            Self::WorkerStart(error) => {
+                write!(formatter, "failed to start virtual-geometry page worker: {error}")
+            }
             Self::DeviceLimitExceeded {
                 requested_bytes,
                 maximum_bytes,

@@ -8,7 +8,7 @@
 use super::residency::{group_containing, group_lod, group_pages, parent_group};
 use super::{ClusterGroup, ResidencyError, ResolvedClusterGroup, VirtualGeometryAsset};
 use crate::renderer::material_indirection::{GpuCompletionTracker, StableResourceId};
-use bloom_geometry_format::{MAX_PAGE_BYTES, MIN_PAGE_BYTES};
+use bloom_geometry_format::{sha256, MAX_PAGE_BYTES, MIN_PAGE_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -573,6 +573,49 @@ impl GpuVirtualGeometryPool {
         mesh_id: VirtualMeshId,
         cluster_index: u32,
     ) -> Result<GpuPageTransition, VirtualGeometryGpuError> {
+        let missing_pages = self.missing_group_pages(mesh_id, cluster_index)?;
+        let payloads = {
+            let mesh = self.live_mesh(mesh_id)?;
+            missing_pages
+                .iter()
+                .map(|page_index| {
+                    let page_id = VirtualPageId {
+                        mesh: mesh_id,
+                        page_index: *page_index,
+                    };
+                    mesh.asset
+                        .page_bytes(*page_index as usize)
+                        .map(|bytes| (*page_index, bytes.to_vec()))
+                        .ok_or(VirtualGeometryGpuError::MissingPage(page_id))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?
+        };
+        self.make_group_resident_with_pages(queue, mesh_id, cluster_index, &payloads)
+    }
+
+    pub(crate) fn missing_group_pages(
+        &self,
+        mesh_id: VirtualMeshId,
+        cluster_index: u32,
+    ) -> Result<Vec<u32>, VirtualGeometryGpuError> {
+        let mesh = self.live_mesh(mesh_id)?;
+        let group = group_containing(mesh.asset.archive(), cluster_index)?;
+        Ok(group_pages(mesh.asset.archive(), group)
+            .into_iter()
+            .filter(|page| mesh.pages[*page as usize].slot.is_none())
+            .collect())
+    }
+
+    /// Upload a completely materialized atomic group. The streamer validates
+    /// pages again here before any eviction or table mutation, so an I/O race
+    /// or corrupt worker result cannot partially replace resident geometry.
+    pub(crate) fn make_group_resident_with_pages(
+        &mut self,
+        queue: &wgpu::Queue,
+        mesh_id: VirtualMeshId,
+        cluster_index: u32,
+        payloads: &BTreeMap<u32, Vec<u8>>,
+    ) -> Result<GpuPageTransition, VirtualGeometryGpuError> {
         let (group, required_pages, missing_pages) = {
             let mesh = self.live_mesh(mesh_id)?;
             let group = group_containing(mesh.asset.archive(), cluster_index)?;
@@ -592,6 +635,24 @@ impl GpuVirtualGeometryPool {
                 evicted: Vec::new(),
                 resident_slot_bytes: self.resident_slot_bytes(),
             });
+        }
+        {
+            let mesh = self.live_mesh(mesh_id)?;
+            for page_index in &missing_pages {
+                let page_id = VirtualPageId {
+                    mesh: mesh_id,
+                    page_index: *page_index,
+                };
+                let expected = &mesh.asset.archive().pages[*page_index as usize];
+                let Some(payload) = payloads.get(page_index) else {
+                    return Err(VirtualGeometryGpuError::MissingPagePayload(page_id));
+                };
+                if payload.len() != expected.payload_bytes as usize
+                    || sha256(payload) != expected.sha256
+                {
+                    return Err(VirtualGeometryGpuError::InvalidPagePayload(page_id));
+                }
+            }
         }
         let upload_bytes = {
             let mesh = self.live_mesh(mesh_id)?;
@@ -628,7 +689,13 @@ impl GpuVirtualGeometryPool {
                     mesh: mesh_id,
                     page_index,
                 };
-                self.replace_physical_page(queue, physical_slot, page_id, false)?;
+                self.replace_physical_page_with_payload(
+                    queue,
+                    physical_slot,
+                    page_id,
+                    false,
+                    &payloads[&page_index],
+                )?;
                 Ok((page_id, physical_slot))
             })
             .collect::<Result<Vec<_>, VirtualGeometryGpuError>>()?;
@@ -951,23 +1018,33 @@ impl GpuVirtualGeometryPool {
         page_id: VirtualPageId,
         pinned: bool,
     ) -> Result<(), VirtualGeometryGpuError> {
+        let payload = {
+            let mesh = self.live_mesh(page_id.mesh)?;
+            mesh.asset
+                .page_bytes(page_id.page_index as usize)
+                .ok_or(VirtualGeometryGpuError::MissingPage(page_id))?
+                .to_vec()
+        };
+        self.replace_physical_page_with_payload(queue, physical_slot, page_id, pinned, &payload)
+    }
+
+    fn replace_physical_page_with_payload(
+        &mut self,
+        queue: &wgpu::Queue,
+        physical_slot: u32,
+        page_id: VirtualPageId,
+        pinned: bool,
+        payload: &[u8],
+    ) -> Result<(), VirtualGeometryGpuError> {
         let previous = self.physical_slots[physical_slot as usize].owner;
         if let Some(previous) = previous {
             let (table_index, previous_state) = self.page_state_location(previous)?;
             previous_state.slot = None;
             self.write_page_entry(queue, table_index, GpuVirtualPageEntry::default());
         }
-        let (table_index, payload) = {
-            let mesh = self.live_mesh(page_id.mesh)?;
-            let payload = mesh
-                .asset
-                .page_bytes(page_id.page_index as usize)
-                .ok_or(VirtualGeometryGpuError::MissingPage(page_id))?
-                .to_vec();
-            (mesh.page_table_base + page_id.page_index, payload)
-        };
+        let table_index = self.live_mesh(page_id.mesh)?.page_table_base + page_id.page_index;
         let offset = u64::from(physical_slot) * u64::from(self.config.page_stride_bytes);
-        write_buffer_padded(queue, &self.physical_buffer, offset, &payload);
+        write_buffer_padded(queue, &self.physical_buffer, offset, payload);
         self.clock = self.clock.saturating_add(1);
         let clock = self.clock;
         let (_, page_state) = self.page_state_location(page_id)?;
@@ -1462,6 +1539,8 @@ pub enum VirtualGeometryGpuError {
     StaleMesh(VirtualMeshId),
     RetiringMesh(VirtualMeshId),
     MissingPage(VirtualPageId),
+    MissingPagePayload(VirtualPageId),
+    InvalidPagePayload(VirtualPageId),
     Residency(ResidencyError),
 }
 
@@ -1559,6 +1638,18 @@ impl fmt::Display for VirtualGeometryGpuError {
             Self::MissingPage(page) => write!(
                 formatter,
                 "virtual mesh {} has no page {}",
+                page.mesh.raw(),
+                page.page_index
+            ),
+            Self::MissingPagePayload(page) => write!(
+                formatter,
+                "virtual mesh {} page {} was not supplied for an atomic upload",
+                page.mesh.raw(),
+                page.page_index
+            ),
+            Self::InvalidPagePayload(page) => write!(
+                formatter,
+                "virtual mesh {} page {} failed its size or SHA-256 contract",
                 page.mesh.raw(),
                 page.page_index
             ),

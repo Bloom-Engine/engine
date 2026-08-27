@@ -3,8 +3,9 @@
 Bloom's #136 asset-database foundation stores virtual-geometry artifacts under
 deterministic recipe keys and immutable content hashes. Optional platform and
 quality profiles provide an explicit variant contract while preserving the
-byte-identical unprofiled v1 format. This remains an offline/runtime-contract
-building block: the shipping renderer does not load the store yet.
+byte-identical unprofiled v1 format. Native runtime loading now resolves the
+validated index off-thread and demand-pages immutable geometry ranges; packed,
+network, and web delivery remain future transport work.
 
 ## Build and inspect
 
@@ -158,13 +159,21 @@ platform/quality, ordered fallbacks, and whether an unprofiled legacy entry is
 allowed. Selection follows exactly the offline resolver contract: exact first,
 caller-ordered fallbacks next, and unprofiled only when explicitly enabled.
 
-The worker performs every potentially blocking operation: reading and parsing
-`index.json`, checking its schema/count/duplicate identities, resolving the
-variant, rejecting non-canonical or symlinked chunk paths, reading the immutable
-chunk, and validating its complete file/payload/source identity. The update or
-render thread only enqueues and polls. Completed assets use the existing
-`Arc<VirtualGeometryAsset>` registration path, so renderer setup remains simple
-and existing direct-byte callers are unchanged.
+The loader worker performs every potentially blocking startup operation:
+reading and parsing `index.json`, checking its schema/count/duplicate
+identities, resolving the variant, rejecting non-canonical or symlinked chunk
+paths, and validating the immutable chunk's complete file/payload/source
+identity. It retains only validated archive metadata and the coarse-root page
+prefix. The update or render thread only enqueues and polls. Completed assets
+use the existing `Arc<VirtualGeometryAsset>` registration path, so renderer
+setup remains simple and existing direct-byte callers are unchanged.
+
+After registration, GPU missing-page feedback queues exact file ranges on the
+page worker. Each result is checked against its independent page SHA-256 before
+the atomic group is eligible for upload. In-flight plus completed-but-not-yet-
+uploaded payloads are bounded by both group count and byte budgets; budgeted
+GPU upload/eviction remains unchanged. Corruption fails the requested group
+closed while its pinned resident ancestor stays drawable.
 
 This runtime intentionally does not rebuild the index from manifests. Shipping
 stores may omit manifests and all source assets; `index.json` plus its immutable
@@ -178,9 +187,7 @@ This checkpoint is geometry-only and loose-store-only. It does not yet add:
 - texture, material, animation, environment, or world recipes;
 - source path/license provenance;
 - dependency-graph invalidation beyond one geometry source closure;
-- garbage collection, packed shipping archives, or network-backed stores;
-- demand-page file reads behind GPU feedback (the native worker currently
-  validates and materializes the selected archive before registration).
+- garbage collection, packed shipping archives, or network-backed stores.
 
 The runtime loader remains opt-in. It changes no default renderer path,
 buffers, shaders, passes, draws, pixels, or frame-time behavior.

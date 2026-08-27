@@ -3,7 +3,11 @@ use bloom_geometry_format::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Identity supplied by the validated #136 asset index.
@@ -19,9 +23,20 @@ pub struct ArtifactIdentity {
 /// An immutable cooked archive whose complete wire contract was validated.
 #[derive(Clone, Debug)]
 pub struct VirtualGeometryAsset {
-    bytes: Arc<[u8]>,
+    backing: VirtualGeometryBacking,
     archive: Arc<GeometryArchive>,
     source_root_spans: Arc<BTreeMap<u32, Range<u32>>>,
+}
+
+#[derive(Clone, Debug)]
+enum VirtualGeometryBacking {
+    Memory(Arc<[u8]>),
+    #[cfg(not(target_arch = "wasm32"))]
+    File {
+        path: Arc<PathBuf>,
+        file_bytes: u64,
+        root_pages: Arc<Vec<Arc<[u8]>>>,
+    },
 }
 
 /// One source glTF mesh's explicit split between virtual and compatibility
@@ -53,7 +68,7 @@ impl VirtualGeometryAsset {
         let archive = decode_geometry(&bytes).map_err(VirtualGeometryLoadError::Format)?;
         let source_root_spans = source_root_spans(&archive);
         Ok(Self {
-            bytes,
+            backing: VirtualGeometryBacking::Memory(bytes),
             archive: Arc::new(archive),
             source_root_spans: Arc::new(source_root_spans),
         })
@@ -95,6 +110,39 @@ impl VirtualGeometryAsset {
         Ok(asset)
     }
 
+    /// Convert a fully validated indexed archive into a file-backed asset.
+    /// Only coarse fallback pages survive this call; the complete temporary
+    /// byte vector is dropped on the loader worker before the result is polled.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn from_indexed_file_bytes(
+        path: PathBuf,
+        bytes: impl Into<Arc<[u8]>>,
+        identity: ArtifactIdentity,
+    ) -> Result<Self, VirtualGeometryLoadError> {
+        let memory = Self::from_indexed_bytes(bytes, identity)?;
+        let root_pages = (0..memory.archive.coarse_root_page_count())
+            .map(|page_index| {
+                memory
+                    .page_bytes(page_index)
+                    .map(Arc::<[u8]>::from)
+                    .ok_or_else(|| {
+                        VirtualGeometryLoadError::Identity(format!(
+                            "coarse root page {page_index} is missing from the validated artifact"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            backing: VirtualGeometryBacking::File {
+                path: Arc::new(path),
+                file_bytes: identity.bytes,
+                root_pages: Arc::new(root_pages),
+            },
+            archive: memory.archive,
+            source_root_spans: memory.source_root_spans,
+        })
+    }
+
     pub fn archive(&self) -> &GeometryArchive {
         &self.archive
     }
@@ -103,8 +151,30 @@ impl VirtualGeometryAsset {
         Arc::clone(&self.archive)
     }
 
-    pub fn file_bytes(&self) -> &[u8] {
-        &self.bytes
+    /// Complete resident archive bytes for direct-memory assets. File-backed
+    /// store assets return `None` because only their coarse roots are retained.
+    pub fn file_bytes(&self) -> Option<&[u8]> {
+        match &self.backing {
+            VirtualGeometryBacking::Memory(bytes) => Some(bytes),
+            #[cfg(not(target_arch = "wasm32"))]
+            VirtualGeometryBacking::File { .. } => None,
+        }
+    }
+
+    pub fn artifact_bytes(&self) -> u64 {
+        match &self.backing {
+            VirtualGeometryBacking::Memory(bytes) => bytes.len() as u64,
+            #[cfg(not(target_arch = "wasm32"))]
+            VirtualGeometryBacking::File { file_bytes, .. } => *file_bytes,
+        }
+    }
+
+    pub fn is_file_backed(&self) -> bool {
+        match self.backing {
+            VirtualGeometryBacking::Memory(_) => false,
+            #[cfg(not(target_arch = "wasm32"))]
+            VirtualGeometryBacking::File { .. } => true,
+        }
     }
 
     pub fn page_file_range(&self, page_index: usize) -> Option<Range<usize>> {
@@ -112,8 +182,110 @@ impl VirtualGeometryAsset {
     }
 
     pub fn page_bytes(&self, page_index: usize) -> Option<&[u8]> {
-        self.page_file_range(page_index)
-            .and_then(|range| self.bytes.get(range))
+        match &self.backing {
+            VirtualGeometryBacking::Memory(bytes) => self
+                .page_file_range(page_index)
+                .and_then(|range| bytes.get(range)),
+            #[cfg(not(target_arch = "wasm32"))]
+            VirtualGeometryBacking::File { root_pages, .. } => {
+                root_pages.get(page_index).map(AsRef::as_ref)
+            }
+        }
+    }
+
+    /// Materialize one validated page. File I/O callers must invoke this only
+    /// on a worker; the method is synchronous by design and never used by the
+    /// renderer's ordinary memory-backed service path.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(super) fn read_page_owned(
+        &self,
+        page_index: usize,
+    ) -> Result<Vec<u8>, VirtualGeometryLoadError> {
+        self.read_pages_owned(&[page_index as u32])?
+            .remove(&(page_index as u32))
+            .ok_or_else(|| {
+                VirtualGeometryLoadError::Identity(format!("archive page {page_index} is missing"))
+            })
+    }
+
+    /// Materialize one atomic page set with a single file open. The caller's
+    /// validated hierarchy already supplies sorted, unique page indices.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn read_pages_owned(
+        &self,
+        page_indices: &[u32],
+    ) -> Result<BTreeMap<u32, Vec<u8>>, VirtualGeometryLoadError> {
+        let mut output = BTreeMap::new();
+        let mut file = match &self.backing {
+            VirtualGeometryBacking::Memory(_) => None,
+            VirtualGeometryBacking::File {
+                path, file_bytes, ..
+            } => {
+                let metadata = std::fs::metadata(path.as_ref()).map_err(|error| {
+                    VirtualGeometryLoadError::Identity(format!(
+                        "inspect file-backed artifact {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                if metadata.len() != *file_bytes {
+                    return Err(VirtualGeometryLoadError::Identity(format!(
+                        "file-backed artifact length changed: expected {file_bytes}, actual {}",
+                        metadata.len()
+                    )));
+                }
+                Some(std::fs::File::open(path.as_ref()).map_err(|error| {
+                    VirtualGeometryLoadError::Identity(format!(
+                        "open file-backed artifact {}: {error}",
+                        path.display()
+                    ))
+                })?)
+            }
+        };
+
+        for page_index in page_indices {
+            let index = *page_index as usize;
+            let page = self.archive.pages.get(index).ok_or_else(|| {
+                VirtualGeometryLoadError::Identity(format!("archive page {index} is missing"))
+            })?;
+            let range = self.page_file_range(index).ok_or_else(|| {
+                VirtualGeometryLoadError::Identity(format!("archive page {index} range is missing"))
+            })?;
+            let bytes = match (&self.backing, file.as_mut()) {
+                (VirtualGeometryBacking::Memory(bytes), _) => {
+                    bytes.get(range).map(<[u8]>::to_vec).ok_or_else(|| {
+                        VirtualGeometryLoadError::Identity(format!(
+                            "archive page {index} range is missing"
+                        ))
+                    })?
+                }
+                (VirtualGeometryBacking::File { .. }, Some(file)) => {
+                    file.seek(SeekFrom::Start(range.start as u64))
+                        .map_err(|error| {
+                            VirtualGeometryLoadError::Identity(format!(
+                                "seek file-backed page {index}: {error}"
+                            ))
+                        })?;
+                    let mut bytes = vec![0; range.len()];
+                    file.read_exact(&mut bytes).map_err(|error| {
+                        VirtualGeometryLoadError::Identity(format!(
+                            "read file-backed page {index}: {error}"
+                        ))
+                    })?;
+                    bytes
+                }
+                (VirtualGeometryBacking::File { .. }, None) => unreachable!(),
+            };
+            let actual = sha256(&bytes);
+            if actual != page.sha256 {
+                return Err(VirtualGeometryLoadError::Identity(format!(
+                    "page {index} hash mismatch: expected {}, actual {}",
+                    hex_hash(page.sha256),
+                    hex_hash(actual)
+                )));
+            }
+            output.insert(*page_index, bytes);
+        }
+        Ok(output)
     }
 
     /// Smallest root-table span containing every coarse root for one source

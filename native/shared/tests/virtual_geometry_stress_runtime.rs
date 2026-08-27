@@ -10,6 +10,8 @@ use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::{Renderer, IDENTITY_MAT4};
 use bloom_shared::virtual_geometry::{
     GpuVirtualGeometryConfig, GpuVirtualTraversalConfig, VirtualGeometryAsset,
+    VirtualGeometryAssetProfile, VirtualGeometryStoreConfig, VirtualGeometryStoreLoader,
+    VirtualGeometryStoreRequest,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,11 +56,7 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
             .unwrap_or_else(|error| panic!("virtual stress device setup failed: {error}"));
     configure(&mut engine.renderer);
     let model_handle = load_model(&mut engine, &scene_path);
-    let archive_bytes = std::fs::read(&archive_path).expect("read virtual stress archive");
-    let asset = Arc::new(
-        VirtualGeometryAsset::from_bytes(archive_bytes)
-            .expect("validate 10M virtual stress archive"),
-    );
+    let (asset, load_metrics) = load_stress_asset(&archive_path);
     let archive = asset.archive();
     let source_triangles = archive
         .clusters
@@ -199,6 +197,25 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
             "virtual stress runtime reported {counter}"
         );
     }
+    if load_metrics.file_backed {
+        assert!(
+            virtual_runtime["streaming_io_requests"]
+                .as_u64()
+                .is_some_and(|requests| requests > 0),
+            "file-backed stress run issued no page reads"
+        );
+        assert_eq!(
+            virtual_runtime["streaming_io_failures"].as_u64(),
+            Some(0),
+            "file-backed stress run reported page I/O failures"
+        );
+        assert!(
+            virtual_runtime["streaming_io_reserved_bytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes <= 32 * 1024 * 1024),
+            "file-backed stress run exceeded its CPU I/O budget"
+        );
+    }
 
     let adapter = engine.renderer.quality_adapter_json();
     let paths = engine.renderer.quality_runtime_paths_json();
@@ -256,6 +273,9 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
             "archive_pages": archive.pages.len(),
             "pool_capacity_bytes": POOL_BYTES,
             "resident_pages": resident_pages,
+            "file_backed": load_metrics.file_backed,
+            "store_load_ms": load_metrics.load_ms,
+            "maximum_poll_ms": load_metrics.maximum_poll_ms,
             "measurement_wall_ms": measurement_wall_ms,
             "measured_frames": measured_frames,
             "thresholds": {
@@ -275,6 +295,70 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
         "virtual-geometry-stress source_triangles={source_triangles} resident_pages={resident_pages} wall_ms={measurement_wall_ms:.3} diagnostics={}",
         diagnostics.display()
     );
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct StressLoadMetrics {
+    file_backed: bool,
+    load_ms: f64,
+    maximum_poll_ms: f64,
+}
+
+fn load_stress_asset(archive_path: &Path) -> (Arc<VirtualGeometryAsset>, StressLoadMetrics) {
+    let Some(store) = std::env::var_os("BLOOM_VIRTUAL_STRESS_STORE").map(PathBuf::from) else {
+        let archive_bytes = std::fs::read(archive_path).expect("read virtual stress archive");
+        return (
+            Arc::new(
+                VirtualGeometryAsset::from_bytes(archive_bytes)
+                    .expect("validate 10M virtual stress archive"),
+            ),
+            StressLoadMetrics::default(),
+        );
+    };
+    let logical_id = std::env::var("BLOOM_VIRTUAL_STRESS_LOGICAL_ID")
+        .unwrap_or_else(|_| "stress/10m".to_string());
+    let platform =
+        std::env::var("BLOOM_VIRTUAL_STRESS_PLATFORM").unwrap_or_else(|_| "macos".to_string());
+    let quality =
+        std::env::var("BLOOM_VIRTUAL_STRESS_QUALITY").unwrap_or_else(|_| "high".to_string());
+    let profile = VirtualGeometryAssetProfile::new(&platform, &quality)
+        .expect("valid virtual stress profile");
+    let mut loader = VirtualGeometryStoreLoader::new(
+        store,
+        VirtualGeometryStoreConfig {
+            max_pending_requests: 1,
+            ..VirtualGeometryStoreConfig::default()
+        },
+    )
+    .expect("start virtual stress store loader");
+    let start = Instant::now();
+    let request_start = Instant::now();
+    let ticket = loader
+        .request(VirtualGeometryStoreRequest::new(logical_id, profile))
+        .expect("queue virtual stress store request");
+    let mut maximum_poll_ms = request_start.elapsed().as_secs_f64() * 1000.0;
+    let asset = loop {
+        let poll_start = Instant::now();
+        let result = loader.poll(ticket);
+        maximum_poll_ms = maximum_poll_ms.max(poll_start.elapsed().as_secs_f64() * 1000.0);
+        if let Some(result) = result {
+            break result.expect("resolve virtual stress store asset").asset;
+        }
+        std::thread::yield_now();
+    };
+    assert!(asset.is_file_backed());
+    assert!(
+        maximum_poll_ms <= 50.0,
+        "non-blocking store request/poll took {maximum_poll_ms:.3} ms"
+    );
+    (
+        asset,
+        StressLoadMetrics {
+            file_backed: true,
+            load_ms: start.elapsed().as_secs_f64() * 1000.0,
+            maximum_poll_ms,
+        },
+    )
 }
 
 fn environment_frames(name: &str, default: u32) -> u32 {

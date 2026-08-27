@@ -58,9 +58,9 @@ reporting it.
 its complete SHA-256 and atomically maps a logical ID to it. Its recipe key
 includes the source closure, hierarchy level count, meshlet/page limits,
 vertex format, and explicit recipe version. A valid repeat is a strict
-zero-write cache hit. See `docs/cooked-asset-store.md`. Runtime code can now
-consume the selected artifact bytes plus the identity fields returned by that
-index; asynchronous store lookup remains a later integration milestone.
+zero-write cache hit. See `docs/cooked-asset-store.md`. Native runtime code can
+resolve that index asynchronously and stream validated page ranges from its
+immutable chunks without requiring source assets or manifests.
 
 ## Versioned payload contract
 
@@ -220,6 +220,14 @@ hash against #136's selected artifact identity. The reader lives in the small
 writer cannot validate against a different interpretation than a backend will
 load.
 
+Native store assets are resolved by a bounded `VirtualGeometryStoreLoader`
+worker. The complete chunk is validated once, but only immutable metadata and
+coarse fallback pages remain CPU-resident. GPU feedback later sends exact
+non-root page ranges to a separate bounded page worker; each page hash is
+rechecked after the read and before any residency mutation. Direct-byte assets
+retain the established memory-backed path, and web builds retain no filesystem
+worker.
+
 `VirtualGeometryResidency` models a hard GPU page-cache budget. Construction
 pins the validated coarse-root page prefix and fails if the roots alone exceed
 the budget. Group requests are atomic: every page needed by an atomic cluster
@@ -335,8 +343,8 @@ The renderer integration remains deliberately explicit:
   shader branches unless a caller explicitly constructs the GPU pool;
 - zero changes to existing immediate-mode or glTF selection and pixels;
 - no silent `.bgeo` replacement of an ordinary model;
-- no asynchronous file/store IO; validated archive bytes remain memory-owned
-  while GPU request feedback and fixed-budget uploads run asynchronously.
+- loose-file native store I/O is supported; packed/network stores and web fetch
+  integration remain future backends.
 
 The opt-in virtual PBR consumer reconstructs perspective-correct current and
 previous clip positions, inverse-transpose normals, mirrored tangent
@@ -373,6 +381,12 @@ remains visible. Advanced callers can override these feedback limits through
 `enable_virtual_geometry_with_streaming`; ordinary rendering allocates and
 records none of the feedback path.
 
+File-backed requests additionally reserve at most 128 atomic groups and 32 MiB
+of CPU payloads by default across in-flight and ready I/O. The render thread
+only performs non-blocking channel operations and existing bounded GPU uploads.
+Telemetry exposes I/O requests/completions/failures, bytes read, ready/in-flight
+groups, and the exact reserved byte count.
+
 An opt-in virtual submission also captures a private 256x256 previous-frame
 max-depth pyramid (349,524 texture bytes) after the renderer's current linear
 depth build. The next traversal can reject an atomic hierarchy group only when
@@ -388,10 +402,9 @@ Asynchronous feedback telemetry exposes the latest visible, frustum-culled,
 occlusion-culled, and occlusion-uncertain group counts without synchronizing
 the render loop.
 
-The next #131 runtime milestones are asynchronous #136 store/index IO behind
-the GPU feedback boundary and discrete/cross-backend timing. The compatibility
-renderer remains responsible for unsupported and not-yet-qualified content
-throughout that work.
+The next #131 runtime milestone is discrete/cross-backend timing. The
+compatibility renderer remains responsible for unsupported and
+not-yet-qualified content throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts

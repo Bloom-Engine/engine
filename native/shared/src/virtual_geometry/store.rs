@@ -94,6 +94,7 @@ pub struct ResolvedVirtualGeometryAsset {
     pub logical_id: String,
     pub selection: VirtualGeometryStoreSelection,
     pub artifact_path: PathBuf,
+    pub artifact_bytes: u64,
     pub asset: Arc<VirtualGeometryAsset>,
 }
 
@@ -248,7 +249,7 @@ impl VirtualGeometryStoreLoader {
                             self.telemetry.loaded_artifact_bytes = self
                                 .telemetry
                                 .loaded_artifact_bytes
-                                .saturating_add(resolved.asset.file_bytes().len() as u64);
+                                .saturating_add(resolved.artifact_bytes);
                             match resolved.selection.kind {
                                 VirtualGeometrySelectionKind::Exact => {
                                     self.telemetry.exact_selections =
@@ -336,12 +337,14 @@ fn resolve_and_load(
         config.max_artifact_bytes,
         "geometry artifact",
     )?;
-    let asset = VirtualGeometryAsset::from_indexed_bytes(bytes, entry.identity)
-        .map_err(VirtualGeometryStoreError::Asset)?;
+    let asset =
+        VirtualGeometryAsset::from_indexed_file_bytes(artifact_path.clone(), bytes, entry.identity)
+            .map_err(VirtualGeometryStoreError::Asset)?;
     Ok(ResolvedVirtualGeometryAsset {
         logical_id: request.logical_id.clone(),
         selection,
         artifact_path,
+        artifact_bytes: entry.identity.bytes,
         asset: Arc::new(asset),
     })
 }
@@ -622,7 +625,9 @@ fn parse_hash(value: &str, label: &str) -> Result<[u8; 32], VirtualGeometryStore
 }
 
 fn validate_chunk_path(path: &Path, hash: [u8; 32]) -> Result<(), VirtualGeometryStoreError> {
-    let expected = PathBuf::from("chunks").join(format!("{}.bgeo", hex_hash(hash)));
+    let expected = PathBuf::from("chunks")
+        .join("sha256")
+        .join(format!("{}.bgeo", hex_hash(hash)));
     if path != expected {
         return Err(VirtualGeometryStoreError::Index(format!(
             "artifact path {:?} is non-canonical; expected {:?}",
