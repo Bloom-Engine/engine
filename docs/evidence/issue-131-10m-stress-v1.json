@@ -1,0 +1,97 @@
+{
+  "schema": "bloom-virtual-geometry-10m-stress-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "741cc5ae874ba617988227a73cccf7ab24aa3ba0",
+  "source": {
+    "meshes": 100,
+    "placements": 100,
+    "triangles": 10000000,
+    "gltf_bytes": 14320,
+    "binary_bytes": 1805412,
+    "gltf_sha256": "eba12b4d682f587a177f4a556aa3469c03d03ea01c8d35374a4a9d5b0f1c5c57",
+    "binary_sha256": "823929f38f2c63625b3156019d0de25c076bd0fb6672b43b649a6934502abe49"
+  },
+  "artifact": {
+    "format_version": 2,
+    "vertex_encoding": "quantized32",
+    "file_bytes": 582052704,
+    "file_sha256": "45b6aa47ce817589911d33f3f4b32387847cf28a9baf6c94523ae1f81db198d8",
+    "payload_sha256": "1a9ca79489830d81211f54f2a9b2e55446a77b9ee5f36fe9ad1490c699001e13",
+    "source_closure_sha256": "d28cc38f1fa6568e38f8a5ed29ecacdda2507af0995d4b0aa463e76f38038649",
+    "clusters": 245500,
+    "pages": 8496,
+    "maximum_lod_level": 7,
+    "root_clusters": 1500,
+    "root_pages": 50,
+    "root_resident_page_bytes": 3276800
+  },
+  "runtime": {
+    "backend": "metal",
+    "adapter": "Apple M1 Max",
+    "adapter_type": "integratedgpu",
+    "width": 640,
+    "height": 360,
+    "warmup_frames": 180,
+    "measured_frames": 120,
+    "physical_pool_capacity_bytes": 67108864,
+    "resident_pages": 955,
+    "resident_physical_bytes": 62586880,
+    "streaming_uploaded_pages": 905,
+    "selected_clusters": 10220,
+    "refined_groups": 340,
+    "visible_groups": 440,
+    "fallback_groups": 0,
+    "missing_current_pages": 0,
+    "selected_overflow": 0,
+    "request_overflow": 0,
+    "invalid_records": 0,
+    "depth_limit_fallbacks": 0,
+    "pending_streaming_groups": 0
+  },
+  "timing_ms": {
+    "wall_frame_mean": 8.279420833333333,
+    "cpu_frame_mean": 3.156008,
+    "cpu_frame_p95": 8.728458,
+    "gpu_frame_mean": 4.795738,
+    "gpu_frame_p95": 7.917457,
+    "hierarchy_selection_gpu_mean": 1.757605,
+    "draw_emission_gpu_mean": 0.12242,
+    "diagnostic_baseline_hierarchy_selection_gpu_mean": 4.500999,
+    "diagnostic_baseline_gpu_frame_mean": 6.665966
+  },
+  "thresholds_ms": {
+    "maximum_wall_frame_mean": 16.666666666666668,
+    "maximum_gpu_frame_mean": 8.0,
+    "maximum_gpu_frame_p95": 12.0,
+    "maximum_hierarchy_selection_gpu_mean": 3.0,
+    "maximum_draw_emission_gpu_mean": 0.5
+  },
+  "corrections": {
+    "source_grouped_root_order": true,
+    "backward_compatible_source_root_spans": true,
+    "per_instance_bounded_root_dispatch": true,
+    "atomic_group_union_aabb_hiz": true,
+    "uncertain_occlusion_fails_open": true
+  },
+  "qualification": {
+    "stress_gate": "pass",
+    "shared_library_tests_passed": 459,
+    "shared_library_tests_ignored": 1,
+    "gpu_golden_tests_passed": 77,
+    "gpu_golden_tests_ignored": 2,
+    "cooker_tests_passed": 32,
+    "quality_governance_tests_passed": 41,
+    "cooker_strict_clippy": "pass",
+    "shared_strict_clippy": "pass",
+    "wasm_web_check": "pass",
+    "native_no_default_features_check": "pass",
+    "format": "pass",
+    "diff_whitespace": "pass",
+    "new_file_size_overages": 0,
+    "unrelated_preexisting_file_size_overages": 3
+  },
+  "remaining": [
+    "asynchronous issue-136 store and index IO",
+    "discrete and cross-backend timing and quality"
+  ]
+}

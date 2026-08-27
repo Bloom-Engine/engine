@@ -6,9 +6,10 @@ fixed-budget GPU residency, projected-error GPU hierarchy selection, raw-page
 vertex decoding, bounded indirect draw emission, temporal/material ABI,
 namespaced visibility raster, four-MRT PBR composition, and explicit production
 `Renderer` ownership. The detailed Bistro now has a governed ordinary-versus-
-virtual pixel and camera-motion qualification. Ordinary glTF rendering remains
-the default; this does not yet claim complete Nanite-equivalent streaming,
-stress-scale, or cross-backend qualification.
+virtual pixel and camera-motion qualification, plus a governed 10M-source-
+triangle fixed-residency Metal stress gate. Ordinary glTF rendering remains
+the default; this does not yet claim complete Nanite-equivalent store-backed
+streaming or cross-backend qualification.
 
 ## Cook and inspect
 
@@ -375,21 +376,22 @@ records none of the feedback path.
 An opt-in virtual submission also captures a private 256x256 previous-frame
 max-depth pyramid (349,524 texture bytes) after the renderer's current linear
 depth build. The next traversal can reject an atomic hierarchy group only when
-every in-frustum cluster is proven behind the farthest depth over its complete
-screen footprint. Camera cuts, resize, skipped frames, new instances,
-near-plane/off-screen bounds, or motion beyond one base-grid cell fail open.
-Queries union previous/current bounds, expand by two cells, and include
-relative and absolute depth bias. Consequently an uncertain group remains
-visible instead of risking a hole. Nine separate R32Float textures avoid
-Metal's sampled/written mip hazard. Ordinary frames add no pass or allocation,
-and virtual-idle frames add no pass. Asynchronous feedback telemetry exposes
-the latest visible, frustum-culled, occlusion-culled, and
-occlusion-uncertain group counts without synchronizing the render loop.
+the union AABB of every in-frustum sibling is proven behind the farthest depth
+over its complete screen footprint. Camera cuts, resize, skipped frames, new
+instances, near-plane/off-screen bounds, or motion beyond one base-grid cell
+fail open. Queries project that group union at both previous and current
+transforms, expand by two cells, and include relative and absolute depth bias.
+Consequently an uncertain group remains visible instead of risking a hole.
+Nine separate R32Float textures avoid Metal's sampled/written mip hazard.
+Ordinary frames add no pass or allocation, and virtual-idle frames add no pass.
+Asynchronous feedback telemetry exposes the latest visible, frustum-culled,
+occlusion-culled, and occlusion-uncertain group counts without synchronizing
+the render loop.
 
-The next #131 runtime milestones are a 10M-source-triangle residency stress,
-asynchronous #136 store/index IO behind the GPU feedback boundary, and
-cross-backend timing. The compatibility renderer remains responsible for
-unsupported and not-yet-qualified content throughout that work.
+The next #131 runtime milestones are asynchronous #136 store/index IO behind
+the GPU feedback boundary and discrete/cross-backend timing. The compatibility
+renderer remains responsible for unsupported and not-yet-qualified content
+throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts
@@ -461,3 +463,10 @@ At 640x360 after 180 streaming warmup frames, virtual output measures 7.1355
 mean RGB difference and 0.81425 SSIM against the ordinary path, with 0.00174%
 clearly-lit missing geometry. Moving away and returning to the same camera
 measures 0.000314 mean RGB difference, 0.999991 SSIM, and no missing geometry.
+The 10M-source-triangle fixed-residency and integrated-Metal timing gate is
+recorded in `docs/evidence/issue-131-10m-stress-v1.{md,json}`. Its 100
+source-filtered placements settle at 955 pages inside a hard 64 MiB pool. Over
+120 measured moving-camera frames, GPU mean is 4.7957 ms, GPU p95 is 7.9175
+ms, hierarchy selection is 1.7576 ms, and bounded draw emission is 0.1224 ms,
+with no missing pages, fallback, overflow, invalid records, or depth-limit
+events.
