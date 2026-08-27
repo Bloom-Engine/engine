@@ -5,9 +5,10 @@ cover the deterministic meshlet/page contract, strict runtime loading,
 fixed-budget GPU residency, projected-error GPU hierarchy selection, raw-page
 vertex decoding, bounded indirect draw emission, temporal/material ABI,
 namespaced visibility raster, four-MRT PBR composition, and explicit production
-`Renderer` ownership. Ordinary glTF rendering remains the default; this does
-not yet claim complete Nanite-equivalent streaming, stress-scale, or
-cross-backend qualification.
+`Renderer` ownership. The detailed Bistro now has a governed ordinary-versus-
+virtual pixel and camera-motion qualification. Ordinary glTF rendering remains
+the default; this does not yet claim complete Nanite-equivalent streaming,
+stress-scale, or cross-backend qualification.
 
 ## Cook and inspect
 
@@ -142,6 +143,12 @@ triangles are cooked into static clusters. Runtime ownership currently retains
 alpha-masked primitives on the ordinary renderer because virtual visibility
 does not yet own their exact texture, sampler, and cutoff test.
 
+The cooker also bakes the runtime importer's exact base-color factor into each
+vertex color. This includes the same `KHR_materials_pbrSpecularGlossiness`
+diffuse-to-metallic/roughness conversion used by model loading. The global
+virtual material record intentionally does not apply that factor a second
+time, so ordinary and virtual ownership produce the same authored base color.
+
 ## Atomic coarse hierarchy
 
 Hierarchy traversal operates on atomic cluster groups. Every child stores the
@@ -159,6 +166,14 @@ and locks the complete group's topological border. Independently selected
 neighboring groups therefore retain their shared boundary. A replacement that
 does not reduce cluster count is rejected and its children become terminal
 roots.
+
+When several lower atomic groups are merged at a later hierarchy level, their
+contiguous replacement ranges are coalesced before the new edge is encoded.
+Every sibling then points at the same complete lower replacement union, and
+every grandchild points back at the complete sibling group. A terminal/
+refinable boundary or a gap in the lower ranges ends the partition. This keeps
+multi-level traversal from following only the first sibling's children and
+silently dropping the others.
 
 The simplifier reports absolute object-space error. Each parent group stores
 that error plus the maximum error accumulated by its children. Parent
@@ -305,10 +320,13 @@ Adapters with `MULTI_DRAW_INDIRECT_COUNT` use the exact counted stream. Other
 qualified adapters use the bounded 22-bin GPU compaction path, whose submitted
 vertex amplification is strictly below 2x and whose empty bins carry zero
 instances. Alpha-masked clusters are discarded and remain compatibility-owned;
-single-sided clusters reject back faces while double-sided clusters preserve
-the face bit for later shading. The 128-byte frame record already carries
-current and previous view-projection transforms, although this raster consumes
-only the current transform.
+opaque clusters follow Bloom's established two-face scene-raster contract even
+when the glTF material is not marked double-sided. This preserves legal but
+reversed/mirrored imported surfaces when residency changes. The face bit is
+retained for later shading, while material double-sidedness still controls
+normal-cone safety and material response. The 128-byte frame record already
+carries current and previous view-projection transforms, although this raster
+consumes only the current transform.
 
 The renderer integration remains deliberately explicit:
 
@@ -368,11 +386,10 @@ and virtual-idle frames add no pass. Asynchronous feedback telemetry exposes
 the latest visible, frustum-culled, occlusion-culled, and
 occlusion-uncertain group counts without synchronizing the render loop.
 
-The next #131 runtime milestones are detailed-Bistro camera-motion/pixel
-qualification, a 10M-source-triangle residency stress, asynchronous #136
-store/index IO behind the GPU feedback boundary, and cross-backend timing. The
-compatibility renderer remains responsible for unsupported and not-yet-qualified
-content throughout that work.
+The next #131 runtime milestones are a 10M-source-triangle residency stress,
+asynchronous #136 store/index IO behind the GPU feedback boundary, and
+cross-backend timing. The compatibility renderer remains responsible for
+unsupported and not-yet-qualified content throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts
@@ -436,3 +453,11 @@ bounded indirect emission, and executable Metal raster proof are recorded in
 `docs/evidence/issue-131-virtual-draw-emission-v1.{md,json}`. Collision-free
 visibility namespacing and raw virtual ID/depth rasterization are recorded in
 `docs/evidence/issue-131-virtual-visibility-raster-v1.{md,json}`.
+Detailed Bistro hierarchy, material, static parity, and camera-return
+qualification is recorded in
+`docs/evidence/issue-131-bistro-runtime-v1.{md,json}`. The 1,176-placement
+scene routes 1,074 placements to virtual geometry and 102 to compatibility.
+At 640x360 after 180 streaming warmup frames, virtual output measures 7.1355
+mean RGB difference and 0.81425 SSIM against the ordinary path, with 0.00174%
+clearly-lit missing geometry. Moving away and returning to the same camera
+measures 0.000314 mean RGB difference, 0.999991 SSIM, and no missing geometry.
