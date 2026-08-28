@@ -1179,6 +1179,8 @@ impl Renderer {
                 &self.current_proj_matrix_unjittered,
                 &self.prev_proj_matrix_unjittered,
             );
+        let taa_camera_motion_phase_active =
+            taa_camera_moving && self.render_scale >= 0.75 && self.render_scale < 0.95;
         let output_detail_uses_depth = !taa_camera_moving && !self.pt_active();
         out.push_str(",\"temporal_reconstruction\":{");
         out.push_str("\"enabled\":");
@@ -1198,6 +1200,17 @@ impl Renderer {
         out.push_str(",\"stationary_reconstruction_detail_min_scale\":0.75");
         out.push_str(",\"stationary_reconstruction_additional_samples\":0");
         out.push_str(",\"stationary_reconstruction_motion_gated\":true");
+        out.push_str(",\"camera_motion_source_phase\":\"jitter-aligned-input-depth\"");
+        out.push_str(",\"camera_motion_source_phase_min_scale\":0.75");
+        out.push_str(",\"camera_motion_source_phase_max_scale\":0.95");
+        out.push_str(",\"camera_motion_source_phase_active\":");
+        out.push_str(if taa_camera_motion_phase_active {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"camera_motion_reconstruction_detail_strength\":0.02");
+        out.push_str(",\"camera_motion_reconstruction_additional_samples\":0");
         out.push_str(",\"output_detail_filter\":\"depth-aware-local-luma-hull\"");
         out.push_str(",\"output_detail_strength\":");
         out.push_str(&self.sharpen_strength.to_string());

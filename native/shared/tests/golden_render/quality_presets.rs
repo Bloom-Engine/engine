@@ -776,13 +776,13 @@ fn fractional_thin_features_bound_motion_error_without_reference_lag() {
     // error by retaining stale samples; the RGB and SSIM bounds catch that
     // ghosting/lag trade instead of accepting it as improved stability.
     assert!(
-        mean_rgb <= 11.86 && mean_ssim >= 0.585 && minimum_ssim >= 0.560,
+        mean_rgb <= 11.78 && mean_ssim >= 0.595 && minimum_ssim >= 0.570,
         "fractional thin-feature motion lagged its supersampled reference: \
          mean_rgb={mean_rgb:.6}, mean_ssim={mean_ssim:.6}, \
          minimum_ssim={minimum_ssim:.6}"
     );
     assert!(
-        derivative_error <= 1.33,
+        derivative_error <= 1.23,
         "fractional thin-feature motion added excessive temporal variation: \
          derivative_error={derivative_error:.6}"
     );
@@ -996,6 +996,30 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     assert_eq!(
         reconstruction["stationary_reconstruction_motion_gated"].as_bool(),
         Some(true)
+    );
+    assert_eq!(
+        reconstruction["camera_motion_source_phase"].as_str(),
+        Some("jitter-aligned-input-depth")
+    );
+    assert_eq!(
+        reconstruction["camera_motion_source_phase_min_scale"].as_f64(),
+        Some(0.75)
+    );
+    assert_eq!(
+        reconstruction["camera_motion_source_phase_max_scale"].as_f64(),
+        Some(0.95)
+    );
+    assert_eq!(
+        reconstruction["camera_motion_source_phase_active"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        reconstruction["camera_motion_reconstruction_detail_strength"].as_f64(),
+        Some(0.02)
+    );
+    assert_eq!(
+        reconstruction["camera_motion_reconstruction_additional_samples"].as_u64(),
+        Some(0)
     );
     assert_eq!(
         reconstruction["output_detail_filter"].as_str(),

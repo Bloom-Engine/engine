@@ -801,6 +801,22 @@ fn fs_main(in: VsOut) -> TaaOut {
     let input_texel = 1.0 / input_size;
     var current_weight = abs(u.params.x);
     let camera_moving = u.params.x < 0.0;
+    let reconstruction_scale = clamp(abs(u.params.w), 0.5, 1.0);
+
+    // Fractional reconstruction reads the current color at the jitter-corrected
+    // source phase. Select depth and velocity from that same input position;
+    // using the unshifted output UV could cross a low-resolution texel boundary
+    // and make reprojection/provenance belong to a different surface sample.
+    // Native and half-scale TAA deliberately keep their established geometry
+    // lookups byte-for-byte. The default 0.75 tier owns this correction during
+    // real camera motion, where the moving native-reference corpus qualifies
+    // it independently from settled and legacy-half reconstruction.
+    let reconstruction_geometry_phase =
+        reconstruction_scale >= 0.75 && reconstruction_scale < 0.95 && camera_moving;
+    var geometry_uv = in.uv;
+    if (reconstruction_geometry_phase) {
+        geometry_uv = geometry_uv + u.params.yz;
+    }
 
     // Closest-depth velocity dilation. Sampling the low-resolution velocity
     // buffer linearly mixed foreground motion with zero/background motion at
@@ -811,7 +827,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     let depth_dims = vec2<i32>(textureDimensions(depth_tex));
     let depth_max_coord = depth_dims - vec2<i32>(1);
     let center_coord = clamp(
-        vec2<i32>(floor(in.uv * vec2<f32>(depth_dims))),
+        vec2<i32>(floor(geometry_uv * vec2<f32>(depth_dims))),
         vec2<i32>(0),
         depth_max_coord,
     );
@@ -829,7 +845,17 @@ fn fs_main(in: VsOut) -> TaaOut {
             closest_coord = coord;
         }
     }
-    let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
+    var selected_depth_uv = in.uv;
+    if (reconstruction_geometry_phase) {
+        selected_depth_uv =
+            (vec2<f32>(closest_coord) + vec2<f32>(0.5)) * input_texel;
+    }
+    let ndc = vec4<f32>(
+        selected_depth_uv.x * 2.0 - 1.0,
+        (1.0 - selected_depth_uv.y) * 2.0 - 1.0,
+        depth,
+        1.0,
+    );
     let world_h = u.inv_vp * ndc;
     let world = world_h.xyz / world_h.w;
 
@@ -897,7 +923,6 @@ fn fs_main(in: VsOut) -> TaaOut {
     // while reprojection supplies the temporal sample location. Sky has no
     // geometry velocity, so include its actual directional reprojection
     // distance in the same motion classification.
-    let reconstruction_scale = clamp(abs(u.params.w), 0.5, 1.0);
     let reprojection_motion = max(vel_len, length(prev_uv - in.uv));
     var jitter_alignment = 1.0;
     // Uniform branch: fractional tiers keep the former shader path (and its
@@ -1258,19 +1283,17 @@ fn fs_main(in: VsOut) -> TaaOut {
         min(history_confidence + 1.0 / 16.0, 1.0) * accepted_history;
     let stable_history = mix(clamped_history, history, settled_static_phase_lock);
     var blended = mix(stable_history, current, alpha);
-    // The temporal average suppresses some of the cubic reconstruction's
-    // source-phase residual even after a stable surface has reached full
-    // confidence. Feed a small bounded portion of that already-computed
-    // current-vs-linear residual through the temporal update only on settled,
-    // stationary fractional reconstruction. The former unconditional 0.20
-    // post-blend addition exposed each source jitter phase at full strength;
-    // tying it to alpha lets history accumulate the residual instead. Three
-    // temporal updates preserve the qualified glossy detail. Half-scale keeps
-    // its established response. Render-scale changes already rebuild the
-    // render targets and reset history, so the uniform 0.75 tier boundary
-    // cannot splice two policies into one accumulation epoch. This adds no
-    // samples, is disabled for camera/object motion, and vanishes at native
-    // scale.
+    // The temporal average suppresses some of the reconstruction's
+    // source-phase residual. On a settled stationary surface, feed a bounded
+    // part of that already-computed current-vs-linear residual through the
+    // temporal update: tying it to alpha lets history accumulate the detail
+    // instead of exposing one source phase at full strength. During camera
+    // motion, provenance now follows the same jitter-corrected input texel as
+    // color; retain only two percent of the bounded current residual to avoid
+    // replacing that stability with history lag. Object-only motion keeps its
+    // established response. Render-scale changes rebuild the targets and
+    // reset history, so policies cannot splice across one accumulation epoch.
+    // This adds no samples and vanishes at native scale.
     let settled_static = history_confidence
         * (1.0 - motion_alpha)
         * select(1.0, 0.0, camera_moving);
@@ -1285,9 +1308,12 @@ fn fs_main(in: VsOut) -> TaaOut {
         3.0 * alpha,
         reconstruction_scale >= 0.75,
     );
+    let moving_reconstruction_detail_weight =
+        select(0.0, 0.02, reconstruction_geometry_phase);
     blended = max(
         blended + reconstruction_detail *
-            (reconstruction_detail_weight * settled_static * fractional_reconstruction),
+            ((reconstruction_detail_weight * settled_static +
+              moving_reconstruction_detail_weight) * fractional_reconstruction),
         vec3<f32>(0.0),
     );
     let blended_w = mix(history_w, current_w, alpha);
