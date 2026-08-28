@@ -64,22 +64,28 @@ struct FractionalSample {
 };
 
 // Rg16Float provenance has one half-float beside depth. Non-reactive history
-// keeps the established normalized 0..1 confidence value byte-for-byte.
-// Reactive history stores -(confidence + 1), preserving the same 17 exact
-// confidence states while retaining coverage even when confidence is zero.
+// keeps the established normalized 0..1 confidence value byte-for-byte when
+// no structural lock is present. A binary detail lock occupies the disjoint
+// 2..3 range. Reactive history negates the complete payload after adding one,
+// preserving both values even when confidence is zero.
 struct TemporalHistory {
     confidence: f32,
     reactive: f32,
+    feature_lock: f32,
 };
 
 fn unpack_temporal_history(payload: f32) -> TemporalHistory {
     let reactive = select(0.0, 1.0, payload < 0.0);
-    let confidence = select(payload, -payload - 1.0, payload < 0.0);
-    return TemporalHistory(clamp(confidence, 0.0, 1.0), reactive);
+    let encoded = select(payload, -payload - 1.0, payload < 0.0);
+    let feature_lock = select(0.0, 1.0, encoded >= 2.0);
+    let confidence = encoded - feature_lock * 2.0;
+    return TemporalHistory(clamp(confidence, 0.0, 1.0), reactive, feature_lock);
 }
 
-fn pack_temporal_history(confidence: f32, reactive: f32) -> f32 {
-    return select(confidence, -confidence - 1.0, reactive > 0.01);
+fn pack_temporal_history(confidence: f32, reactive: f32, feature_lock: f32) -> f32 {
+    let encoded = clamp(confidence, 0.0, 1.0) +
+        select(0.0, 2.0, feature_lock > 0.01);
+    return select(encoded, -encoded - 1.0, reactive > 0.01);
 }
 
 fn sample_fractional_lanczos2(

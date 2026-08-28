@@ -70,6 +70,29 @@ The `32`-pixel coherent-component limit is the qualified 512×288 gate for
 issue #151: the prior full path measures 55 pixels and the corrected path 25.
 Keep the size and 32-frame sequence unchanged when applying that limit.
 
+To qualify fractional TAA/TSR against a matched native-resolution camera
+motion, capture the same detailed-Bistro pose at the candidate scale, its
+comparison revision, and scale 1.0. The opt-in dump accepts
+`BLOOM_BISTRO_PROBE_DUMP_RENDER_SCALE`, a linear `dx,dz,dyaw` in
+`BLOOM_BISTRO_PROBE_DUMP_SEQUENCE_MOTION`, and
+`BLOOM_BISTRO_PROBE_DUMP_DIAGNOSTICS=0` when only final frames are required.
+Compare the resulting numbered sequences with:
+
+```sh
+python3 tools/quality/tsr_motion_compare.py \
+  --baseline /tmp/bloom-tsr-baseline \
+  --candidate /tmp/bloom-tsr-candidate \
+  --native /tmp/bloom-tsr-native \
+  --expected-frames 32 \
+  --output /tmp/bloom-tsr-comparison.json
+```
+
+The command fails closed unless the candidate is no worse than its baseline
+in both normalized RGB error against native frames and error against native
+adjacent-frame motion derivatives. It also records exact dimensions and
+endpoint hashes so differently posed or incomplete sequences cannot silently
+be compared.
+
 For the official Khronos alpha, transmission, volume, and ordering controls:
 
 ```sh

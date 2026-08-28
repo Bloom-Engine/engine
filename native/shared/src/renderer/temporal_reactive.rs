@@ -191,10 +191,8 @@ pub(super) fn taa_reactive_shader_source() -> String {
         "TAA binding declarations changed; reactive injection must be updated"
     );
     let source = source.replacen(
-        "        history_confidence = max(history_provenance.g, 0.0);",
-        "        let temporal_history = unpack_temporal_history(history_provenance.g);\n\
-         history_confidence = temporal_history.confidence;\n\
-         history_reactive = temporal_history.reactive;",
+        "    let preserve_reactive_history = false;",
+        "    let preserve_reactive_history = true;",
         1,
     );
     let source = source.replacen(
@@ -219,17 +217,16 @@ pub(super) fn taa_reactive_shader_source() -> String {
         1,
     );
     let source = source.replacen(
-        "        vec2<f32>(current_depth_key, next_history_confidence),",
-        "        vec2<f32>(\n\
-             current_depth_key,\n\
-             pack_temporal_history(next_history_confidence, current_reactive),\n\
-         ),",
+        "pack_temporal_history(next_history_confidence, 0.0, next_feature_lock)",
+        "pack_temporal_history(\n\
+             next_history_confidence, current_reactive, next_feature_lock,\n\
+         )",
         1,
     );
     assert!(
         source.contains("var reactive_tex")
             && source.contains("history_reactive = temporal_history.reactive")
-            && source.contains("pack_temporal_history(next_history_confidence"),
+            && source.contains("current_reactive, next_feature_lock"),
         "reactive TAA shader must declare and persist current/prior coverage"
     );
     source

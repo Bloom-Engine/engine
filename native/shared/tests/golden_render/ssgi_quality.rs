@@ -1435,6 +1435,12 @@ fn dump_detailed_bistro_probe_state() {
     );
     let mut eng = EngineState::new(renderer);
     configure(&mut eng, true, false);
+    let dump_render_scale = std::env::var("BLOOM_BISTRO_PROBE_DUMP_RENDER_SCALE")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(1.0)
+        .clamp(0.5, 1.0);
+    eng.renderer.set_render_scale(dump_render_scale);
     let dump_ssgi_enabled =
         std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_SSGI").is_none_or(|value| value != "0");
     if std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_SSR").is_some() {
@@ -1519,7 +1525,11 @@ fn dump_detailed_bistro_probe_state() {
         }
     }
 
-    eng.renderer.pending_quality_capture_dir = Some(dump_dir.to_string_lossy().into_owned());
+    let dump_diagnostics =
+        std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_DIAGNOSTICS").is_none_or(|value| value != "0");
+    if dump_diagnostics {
+        eng.renderer.pending_quality_capture_dir = Some(dump_dir.to_string_lossy().into_owned());
+    }
     let (shot_w, shot_h, screenshot) =
         render(&mut eng, 1, |eng| draw(eng, start_x, start_z, cam_yaw));
     image::save_buffer(
@@ -1531,9 +1541,10 @@ fn dump_detailed_bistro_probe_state() {
     )
     .expect("write final Bistro output");
 
-    // Optional stationary burst for offline temporal analysis. This is gated
-    // so the ordinary corpus keeps exactly one readback; unlike an interactive
-    // window it cannot miss a transient because macOS withheld a drawable.
+    // Optional stationary or linearly moving burst for offline temporal
+    // analysis. This is gated so the ordinary corpus keeps exactly one
+    // readback; unlike an interactive window it cannot miss a transient
+    // because macOS withheld a drawable.
     let sequence_frames = std::env::var("BLOOM_BISTRO_PROBE_DUMP_SEQUENCE_FRAMES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -1549,6 +1560,15 @@ fn dump_detailed_bistro_probe_state() {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let sequence_motion = std::env::var("BLOOM_BISTRO_PROBE_DUMP_SEQUENCE_MOTION")
+        .ok()
+        .and_then(|value| {
+            let parts = value
+                .split(',')
+                .filter_map(|part| part.trim().parse::<f32>().ok())
+                .collect::<Vec<_>>();
+            (parts.len() == 3).then(|| (parts[0], parts[1], parts[2]))
+        });
     if sequence_frames > 0 {
         image::save_buffer(
             dump_dir.join("sequence-000.png"),
@@ -1567,8 +1587,20 @@ fn dump_detailed_bistro_probe_state() {
                         .into_owned(),
                 );
             }
-            let (sequence_w, sequence_h, sequence) =
-                render(&mut eng, 1, |eng| draw(eng, start_x, start_z, cam_yaw));
+            let sequence_t = sequence_index as f32 / (sequence_frames - 1) as f32;
+            let (sequence_x, sequence_z, sequence_yaw) = sequence_motion.map_or(
+                (start_x, start_z, cam_yaw),
+                |(delta_x, delta_z, delta_yaw)| {
+                    (
+                        start_x + delta_x * sequence_t,
+                        start_z + delta_z * sequence_t,
+                        cam_yaw + delta_yaw * sequence_t,
+                    )
+                },
+            );
+            let (sequence_w, sequence_h, sequence) = render(&mut eng, 1, |eng| {
+                draw(eng, sequence_x, sequence_z, sequence_yaw)
+            });
             image::save_buffer(
                 dump_dir.join(format!("sequence-{sequence_index:03}.png")),
                 &sequence,

@@ -1,0 +1,125 @@
+{
+  "schema": "bloom-tsr-moving-detail-lock-evidence-v1",
+  "issue": 149,
+  "comparison_base": "201b492355eb344cc161b572422ae035922c56d4",
+  "candidate_revision": "commit-containing-this-artifact",
+  "adapter": "Apple M1 Max",
+  "backend": "Metal",
+  "architecture": {
+    "history_representation": "binary-detail-lock-packed-in-existing-rg16float-provenance-g",
+    "legacy_unlocked_confidence_range": [0.0, 1.0],
+    "locked_confidence_range": [2.0, 3.0],
+    "reactive_encoding": "negative-complete-payload",
+    "seed": "moving-camera-fractional-ycocg-luma-variance",
+    "effect": "rectification-only",
+    "stationary_kill": true
+  },
+  "synthetic_motion": {
+    "static_fractional": {
+      "candidate_exactly_matches_base": true,
+      "mean_rgb": 0.6107025,
+      "rmse": 0.021239817,
+      "oklab": 0.002333706,
+      "edge": 0.004104466,
+      "ssim": 0.991220445
+    },
+    "glossy_slow_pan": {
+      "base": {
+        "mean_rgb": 1.105650,
+        "mean_ssim": 0.978452,
+        "minimum_ssim": 0.973658,
+        "motion_derivative_error": 0.128599
+      },
+      "candidate": {
+        "mean_rgb": 1.077261,
+        "mean_ssim": 0.978843,
+        "minimum_ssim": 0.974621,
+        "motion_derivative_error": 0.113418
+      },
+      "enforced": {
+        "maximum_mean_rgb": 1.09,
+        "minimum_mean_ssim": 0.9786,
+        "minimum_frame_ssim": 0.9740,
+        "maximum_motion_derivative_error": 0.122
+      }
+    },
+    "thin_feature_slow_pan": {
+      "base": {
+        "mean_rgb": 11.695227,
+        "mean_ssim": 0.599727,
+        "minimum_ssim": 0.578274,
+        "motion_derivative_error": 1.193663
+      },
+      "candidate": {
+        "mean_rgb": 10.376356,
+        "mean_ssim": 0.720353,
+        "minimum_ssim": 0.634745,
+        "motion_derivative_error": 0.903769
+      },
+      "enforced": {
+        "maximum_mean_rgb": 11.0,
+        "minimum_mean_ssim": 0.66,
+        "minimum_frame_ssim": 0.60,
+        "maximum_motion_derivative_error": 1.05
+      }
+    }
+  },
+  "matched_bistro_motion": {
+    "scene": "BistroReference.gltf",
+    "placements": 1176,
+    "resolution": [512, 288],
+    "frames": 32,
+    "candidate_scale": 0.75,
+    "native_scale": 1.0,
+    "camera_delta": [0.08, 0.02, 0.0],
+    "base": {
+      "native_frame_rmse": 0.02173569152336511,
+      "native_motion_derivative_rmse": 0.017314196720383652
+    },
+    "candidate": {
+      "native_frame_rmse": 0.021439822792731388,
+      "native_motion_derivative_rmse": 0.016946072617987723
+    },
+    "relative_change": {
+      "native_frame_rmse": -0.013612114908590489,
+      "native_motion_derivative_rmse": -0.021261402324402656
+    },
+    "repeatability_rmse": {
+      "candidate": 0.00024765991838648915,
+      "native": 0.00021780841052532196
+    },
+    "endpoint_sha256": {
+      "base_first": "f686090750ef9e6e13adb05d9ca90822cb93cb835d02a4f1608a7264976e2270",
+      "base_last": "c626f177d8d20043f3f13de3be4b4b56d04096f1209c26cbbff73d2b5e56802d",
+      "candidate_first": "2f8b38be6cd4a5b6508c3b2dfe7ea099dd6f038b9ba71a2ebf87f8c396e9c44f",
+      "candidate_last": "13b0e1f774889472119602372c214e6bc16d2566dd6519022c5a4908e1d6a54a",
+      "native_first": "64a83bf0370138e03bf169367eebb08b933e6f7b17db4751ddbd8695b905c74f",
+      "native_last": "48ee966e69914191fa16c88b0cb7d8f575c8df1406794d3863e5a1b435f5aa1c"
+    }
+  },
+  "performance": {
+    "resolution": [1600, 900],
+    "render_scale": 0.75,
+    "frames_per_run": 1200,
+    "pass": "taa",
+    "candidate_gpu_mean_us": [1965.765, 2092.520],
+    "candidate_standard_error_us": [24.572, 12.666],
+    "base_gpu_mean_us": 2042.832,
+    "base_standard_error_us": 21.200,
+    "candidate_bracket_mean_us": 2029.1425,
+    "candidate_relative_change": -0.006701236322908644
+  },
+  "resources": {
+    "added_texture_reads": 0,
+    "added_passes": 0,
+    "added_targets": 0,
+    "added_bindings": 0,
+    "added_allocations": 0,
+    "added_persistent_bytes": 0
+  },
+  "rejected_candidates": [
+    "continuous-axial-lock-added-4.9-percent-taa-cost",
+    "alpha-policy-changes-worsened-motion-derivative-error",
+    "resting-variance-lock-regressed-static-output"
+  ]
+}

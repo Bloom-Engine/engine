@@ -724,8 +724,9 @@ struct VsOut {
 
 struct TaaOut {
     @location(0) color: vec4<f32>,
-    /// R = geometric depth; abs-domain G stores persistent history confidence,
-    /// with a negative encoded range retaining prior reactive coverage.
+    /// R = geometric depth; G packs persistent history confidence and the
+    /// independent detail lock, with a negative encoded range retaining prior
+    /// reactive coverage.
     @location(1) provenance_history: vec2<f32>,
 };
 
@@ -802,6 +803,9 @@ fn fs_main(in: VsOut) -> TaaOut {
     var current_weight = abs(u.params.x);
     let camera_moving = u.params.x < 0.0;
     let reconstruction_scale = clamp(abs(u.params.w), 0.5, 1.0);
+    // The material-aware variant replaces this compile-time constant. The
+    // ordinary lazy topology consumes prior reactive provenance immediately.
+    let preserve_reactive_history = false;
 
     // Fractional reconstruction reads the current color at the jitter-corrected
     // source phase. Select depth and velocity from that same input position;
@@ -942,6 +946,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     var fractional_coverage = 1.0;
     var fractional_mean = vec3<f32>(0.0);
     var fractional_stddev = vec3<f32>(0.0);
+    var current_feature_lock = 0.0;
     var use_fractional_statistics = false;
     // This is uniform across the draw. Keep native reconstruction and its
     // already-qualified material response byte-for-byte unchanged.
@@ -960,6 +965,16 @@ fn fs_main(in: VsOut) -> TaaOut {
         center_rgb = reconstructed.center.rgb;
         fractional_mean = reconstructed.mean;
         fractional_stddev = reconstructed.stddev;
+        // Seed a persistent detail lock from statistics already required by
+        // rectification. Restrict it to real camera motion: settled output is
+        // byte-for-byte unchanged, while moving high-frequency detail can
+        // retain history through a transient source-phase excursion.
+        current_feature_lock = select(
+            0.0,
+            1.0,
+            camera_moving &&
+                reconstructed.stddev.x > max(abs(reconstructed.mean.x) * 0.05, 0.002),
+        );
         // At half scale, the Lanczos taps move substantially with source
         // phase. Reusing their moments as a history-clamp neighborhood makes
         // the clamp breathe as the Halton phase advances. Keep history
@@ -995,6 +1010,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     var history_depth = current_depth_key;
     var history_confidence = 0.0;
     var history_reactive = 0.0;
+    var history_feature_lock = 0.0;
     let history_in_bounds =
         prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
         prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
@@ -1010,10 +1026,19 @@ fn fs_main(in: VsOut) -> TaaOut {
         );
         let history_provenance = textureLoad(history_depth_tex, history_depth_coord, 0).rg;
         history_depth = history_provenance.r;
+        let temporal_history = unpack_temporal_history(history_provenance.g);
         // Negative provenance came from a reactive frame. The ordinary path
-        // resets its confidence, consuming current color immediately if the
+        // resets its confidence and detail lock, consuming current color if the
         // last reactive contributor disappeared with its lazy topology.
-        history_confidence = max(history_provenance.g, 0.0);
+        let history_payload_usable = select(
+            1.0 - temporal_history.reactive,
+            1.0,
+            preserve_reactive_history,
+        );
+        history_confidence = temporal_history.confidence * history_payload_usable;
+        history_feature_lock = temporal_history.feature_lock * history_payload_usable;
+        history_reactive = temporal_history.reactive *
+            select(0.0, 1.0, preserve_reactive_history);
     }
 
     // Reject history whose geometric provenance no longer matches the world
@@ -1281,7 +1306,23 @@ fn fs_main(in: VsOut) -> TaaOut {
     let accepted_history = select(0.0, 1.0 - temporal_rejection, history_usable);
     let next_history_confidence =
         min(history_confidence + 1.0 / 16.0, 1.0) * accepted_history;
-    let stable_history = mix(clamped_history, history, settled_static_phase_lock);
+    // Keep structural lifetime independent from ordinary color confidence.
+    // Existing geometric/reactive acceptance, the broad color band, and a
+    // stationary camera kill a stale lock; compatible moving detail seeds or
+    // renews it. The lock only protects rectification, leaving the qualified
+    // accumulation alpha intact.
+    let feature_shading_stable = gross_color_dist <= reject_hi * 4.0;
+    let protected_feature_lock = select(
+        0.0,
+        history_feature_lock,
+        camera_moving && accepted_history >= 0.99 && feature_shading_stable,
+    );
+    let next_feature_lock = max(
+        select(current_feature_lock, 0.0, current_reactive > 0.01),
+        protected_feature_lock,
+    );
+    let rectification_lock = max(settled_static_phase_lock, protected_feature_lock);
+    let stable_history = mix(clamped_history, history, rectification_lock);
     var blended = mix(stable_history, current, alpha);
     // The temporal average suppresses some of the reconstruction's
     // source-phase residual. On a settled stationary surface, feed a bounded
@@ -1319,7 +1360,10 @@ fn fs_main(in: VsOut) -> TaaOut {
     let blended_w = mix(history_w, current_w, alpha);
     return TaaOut(
         vec4<f32>(blended, blended_w),
-        vec2<f32>(current_depth_key, next_history_confidence),
+        vec2<f32>(
+            current_depth_key,
+            pack_temporal_history(next_history_confidence, 0.0, next_feature_lock),
+        ),
     );
 }
 ",

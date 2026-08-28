@@ -225,9 +225,13 @@ fn capture_glossy_detail(
 fn profile_taa_reconstruction(eng: &mut EngineState, frames: u32, render_scale: f32) -> f64 {
     eng.renderer.resize(1600, 900, 1600, 900);
     configure_glossy_detail_capture(&mut eng.renderer, true, render_scale);
-    for _ in 0..24 {
+    let camera_step = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_CAMERA_STEP")
+        .ok()
+        .map(|value| value.parse::<f32>().expect("profile camera step"))
+        .unwrap_or(0.0);
+    for frame in 0..24 {
         eng.begin_frame();
-        draw_glossy_detail_fixture(eng, 0.0);
+        draw_glossy_detail_fixture(eng, frame as f32 * camera_step);
         eng.end_frame();
     }
 
@@ -240,7 +244,7 @@ fn profile_taa_reconstruction(eng: &mut EngineState, frames: u32, render_scale: 
     let mut taa_gpu_windows = Vec::new();
     for frame in 0..frames {
         eng.begin_frame();
-        draw_glossy_detail_fixture(eng, 0.0);
+        draw_glossy_detail_fixture(eng, (frame + 24) as f32 * camera_step);
         eng.end_frame();
         if (frame + 1) % 120 == 0 || frame + 1 == frames {
             if let Some(taa_gpu_us) = eng
@@ -270,7 +274,8 @@ fn profile_taa_reconstruction(eng: &mut EngineState, frames: u32, render_scale: 
     };
     let standard_error = sample_variance.sqrt() / (taa_gpu_windows.len() as f64).sqrt();
     eprintln!(
-        "fractional-reconstruction profile_windows={} standard_error_us={standard_error:.3}",
+        "fractional-reconstruction profile_windows={} camera_step={camera_step:.6} \
+         standard_error_us={standard_error:.3}",
         taa_gpu_windows.len(),
     );
     mean
@@ -776,13 +781,13 @@ fn fractional_thin_features_bound_motion_error_without_reference_lag() {
     // error by retaining stale samples; the RGB and SSIM bounds catch that
     // ghosting/lag trade instead of accepting it as improved stability.
     assert!(
-        mean_rgb <= 11.78 && mean_ssim >= 0.595 && minimum_ssim >= 0.570,
+        mean_rgb <= 11.00 && mean_ssim >= 0.660 && minimum_ssim >= 0.600,
         "fractional thin-feature motion lagged its supersampled reference: \
          mean_rgb={mean_rgb:.6}, mean_ssim={mean_ssim:.6}, \
          minimum_ssim={minimum_ssim:.6}"
     );
     assert!(
-        derivative_error <= 1.23,
+        derivative_error <= 1.05,
         "fractional thin-feature motion added excessive temporal variation: \
          derivative_error={derivative_error:.6}"
     );
@@ -790,19 +795,21 @@ fn fractional_thin_features_bound_motion_error_without_reference_lag() {
 
 #[test]
 fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
-    let Some((_, mean_ssim, minimum_ssim, derivative_error, _)) = glossy_slow_pan_metrics(0.75)
+    let Some((mean_rgb, mean_ssim, minimum_ssim, derivative_error, _)) =
+        glossy_slow_pan_metrics(0.75)
     else {
         eprintln!("skip: no GPU adapter");
         return;
     };
 
     assert!(
-        mean_ssim >= 0.973 && minimum_ssim >= 0.965,
+        mean_rgb <= 1.09 && mean_ssim >= 0.9786 && minimum_ssim >= 0.9740,
         "fractional glossy slow pan diverged from supersampled motion: \
-         mean_ssim={mean_ssim:.6}, minimum_ssim={minimum_ssim:.6}"
+         mean_rgb={mean_rgb:.6}, mean_ssim={mean_ssim:.6}, \
+         minimum_ssim={minimum_ssim:.6}"
     );
     assert!(
-        derivative_error <= 0.145,
+        derivative_error <= 0.122,
         "fractional glossy slow pan added excessive temporal variation: \
          derivative_error={derivative_error:.6}"
     );

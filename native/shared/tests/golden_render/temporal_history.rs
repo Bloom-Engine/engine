@@ -836,7 +836,7 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
         "taa-reactive-history",
         "taa-history-policy",
         "taa-reconstruction-footprint",
-        "taa-thin-feature-confidence",
+        "taa-detail-lock",
     ] {
         let path = directory.join(format!("{name}.png"));
         let bytes = std::fs::read(&path)
@@ -975,18 +975,23 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
                 "reconstruction-footprint diagnostics must expose source residual, \
                  local variance, rectification pressure, and their actionable overlap"
             );
-        } else if name == "taa-thin-feature-confidence" {
+        } else if name == "taa-detail-lock" {
             let pixels = image::open(&path).unwrap().to_rgb8();
-            let candidates = pixels.pixels().filter(|pixel| pixel[1] > 127).count();
-            let ranged = pixels.pixels().filter(|pixel| pixel[2] > 2).count();
+            let current_locks = pixels.pixels().filter(|pixel| pixel[0] > 127).count();
+            let incoming_locks = pixels.pixels().filter(|pixel| pixel[1] > 127).count();
+            let outgoing_locks = pixels.pixels().filter(|pixel| pixel[2] > 127).count();
+            let invented_locks = pixels
+                .pixels()
+                .filter(|pixel| pixel[2] > pixel[0].max(pixel[1]).saturating_add(2))
+                .count();
             eprintln!(
-                "temporal-corpus thin_feature_candidates={candidates} \
-                 thin_feature_ranged={ranged}"
+                "temporal-corpus detail_lock_current={current_locks} incoming={incoming_locks} \
+                 outgoing={outgoing_locks} invented={invented_locks}"
             );
             assert!(
-                ranged > candidates,
-                "thin-feature diagnostics must keep ordinary local luma range \
-                 distinct from qualified ridges"
+                invented_locks == 0,
+                "detail-lock diagnostics must not create outgoing persistence \
+                 without a current or reprojected source"
             );
         }
     }
