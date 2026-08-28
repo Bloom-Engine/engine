@@ -1063,6 +1063,51 @@ fn camera_motion_sequence_bounds_ghosting_flicker_and_cut_residue() {
         "an explicit camera cut retained pixels from the prior camera"
     );
 
+    // A projection-only jump is currently remapped through the common motion
+    // vectors rather than automatically invalidated. Compare it with a fresh
+    // history epoch at the same Halton phases before approving that policy.
+    eng.renderer.reset_temporal_history();
+    let mut fresh_fov = Vec::new();
+    for _ in 0..8 {
+        fresh_fov.push(capture(&mut eng, 0.0, 70.0));
+    }
+    eng.renderer.reset_temporal_history();
+    advance(&mut eng, 16, 0.0, 42.0);
+    let mut stepped_fov = Vec::new();
+    for _ in 0..8 {
+        stepped_fov.push(capture(&mut eng, 0.0, 70.0));
+    }
+    let fov_step_metrics = fresh_fov
+        .iter()
+        .zip(&stepped_fov)
+        .map(|(fresh, stepped)| calculate_diff_metrics(fresh, stepped, W, H))
+        .collect::<Vec<_>>();
+    for (frame, metrics) in fov_step_metrics.iter().enumerate() {
+        eprintln!(
+            "temporal-corpus fov-step frame={frame} mean_rgb={:.4} outliers={:.4}% \
+             max={} ssim={:.6}",
+            metrics.mean_rgb,
+            metrics.outlier_pixel_fraction * 100.0,
+            metrics.max_diff,
+            metrics.ssim,
+        );
+    }
+    assert!(
+        fov_step_metrics.iter().all(|metrics| {
+            metrics.mean_rgb <= 0.35
+                && metrics.outlier_pixel_fraction <= 0.01
+                && metrics.ssim >= 0.992
+        }),
+        "FOV reprojection diverged materially from a fresh matched history epoch"
+    );
+    let fov_recovered = &fov_step_metrics[7];
+    assert!(
+        fov_recovered.mean_rgb <= 0.15 && fov_recovered.outlier_pixel_fraction <= 0.002,
+        "FOV reprojection did not converge to fresh output within eight frames: \
+         {fov_recovered:?}"
+    );
+
+    eng.renderer.reset_temporal_history();
     advance(&mut eng, 8, old_angle, 42.0);
     let mut fast_rotation = Vec::new();
     for _ in 0..24 {

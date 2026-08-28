@@ -1182,15 +1182,58 @@ impl Renderer {
         let taa_camera_motion_phase_active =
             taa_camera_moving && self.render_scale >= 0.75 && self.render_scale < 0.95;
         let output_detail_uses_depth = !taa_camera_moving && !self.pt_active();
+        let (
+            taa_source_filter,
+            taa_source_filter_samples,
+            taa_statistics_filter,
+            taa_statistics_additional_samples,
+            taa_composed_source_samples,
+        ) = if self.render_scale >= 0.75 && self.render_scale < 0.95 {
+            (
+                "approximate-separable-lanczos2",
+                9,
+                "reused-lanczos-cross",
+                0,
+                9,
+            )
+        } else if self.render_scale >= 0.5 && self.render_scale < 0.75 {
+            (
+                "approximate-radial-lanczos2",
+                5,
+                "variance-corrected-output-cross",
+                4,
+                9,
+            )
+        } else {
+            (
+                "exact-separable-catmull-rom",
+                9,
+                "variance-corrected-output-cross",
+                5,
+                14,
+            )
+        };
         out.push_str(",\"temporal_reconstruction\":{");
         out.push_str("\"enabled\":");
         out.push_str(if self.taa_enabled { "true" } else { "false" });
         out.push_str(",\"mode\":\"source-footprint-temporal\"");
-        out.push_str(",\"source_filter\":\"exact-separable-catmull-rom\"");
-        out.push_str(",\"source_filter_samples\":9");
-        out.push_str(",\"statistics_filter\":\"variance-corrected-cross\"");
+        out.push_str(",\"source_filter\":\"");
+        out.push_str(taa_source_filter);
+        out.push('"');
+        out.push_str(",\"source_filter_samples\":");
+        out.push_str(&taa_source_filter_samples.to_string());
+        out.push_str(",\"statistics_filter\":\"");
+        out.push_str(taa_statistics_filter);
+        out.push('"');
         out.push_str(",\"statistics_filter_samples\":5");
-        out.push_str(",\"composed_source_samples\":14");
+        out.push_str(",\"statistics_additional_samples\":");
+        out.push_str(&taa_statistics_additional_samples.to_string());
+        out.push_str(",\"composed_source_samples\":");
+        out.push_str(&taa_composed_source_samples.to_string());
+        out.push_str(",\"bootstrap_source_filter\":\"exact-separable-catmull-rom\"");
+        out.push_str(",\"bootstrap_source_filter_samples\":9");
+        out.push_str(",\"bootstrap_statistics_additional_samples\":5");
+        out.push_str(",\"bootstrap_composed_source_samples\":14");
         out.push_str(",\"history_filter\":\"camera-motion-phase-compressed-linear\"");
         out.push_str(",\"history_filter_samples\":1");
         out.push_str(",\"stationary_reconstruction_detail_strength\":0.2");

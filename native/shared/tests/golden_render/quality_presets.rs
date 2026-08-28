@@ -871,6 +871,9 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     };
 
     let legacy_half = capture_preset(&mut eng, 2, Some(0.5));
+    let legacy_paths: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+            .expect("half-scale reconstruction telemetry is valid JSON");
     let default_seed = capture_preset_frames(&mut eng, 2, None, 1);
     let default_medium = capture_preset(&mut eng, 2, None);
     let default_paths: serde_json::Value =
@@ -959,23 +962,73 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     );
     assert_eq!(
         reconstruction["source_filter"].as_str(),
-        Some("exact-separable-catmull-rom")
+        Some("approximate-separable-lanczos2")
     );
     assert_eq!(reconstruction["source_filter_samples"].as_u64(), Some(9));
     assert_eq!(
         reconstruction["statistics_filter"].as_str(),
-        Some("variance-corrected-cross")
+        Some("reused-lanczos-cross")
     );
     assert_eq!(
         reconstruction["statistics_filter_samples"].as_u64(),
         Some(5)
     );
-    assert_eq!(reconstruction["composed_source_samples"].as_u64(), Some(14));
+    assert_eq!(
+        reconstruction["statistics_additional_samples"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(reconstruction["composed_source_samples"].as_u64(), Some(9));
+    assert_eq!(
+        reconstruction["bootstrap_source_filter"].as_str(),
+        Some("exact-separable-catmull-rom")
+    );
+    assert_eq!(
+        reconstruction["bootstrap_source_filter_samples"].as_u64(),
+        Some(9)
+    );
+    assert_eq!(
+        reconstruction["bootstrap_statistics_additional_samples"].as_u64(),
+        Some(5)
+    );
+    assert_eq!(
+        reconstruction["bootstrap_composed_source_samples"].as_u64(),
+        Some(14)
+    );
     assert_eq!(
         reconstruction["history_filter"].as_str(),
         Some("camera-motion-phase-compressed-linear")
     );
     assert_eq!(reconstruction["history_filter_samples"].as_u64(), Some(1));
+    let half_reconstruction = &legacy_paths["temporal_reconstruction"];
+    assert_eq!(
+        half_reconstruction["source_filter"].as_str(),
+        Some("approximate-radial-lanczos2")
+    );
+    assert_eq!(
+        half_reconstruction["source_filter_samples"].as_u64(),
+        Some(5)
+    );
+    assert_eq!(
+        half_reconstruction["statistics_additional_samples"].as_u64(),
+        Some(4)
+    );
+    assert_eq!(
+        half_reconstruction["composed_source_samples"].as_u64(),
+        Some(9)
+    );
+    let native_reconstruction = &ultra_paths["temporal_reconstruction"];
+    assert_eq!(
+        native_reconstruction["source_filter"].as_str(),
+        Some("exact-separable-catmull-rom")
+    );
+    assert_eq!(
+        native_reconstruction["statistics_additional_samples"].as_u64(),
+        Some(5)
+    );
+    assert_eq!(
+        native_reconstruction["composed_source_samples"].as_u64(),
+        Some(14)
+    );
     assert_eq!(
         reconstruction["stationary_reconstruction_detail_strength"].as_f64(),
         Some(0.2)
