@@ -20,12 +20,15 @@ const START_Z: f32 = 7.2358;
 const START_YAW: f32 = -0.344;
 const END_X: f32 = START_X + 3.748170285;
 const END_Z: f32 = START_Z + 4.685212856;
+const MOTION_STEPS: u32 = 30;
+const MOTION_SAMPLE_INTERVAL: u32 = 5;
 
 #[derive(Clone, Copy, Debug)]
 struct ImageMetrics {
     mean_rgb: f64,
     ssim: f64,
     missing_geometry_fraction: f64,
+    background_leak_fraction: f64,
 }
 
 #[test]
@@ -77,22 +80,66 @@ fn detailed_bistro_virtual_geometry_matches_camera_endpoint() {
     let returned = load_rgba(&directory.join("virtual-returned.png"));
     let parity = image_metrics(&ordinary, &direct, WIDTH, HEIGHT);
     let motion = image_metrics(&direct, &returned, WIDTH, HEIGHT);
+    let mut minimum_motion_parity_ssim = 1.0f64;
+    let mut maximum_motion_parity_mean_rgb = 0.0f64;
+    let mut maximum_motion_missing_geometry = 0.0f64;
+    let mut maximum_motion_background_leak = 0.0f64;
+    let mut minimum_path_return_ssim = 1.0f64;
+    let mut maximum_path_return_mean_rgb = 0.0f64;
+    let mut motion_metrics = Vec::new();
+    for step in (MOTION_SAMPLE_INTERVAL..=MOTION_STEPS).step_by(MOTION_SAMPLE_INTERVAL as usize) {
+        let ordinary_frame = load_rgba(&motion_path(directory.as_path(), "ordinary", step));
+        let outbound = load_rgba(&motion_path(directory.as_path(), "virtual-outbound", step));
+        let outbound_parity = image_metrics(&ordinary_frame, &outbound, WIDTH, HEIGHT);
+        minimum_motion_parity_ssim = minimum_motion_parity_ssim.min(outbound_parity.ssim);
+        maximum_motion_parity_mean_rgb =
+            maximum_motion_parity_mean_rgb.max(outbound_parity.mean_rgb);
+        maximum_motion_missing_geometry =
+            maximum_motion_missing_geometry.max(outbound_parity.missing_geometry_fraction);
+        maximum_motion_background_leak =
+            maximum_motion_background_leak.max(outbound_parity.background_leak_fraction);
+        let path_return = (step < MOTION_STEPS).then(|| {
+            let returned_frame =
+                load_rgba(&motion_path(directory.as_path(), "virtual-return", step));
+            let metrics = image_metrics(&outbound, &returned_frame, WIDTH, HEIGHT);
+            minimum_path_return_ssim = minimum_path_return_ssim.min(metrics.ssim);
+            maximum_path_return_mean_rgb = maximum_path_return_mean_rgb.max(metrics.mean_rgb);
+            metrics
+        });
+        motion_metrics.push((step, outbound_parity, path_return));
+    }
     std::fs::write(
         directory.join("metrics.txt"),
-        format!("parity={parity:?}\nmotion={motion:?}\n"),
+        format!(
+            "parity={parity:?}\nmotion={motion:?}\nminimum_motion_parity_ssim={minimum_motion_parity_ssim:?}\nmaximum_motion_parity_mean_rgb={maximum_motion_parity_mean_rgb:?}\nmaximum_motion_missing_geometry={maximum_motion_missing_geometry:?}\nmaximum_motion_background_leak={maximum_motion_background_leak:?}\nminimum_path_return_ssim={minimum_path_return_ssim:?}\nmaximum_path_return_mean_rgb={maximum_path_return_mean_rgb:?}\nmotion_metrics={motion_metrics:#?}\n"
+        ),
     )
     .expect("write Bistro virtual metrics");
     eprintln!(
-        "detailed-bistro-virtual parity={parity:?} motion={motion:?} diagnostics={}",
+        "detailed-bistro-virtual parity={parity:?} motion={motion:?} motion_ssim_min={minimum_motion_parity_ssim:.8} motion_mean_max={maximum_motion_parity_mean_rgb:.6} motion_missing_max={maximum_motion_missing_geometry:.8} motion_background_leak_max={maximum_motion_background_leak:.8} path_ssim_min={minimum_path_return_ssim:.8} path_mean_max={maximum_path_return_mean_rgb:.6} diagnostics={}",
         directory.display()
     );
     assert!(
-        parity.ssim >= 0.80 && parity.mean_rgb <= 8.0 && parity.missing_geometry_fraction <= 0.005,
+        parity.ssim >= 0.80
+            && parity.mean_rgb <= 8.0
+            && parity.missing_geometry_fraction <= 0.005
+            && parity.background_leak_fraction <= 0.001,
         "virtual Bistro diverged from the ordinary material/camera reference: {parity:?}"
     );
     assert!(
         motion.ssim >= 0.985,
         "virtual Bistro failed to return to a stable camera endpoint: {motion:?}"
+    );
+    assert!(
+        minimum_motion_parity_ssim >= 0.80
+            && maximum_motion_parity_mean_rgb <= 8.0
+            && maximum_motion_missing_geometry <= 0.005
+            && maximum_motion_background_leak <= 0.001,
+        "virtual Bistro produced a hole/flash along the fixed motion corpus: {motion_metrics:#?}"
+    );
+    assert!(
+        minimum_path_return_ssim >= 0.985,
+        "virtual Bistro motion was path-dependent at a matched camera: {motion_metrics:#?}"
     );
     if std::env::var_os("BLOOM_KEEP_BISTRO_VIRTUAL_DIAGNOSTICS").is_none() {
         let _ = std::fs::remove_dir_all(directory);
@@ -115,6 +162,14 @@ fn run_ordinary_child(scene_path: &Path, directory: &Path) {
     let ordinary = retained_frame(&mut engine, START_X, START_Z, START_YAW, true)
         .expect("ordinary Bistro reference screenshot");
     save_rgba(&directory.join("ordinary.png"), &ordinary);
+    for step in 1..=MOTION_STEPS {
+        let (x, z) = motion_camera(step);
+        let capture = step % MOTION_SAMPLE_INTERVAL == 0;
+        let frame = retained_frame(&mut engine, x, z, START_YAW, capture);
+        if let Some(frame) = frame {
+            save_rgba(&motion_path(directory, "ordinary", step), &frame);
+        }
+    }
 }
 
 fn run_virtual_child(scene_path: &Path, archive_path: &Path, directory: &Path) {
@@ -247,31 +302,83 @@ fn run_virtual_child(scene_path: &Path, archive_path: &Path, directory: &Path) {
     .expect("direct virtual Bistro screenshot");
     let direct_report = engine.renderer.renderer_capability_report_json();
 
-    for step in 1..=30 {
-        let t = step as f32 / 30.0;
-        virtual_frame(
+    for step in 1..=MOTION_STEPS {
+        let (x, z) = motion_camera(step);
+        let capture = step % MOTION_SAMPLE_INTERVAL == 0;
+        let frame = virtual_frame(
             &mut engine,
             compact_handle,
             &route,
             &instances,
-            START_X + (END_X - START_X) * t,
-            START_Z + (END_Z - START_Z) * t,
+            x,
+            z,
             START_YAW,
-            false,
+            capture,
         );
+        if let Some(frame) = frame {
+            save_rgba(&motion_path(directory, "virtual-outbound", step), &frame);
+            std::fs::write(
+                directory.join(format!("virtual-outbound-{step:02}-report.json")),
+                engine.renderer.renderer_capability_report_json(),
+            )
+            .expect("write outbound Bistro runtime report");
+        }
     }
-    for step in 1..=30 {
-        let t = step as f32 / 30.0;
-        virtual_frame(
+    let endpoint_settle_frames = std::env::var("BLOOM_BISTRO_VIRTUAL_ENDPOINT_SETTLE_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if endpoint_settle_frames != 0 {
+        for _ in 0..endpoint_settle_frames {
+            virtual_frame(
+                &mut engine,
+                compact_handle,
+                &route,
+                &instances,
+                END_X,
+                END_Z,
+                START_YAW,
+                false,
+            );
+        }
+        let settled = virtual_frame(
             &mut engine,
             compact_handle,
             &route,
             &instances,
-            END_X + (START_X - END_X) * t,
-            END_Z + (START_Z - END_Z) * t,
+            END_X,
+            END_Z,
             START_YAW,
-            false,
+            true,
+        )
+        .expect("settled endpoint virtual Bistro screenshot");
+        save_rgba(&directory.join("virtual-endpoint-settled.png"), &settled);
+        std::fs::write(
+            directory.join("virtual-endpoint-settled-report.json"),
+            engine.renderer.renderer_capability_report_json(),
+        )
+        .expect("write settled endpoint Bistro runtime report");
+    }
+    for return_step in 1..=MOTION_STEPS {
+        let outbound_step = MOTION_STEPS - return_step;
+        let (x, z) = motion_camera(outbound_step);
+        let capture = outbound_step > 0 && outbound_step % MOTION_SAMPLE_INTERVAL == 0;
+        let frame = virtual_frame(
+            &mut engine,
+            compact_handle,
+            &route,
+            &instances,
+            x,
+            z,
+            START_YAW,
+            capture,
         );
+        if let Some(frame) = frame {
+            save_rgba(
+                &motion_path(directory, "virtual-return", outbound_step),
+                &frame,
+            );
+        }
     }
     for _ in 0..30 {
         virtual_frame(
@@ -366,6 +473,18 @@ fn begin_camera(renderer: &mut Renderer, x: f32, z: f32, yaw: f32) {
     );
     renderer.set_ambient_light(255.0, 245.0, 232.0, 0.18);
     renderer.set_directional_light(0.59732, 0.79653, -0.0935387, 255.0, 212.0, 177.0, 1.4);
+}
+
+fn motion_camera(step: u32) -> (f32, f32) {
+    let t = step as f32 / MOTION_STEPS as f32;
+    (
+        START_X + (END_X - START_X) * t,
+        START_Z + (END_Z - START_Z) * t,
+    )
+}
+
+fn motion_path(directory: &Path, label: &str, step: u32) -> PathBuf {
+    directory.join(format!("{label}-{step:02}.png"))
 }
 
 fn attach_model_placements(engine: &mut EngineState, model_handle: f64) {
@@ -542,6 +661,25 @@ fn image_metrics(reference: &[u8], candidate: &[u8], width: u32, height: u32) ->
         })
         .count() as f64
         / (f64::from(width) * f64::from(height));
+    // With the sky intentionally skipped, the fixed Bistro clear color is an
+    // exact geometry-hole sentinel. Compare against the ordinary reference so
+    // legitimate background remains excluded while virtual-only leaks fail
+    // even when broad SSIM/luminance metrics dilute them.
+    const CLEAR_RGB: [u8; 3] = [29, 39, 60];
+    let background_leak_fraction = reference
+        .chunks_exact(4)
+        .zip(candidate.chunks_exact(4))
+        .filter(|(reference, candidate)| {
+            let candidate_clear_delta = (0..3)
+                .map(|channel| candidate[channel].abs_diff(CLEAR_RGB[channel]) as u32)
+                .sum::<u32>();
+            let reference_clear_delta = (0..3)
+                .map(|channel| reference[channel].abs_diff(CLEAR_RGB[channel]) as u32)
+                .sum::<u32>();
+            candidate_clear_delta <= 3 && reference_clear_delta >= 48
+        })
+        .count() as f64
+        / (f64::from(width) * f64::from(height));
     let width = width as usize;
     let height = height as usize;
     let mut ssim = 0.0;
@@ -585,6 +723,7 @@ fn image_metrics(reference: &[u8], candidate: &[u8], width: u32, height: u32) ->
         mean_rgb,
         ssim: ssim / windows as f64,
         missing_geometry_fraction,
+        background_leak_fraction,
     }
 }
 

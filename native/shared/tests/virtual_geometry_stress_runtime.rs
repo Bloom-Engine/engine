@@ -235,7 +235,9 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
             as u64
             + readback_capacity
                 * std::mem::size_of::<bloom_shared::virtual_geometry::GpuVirtualPageRequest>()
-                    as u64),
+                    as u64
+            + readback_capacity
+                * std::mem::size_of::<bloom_shared::virtual_geometry::GpuVirtualPageUse>() as u64),
         "reported readback staging did not match its fixed allocation"
     );
     for counter in [
