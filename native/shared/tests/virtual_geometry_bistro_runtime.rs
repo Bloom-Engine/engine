@@ -120,8 +120,8 @@ fn detailed_bistro_virtual_geometry_matches_camera_endpoint() {
         directory.display()
     );
     assert!(
-        parity.ssim >= 0.80
-            && parity.mean_rgb <= 8.0
+        parity.ssim >= 0.95
+            && parity.mean_rgb <= 3.0
             && parity.missing_geometry_fraction <= 0.005
             && parity.background_leak_fraction <= 0.001,
         "virtual Bistro diverged from the ordinary material/camera reference: {parity:?}"
@@ -131,8 +131,8 @@ fn detailed_bistro_virtual_geometry_matches_camera_endpoint() {
         "virtual Bistro failed to return to a stable camera endpoint: {motion:?}"
     );
     assert!(
-        minimum_motion_parity_ssim >= 0.80
-            && maximum_motion_parity_mean_rgb <= 8.0
+        minimum_motion_parity_ssim >= 0.95
+            && maximum_motion_parity_mean_rgb <= 3.0
             && maximum_motion_missing_geometry <= 0.005
             && maximum_motion_background_leak <= 0.001,
         "virtual Bistro produced a hole/flash along the fixed motion corpus: {motion_metrics:#?}"
@@ -202,6 +202,10 @@ fn run_virtual_child(scene_path: &Path, archive_path: &Path, directory: &Path) {
     let root_page_count =
         u32::try_from(archive.coarse_root_page_count()).expect("Bistro root page count");
     let root_page_bytes = archive.coarse_root_page_bytes();
+    assert!(
+        root_page_count <= 920,
+        "Bistro root packing consumes {root_page_count} physical slots for {root_page_bytes} payload bytes"
+    );
     let max_clusters_per_group = archive
         .clusters
         .iter()

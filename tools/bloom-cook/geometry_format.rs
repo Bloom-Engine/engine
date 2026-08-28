@@ -52,7 +52,13 @@ pub fn encode_geometry_with_vertex_encoding(
             ));
         }
         let current_page_bytes = payload.len() - page_start;
-        let page_class = (meshlet.lod_level, meshlet.flags & FLAG_COARSE_ROOT != 0);
+        let coarse_root = meshlet.flags & FLAG_COARSE_ROOT != 0;
+        // Every coarse-root page is pinned for the complete lifetime of the
+        // registered mesh. Root LOD therefore does not define a different
+        // residency class, and separating mesh-first roots by level wastes a
+        // physical 64 KiB slot for each short run. Streamable pages retain the
+        // strict one-level-per-page contract used by atomic refinement.
+        let page_class = (coarse_root, if coarse_root { 0 } else { meshlet.lod_level });
         if current_page_bytes > 0
             && (previous_page_class != Some(page_class)
                 || current_page_bytes
@@ -686,6 +692,29 @@ mod tests {
         bytes[second_child_level..second_child_level + 4].copy_from_slice(&1u32.to_le_bytes());
         assert!(decode_geometry(&bytes)
             .unwrap_err()
-            .contains("mixes hierarchy levels or root residency classes"));
+            .contains("mixes streamable hierarchy levels or root residency classes"));
+    }
+
+    #[test]
+    fn pinned_roots_of_different_lod_levels_share_a_page() {
+        let mut root_a = triangle(0.0, 0);
+        root_a.flags |= FLAG_COARSE_ROOT;
+        root_a.lod_level = 1;
+        root_a.geometric_error = 0.25;
+        let mut root_b = triangle(2.0, 0);
+        root_b.flags |= FLAG_COARSE_ROOT;
+        root_b.lod_level = 3;
+        root_b.geometric_error = 1.0;
+
+        let bytes = encode_geometry(
+            &[root_a, root_b],
+            &[],
+            sha256(b"mixed-level-roots"),
+            DEFAULT_PAGE_BYTES,
+        )
+        .unwrap();
+        let archive = decode_geometry(&bytes).unwrap();
+        assert_eq!(archive.pages.len(), 1);
+        assert_eq!(archive.coarse_root_page_count(), 1);
     }
 }

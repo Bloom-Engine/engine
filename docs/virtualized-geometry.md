@@ -191,11 +191,16 @@ by aggregate totals.
 
 Before encoding, hierarchy clusters are deterministically remapped into
 coarse-first order while every atomic relation range remains contiguous.
-Coarse roots occupy a page prefix, and no page may mix root/streamable classes
-or LOD levels. `geometry` and `geometry-inspect` report the exact root-page
-count and bytes. The reader rejects mixed classes or roots placed after
-streamable pages, making the future always-resident upload a bounded prefix
-instead of a heuristic scan.
+Coarse roots occupy a page prefix, and no page may mix root and streamable
+classes. Streamable pages also remain isolated by LOD level so atomic
+refinement cannot accidentally couple unrelated levels. Pinned roots may
+share a page across levels because every root page has the same lifetime and
+residency policy. Geometry recipe v3 makes that distinction explicit; it
+avoids wasting a physical slot each time mesh-first root ordering changes LOD.
+`geometry` and `geometry-inspect` report the exact root-page count and bytes.
+The reader rejects mixed residency classes, mixed streamable levels, or roots
+placed after streamable pages, making the always-resident upload a bounded
+prefix instead of a heuristic scan.
 
 The cooker integration uses the Rust `meshopt` wrapper and its vendored
 meshoptimizer implementation under their permissive MIT/Apache-2.0 terms.

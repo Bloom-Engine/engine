@@ -53,18 +53,24 @@ pub(crate) fn validate_pages(
         let page_clusters = clusters
             .get(cluster_start..cluster_end)
             .ok_or_else(|| format!("page {page_index} cluster range exceeds cluster table"))?;
+        let first_root = page_clusters[0].flags & FLAG_COARSE_ROOT != 0;
         let first_class = (
-            page_clusters[0].lod_level,
-            page_clusters[0].flags & FLAG_COARSE_ROOT != 0,
+            first_root,
+            if first_root {
+                0
+            } else {
+                page_clusters[0].lod_level
+            },
         );
         if page_clusters.iter().any(|cluster| {
-            (cluster.lod_level, cluster.flags & FLAG_COARSE_ROOT != 0) != first_class
+            let coarse_root = cluster.flags & FLAG_COARSE_ROOT != 0;
+            (coarse_root, if coarse_root { 0 } else { cluster.lod_level }) != first_class
         }) {
             return Err(format!(
-                "page {page_index} mixes hierarchy levels or root residency classes"
+                "page {page_index} mixes streamable hierarchy levels or root residency classes"
             ));
         }
-        if first_class.1 {
+        if first_class.0 {
             if reached_non_root_pages {
                 return Err(format!(
                     "page {page_index} places coarse roots after streamable pages"
