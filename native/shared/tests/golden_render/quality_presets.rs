@@ -764,6 +764,184 @@ fn thin_feature_slow_pan_metrics() -> Option<(f64, f64, f64, f64, Vec<f64>)> {
     ))
 }
 
+fn crop_rgba(
+    rgba: &[u8],
+    width: u32,
+    x0: u32,
+    y0: u32,
+    crop_width: u32,
+    crop_height: u32,
+) -> Vec<u8> {
+    let mut crop = Vec::with_capacity((crop_width * crop_height * 4) as usize);
+    for y in y0..y0 + crop_height {
+        let start = ((y * width + x0) * 4) as usize;
+        let end = start + (crop_width * 4) as usize;
+        crop.extend_from_slice(&rgba[start..end]);
+    }
+    crop
+}
+
+fn coplanar_material_boundary_metrics() -> Option<(f64, f64, f64, f64)> {
+    const FRAMES: usize = 12;
+    const CAMERA_STEP: f32 = 0.03;
+    const CROP_X: u32 = 112;
+    const CROP_Y: u32 = 48;
+    const CROP_W: u32 = 32;
+    const CROP_H: u32 = 160;
+
+    let mut eng = try_engine()?;
+    let mut surface_detail = Vec::with_capacity(64 * 64 * 4);
+    for y in 0..64 {
+        for x in 0..64 {
+            let value = if ((x / 2) + (y / 2)) & 1 == 0 {
+                210
+            } else {
+                150
+            };
+            surface_detail.extend_from_slice(&[value, value, value, 255]);
+        }
+    }
+    let surface_detail = eng
+        .renderer
+        .register_texture_no_mips(64, 64, &surface_detail);
+    let make_panel = |min_x: f32, max_x: f32| {
+        [
+            ([min_x, -2.2, 0.0], [0.0, 1.0]),
+            ([max_x, -2.2, 0.0], [1.0, 1.0]),
+            ([max_x, 2.2, 0.0], [1.0, 0.0]),
+            ([min_x, 2.2, 0.0], [0.0, 0.0]),
+        ]
+        .into_iter()
+        .map(|(position, uv)| Vertex3D {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            uv,
+            joints: [0.0; 4],
+            weights: [0.0; 4],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+        })
+        .collect::<Vec<_>>()
+    };
+    let glossy = eng.scene.create_node();
+    eng.scene
+        .update_geometry(glossy, make_panel(-3.2, 0.0), vec![0, 1, 2, 0, 2, 3]);
+    eng.scene.set_material_color(glossy, 0.42, 0.48, 0.56, 1.0);
+    eng.scene.set_material_texture(glossy, surface_detail);
+    eng.scene.set_material_pbr(glossy, 0.08, 0.0);
+    let rough = eng.scene.create_node();
+    eng.scene
+        .update_geometry(rough, make_panel(0.0, 3.2), vec![0, 1, 2, 0, 2, 3]);
+    eng.scene.set_material_color(rough, 0.42, 0.48, 0.56, 1.0);
+    eng.scene.set_material_texture(rough, surface_detail);
+    eng.scene.set_material_pbr(rough, 0.92, 0.0);
+
+    let draw = |eng: &mut EngineState, camera_x: f32| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(4.0, 5.0, 8.0, 255.0);
+        r.begin_mode_3d(
+            camera_x,
+            0.0,
+            5.0,
+            camera_x * 0.10,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            42.0,
+            0.0,
+        );
+        r.set_ambient_light(175.0, 185.0, 205.0, 0.16);
+        r.add_directional_light(-0.55, -0.2, -1.0, 1.0, 0.94, 0.82, 3.8);
+        r.add_point_light(-0.6, 0.8, 2.2, 8.0, 0.65, 0.78, 1.0, 10.0);
+    };
+    let configure = |renderer: &mut Renderer, taa: bool, render_scale: f32| {
+        renderer.apply_quality_preset(4);
+        renderer.set_render_scale(render_scale);
+        configure_reconstruction_scene(renderer);
+        renderer.set_taa_enabled(taa);
+        renderer.set_sharpen_strength(0.0);
+        renderer.set_auto_exposure(false);
+        renderer.set_manual_exposure(1.0);
+        renderer.reset_temporal_history();
+    };
+
+    eng.renderer.resize(W * 2, H * 2, W * 2, H * 2);
+    configure(&mut eng.renderer, false, 1.0);
+    let references = (0..FRAMES)
+        .map(|frame| {
+            let camera_x = frame as f32 * CAMERA_STEP;
+            let supersampled = render(&mut eng, 1, |eng| draw(eng, camera_x)).2;
+            let reference = downsample_box_2x(&supersampled, W * 2, H * 2);
+            crop_rgba(&reference, W, CROP_X, CROP_Y, CROP_W, CROP_H)
+        })
+        .collect::<Vec<_>>();
+
+    eng.renderer.resize(W, H, W, H);
+    configure(&mut eng.renderer, true, 0.75);
+    let _ = render(&mut eng, 24, |eng| draw(eng, 0.0));
+    let candidates = (0..FRAMES)
+        .map(|frame| {
+            let camera_x = frame as f32 * CAMERA_STEP;
+            let frame = render(&mut eng, 1, |eng| draw(eng, camera_x)).2;
+            crop_rgba(&frame, W, CROP_X, CROP_Y, CROP_W, CROP_H)
+        })
+        .collect::<Vec<_>>();
+
+    let metrics = references
+        .iter()
+        .zip(&candidates)
+        .map(|(reference, candidate)| calculate_diff_metrics(reference, candidate, CROP_W, CROP_H))
+        .collect::<Vec<_>>();
+    let mean_rgb = metrics.iter().map(|metrics| metrics.mean_rgb).sum::<f64>() / FRAMES as f64;
+    let mean_ssim = metrics.iter().map(|metrics| metrics.ssim).sum::<f64>() / FRAMES as f64;
+    let minimum_ssim = metrics
+        .iter()
+        .map(|metrics| metrics.ssim)
+        .fold(1.0f64, f64::min);
+    let derivative_error = references
+        .windows(2)
+        .zip(candidates.windows(2))
+        .map(|(reference, candidate)| {
+            temporal_derivative_error(&reference[0], &reference[1], &candidate[0], &candidate[1])
+        })
+        .sum::<f64>()
+        / (FRAMES - 1) as f64;
+    eprintln!(
+        "coplanar-material-boundary mean_rgb={mean_rgb:.6} mean_ssim={mean_ssim:.6} \
+         minimum_ssim={minimum_ssim:.6} derivative_error={derivative_error:.6} \
+         frame_metrics={metrics:?}"
+    );
+    Some((mean_rgb, mean_ssim, minimum_ssim, derivative_error))
+}
+
+#[test]
+fn fractional_coplanar_material_boundary_tracks_supersampled_motion() {
+    let Some((mean_rgb, mean_ssim, minimum_ssim, derivative_error)) =
+        coplanar_material_boundary_metrics()
+    else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    // The two panels are exactly coplanar and share their base texture/color,
+    // but sit at opposite ends of the perceptual-roughness range. Depth and
+    // broad color alone therefore cannot identify the boundary. Keep both
+    // native-reference fidelity and temporal response bounded so a future
+    // discriminator cannot earn a lower still error by retaining stale detail.
+    assert!(
+        mean_rgb <= 1.86 && mean_ssim >= 0.9745 && minimum_ssim >= 0.94,
+        "fractional coplanar material boundary diverged from supersampled motion: \
+         mean_rgb={mean_rgb:.6}, mean_ssim={mean_ssim:.6}, \
+         minimum_ssim={minimum_ssim:.6}"
+    );
+    assert!(
+        derivative_error <= 0.47,
+        "fractional coplanar material boundary added excessive temporal variation: \
+         derivative_error={derivative_error:.6}"
+    );
+}
+
 #[test]
 fn fractional_thin_features_bound_motion_error_without_reference_lag() {
     let Some((mean_rgb, mean_ssim, minimum_ssim, derivative_error, _)) =
