@@ -54,8 +54,9 @@ pub use streaming::{
 };
 pub use traversal::{
     GpuSelectedVirtualCluster, GpuVirtualHierarchySelector, GpuVirtualInstance,
-    GpuVirtualPageRequest, GpuVirtualTraversalConfig, GpuVirtualTraversalCounters,
-    VirtualGeometryTraversalDispatch, VirtualGeometryTraversalError, VirtualGeometryView,
+    GpuVirtualPageRequest, GpuVirtualPageUse, GpuVirtualTraversalConfig,
+    GpuVirtualTraversalCounters, VirtualGeometryTraversalDispatch, VirtualGeometryTraversalError,
+    VirtualGeometryView,
 };
 pub use visibility::{
     GpuVirtualVisibilityFrame, GpuVirtualVisibilityRaster, VirtualGeometryVisibilityError,

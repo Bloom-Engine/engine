@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn selected_records_are_render_ready_across_multiple_meshes() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping multi-mesh decode oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping multi-mesh decode oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(10)).unwrap();
@@ -131,7 +131,7 @@ fn temporal_instance_state_is_finite_affine_and_preserves_the_traversal_prefix()
 #[test]
 fn material_binding_is_atomic_and_temporal_gpu_decode_uses_dense_instances() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping temporal material oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping temporal material oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();

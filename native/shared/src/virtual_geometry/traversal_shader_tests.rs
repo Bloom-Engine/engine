@@ -1,11 +1,14 @@
 use super::*;
 
 #[test]
-fn traversal_shader_parses_and_uses_the_bounded_depth_contract() {
+fn traversal_shader_parses_and_uses_bounded_depth_and_branch_contracts() {
     wgpu::naga::front::wgsl::parse_str(TRAVERSAL_SHADER)
         .unwrap_or_else(|error| panic!("virtual hierarchy WGSL failed: {error:?}"));
-    assert!(TRAVERSAL_SHADER.contains("depth < 32u"));
+    assert!(TRAVERSAL_SHADER.contains("depth >= params.limits.x"));
+    assert!(TRAVERSAL_SHADER
+        .contains("stack_count + child_group_count > TRAVERSAL_GROUP_STACK_CAPACITY"));
     assert_eq!(MAX_GPU_HIERARCHY_LEVELS, 32);
+    assert_eq!(TRAVERSAL_GROUP_STACK_CAPACITY, 32);
 }
 
 #[test]

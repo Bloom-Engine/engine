@@ -61,7 +61,7 @@ fn runtime_asset_reports_canonical_source_mesh_routes() {
 #[test]
 fn gpu_hierarchy_selector_filters_shared_archives_by_source_mesh_placement() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping source-mesh filter oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping source-mesh filter oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();

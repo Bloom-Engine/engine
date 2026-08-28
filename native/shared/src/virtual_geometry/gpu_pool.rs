@@ -12,6 +12,12 @@ use bloom_geometry_format::{sha256, MAX_PAGE_BYTES, MIN_PAGE_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+// Feedback is asynchronous, and repairing one missing intermediate group can
+// temporarily make its already-resident descendants unreachable. Retain the
+// recently visible hierarchy long enough for that closure to rebuild; a
+// higher-priority current request may still preempt the guard immediately.
+const VISIBLE_PAGE_PROTECTION_FRAMES: u64 = 16;
 use std::sync::Arc;
 
 const ID_SLOT_BITS: u32 = 20;
@@ -28,6 +34,10 @@ pub const GPU_VIRTUAL_PAGE_RESIDENT: u32 = 1 << 0;
 pub const GPU_VIRTUAL_PAGE_PINNED: u32 = 1 << 1;
 pub const GPU_VIRTUAL_MESH_VALID: u32 = 1 << 0;
 pub const GPU_VIRTUAL_MESH_MATERIALS_BOUND: u32 = 1 << 1;
+/// Runtime-only cluster metadata: every sibling in this current group names
+/// the same child replacement. The selector can retain its single-range fast
+/// path without trusting that property for genuinely branched hierarchy data.
+pub(super) const GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE: u32 = 1 << 27;
 
 /// Explicit translation from one archive material slot to the renderer's
 /// generation-safe global material ID. `None` is glTF's default material.
@@ -251,7 +261,16 @@ struct PhysicalSlot {
     owner: Option<VirtualPageId>,
     pinned: bool,
     last_use: u64,
+    protected_until_frame: u64,
+    streaming_priority_bits: u32,
+    streaming_source_cluster: u32,
     retiring_until: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StreamingAdmission {
+    source_cluster: u32,
+    priority_bits: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -434,7 +453,7 @@ impl GpuVirtualGeometryPool {
         let mesh_slot_index = self
             .available_mesh_slot()
             .ok_or(VirtualGeometryGpuError::MeshTableExhausted)?;
-        let target_slots = self.plan_physical_slots(root_page_count, &[])?;
+        let target_slots = self.plan_physical_slots(root_page_count, &[], None)?;
 
         let table_base = self
             .allocate_page_range(page_count)
@@ -579,24 +598,56 @@ impl GpuVirtualGeometryPool {
         mesh_id: VirtualMeshId,
         cluster_index: u32,
     ) -> Result<GpuPageTransition, VirtualGeometryGpuError> {
+        let payloads = self.in_memory_group_payloads(mesh_id, cluster_index)?;
+        self.make_group_resident_with_pages_admission(
+            queue,
+            mesh_id,
+            cluster_index,
+            &payloads,
+            None,
+        )
+    }
+
+    pub(crate) fn make_group_resident_for_streaming(
+        &mut self,
+        queue: &wgpu::Queue,
+        mesh_id: VirtualMeshId,
+        cluster_index: u32,
+        priority_bits: u32,
+    ) -> Result<GpuPageTransition, VirtualGeometryGpuError> {
+        let payloads = self.in_memory_group_payloads(mesh_id, cluster_index)?;
+        self.make_group_resident_with_pages_admission(
+            queue,
+            mesh_id,
+            cluster_index,
+            &payloads,
+            Some(StreamingAdmission {
+                source_cluster: cluster_index,
+                priority_bits,
+            }),
+        )
+    }
+
+    fn in_memory_group_payloads(
+        &self,
+        mesh_id: VirtualMeshId,
+        cluster_index: u32,
+    ) -> Result<BTreeMap<u32, Vec<u8>>, VirtualGeometryGpuError> {
         let missing_pages = self.missing_group_pages(mesh_id, cluster_index)?;
-        let payloads = {
-            let mesh = self.live_mesh(mesh_id)?;
-            missing_pages
-                .iter()
-                .map(|page_index| {
-                    let page_id = VirtualPageId {
-                        mesh: mesh_id,
-                        page_index: *page_index,
-                    };
-                    mesh.asset
-                        .page_bytes(*page_index as usize)
-                        .map(|bytes| (*page_index, bytes.to_vec()))
-                        .ok_or(VirtualGeometryGpuError::MissingPage(page_id))
-                })
-                .collect::<Result<BTreeMap<_, _>, _>>()?
-        };
-        self.make_group_resident_with_pages(queue, mesh_id, cluster_index, &payloads)
+        let mesh = self.live_mesh(mesh_id)?;
+        missing_pages
+            .iter()
+            .map(|page_index| {
+                let page_id = VirtualPageId {
+                    mesh: mesh_id,
+                    page_index: *page_index,
+                };
+                mesh.asset
+                    .page_bytes(*page_index as usize)
+                    .map(|bytes| (*page_index, bytes.to_vec()))
+                    .ok_or(VirtualGeometryGpuError::MissingPage(page_id))
+            })
+            .collect()
     }
 
     pub(crate) fn missing_group_pages(
@@ -615,12 +666,33 @@ impl GpuVirtualGeometryPool {
     /// Upload a completely materialized atomic group. The streamer validates
     /// pages again here before any eviction or table mutation, so an I/O race
     /// or corrupt worker result cannot partially replace resident geometry.
-    pub(crate) fn make_group_resident_with_pages(
+    pub(crate) fn make_group_resident_with_pages_for_streaming(
         &mut self,
         queue: &wgpu::Queue,
         mesh_id: VirtualMeshId,
         cluster_index: u32,
         payloads: &BTreeMap<u32, Vec<u8>>,
+        priority_bits: u32,
+    ) -> Result<GpuPageTransition, VirtualGeometryGpuError> {
+        self.make_group_resident_with_pages_admission(
+            queue,
+            mesh_id,
+            cluster_index,
+            payloads,
+            Some(StreamingAdmission {
+                source_cluster: cluster_index,
+                priority_bits,
+            }),
+        )
+    }
+
+    fn make_group_resident_with_pages_admission(
+        &mut self,
+        queue: &wgpu::Queue,
+        mesh_id: VirtualMeshId,
+        cluster_index: u32,
+        payloads: &BTreeMap<u32, Vec<u8>>,
+        admission: Option<StreamingAdmission>,
     ) -> Result<GpuPageTransition, VirtualGeometryGpuError> {
         let (group, required_pages, missing_pages) = {
             let mesh = self.live_mesh(mesh_id)?;
@@ -675,7 +747,8 @@ impl GpuVirtualGeometryPool {
                 page_index: *page_index,
             })
             .collect::<Vec<_>>();
-        let target_slots = self.plan_physical_slots(missing_pages.len() as u32, &protected)?;
+        let target_slots =
+            self.plan_physical_slots(missing_pages.len() as u32, &protected, admission)?;
         let evicted = target_slots
             .iter()
             .filter_map(|slot| self.physical_slots[*slot as usize].owner)
@@ -705,6 +778,15 @@ impl GpuVirtualGeometryPool {
                 Ok((page_id, physical_slot))
             })
             .collect::<Result<Vec<_>, VirtualGeometryGpuError>>()?;
+        if let Some(admission) = admission {
+            let protected_until = self.frame.saturating_add(VISIBLE_PAGE_PROTECTION_FRAMES);
+            for (_, physical_slot) in &uploaded {
+                let slot = &mut self.physical_slots[*physical_slot as usize];
+                slot.protected_until_frame = protected_until;
+                slot.streaming_priority_bits = admission.priority_bits;
+                slot.streaming_source_cluster = admission.source_cluster;
+            }
+        }
         self.touch_pages(mesh_id, &required_pages)?;
         self.counters.frame_upload_pages += uploaded.len() as u32;
         self.counters.frame_upload_bytes += upload_bytes;
@@ -1070,6 +1152,9 @@ impl GpuVirtualGeometryPool {
             owner: Some(page_id),
             pinned,
             last_use: clock,
+            protected_until_frame: 0,
+            streaming_priority_bits: 0,
+            streaming_source_cluster: u32::MAX,
             retiring_until: None,
         };
         self.write_page_entry(
@@ -1113,10 +1198,58 @@ impl GpuVirtualGeometryPool {
         Ok(())
     }
 
+    pub(crate) fn protect_group_pages(
+        &mut self,
+        mesh_id: VirtualMeshId,
+        cluster_index: u32,
+        priority_bits: u32,
+    ) -> Result<u32, VirtualGeometryGpuError> {
+        let pages = {
+            let mesh = self.live_mesh(mesh_id)?;
+            let archive = mesh.asset.archive();
+            let mut group = group_containing(archive, cluster_index)?;
+            let mut visited_groups = BTreeSet::new();
+            let mut pages = BTreeSet::new();
+            while visited_groups.insert((group.first_cluster, group.cluster_count)) {
+                pages.extend(group_pages(archive, group));
+                let Some(parent) = parent_group(archive, group) else {
+                    break;
+                };
+                // A child can name only the parent subgroup that generated it,
+                // while traversal requires the complete atomic group containing
+                // that subgroup (including its sibling branches).
+                group = group_containing(archive, parent.first_cluster)?;
+            }
+            pages.into_iter().collect::<Vec<_>>()
+        };
+        self.touch_pages(mesh_id, &pages)?;
+        let slots = {
+            let mesh = self.live_mesh(mesh_id)?;
+            pages
+                .iter()
+                .filter_map(|page_index| mesh.pages[*page_index as usize].slot)
+                .collect::<Vec<_>>()
+        };
+        let protected_until = self.frame.saturating_add(VISIBLE_PAGE_PROTECTION_FRAMES);
+        for slot in &slots {
+            let physical = &mut self.physical_slots[*slot as usize];
+            physical.protected_until_frame = physical.protected_until_frame.max(protected_until);
+            if priority_bits > physical.streaming_priority_bits
+                || (priority_bits == physical.streaming_priority_bits
+                    && cluster_index < physical.streaming_source_cluster)
+            {
+                physical.streaming_priority_bits = priority_bits;
+                physical.streaming_source_cluster = cluster_index;
+            }
+        }
+        Ok(slots.len() as u32)
+    }
+
     fn plan_physical_slots(
         &self,
         count: u32,
         protected: &[VirtualPageId],
+        admission: Option<StreamingAdmission>,
     ) -> Result<Vec<u32>, VirtualGeometryGpuError> {
         let mut selected = self
             .physical_slots
@@ -1132,17 +1265,45 @@ impl GpuVirtualGeometryPool {
                 .iter()
                 .enumerate()
                 .filter(|(_, slot)| {
-                    !slot.pinned
-                        && slot.retiring_until.is_none()
-                        && slot.owner.is_some_and(|owner| !protected.contains(&owner))
+                    if slot.pinned || slot.retiring_until.is_some() {
+                        return false;
+                    }
+                    let Some(owner) = slot.owner else {
+                        return false;
+                    };
+                    if protected.contains(&owner) {
+                        return false;
+                    }
+                    let Some(admission) = admission else {
+                        return slot.protected_until_frame < self.frame;
+                    };
+                    if slot.protected_until_frame < self.frame {
+                        return true;
+                    }
+                    admission.priority_bits > slot.streaming_priority_bits
+                        || (admission.priority_bits == slot.streaming_priority_bits
+                            && admission.source_cluster < slot.streaming_source_cluster)
                 })
-                .map(|(index, slot)| (slot.last_use, index as u32))
+                .map(|(index, slot)| {
+                    let class = if slot.protected_until_frame < self.frame {
+                        0u8
+                    } else {
+                        1
+                    };
+                    (
+                        class,
+                        slot.streaming_priority_bits,
+                        u32::MAX - slot.streaming_source_cluster,
+                        slot.last_use,
+                        index as u32,
+                    )
+                })
                 .collect::<Vec<_>>();
             evictable.sort_unstable();
             selected.extend(
                 evictable
                     .into_iter()
-                    .map(|(_, index)| index)
+                    .map(|(_, _, _, _, index)| index)
                     .take(count as usize - selected.len()),
             );
         }
@@ -1161,7 +1322,7 @@ impl GpuVirtualGeometryPool {
         protected: &[VirtualPageId],
     ) -> Result<u32, VirtualGeometryGpuError> {
         Ok(self
-            .plan_physical_slots(count, protected)?
+            .plan_physical_slots(count, protected, None)?
             .iter()
             .filter(|slot| self.physical_slots[**slot as usize].owner.is_some())
             .count() as u32)
@@ -1397,6 +1558,7 @@ fn validate_config(
 fn encode_cluster_entries(
     archive: &bloom_geometry_format::GeometryArchive,
 ) -> Result<Vec<GpuVirtualClusterEntry>, VirtualGeometryGpuError> {
+    let uniform_child_ranges = uniform_child_range_flags(archive);
     archive
         .clusters
         .iter()
@@ -1446,7 +1608,9 @@ fn encode_cluster_entries(
                     cluster.mesh_index,
                     cluster.primitive_index,
                     0,
-                    cluster.flags,
+                    cluster.flags
+                        | u32::from(uniform_child_ranges[cluster_index])
+                            * GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE,
                 ],
                 page_lod_counts: [
                     cluster.page_index,
@@ -1464,6 +1628,48 @@ fn encode_cluster_entries(
             })
         })
         .collect()
+}
+
+fn uniform_child_range_flags(archive: &bloom_geometry_format::GeometryArchive) -> Vec<bool> {
+    let mut groups = BTreeSet::<(u32, u32)>::new();
+    for cluster in &archive.clusters {
+        if cluster.first_child != bloom_geometry_format::NO_RELATION && cluster.child_count != 0 {
+            groups.insert((cluster.first_child, cluster.child_count));
+        }
+        if cluster.flags & bloom_geometry_format::FLAG_COARSE_ROOT != 0
+            && cluster.first_child != bloom_geometry_format::NO_RELATION
+            && cluster.child_count != 0
+        {
+            let Some(child) = archive.clusters.get(cluster.first_child as usize) else {
+                continue;
+            };
+            if child.parent != bloom_geometry_format::NO_RELATION && child.parent_count != 0 {
+                groups.insert((child.parent, child.parent_count));
+            }
+        }
+    }
+
+    let mut uniform = vec![false; archive.clusters.len()];
+    for (first, count) in groups {
+        let Some(end) = first.checked_add(count) else {
+            continue;
+        };
+        let range = first as usize..end as usize;
+        let Some(first_cluster) = archive.clusters.get(range.start) else {
+            continue;
+        };
+        let Some(group) = archive.clusters.get(range.clone()) else {
+            continue;
+        };
+        let relation = (first_cluster.first_child, first_cluster.child_count);
+        if group
+            .iter()
+            .all(|cluster| (cluster.first_child, cluster.child_count) == relation)
+        {
+            uniform[range].fill(true);
+        }
+    }
+    uniform
 }
 
 fn allocate_table_range(ranges: &mut Vec<FreeRange>, count: u32) -> Option<u32> {

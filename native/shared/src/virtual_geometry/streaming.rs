@@ -1,5 +1,5 @@
 use super::{
-    GpuVirtualGeometryPool, GpuVirtualHierarchySelector, GpuVirtualPageRequest,
+    GpuVirtualGeometryPool, GpuVirtualHierarchySelector, GpuVirtualPageRequest, GpuVirtualPageUse,
     GpuVirtualTraversalCounters, VirtualGeometryGpuError, VirtualMeshId, VirtualPageId,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -17,6 +17,7 @@ use std::sync::{
 const READBACK_SLOTS: usize = 2;
 const COUNTER_BYTES: u64 = std::mem::size_of::<GpuVirtualTraversalCounters>() as u64;
 const REQUEST_BYTES: u64 = std::mem::size_of::<GpuVirtualPageRequest>() as u64;
+const PAGE_USE_BYTES: u64 = std::mem::size_of::<GpuVirtualPageUse>() as u64;
 
 /// Fixed CPU/GPU feedback budgets for virtual page streaming. The renderer's
 /// simple enable method uses this default; advanced callers can opt into an
@@ -77,7 +78,13 @@ pub struct GpuVirtualStreamingTelemetry {
     pub attempted_requests: u64,
     pub copied_requests: u64,
     pub truncated_requests: u64,
+    pub attempted_page_uses: u64,
+    pub copied_page_uses: u64,
+    pub truncated_page_uses: u64,
+    pub protected_page_groups: u64,
+    pub protected_pages: u64,
     pub unique_group_requests: u64,
+    pub expired_pending_groups: u64,
     pub dropped_pending_groups: u64,
     pub group_attempts: u64,
     pub groups_resolved: u64,
@@ -103,6 +110,7 @@ pub struct GpuVirtualStreamingTelemetry {
     pub last_selected_count: u32,
     pub last_selected_overflow: u32,
     pub last_request_overflow: u32,
+    pub last_page_use_overflow: u32,
     pub last_invalid_records: u32,
     pub last_depth_limit_fallbacks: u32,
     pub last_occlusion_culled_groups: u32,
@@ -126,6 +134,7 @@ struct CompletedFeedback {
     sequence: u64,
     counters: GpuVirtualTraversalCounters,
     requests: Vec<GpuVirtualPageRequest>,
+    page_uses: Vec<GpuVirtualPageUse>,
 }
 
 type GroupKey = (u32, u32);
@@ -172,6 +181,7 @@ pub struct GpuVirtualPageStreamer {
     next_sequence: u64,
     latest_consumed_sequence: u64,
     pending: BTreeMap<GroupKey, PendingGroup>,
+    latest_page_uses: BTreeMap<GroupKey, u32>,
     #[cfg(not(target_arch = "wasm32"))]
     page_io: PageIoState,
     telemetry: GpuVirtualStreamingTelemetry,
@@ -211,6 +221,7 @@ impl GpuVirtualPageStreamer {
             next_sequence: 1,
             latest_consumed_sequence: 0,
             pending: BTreeMap::new(),
+            latest_page_uses: BTreeMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             page_io,
             telemetry: GpuVirtualStreamingTelemetry {
@@ -307,6 +318,13 @@ impl GpuVirtualPageStreamer {
             COUNTER_BYTES,
             REQUEST_BYTES * u64::from(self.config.max_readback_requests),
         );
+        encoder.copy_buffer_to_buffer(
+            selector.page_use_buffer(),
+            0,
+            &self.readbacks[slot].buffer,
+            COUNTER_BYTES + REQUEST_BYTES * u64::from(self.config.max_readback_requests),
+            PAGE_USE_BYTES * u64::from(self.config.max_readback_requests),
+        );
         self.readbacks[slot].sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
         self.readbacks[slot].status.store(0, Ordering::Release);
@@ -338,6 +356,24 @@ impl GpuVirtualPageStreamer {
     /// caused only by this frame's residency budgets is retained for a later
     /// frame; malformed or generation-stale requests are removed.
     pub fn service(&mut self, pool: &mut GpuVirtualGeometryPool, queue: &wgpu::Queue) {
+        // Mapping completion is asynchronous and may skip several renderer frames. Keep
+        // refreshing the newest completed visible set until a newer traversal replaces it;
+        // consuming it once would let live pages age out between readbacks and restart the
+        // same request/eviction cycle at a static camera.
+        for (&(mesh_id, source_cluster), &priority_bits) in &self.latest_page_uses {
+            if let Ok(protected_pages) = pool.protect_group_pages(
+                VirtualMeshId::from_raw(mesh_id),
+                source_cluster,
+                priority_bits,
+            ) {
+                self.telemetry.protected_page_groups =
+                    self.telemetry.protected_page_groups.saturating_add(1);
+                self.telemetry.protected_pages = self
+                    .telemetry
+                    .protected_pages
+                    .saturating_add(u64::from(protected_pages));
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.drain_page_io();
         let mut blocked = BTreeSet::new();
@@ -368,7 +404,12 @@ impl GpuVirtualPageStreamer {
                 self.service_file_group(pool, queue, key, request, &mut blocked);
                 continue;
             }
-            match pool.make_group_resident(queue, mesh, request.source_cluster) {
+            match pool.make_group_resident_for_streaming(
+                queue,
+                mesh,
+                request.source_cluster,
+                request.priority_bits,
+            ) {
                 Ok(transition) => {
                     self.record_resolved_group(pool, key, &transition);
                 }
@@ -392,10 +433,15 @@ impl GpuVirtualPageStreamer {
 
     fn record_resolved_group(
         &mut self,
-        pool: &GpuVirtualGeometryPool,
+        pool: &mut GpuVirtualGeometryPool,
         key: GroupKey,
         transition: &super::GpuPageTransition,
     ) {
+        let priority_bits = self
+            .pending
+            .get(&key)
+            .map(|pending| pending.request.priority_bits)
+            .unwrap_or_default();
         self.pending.remove(&key);
         self.telemetry.groups_resolved = self.telemetry.groups_resolved.saturating_add(1);
         self.telemetry.uploaded_pages = self
@@ -413,6 +459,13 @@ impl GpuVirtualPageStreamer {
                 })
                 .sum::<u64>(),
         );
+        if !transition.uploaded.is_empty() {
+            // A freshly uploaded atomic group cannot appear in selected-page feedback
+            // until a later traversal has executed and mapped back. Give it the same
+            // bounded grace window as a visible group so later requests in this service
+            // call cannot evict it before the renderer gets one chance to consume it.
+            let _ = pool.protect_group_pages(VirtualMeshId::from_raw(key.0), key.1, priority_bits);
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -426,11 +479,12 @@ impl GpuVirtualPageStreamer {
     ) {
         let mesh = VirtualMeshId::from_raw(request.mesh_id);
         if let Some(ready) = self.page_io.ready.remove(&key) {
-            let result = pool.make_group_resident_with_pages(
+            let result = pool.make_group_resident_with_pages_for_streaming(
                 queue,
                 mesh,
                 request.source_cluster,
                 &ready.payloads,
+                request.priority_bits,
             );
             match result {
                 Ok(transition) => {
@@ -469,11 +523,12 @@ impl GpuVirtualPageStreamer {
             }
         };
         if missing_pages.is_empty() {
-            match pool.make_group_resident_with_pages(
+            match pool.make_group_resident_with_pages_for_streaming(
                 queue,
                 mesh,
                 request.source_cluster,
                 &BTreeMap::new(),
+                request.priority_bits,
             ) {
                 Ok(transition) => self.record_resolved_group(pool, key, &transition),
                 Err(_) => {
@@ -606,6 +661,7 @@ impl GpuVirtualPageStreamer {
     }
 
     fn ingest(&mut self, feedback: CompletedFeedback) {
+        let feedback_sequence = feedback.sequence;
         self.telemetry.last_visible_groups = feedback.counters.visible_groups;
         self.telemetry.last_frustum_culled_groups = feedback.counters.frustum_culled_groups;
         self.telemetry.last_cone_culled_clusters = feedback.counters.cone_culled_clusters;
@@ -615,6 +671,7 @@ impl GpuVirtualPageStreamer {
         self.telemetry.last_selected_count = feedback.counters.selected_count;
         self.telemetry.last_selected_overflow = feedback.counters.selected_overflow;
         self.telemetry.last_request_overflow = feedback.counters.request_overflow;
+        self.telemetry.last_page_use_overflow = feedback.counters.page_use_overflow;
         self.telemetry.last_invalid_records = feedback.counters.invalid_records;
         self.telemetry.last_depth_limit_fallbacks = feedback.counters.depth_limit_fallbacks;
         self.telemetry.last_occlusion_culled_groups = feedback.counters.occlusion_culled_groups;
@@ -629,6 +686,34 @@ impl GpuVirtualPageStreamer {
             .telemetry
             .truncated_requests
             .saturating_add(attempted.saturating_sub(copied));
+        let attempted_page_uses = u64::from(feedback.counters.page_use_count);
+        let copied_page_uses = feedback.page_uses.len() as u64;
+        self.telemetry.attempted_page_uses = self
+            .telemetry
+            .attempted_page_uses
+            .saturating_add(attempted_page_uses);
+        self.telemetry.copied_page_uses = self
+            .telemetry
+            .copied_page_uses
+            .saturating_add(copied_page_uses);
+        self.telemetry.truncated_page_uses = self
+            .telemetry
+            .truncated_page_uses
+            .saturating_add(attempted_page_uses.saturating_sub(copied_page_uses));
+        let mut latest_page_uses = BTreeMap::new();
+        for page_use in feedback
+            .page_uses
+            .into_iter()
+            .filter(|page_use| page_use.mesh_id != 0)
+        {
+            latest_page_uses
+                .entry((page_use.mesh_id, page_use.source_cluster))
+                .and_modify(|priority: &mut u32| {
+                    *priority = (*priority).max(page_use.priority_bits)
+                })
+                .or_insert(page_use.priority_bits);
+        }
+        self.latest_page_uses = latest_page_uses;
 
         for request in feedback.requests {
             if request.mesh_id == 0 {
@@ -639,8 +724,11 @@ impl GpuVirtualPageStreamer {
                 .entry(key)
                 .and_modify(|pending| {
                     pending.last_seen_sequence = feedback.sequence;
-                    if (request.page_index, request.instance_id)
-                        < (pending.request.page_index, pending.request.instance_id)
+                    if (request.priority_bits, Reverse(request.page_index))
+                        > (
+                            pending.request.priority_bits,
+                            Reverse(pending.request.page_index),
+                        )
                     {
                         pending.request = request;
                     }
@@ -654,6 +742,30 @@ impl GpuVirtualPageStreamer {
                     }
                 });
         }
+        // A complete feedback snapshot is authoritative for that traversal.
+        // Requests absent from it are no longer missing at that view (or are
+        // no longer reachable/visible), so retaining them lets obsolete high
+        // priorities from an earlier camera keep evicting the current working
+        // set forever. When either GPU output or CPU readback truncated the
+        // snapshot, absence is not evidence and the older requests remain.
+        let complete_requests = feedback.counters.request_overflow == 0
+            && u64::from(feedback.counters.page_request_count) == copied;
+        if complete_requests {
+            let stale = self
+                .pending
+                .iter()
+                .filter_map(|(&key, pending)| {
+                    (pending.last_seen_sequence < feedback_sequence).then_some(key)
+                })
+                .collect::<Vec<_>>();
+            for key in stale {
+                self.pending.remove(&key);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.discard_ready_group(key);
+                self.telemetry.expired_pending_groups =
+                    self.telemetry.expired_pending_groups.saturating_add(1);
+            }
+        }
         self.enforce_pending_capacity();
     }
 
@@ -665,10 +777,16 @@ impl GpuVirtualPageStreamer {
         let mut priority = self
             .pending
             .iter()
-            .map(|(&key, pending)| (Reverse(pending.last_seen_sequence), key))
+            .map(|(&key, pending)| {
+                (
+                    Reverse(pending.last_seen_sequence),
+                    Reverse(pending.request.priority_bits),
+                    key,
+                )
+            })
             .collect::<Vec<_>>();
         priority.sort_unstable();
-        for (_, key) in priority.into_iter().skip(capacity) {
+        for (_, _, key) in priority.into_iter().skip(capacity) {
             self.pending.remove(&key);
             #[cfg(not(target_arch = "wasm32"))]
             self.discard_ready_group(key);
@@ -681,7 +799,13 @@ impl GpuVirtualPageStreamer {
         self.pending
             .iter()
             .filter(|(key, _)| !blocked.contains(key))
-            .min_by_key(|(key, pending)| (Reverse(pending.last_seen_sequence), **key))
+            .min_by_key(|(key, pending)| {
+                (
+                    Reverse(pending.last_seen_sequence),
+                    Reverse(pending.request.priority_bits),
+                    **key,
+                )
+            })
             .map(|(&key, _)| key)
     }
 
@@ -739,7 +863,7 @@ fn page_io_worker(
 }
 
 fn readback_bytes(requests: u32) -> u64 {
-    COUNTER_BYTES + REQUEST_BYTES * u64::from(requests)
+    COUNTER_BYTES + (REQUEST_BYTES + PAGE_USE_BYTES) * u64::from(requests)
 }
 
 fn validate_config(
@@ -785,11 +909,23 @@ fn decode_readback(
         .take(count)
         .map(bytemuck::pod_read_unaligned::<GpuVirtualPageRequest>)
         .collect();
+    let page_use_count = counters
+        .page_use_count
+        .min(selector_capacity)
+        .min(readback_capacity) as usize;
+    let page_use_offset =
+        COUNTER_BYTES as usize + REQUEST_BYTES as usize * readback_capacity as usize;
+    let page_uses = mapped[page_use_offset..]
+        .chunks_exact(std::mem::size_of::<GpuVirtualPageUse>())
+        .take(page_use_count)
+        .map(bytemuck::pod_read_unaligned::<GpuVirtualPageUse>)
+        .collect();
     drop(mapped);
     CompletedFeedback {
         sequence: readback.sequence,
         counters,
         requests,
+        page_uses,
     }
 }
 

@@ -5,7 +5,7 @@ use crate::virtual_geometry::VirtualGeometryHiZFrame;
 #[test]
 fn previous_hiz_culls_only_stable_captured_instances_and_rejects_camera_motion() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping virtual Hi-Z oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping virtual Hi-Z oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();

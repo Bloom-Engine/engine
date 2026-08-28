@@ -26,6 +26,8 @@ const SELECTED_VERTEX_ENCODING_SHIFT: u32 = 28;
 const SELECTED_VERTEX_ENCODING_MASK: u32 = 3;
 const ID_SLOT_MASK: u32 = (1 << 20) - 1;
 const ALL_SOURCE_MESHES: u32 = u32::MAX;
+#[cfg(test)]
+const TRAVERSAL_GROUP_STACK_CAPACITY: usize = 32;
 static NEXT_SELECTOR_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Fixed GPU input record for one virtual-geometry instance (224 bytes).
@@ -254,8 +256,22 @@ impl GpuSelectedVirtualCluster {
 pub struct GpuVirtualPageRequest {
     pub mesh_id: u32,
     pub page_index: u32,
-    pub instance_id: u32,
+    /// Non-negative projected-error bits. IEEE-754 bit order matches numeric order.
+    pub priority_bits: u32,
     pub source_cluster: u32,
+}
+
+/// One selected atomic group whose resident pages were consumed by the current frame.
+/// Streaming uses this bounded feedback to protect visible pages from eviction churn.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, bytemuck::Pod, bytemuck::Zeroable,
+)]
+pub struct GpuVirtualPageUse {
+    pub mesh_id: u32,
+    pub source_cluster: u32,
+    /// Non-negative projected-error bits. IEEE-754 bit order matches numeric order.
+    pub priority_bits: u32,
 }
 
 /// GPU-written traversal telemetry. Attempted counts can exceed output
@@ -277,11 +293,14 @@ pub struct GpuVirtualTraversalCounters {
     pub depth_limit_fallbacks: u32,
     pub occlusion_culled_groups: u32,
     pub occlusion_uncertain_groups: u32,
+    pub page_use_count: u32,
+    pub page_use_overflow: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<GpuSelectedVirtualCluster>() == 32);
 const _: () = assert!(std::mem::size_of::<GpuVirtualPageRequest>() == 16);
-const _: () = assert!(std::mem::size_of::<GpuVirtualTraversalCounters>() == 56);
+const _: () = assert!(std::mem::size_of::<GpuVirtualPageUse>() == 12);
+const _: () = assert!(std::mem::size_of::<GpuVirtualTraversalCounters>() == 64);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct GpuVirtualTraversalConfig {
@@ -331,6 +350,7 @@ pub struct GpuVirtualHierarchySelector {
     instance_buffer: wgpu::Buffer,
     selected_buffer: wgpu::Buffer,
     request_buffer: wgpu::Buffer,
+    page_use_buffer: wgpu::Buffer,
     counter_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -364,6 +384,12 @@ impl GpuVirtualHierarchySelector {
             buffer_bytes::<GpuVirtualPageRequest>(config.max_page_requests),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
+        let page_use_buffer = create_buffer(
+            device,
+            "virtual_geometry_page_uses",
+            buffer_bytes::<GpuVirtualPageUse>(config.max_page_requests),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
         let counter_buffer = create_buffer(
             device,
             "virtual_geometry_traversal_counters",
@@ -391,7 +417,8 @@ impl GpuVirtualHierarchySelector {
                 binding(4, &selected_buffer),
                 binding(5, &request_buffer),
                 binding(6, &counter_buffer),
-                binding(7, &params_buffer),
+                binding(7, &page_use_buffer),
+                binding(8, &params_buffer),
             ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -418,6 +445,7 @@ impl GpuVirtualHierarchySelector {
             instance_buffer,
             selected_buffer,
             request_buffer,
+            page_use_buffer,
             counter_buffer,
             params_buffer,
             bind_group,
@@ -654,6 +682,10 @@ impl GpuVirtualHierarchySelector {
         &self.request_buffer
     }
 
+    pub fn page_use_buffer(&self) -> &wgpu::Buffer {
+        &self.page_use_buffer
+    }
+
     pub fn counter_buffer(&self) -> &wgpu::Buffer {
         &self.counter_buffer
     }
@@ -685,11 +717,11 @@ fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         },
         count: None,
     };
-    let mut entries = (0..7)
+    let mut entries = (0..8)
         .map(|binding| storage(binding, binding < 4))
         .collect::<Vec<_>>();
     entries.push(wgpu::BindGroupLayoutEntry {
-        binding: 7,
+        binding: 8,
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
@@ -733,7 +765,7 @@ fn validate_selector_config(
         return Err(VirtualGeometryTraversalError::InvalidConfig);
     }
     let limits = device.limits();
-    if limits.max_storage_buffers_per_shader_stage < 7
+    if limits.max_storage_buffers_per_shader_stage < 8
         || limits.max_bind_groups < 2
         || limits.max_sampled_textures_per_shader_stage < VIRTUAL_HIZ_MIP_COUNT
         || limits.max_compute_invocations_per_workgroup < WORKGROUP_SIZE
@@ -757,6 +789,10 @@ fn validate_selector_config(
         (
             "page request table",
             buffer_bytes::<GpuVirtualPageRequest>(config.max_page_requests),
+        ),
+        (
+            "page use table",
+            buffer_bytes::<GpuVirtualPageUse>(config.max_page_requests),
         ),
     ] {
         if bytes > limits.max_buffer_size || bytes > limits.max_storage_buffer_binding_size {
@@ -962,8 +998,29 @@ pub(super) fn select_cpu_reference(
             }
 
             let scale = cpu_scale_bound(instance.model);
-            let mut exhausted_depth = true;
-            for _depth in 0..pool.config().max_hierarchy_levels {
+            // A cooked group can replace several independently refinable child
+            // ranges. Keep those branches on a bounded local stack instead of
+            // following the first sibling's child range and silently dropping
+            // every other branch.
+            let mut stack = vec![(group_first, group_count, 1.0e30f32.to_bits(), 0u32)];
+            while let Some((group_first, group_count, group_priority_bits, depth)) = stack.pop() {
+                if depth >= pool.config().max_hierarchy_levels {
+                    result.counters.depth_limit_fallbacks += 1;
+                    cpu_select_group(
+                        pool,
+                        config,
+                        mesh_id,
+                        instance_index as u32,
+                        *instance,
+                        group_first,
+                        group_count,
+                        scale,
+                        view,
+                        group_priority_bits,
+                        &mut result,
+                    )?;
+                    continue;
+                }
                 let range = group_first as usize..(group_first + group_count) as usize;
                 let mut common_outside_mask = (1u32 << view.frustum_planes.len()) - 1;
                 let mut intersecting_error = 0.0f32;
@@ -983,8 +1040,7 @@ pub(super) fn select_cpu_reference(
                 }
                 if common_outside_mask != 0 {
                     result.counters.frustum_culled_groups += 1;
-                    exhausted_depth = false;
-                    break;
+                    continue;
                 }
                 let maximum_error = if has_intersecting_cluster {
                     intersecting_error
@@ -992,10 +1048,27 @@ pub(super) fn select_cpu_reference(
                     group_error
                 };
                 result.counters.visible_groups += 1;
-
-                let first = &archive.clusters[group_first as usize];
-                let wants_refinement =
-                    maximum_error > view.target_error_pixels && first.child_count != 0;
+                let mut child_groups = Vec::<(u32, u32)>::new();
+                let mut terminal_clusters = false;
+                for cluster in &archive.clusters[range] {
+                    if cluster.first_child == bloom_geometry_format::NO_RELATION
+                        || cluster.child_count == 0
+                    {
+                        terminal_clusters = true;
+                        continue;
+                    }
+                    let relation = (cluster.first_child, cluster.child_count);
+                    if child_groups.last().copied() != Some(relation) {
+                        child_groups.push(relation);
+                    }
+                }
+                let mixed_replacement = terminal_clusters && !child_groups.is_empty();
+                let wants_refinement = maximum_error > view.target_error_pixels
+                    && !child_groups.is_empty()
+                    && !mixed_replacement;
+                if mixed_replacement {
+                    result.counters.invalid_records += 1;
+                }
                 if !wants_refinement {
                     cpu_select_group(
                         pool,
@@ -1007,22 +1080,33 @@ pub(super) fn select_cpu_reference(
                         group_count,
                         scale,
                         view,
+                        group_priority_bits,
                         &mut result,
                     )?;
-                    exhausted_depth = false;
-                    break;
+                    continue;
                 }
-                if !cpu_group_is_resident(pool, mesh_id, first.first_child, first.child_count)? {
+                let children_resident = child_groups.iter().try_fold(
+                    true,
+                    |resident, &(child_first, child_count)| {
+                        Ok::<_, VirtualGeometryTraversalError>(
+                            resident
+                                && cpu_group_is_resident(pool, mesh_id, child_first, child_count)?,
+                        )
+                    },
+                )?;
+                if !children_resident {
                     result.counters.fallback_groups += 1;
-                    cpu_emit_missing_requests(
-                        pool,
-                        config,
-                        mesh_id,
-                        instance.instance_id(),
-                        first.first_child,
-                        first.child_count,
-                        &mut result,
-                    )?;
+                    for &(child_first, child_count) in &child_groups {
+                        cpu_emit_missing_requests(
+                            pool,
+                            config,
+                            mesh_id,
+                            child_first,
+                            child_count,
+                            maximum_error.max(0.0).to_bits(),
+                            &mut result,
+                        )?;
+                    }
                     cpu_select_group(
                         pool,
                         config,
@@ -1033,29 +1117,33 @@ pub(super) fn select_cpu_reference(
                         group_count,
                         scale,
                         view,
+                        group_priority_bits,
                         &mut result,
                     )?;
-                    exhausted_depth = false;
-                    break;
+                    continue;
+                }
+                if stack.len() + child_groups.len() > TRAVERSAL_GROUP_STACK_CAPACITY {
+                    result.counters.depth_limit_fallbacks += 1;
+                    cpu_select_group(
+                        pool,
+                        config,
+                        mesh_id,
+                        instance_index as u32,
+                        *instance,
+                        group_first,
+                        group_count,
+                        scale,
+                        view,
+                        group_priority_bits,
+                        &mut result,
+                    )?;
+                    continue;
                 }
                 result.counters.refined_groups += 1;
-                group_first = first.first_child;
-                group_count = first.child_count;
-            }
-            if exhausted_depth {
-                result.counters.depth_limit_fallbacks += 1;
-                cpu_select_group(
-                    pool,
-                    config,
-                    mesh_id,
-                    instance_index as u32,
-                    *instance,
-                    group_first,
-                    group_count,
-                    scale,
-                    view,
-                    &mut result,
-                )?;
+                let child_priority_bits = maximum_error.max(0.0).to_bits();
+                for &(child_first, child_count) in child_groups.iter().rev() {
+                    stack.push((child_first, child_count, child_priority_bits, depth + 1));
+                }
             }
         }
     }
@@ -1090,9 +1178,9 @@ fn cpu_emit_missing_requests(
     pool: &GpuVirtualGeometryPool,
     config: GpuVirtualTraversalConfig,
     mesh_id: VirtualMeshId,
-    instance_id: u32,
     first: u32,
     count: u32,
+    priority_bits: u32,
     result: &mut CpuTraversalResult,
 ) -> Result<(), VirtualGeometryTraversalError> {
     let archive = pool.asset(mesh_id)?.archive();
@@ -1118,7 +1206,7 @@ fn cpu_emit_missing_requests(
             result.requests.push(GpuVirtualPageRequest {
                 mesh_id: mesh_id.raw(),
                 page_index: cluster.page_index,
-                instance_id,
+                priority_bits,
                 source_cluster: first,
             });
         } else {
@@ -1140,9 +1228,15 @@ fn cpu_select_group(
     count: u32,
     scale: f32,
     view: VirtualGeometryView,
+    priority_bits: u32,
     result: &mut CpuTraversalResult,
 ) -> Result<(), VirtualGeometryTraversalError> {
     let archive = pool.asset(mesh_id)?.archive();
+    let page_use_index = result.counters.page_use_count;
+    result.counters.page_use_count += 1;
+    if page_use_index >= config.max_page_requests {
+        result.counters.page_use_overflow += 1;
+    }
     for (offset, cluster) in archive.clusters[first as usize..(first + count) as usize]
         .iter()
         .enumerate()
@@ -1168,9 +1262,9 @@ fn cpu_select_group(
                 pool,
                 config,
                 mesh_id,
-                instance.instance_id(),
                 first + offset as u32,
                 1,
+                priority_bits,
                 result,
             )?;
             continue;
@@ -1333,11 +1427,11 @@ fn cpu_projected_error(
     let clip_w = m[0][3] * p[0] + m[1][3] * p[1] + m[2][3] * p[2] + m[3][3];
     let clip_w_gradient = [m[0][3], m[1][3], m[2][3]];
     let nearest_w = clip_w - sphere.radius * dot3(clip_w_gradient, clip_w_gradient).sqrt();
-    if nearest_w <= 1.0e-5 {
-        1.0e30
-    } else {
-        world_error * view.projection_scale / nearest_w
-    }
+    // Near-intersecting groups all need refinement, but assigning every one
+    // the same sentinel priority makes pool admission depend on source order.
+    // Clamp at the actual near plane so projected error stays conservative,
+    // finite, and proportional to the group's authored geometric error.
+    world_error * view.projection_scale / nearest_w.max(lateral_frustum_guard_w(view))
 }
 
 #[cfg(test)]
@@ -1399,6 +1493,11 @@ fn cpu_cone_culled(
 const TRAVERSAL_SHADER: &str = r#"
 const NO_RELATION: u32 = 0xffffffffu;
 const ALL_SOURCE_MESHES: u32 = 0xffffffffu;
+// Keep private per-invocation storage bounded tightly enough to remain in fast
+// GPU local storage. Overflow retains the complete resident parent, so this is
+// a quality fallback rather than a coverage failure.
+const TRAVERSAL_GROUP_STACK_CAPACITY: u32 = 32u;
+const VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE: u32 = 0x08000000u;
 const INSTANCE_CONE_CULL_SAFE: u32 = 1u;
 const INSTANCE_PREVIOUS_HIZ_ELIGIBLE: u32 = 4u;
 
@@ -1452,8 +1551,13 @@ struct GpuSelectedVirtualCluster {
 struct GpuVirtualPageRequest {
     mesh_id: u32,
     page_index: u32,
-    instance_id: u32,
+    priority_bits: u32,
     source_cluster: u32,
+};
+struct GpuVirtualPageUse {
+    mesh_id: u32,
+    source_cluster: u32,
+    priority_bits: u32,
 };
 struct MeshTable { records: array<GpuVirtualMeshEntry>, };
 struct PageTable { records: array<GpuVirtualPageEntry>, };
@@ -1461,6 +1565,7 @@ struct ClusterTable { records: array<GpuVirtualClusterEntry>, };
 struct InstanceTable { records: array<GpuVirtualInstance>, };
 struct SelectedTable { records: array<GpuSelectedVirtualCluster>, };
 struct RequestTable { records: array<GpuVirtualPageRequest>, };
+struct PageUseTable { records: array<GpuVirtualPageUse>, };
 struct TraversalCounters {
     selected_count: atomic<u32>,
     page_request_count: atomic<u32>,
@@ -1476,6 +1581,8 @@ struct TraversalCounters {
     depth_limit_fallbacks: atomic<u32>,
     occlusion_culled_groups: atomic<u32>,
     occlusion_uncertain_groups: atomic<u32>,
+    page_use_count: atomic<u32>,
+    page_use_overflow: atomic<u32>,
 };
 struct TraversalParams {
     planes: array<vec4<f32>, 6>,
@@ -1511,7 +1618,8 @@ struct ProjectedBounds {
 @group(0) @binding(4) var<storage, read_write> selected: SelectedTable;
 @group(0) @binding(5) var<storage, read_write> requests: RequestTable;
 @group(0) @binding(6) var<storage, read_write> counters: TraversalCounters;
-@group(0) @binding(7) var<uniform> params: TraversalParams;
+@group(0) @binding(7) var<storage, read_write> page_uses: PageUseTable;
+@group(0) @binding(8) var<uniform> params: TraversalParams;
 @group(1) @binding(0) var<uniform> hiz_params: HiZParams;
 @group(1) @binding(1) var hiz_0: texture_2d<f32>;
 @group(1) @binding(2) var hiz_1: texture_2d<f32>;
@@ -1731,10 +1839,9 @@ fn projected_error(
         params.view_projection[2].w
     );
     let nearest_w = clip.w - sphere.radius * length(clip_w_gradient);
-    if (nearest_w <= params.thresholds.y) {
-        return 1.0e30;
-    }
-    return world_error * params.camera_projection.w / nearest_w;
+    // Preserve refinement at the near plane without collapsing every
+    // near-intersecting group onto one source-order tie.
+    return world_error * params.camera_projection.w / max(nearest_w, params.thresholds.z);
 }
 
 fn cone_culled(
@@ -1787,9 +1894,9 @@ fn group_is_resident(mesh: GpuVirtualMeshEntry, first: u32, count: u32) -> bool 
 
 fn emit_missing_requests(
     mesh: GpuVirtualMeshEntry,
-    instance: GpuVirtualInstance,
     first: u32,
     count: u32,
+    priority_bits: u32,
 ) {
     for (var offset = 0u; offset < count; offset++) {
         let local_cluster = first + offset;
@@ -1821,7 +1928,7 @@ fn emit_missing_requests(
                 requests.records[output_index] = GpuVirtualPageRequest(
                     mesh.mesh_id,
                     page_index,
-                    instance.instance_info.y,
+                    priority_bits,
                     first
                 );
             } else {
@@ -1838,7 +1945,21 @@ fn select_group(
     first: u32,
     count: u32,
     scale: f32,
+    priority_bits: u32,
 ) {
+    // One final group identifies the entire selected hierarchy path. The CPU
+    // owns the validated archive metadata and protects this group plus every
+    // ancestor, avoiding an atomic feedback write for every intermediate group.
+    let page_use_index = atomicAdd(&counters.page_use_count, 1u);
+    if (page_use_index < params.dispatch.w) {
+        page_uses.records[page_use_index] = GpuVirtualPageUse(
+            mesh.mesh_id,
+            first,
+            priority_bits
+        );
+    } else {
+        atomicAdd(&counters.page_use_overflow, 1u);
+    }
     for (var offset = 0u; offset < count; offset++) {
         let local_cluster = first + offset;
         if (!valid_cluster(mesh, local_cluster)) {
@@ -1862,7 +1983,7 @@ fn select_group(
         let page = pages.records[mesh.page_table_base + page_index];
         if (page.slot_plus_one == 0u || page.mesh_id != mesh.mesh_id || (page.flags & 1u) == 0u) {
             atomicAdd(&counters.missing_current_pages, 1u);
-            emit_missing_requests(mesh, instance, local_cluster, 1u);
+            emit_missing_requests(mesh, local_cluster, 1u, priority_bits);
             continue;
         }
         let output_index = atomicAdd(&counters.selected_count, 1u);
@@ -1875,7 +1996,8 @@ fn select_group(
                 cluster.page_lod_counts.y,
                 cluster.page_lod_counts.w,
                 cluster.identity.z,
-                cluster.identity.w | (mesh.vertex_encoding << 28u)
+                (cluster.identity.w & ~VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE)
+                    | (mesh.vertex_encoding << 28u)
             );
         } else {
             atomicAdd(&counters.selected_overflow, 1u);
@@ -1918,28 +2040,59 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (source_mesh_filter != ALL_SOURCE_MESHES && root.identity.x != source_mesh_filter) {
         return;
     }
-    var group_first = root_index;
-    var group_count = 1u;
+    var root_group_first = root_index;
+    var root_group_count = 1u;
     if (root.relations.w != 0u && valid_cluster(mesh, root.relations.z)) {
         let first_child = clusters.records[mesh.cluster_table_base + root.relations.z];
         if (first_child.relations.x != NO_RELATION && first_child.relations.y != 0u) {
-            group_first = first_child.relations.x;
-            group_count = first_child.relations.y;
+            root_group_first = first_child.relations.x;
+            root_group_count = first_child.relations.y;
         }
     }
-    if (root_index != group_first) {
+    if (root_index != root_group_first) {
         return;
     }
 
     let scale = scale_bound(instance.model);
-    for (var depth = 0u; depth < 32u; depth++) {
-        if (depth >= params.limits.x) {
+    // Hierarchies branch whenever one coarse group replaces several lower
+    // atomic ranges. A bounded depth-first stack follows every branch in this
+    // invocation. Stack overflow fails closed to the complete resident parent,
+    // preserving coverage without another pass or allocation.
+    var group_stack: array<vec4<u32>, TRAVERSAL_GROUP_STACK_CAPACITY>;
+    var stack_count = 1u;
+    group_stack[0] = vec4<u32>(
+        root_group_first,
+        root_group_count,
+        bitcast<u32>(1.0e30),
+        0u
+    );
+    loop {
+        if (stack_count == 0u) {
             break;
+        }
+        stack_count -= 1u;
+        let pending = group_stack[stack_count];
+        let group_first = pending.x;
+        let group_count = pending.y;
+        let group_priority_bits = pending.z;
+        let depth = pending.w;
+        if (depth >= params.limits.x) {
+            atomicAdd(&counters.depth_limit_fallbacks, 1u);
+            select_group(
+                mesh,
+                instance_index,
+                instance,
+                group_first,
+                group_count,
+                scale,
+                group_priority_bits
+            );
+            continue;
         }
         if (group_count == 0u || group_count > params.limits.y
             || group_first + group_count > mesh.cluster_count) {
             atomicAdd(&counters.invalid_records, 1u);
-            return;
+            continue;
         }
 
         var common_outside_mask = 0x3fu;
@@ -1954,7 +2107,7 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
             let local_cluster = group_first + offset;
             if (!valid_cluster(mesh, local_cluster)) {
                 atomicAdd(&counters.invalid_records, 1u);
-                return;
+                continue;
             }
             let cluster = clusters.records[mesh.cluster_table_base + local_cluster];
             let sphere = world_sphere(cluster, instance, scale);
@@ -1971,9 +2124,10 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         if (common_outside_mask != 0u) {
             atomicAdd(&counters.frustum_culled_groups, 1u);
-            return;
+            continue;
         }
         let maximum_error = select(group_error, intersecting_error, has_intersecting_cluster);
+        let refinement_priority_bits = bitcast<u32>(max(maximum_error, 0.0));
         if (hiz_params.extent.w != 0u) {
             if (has_intersecting_cluster) {
                 let hiz_result = previous_hiz_group_result(
@@ -1990,39 +2144,173 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         if (!occlusion_visible) {
             atomicAdd(&counters.occlusion_culled_groups, 1u);
-            return;
+            continue;
         }
         if (occlusion_uncertain) {
             atomicAdd(&counters.occlusion_uncertain_groups, 1u);
         }
         atomicAdd(&counters.visible_groups, 1u);
-
         let first_cluster = clusters.records[mesh.cluster_table_base + group_first];
-        let child_first = first_cluster.relations.z;
-        let child_count = first_cluster.relations.w;
-        let wants_refinement = maximum_error > params.thresholds.x && child_count != 0u;
-        if (!wants_refinement) {
-            select_group(mesh, instance_index, instance, group_first, group_count, scale);
-            return;
+        let uniform_child_range =
+            (first_cluster.identity.w & VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE) != 0u;
+        var child_group_count = 0u;
+        var previous_child_first = NO_RELATION;
+        var previous_child_count = 0u;
+        var has_children = false;
+        var has_terminal_clusters = false;
+        var children_valid = true;
+        var children_resident = true;
+        if (uniform_child_range) {
+            let child_first = first_cluster.relations.z;
+            let child_count = first_cluster.relations.w;
+            if (child_first == NO_RELATION || child_count == 0u) {
+                has_terminal_clusters = true;
+            } else if (child_count > params.limits.y
+                || child_first + child_count > mesh.cluster_count) {
+                children_valid = false;
+            } else {
+                has_children = true;
+                child_group_count += 1u;
+                children_resident = group_is_resident(mesh, child_first, child_count);
+                previous_child_first = child_first;
+                previous_child_count = child_count;
+            }
+        } else {
+            for (var offset = 0u; offset < group_count; offset++) {
+                let cluster = clusters.records[mesh.cluster_table_base + group_first + offset];
+                let child_first = cluster.relations.z;
+                let child_count = cluster.relations.w;
+                if (child_first == NO_RELATION || child_count == 0u) {
+                    has_terminal_clusters = true;
+                    continue;
+                }
+                has_children = true;
+                if (child_count > params.limits.y
+                    || child_first + child_count > mesh.cluster_count) {
+                    children_valid = false;
+                    continue;
+                }
+                if (child_first != previous_child_first || child_count != previous_child_count) {
+                    child_group_count += 1u;
+                    children_resident = children_resident
+                        && group_is_resident(mesh, child_first, child_count);
+                    previous_child_first = child_first;
+                    previous_child_count = child_count;
+                }
+            }
         }
-        if (child_count > params.limits.y || child_first + child_count > mesh.cluster_count) {
+        if (!children_valid || (has_children && has_terminal_clusters)) {
             atomicAdd(&counters.invalid_records, 1u);
-            select_group(mesh, instance_index, instance, group_first, group_count, scale);
-            return;
+            select_group(
+                mesh,
+                instance_index,
+                instance,
+                group_first,
+                group_count,
+                scale,
+                group_priority_bits
+            );
+            continue;
         }
-        if (!group_is_resident(mesh, child_first, child_count)) {
+        let wants_refinement = maximum_error > params.thresholds.x && has_children;
+        if (!wants_refinement) {
+            select_group(
+                mesh,
+                instance_index,
+                instance,
+                group_first,
+                group_count,
+                scale,
+                group_priority_bits
+            );
+            continue;
+        }
+        if (!children_resident) {
             atomicAdd(&counters.fallback_groups, 1u);
-            emit_missing_requests(mesh, instance, child_first, child_count);
-            select_group(mesh, instance_index, instance, group_first, group_count, scale);
-            return;
+            if (uniform_child_range) {
+                emit_missing_requests(
+                    mesh,
+                    first_cluster.relations.z,
+                    first_cluster.relations.w,
+                    refinement_priority_bits
+                );
+            } else {
+                previous_child_first = NO_RELATION;
+                previous_child_count = 0u;
+                for (var offset = 0u; offset < group_count; offset++) {
+                    let cluster = clusters.records[mesh.cluster_table_base + group_first + offset];
+                    let child_first = cluster.relations.z;
+                    let child_count = cluster.relations.w;
+                    if (child_first != NO_RELATION && child_count != 0u
+                        && (child_first != previous_child_first
+                            || child_count != previous_child_count)) {
+                        emit_missing_requests(
+                            mesh,
+                            child_first,
+                            child_count,
+                            refinement_priority_bits
+                        );
+                        previous_child_first = child_first;
+                        previous_child_count = child_count;
+                    }
+                }
+            }
+            select_group(
+                mesh,
+                instance_index,
+                instance,
+                group_first,
+                group_count,
+                scale,
+                group_priority_bits
+            );
+            continue;
+        }
+        if (stack_count + child_group_count > TRAVERSAL_GROUP_STACK_CAPACITY) {
+            atomicAdd(&counters.depth_limit_fallbacks, 1u);
+            select_group(
+                mesh,
+                instance_index,
+                instance,
+                group_first,
+                group_count,
+                scale,
+                group_priority_bits
+            );
+            continue;
         }
         atomicAdd(&counters.refined_groups, 1u);
-        group_first = child_first;
-        group_count = child_count;
+        if (uniform_child_range) {
+            group_stack[stack_count] = vec4<u32>(
+                first_cluster.relations.z,
+                first_cluster.relations.w,
+                refinement_priority_bits,
+                depth + 1u
+            );
+            stack_count += 1u;
+        } else {
+            previous_child_first = NO_RELATION;
+            previous_child_count = 0u;
+            for (var offset = 0u; offset < group_count; offset++) {
+                let cluster = clusters.records[mesh.cluster_table_base + group_first + offset];
+                let child_first = cluster.relations.z;
+                let child_count = cluster.relations.w;
+                if (child_first != NO_RELATION && child_count != 0u
+                    && (child_first != previous_child_first
+                        || child_count != previous_child_count)) {
+                    group_stack[stack_count] = vec4<u32>(
+                        child_first,
+                        child_count,
+                        refinement_priority_bits,
+                        depth + 1u
+                    );
+                    stack_count += 1u;
+                    previous_child_first = child_first;
+                    previous_child_count = child_count;
+                }
+            }
+        }
     }
-
-    atomicAdd(&counters.depth_limit_fallbacks, 1u);
-    select_group(mesh, instance_index, instance, group_first, group_count, scale);
 }
 "#;
 

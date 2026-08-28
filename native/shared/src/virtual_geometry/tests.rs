@@ -165,6 +165,47 @@ fn hierarchy_asset(archive: GeometryArchive) -> Arc<VirtualGeometryAsset> {
     Arc::new(VirtualGeometryAsset::from_bytes(encode_archive(archive)).unwrap())
 }
 
+fn branching_hierarchy_archive() -> GeometryArchive {
+    let mut clusters = vec![
+        cluster(0, 2, NO_RELATION, 2, 4, true),
+        cluster(0, 2, NO_RELATION, 2, 4, true),
+        cluster(1, 1, 0, 6, 2, false),
+        cluster(1, 1, 0, 6, 2, false),
+        cluster(2, 1, 0, 8, 2, false),
+        cluster(2, 1, 0, 8, 2, false),
+        cluster(3, 0, 2, NO_RELATION, 0, false),
+        cluster(3, 0, 2, NO_RELATION, 0, false),
+        cluster(4, 0, 4, NO_RELATION, 0, false),
+        cluster(4, 0, 4, NO_RELATION, 0, false),
+    ];
+    for child in &mut clusters[2..6] {
+        child.parent_count = 2;
+    }
+    for leaf in &mut clusters[6..8] {
+        leaf.parent_count = 2;
+    }
+    for leaf in &mut clusters[8..10] {
+        leaf.parent_count = 2;
+    }
+    GeometryArchive {
+        format_version: VERSION,
+        vertex_encoding: VertexEncoding::Float32,
+        source_sha256: [3; 32],
+        payload_sha256: [4; 32],
+        page_budget_bytes: MIN_PAGE_BYTES,
+        file_payload_offset: 0,
+        clusters,
+        pages: vec![
+            page(0, 0, 2),
+            page(100, 2, 2),
+            page(200, 4, 2),
+            page(300, 6, 2),
+            page(400, 8, 2),
+        ],
+        compatibility: Vec::new(),
+    }
+}
+
 fn split_leaf_group_archive() -> GeometryArchive {
     let mut archive = hierarchy_archive();
     archive.clusters[5].page_index = 4;
@@ -472,7 +513,7 @@ fn try_traversal_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .ok()?;
     let mut limits = wgpu::Limits::downlevel_defaults();
-    limits.max_storage_buffers_per_shader_stage = 7;
+    limits.max_storage_buffers_per_shader_stage = 8;
     let optional_indirect = wgpu::Features::INDIRECT_FIRST_INSTANCE
         | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
         | wgpu::Features::PRIMITIVE_INDEX;
@@ -914,7 +955,7 @@ fn assert_gpu_raw_page_decode(
 #[test]
 fn gpu_raw_page_vertex_decoder_matches_float32_and_quantized_archives() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping raw-page decode oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping raw-page decode oracle");
         return;
     };
     assert_gpu_raw_page_decode(&device, &queue, hierarchy_archive(), [1.0, 0.5, 0.25, 1.0]);
@@ -980,7 +1021,7 @@ fn run_draw_emission(
 #[test]
 fn gpu_virtual_draw_emission_compacts_selected_clusters_into_exact_indirect_commands() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping virtual draw emission oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping virtual draw emission oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
@@ -1031,7 +1072,7 @@ fn gpu_virtual_draw_emission_compacts_selected_clusters_into_exact_indirect_comm
 #[test]
 fn gpu_virtual_draw_commands_execute_with_exact_first_instance_values() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping virtual indirect draw oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping virtual indirect draw oracle");
         return;
     };
     if !device
@@ -1224,7 +1265,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<u32> {
 #[test]
 fn gpu_virtual_draw_emission_suppresses_the_whole_batch_on_selection_overflow() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping virtual draw fallback oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping virtual draw fallback oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
@@ -1331,7 +1372,7 @@ fn gpu_virtual_draw_emission_suppresses_the_whole_batch_on_selection_overflow() 
 #[test]
 fn gpu_hierarchy_selector_matches_cpu_across_lod_and_frustum_decisions() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy selector oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping hierarchy selector oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
@@ -1403,9 +1444,62 @@ fn gpu_hierarchy_selector_matches_cpu_across_lod_and_frustum_decisions() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn gpu_hierarchy_selector_follows_every_branched_child_range() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no eight-storage-buffer GPU adapter — skipping branched hierarchy oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(branching_hierarchy_archive()))
+        .unwrap();
+    assert_ne!(
+        pool.cluster_entry(mesh, 0).unwrap().identity[3]
+            & super::gpu_pool::GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE,
+        0,
+        "the root group should retain the uniform-child fast path"
+    );
+    assert_eq!(
+        pool.cluster_entry(mesh, 2).unwrap().identity[3]
+            & super::gpu_pool::GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE,
+        0,
+        "the genuinely branched group must take the complete child scan"
+    );
+    make_hierarchy_fully_resident(&mut pool, &queue, mesh);
+    pool.make_group_resident(&queue, mesh, 8).unwrap();
+    assert_eq!(
+        pool.protect_group_pages(mesh, 6, 1.0f32.to_bits()).unwrap(),
+        4,
+        "leaf feedback must retain its leaf, complete branched parent, and root pages"
+    );
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let (selected, requests, counters) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &[GpuVirtualInstance::identity(mesh, 171)],
+        traversal_view(50.0),
+    );
+
+    assert_eq!(
+        selected
+            .iter()
+            .map(|record| record.cluster_table_index)
+            .collect::<Vec<_>>(),
+        [6, 7, 8, 9]
+    );
+    assert!(requests.is_empty());
+    assert_eq!(counters.refined_groups, 2);
+    assert_eq!(counters.fallback_groups, 0);
+    assert_eq!(counters.invalid_records, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn gpu_hierarchy_selector_refines_atomic_groups_that_straddle_frustum_planes() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping group-frustum oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping group-frustum oracle");
         return;
     };
     let mut archive = hierarchy_archive();
@@ -1459,7 +1553,7 @@ fn gpu_hierarchy_selector_refines_atomic_groups_that_straddle_frustum_planes() {
 #[test]
 fn gpu_hierarchy_selector_fails_open_laterally_for_near_clipped_groups() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping near-clip frustum oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping near-clip frustum oracle");
         return;
     };
     let mut archive = hierarchy_archive();
@@ -1512,9 +1606,65 @@ fn gpu_hierarchy_selector_fails_open_laterally_for_near_clipped_groups() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn gpu_hierarchy_selector_preserves_near_clipped_priority_order() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no eight-storage-buffer GPU adapter — skipping near-clip priority oracle");
+        return;
+    };
+    let mut archive = hierarchy_archive();
+    for cluster in &mut archive.clusters {
+        cluster.aabb_min = [0.02, -0.005, -0.03];
+        cluster.aabb_max = [0.03, 0.005, 0.0];
+        cluster.sphere_center = [0.025, 0.0, -0.015];
+        cluster.sphere_radius = 0.0175;
+    }
+    archive.clusters[2].geometric_error = 1.0;
+    archive.clusters[3].geometric_error = 2.0;
+
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(3)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(archive))
+        .unwrap();
+    bind_test_materials(&mut pool, &queue, mesh);
+    pool.begin_frame(2);
+    pool.make_group_resident(&queue, mesh, 2).unwrap();
+    pool.make_group_resident(&queue, mesh, 3).unwrap();
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let view_projection =
+        crate::renderer::mat4_perspective(60.0_f32.to_radians(), 1.0, 0.01, 1_000.0);
+    let view = VirtualGeometryView {
+        frustum_planes: crate::scene::extract_frustum_planes(&view_projection),
+        view_projection,
+        camera_position: [0.0; 3],
+        projection_scale: 100.0,
+        target_error_pixels: 1.0,
+    };
+
+    let (_, requests, counters) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &[GpuVirtualInstance::identity(mesh, 22)],
+        view,
+    );
+    assert_eq!(requests.len(), 2);
+    let priorities = requests
+        .iter()
+        .map(|request| (request.page_index, f32::from_bits(request.priority_bits)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(priorities[&3].is_finite());
+    assert!(priorities[&4].is_finite());
+    assert!(priorities[&4] > priorities[&3]);
+    assert_eq!(counters.fallback_groups, 2);
+    assert_eq!(counters.frustum_culled_groups, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn gpu_hierarchy_selector_keeps_resident_ancestors_and_requests_missing_pages() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy fallback oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping hierarchy fallback oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(3)).unwrap();
@@ -1558,9 +1708,73 @@ fn gpu_hierarchy_selector_keeps_resident_ancestors_and_requests_missing_pages() 
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn gpu_hierarchy_selector_keeps_request_and_residency_priorities_consistent() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no eight-storage-buffer GPU adapter — skipping priority consistency oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    bind_test_materials(&mut pool, &queue, mesh);
+    pool.begin_frame(2);
+    pool.make_group_resident(&queue, mesh, 2).unwrap();
+    pool.make_group_resident(&queue, mesh, 3).unwrap();
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let instances = [GpuVirtualInstance::identity(mesh, 24)];
+
+    let (_, requests, _) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &instances,
+        traversal_view(50.0),
+    );
+    let requested_priorities = requests
+        .iter()
+        .map(|request| (request.source_cluster, request.priority_bits))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(requested_priorities.len(), 2);
+
+    pool.begin_frame(3);
+    pool.make_group_resident(&queue, mesh, 4).unwrap();
+    pool.make_group_resident(&queue, mesh, 6).unwrap();
+    let (_, requests, counters) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &instances,
+        traversal_view(50.0),
+    );
+    assert!(requests.is_empty());
+    let page_use_bytes = read_gpu_buffer(
+        &device,
+        &queue,
+        selector.page_use_buffer(),
+        selector.page_use_buffer().size(),
+    );
+    let page_uses = decode_records::<GpuVirtualPageUse>(
+        &page_use_bytes,
+        counters
+            .page_use_count
+            .min(selector.config().max_page_requests) as usize,
+    );
+    let resident_priorities = page_uses
+        .iter()
+        .filter(|page_use| requested_priorities.contains_key(&page_use.source_cluster))
+        .map(|page_use| (page_use.source_cluster, page_use.priority_bits))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(resident_priorities, requested_priorities);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn gpu_hierarchy_selector_reports_bounded_output_overflow_without_overwriting() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy overflow oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping hierarchy overflow oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
@@ -1637,7 +1851,7 @@ fn gpu_hierarchy_selector_reports_bounded_output_overflow_without_overwriting() 
 #[test]
 fn gpu_hierarchy_selector_cone_culling_is_conservative_for_transform_class() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy cone oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping hierarchy cone oracle");
         return;
     };
     let mut archive = hierarchy_archive();
@@ -1689,7 +1903,7 @@ fn gpu_hierarchy_selector_cone_culling_is_conservative_for_transform_class() {
 #[test]
 fn gpu_hierarchy_selector_is_stateless_across_camera_cuts_and_fast_instance_motion() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy motion oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping hierarchy motion oracle");
         return;
     };
     let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
@@ -1887,7 +2101,7 @@ fn gpu_pool_cluster_table_exhaustion_is_preflight_atomic() {
 #[test]
 fn gpu_hierarchy_selector_rejects_other_pools_and_retiring_meshes_before_dispatch() {
     let Some((device, queue)) = try_traversal_device() else {
-        eprintln!("no seven-storage-buffer GPU adapter — skipping selector ownership oracle");
+        eprintln!("no eight-storage-buffer GPU adapter — skipping selector ownership oracle");
         return;
     };
     let asset = hierarchy_asset(hierarchy_archive());
