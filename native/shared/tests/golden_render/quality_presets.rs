@@ -651,6 +651,143 @@ fn glossy_slow_pan_metrics(render_scale: f32) -> Option<(f64, f64, f64, f64, Vec
     ))
 }
 
+fn thin_feature_slow_pan_metrics() -> Option<(f64, f64, f64, f64, Vec<f64>)> {
+    const FRAMES: usize = 16;
+    const CAMERA_STEP: f32 = 0.002;
+
+    let mut eng = try_engine()?;
+    let mut checker = Vec::with_capacity(64 * 64 * 4);
+    for y in 0..64 {
+        for x in 0..64 {
+            let value = if (x + y) & 1 == 0 { 245 } else { 8 };
+            checker.extend_from_slice(&[value, value, value, 255]);
+        }
+    }
+    let texture = eng.renderer.register_texture_no_mips(64, 64, &checker);
+    let vertices = [
+        ([-3.0, -1.7, 0.0], [0.0, 2.0]),
+        ([3.0, -1.7, 0.0], [4.0, 2.0]),
+        ([3.0, 1.7, 0.0], [4.0, 0.0]),
+        ([-3.0, 1.7, 0.0], [0.0, 0.0]),
+    ]
+    .into_iter()
+    .map(|(position, uv)| Vertex3D {
+        position,
+        normal: [0.0, 0.0, 1.0],
+        color: [1.0; 4],
+        uv,
+        joints: [0.0; 4],
+        weights: [0.0; 4],
+        tangent: [1.0, 0.0, 0.0, 1.0],
+    })
+    .collect();
+    let receiver = eng.scene.create_node();
+    eng.scene
+        .update_geometry(receiver, vertices, vec![0, 1, 2, 0, 2, 3]);
+    eng.scene.set_material_texture(receiver, texture);
+    eng.scene.set_material_pbr(receiver, 1.0, 0.0);
+
+    let draw = |eng: &mut EngineState, camera_x: f32| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(4.0, 5.0, 8.0, 255.0);
+        r.begin_mode_3d(
+            camera_x,
+            0.0,
+            5.2,
+            camera_x * 0.12,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            42.0,
+            0.0,
+        );
+        r.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+    };
+
+    eng.renderer.resize(W * 2, H * 2, W * 2, H * 2);
+    configure_glossy_detail_capture(&mut eng.renderer, false, 1.0);
+    let references = (0..FRAMES)
+        .map(|frame| {
+            let camera_x = frame as f32 * CAMERA_STEP;
+            let supersampled = render(&mut eng, 1, |eng| draw(eng, camera_x)).2;
+            downsample_box_2x(&supersampled, W * 2, H * 2)
+        })
+        .collect::<Vec<_>>();
+
+    eng.renderer.resize(W, H, W, H);
+    configure_glossy_detail_capture(&mut eng.renderer, true, 0.75);
+    let _ = render(&mut eng, 32, |eng| draw(eng, 0.0));
+    let candidates = (0..FRAMES)
+        .map(|frame| {
+            let camera_x = frame as f32 * CAMERA_STEP;
+            render(&mut eng, 1, |eng| draw(eng, camera_x)).2
+        })
+        .collect::<Vec<_>>();
+
+    let metrics = references
+        .iter()
+        .zip(&candidates)
+        .map(|(reference, candidate)| calculate_diff_metrics(reference, candidate, W, H))
+        .collect::<Vec<_>>();
+    let mean_rgb = metrics.iter().map(|metrics| metrics.mean_rgb).sum::<f64>() / FRAMES as f64;
+    let mean_ssim = metrics.iter().map(|metrics| metrics.ssim).sum::<f64>() / FRAMES as f64;
+    let minimum_ssim = metrics
+        .iter()
+        .map(|metrics| metrics.ssim)
+        .fold(1.0f64, f64::min);
+    let derivative_errors = references
+        .windows(2)
+        .zip(candidates.windows(2))
+        .map(|(reference, candidate)| {
+            temporal_derivative_error(&reference[0], &reference[1], &candidate[0], &candidate[1])
+        })
+        .collect::<Vec<_>>();
+    let derivative_error = derivative_errors.iter().sum::<f64>() / (FRAMES - 1) as f64;
+    eprintln!(
+        "thin-feature-slow-pan mean_rgb={mean_rgb:.6} mean_ssim={mean_ssim:.6} \
+         minimum_ssim={minimum_ssim:.6} derivative_error={derivative_error:.6} \
+         derivative_frames={derivative_errors:?}"
+    );
+    Some((
+        mean_rgb,
+        mean_ssim,
+        minimum_ssim,
+        derivative_error,
+        derivative_errors,
+    ))
+}
+
+#[test]
+fn fractional_thin_features_bound_motion_error_without_reference_lag() {
+    let Some((mean_rgb, mean_ssim, minimum_ssim, derivative_error, _)) =
+        thin_feature_slow_pan_metrics()
+    else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    // This fixture deliberately presents an unfiltered one-texel checker at
+    // fractional resolution while the camera moves. It is much harsher than
+    // the authored glossy corpus: the absolute similarity score is therefore
+    // a non-regression envelope, not a claim that every source texel is
+    // reconstructable. Gate reference fidelity and temporal variation
+    // independently. A persistent thin-feature lock can lower derivative
+    // error by retaining stale samples; the RGB and SSIM bounds catch that
+    // ghosting/lag trade instead of accepting it as improved stability.
+    assert!(
+        mean_rgb <= 11.86 && mean_ssim >= 0.585 && minimum_ssim >= 0.560,
+        "fractional thin-feature motion lagged its supersampled reference: \
+         mean_rgb={mean_rgb:.6}, mean_ssim={mean_ssim:.6}, \
+         minimum_ssim={minimum_ssim:.6}"
+    );
+    assert!(
+        derivative_error <= 1.33,
+        "fractional thin-feature motion added excessive temporal variation: \
+         derivative_error={derivative_error:.6}"
+    );
+}
+
 #[test]
 fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
     let Some((_, mean_ssim, minimum_ssim, derivative_error, _)) = glossy_slow_pan_metrics(0.75)
