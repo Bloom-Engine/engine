@@ -21,6 +21,7 @@ use bloom_shared::{
         VirtualGeometryAsset,
     },
 };
+use std::path::Path;
 use std::sync::Arc;
 
 #[test]
@@ -38,6 +39,13 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         };
     engine.renderer.set_render_scale(1.0);
     engine.renderer.set_taa_enabled(false);
+    engine.renderer.set_ssao_enabled(false);
+    engine.renderer.set_ssr_enabled(false);
+    engine.renderer.set_ssgi_enabled(false);
+    engine.renderer.set_bloom_enabled(false);
+    engine.renderer.set_motion_blur_enabled(false);
+    engine.renderer.set_sharpen_strength(0.0);
+    engine.renderer.set_auto_exposure(false);
 
     let initial: serde_json::Value =
         serde_json::from_str(&engine.renderer.renderer_capability_report_json())
@@ -106,6 +114,32 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         },
     );
 
+    let gltf_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/renderer-test/assets/DamagedHelmet.glb");
+    let gltf_bytes = std::fs::read(&gltf_path).expect("read ordinary glTF control");
+    let gltf_handle = engine.models.load_model_with_textures_from_source_path(
+        &gltf_bytes,
+        &gltf_path,
+        &mut engine.renderer,
+    );
+    assert!(gltf_handle > 0.0, "ordinary glTF control loads");
+    let gltf_handle_bits = gltf_handle.to_bits();
+    {
+        let model = engine
+            .models
+            .get(gltf_handle)
+            .expect("ordinary glTF control remains resident");
+        assert_eq!(model.meshes.len(), 1);
+        assert!(engine.renderer.cache_model_if_static_with_transforms(
+            gltf_handle_bits,
+            &model.meshes,
+            &model.mesh_transforms,
+        ));
+    }
+    let draw_gltf = |renderer: &mut bloom_shared::renderer::Renderer| {
+        renderer.draw_model_cached(gltf_handle_bits, [-1.7, 1.2, -0.4], 0.6, [1.0; 4]);
+    };
+
     engine.begin_frame();
     engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
     engine
@@ -115,19 +149,27 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     engine.renderer.screenshot_requested = true;
     engine.end_frame();
 
-    let (_, _, mut rgba) = engine
+    let procedural_rgba = take_rgba_screenshot(&mut engine.renderer);
+
+    engine.begin_frame();
+    engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
+    engine
         .renderer
-        .screenshot_data
-        .take()
-        .expect("visibility-shaded frame produced a screenshot");
-    if matches!(
-        engine.renderer.surface_format(),
-        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-    ) {
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
-    }
+        .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+    engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+    draw_gltf(&mut engine.renderer);
+    engine.renderer.screenshot_requested = true;
+    engine.end_frame();
+    let rgba = take_rgba_screenshot(&mut engine.renderer);
+    let gltf_changed_pixels = rgba
+        .chunks_exact(4)
+        .zip(procedural_rgba.chunks_exact(4))
+        .filter(|(with_gltf, procedural)| with_gltf != procedural)
+        .count();
+    assert!(
+        gltf_changed_pixels > 64,
+        "ordinary glTF control produced no visible cached-model pixels"
+    );
     let green_pixels = rgba
         .chunks_exact(4)
         .filter(|pixel| {
@@ -195,6 +237,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         .renderer
         .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
     engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+    draw_gltf(&mut engine.renderer);
     engine
         .renderer
         .submit_virtual_geometry_current_view(&[], 1.0)
@@ -214,9 +257,13 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
             pixel.swap(0, 2);
         }
     }
+    let noop_differences = image_difference_bounds(&rgba, &virtual_noop_rgba, 128);
+    eprintln!(
+        "visibility-invariance gltf_visible_pixels={gltf_changed_pixels} virtual_noop={noop_differences:?}"
+    );
     assert_eq!(
-        virtual_noop_rgba, rgba,
-        "an empty registered virtual batch changed ordinary visibility/compatibility pixels"
+        noop_differences.changed_pixels, 0,
+        "an empty registered virtual batch changed ordinary visibility/compatibility pixels: {noop_differences:?}"
     );
 
     let queue = engine.renderer.queue.clone();
@@ -285,6 +332,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         .renderer
         .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
     engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+    draw_gltf(&mut engine.renderer);
     engine
         .renderer
         .submit_virtual_geometry_current_view(&[virtual_instance], 1.0)
@@ -458,6 +506,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
                 .renderer
                 .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
             engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+            draw_gltf(&mut engine.renderer);
             if draw_compatibility {
                 assert!(engine.renderer.draw_model_cached_compatibility(
                     compatibility_handle,
@@ -610,6 +659,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
             .renderer
             .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
         engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+        draw_gltf(&mut engine.renderer);
         if let Some(palette) = palette {
             engine.renderer.set_joint_matrices(&palette);
             assert!(engine.renderer.draw_model_cached_compatibility(
@@ -818,4 +868,51 @@ fn take_rgba_screenshot(renderer: &mut bloom_shared::renderer::Renderer) -> Vec<
         }
     }
     pixels
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ImageDifferenceBounds {
+    changed_pixels: usize,
+    minimum: [usize; 2],
+    maximum: [usize; 2],
+    maximum_channel_delta: u8,
+}
+
+fn image_difference_bounds(
+    reference: &[u8],
+    candidate: &[u8],
+    width: usize,
+) -> ImageDifferenceBounds {
+    let mut changed_pixels = 0;
+    let mut minimum = [usize::MAX; 2];
+    let mut maximum = [0; 2];
+    let mut maximum_channel_delta = 0;
+    for (index, (reference, candidate)) in reference
+        .chunks_exact(4)
+        .zip(candidate.chunks_exact(4))
+        .enumerate()
+    {
+        if reference == candidate {
+            continue;
+        }
+        changed_pixels += 1;
+        let point = [index % width, index / width];
+        minimum[0] = minimum[0].min(point[0]);
+        minimum[1] = minimum[1].min(point[1]);
+        maximum[0] = maximum[0].max(point[0]);
+        maximum[1] = maximum[1].max(point[1]);
+        for channel in 0..4 {
+            maximum_channel_delta =
+                maximum_channel_delta.max(reference[channel].abs_diff(candidate[channel]));
+        }
+    }
+    if changed_pixels == 0 {
+        minimum = [0; 2];
+    }
+    ImageDifferenceBounds {
+        changed_pixels,
+        minimum,
+        maximum,
+        maximum_channel_delta,
+    }
 }
