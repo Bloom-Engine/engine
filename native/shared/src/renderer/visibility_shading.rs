@@ -81,6 +81,8 @@ pub(super) fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             storage(1),
             storage(2),
             storage(3),
+            storage(4),
+            storage(5),
         ],
     })
 }
@@ -364,9 +366,34 @@ struct VisibilityVertexTable { records: array<BloomPackedVertex3D>, };
 struct VisibilityIndexTable { values: array<u32>, };
 
 @group(4) @binding(0) var visibility_shade_ids: texture_2d<u32>;
-@group(4) @binding(1) var<storage, read> visibility_shade_vertices: VisibilityVertexTable;
+// Vertex-input buffers may exceed a device's per-storage-binding limit even
+// though the buffer itself and ordinary raster vertex input are legal. Three
+// aligned binding windows retain one global vertex namespace for large scenes.
+@group(4) @binding(1) var<storage, read> visibility_shade_vertices_0: VisibilityVertexTable;
 @group(4) @binding(2) var<storage, read> visibility_shade_indices: VisibilityIndexTable;
 @group(4) @binding(3) var<storage, read> visibility_shade_draws: GpuDrawTable;
+@group(4) @binding(4) var<storage, read> visibility_shade_vertices_1: VisibilityVertexTable;
+@group(4) @binding(5) var<storage, read> visibility_shade_vertices_2: VisibilityVertexTable;
+
+fn bloom_visibility_vertex_count() -> u32 {
+    return arrayLength(&visibility_shade_vertices_0.records)
+        + arrayLength(&visibility_shade_vertices_1.records)
+        + arrayLength(&visibility_shade_vertices_2.records);
+}
+
+fn bloom_visibility_vertex(index: u32) -> BloomVertex3D {
+    let count_0 = arrayLength(&visibility_shade_vertices_0.records);
+    if (index < count_0) {
+        return bloom_decode_vertex3d(visibility_shade_vertices_0.records[index]);
+    }
+    var local_index = index - count_0;
+    let count_1 = arrayLength(&visibility_shade_vertices_1.records);
+    if (local_index < count_1) {
+        return bloom_decode_vertex3d(visibility_shade_vertices_1.records[local_index]);
+    }
+    local_index -= count_1;
+    return bloom_decode_vertex3d(visibility_shade_vertices_2.records[local_index]);
+}
 
 @vertex
 fn vs_visibility_shade(@builtin(vertex_index) vertex_index: u32) -> VisibilityVertexOut {
@@ -420,14 +447,14 @@ fn fs_visibility_shade(in: VisibilityVertexOut) -> SceneOut {
     let index0 = u32(signed0);
     let index1 = u32(signed1);
     let index2 = u32(signed2);
-    let vertex_count = arrayLength(&visibility_shade_vertices.records);
+    let vertex_count = bloom_visibility_vertex_count();
     if (index0 >= vertex_count || index1 >= vertex_count || index2 >= vertex_count) {
         return visibility_shade_fault();
     }
 
-    let vertex0 = bloom_decode_vertex3d(visibility_shade_vertices.records[index0]);
-    let vertex1 = bloom_decode_vertex3d(visibility_shade_vertices.records[index1]);
-    let vertex2 = bloom_decode_vertex3d(visibility_shade_vertices.records[index2]);
+    let vertex0 = bloom_visibility_vertex(index0);
+    let vertex1 = bloom_visibility_vertex(index1);
+    let vertex2 = bloom_visibility_vertex(index2);
     let local0 = vec4<f32>(vertex0.position, 1.0);
     let local1 = vec4<f32>(vertex1.position, 1.0);
     let local2 = vec4<f32>(vertex2.position, 1.0);

@@ -154,6 +154,7 @@ struct RuntimeResources {
     extent: (u32, u32),
     draw_capacity: usize,
     geometry_generation: u64,
+    vertex_bytes: u64,
 }
 
 pub(crate) struct VisibilityBufferRuntime {
@@ -171,6 +172,70 @@ pub(crate) struct VisibilityBufferRuntime {
     eligible_draws: u32,
     compatibility_draws: u32,
     frame_recorded: bool,
+}
+
+const VISIBILITY_VERTEX_SEGMENTS: usize = 3;
+
+fn gcd(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
+fn visibility_vertex_binding_ranges(
+    limits: &wgpu::Limits,
+    buffer_bytes: u64,
+    used_bytes: u64,
+) -> [(u64, u64); VISIBILITY_VERTEX_SEGMENTS] {
+    let vertex_stride = std::mem::size_of::<super::Vertex3D>() as u64;
+    let binding_alignment = u64::from(limits.min_storage_buffer_offset_alignment).max(1);
+    let segment_alignment =
+        vertex_stride / gcd(vertex_stride, binding_alignment) * binding_alignment;
+    let maximum_binding_bytes = u64::from(limits.max_storage_buffer_binding_size);
+    let segment_bytes = maximum_binding_bytes / segment_alignment * segment_alignment;
+    assert!(
+        segment_bytes >= vertex_stride,
+        "visibility vertex ABI requires a {vertex_stride}-byte aligned storage window, but the device limit is {maximum_binding_bytes} bytes"
+    );
+    assert!(
+        used_bytes <= buffer_bytes,
+        "visibility vertex usage {used_bytes} exceeds its {buffer_bytes}-byte arena"
+    );
+    assert!(
+        used_bytes <= segment_bytes * VISIBILITY_VERTEX_SEGMENTS as u64,
+        "visibility vertex usage {used_bytes} exceeds three device-sized storage windows of {segment_bytes} bytes"
+    );
+    let bound_bytes = used_bytes.max(vertex_stride);
+    std::array::from_fn(|segment| {
+        let offset = segment as u64 * segment_bytes;
+        if offset < bound_bytes {
+            let size = segment_bytes.min(bound_bytes - offset);
+            debug_assert_eq!(offset % binding_alignment, 0);
+            debug_assert_eq!(size % vertex_stride, 0);
+            (offset, size)
+        } else {
+            // Every declared layout entry needs a non-empty resource. An
+            // unreachable one-record alias keeps small scenes on the same ABI.
+            (0, vertex_stride)
+        }
+    })
+}
+
+fn visibility_vertex_bindings<'a>(
+    device: &wgpu::Device,
+    buffer: &'a wgpu::Buffer,
+    used_bytes: u64,
+) -> [wgpu::BufferBinding<'a>; VISIBILITY_VERTEX_SEGMENTS] {
+    visibility_vertex_binding_ranges(&device.limits(), buffer.size(), used_bytes).map(
+        |(offset, size)| wgpu::BufferBinding {
+            buffer,
+            offset,
+            size: std::num::NonZeroU64::new(size),
+        },
+    )
 }
 
 impl VisibilityBufferRuntime {
@@ -426,6 +491,7 @@ impl VisibilityBufferRuntime {
         device: &wgpu::Device,
         extent: (u32, u32),
         vertex_buffer: &wgpu::Buffer,
+        vertex_bytes: u64,
         index_buffer: &wgpu::Buffer,
         draw_buffer: &wgpu::Buffer,
         draw_capacity: usize,
@@ -439,6 +505,7 @@ impl VisibilityBufferRuntime {
             resources.extent == extent
                 && resources.draw_capacity == draw_capacity
                 && resources.geometry_generation == geometry_generation
+                && resources.vertex_bytes == vertex_bytes
         });
         if current {
             return ResourceCreations::default();
@@ -460,6 +527,7 @@ impl VisibilityBufferRuntime {
             view_formats: &[],
         });
         let visibility_view = visibility_texture.create_view(&Default::default());
+        let vertex_bindings = visibility_vertex_bindings(device, vertex_buffer, vertex_bytes);
         let diagnostic_texture = self.reconstruction_enabled().then(|| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("visibility_buffer_runtime_reconstruction"),
@@ -489,7 +557,7 @@ impl VisibilityBufferRuntime {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: vertex_buffer.as_entire_binding(),
+                        resource: wgpu::BindingResource::Buffer(vertex_bindings[0].clone()),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -502,6 +570,14 @@ impl VisibilityBufferRuntime {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(diagnostic_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Buffer(vertex_bindings[1].clone()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Buffer(vertex_bindings[2].clone()),
                     },
                 ],
             })
@@ -538,7 +614,7 @@ impl VisibilityBufferRuntime {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: vertex_buffer.as_entire_binding(),
+                            resource: wgpu::BindingResource::Buffer(vertex_bindings[0].clone()),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
@@ -547,6 +623,14 @@ impl VisibilityBufferRuntime {
                         wgpu::BindGroupEntry {
                             binding: 3,
                             resource: draw_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Buffer(vertex_bindings[1].clone()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Buffer(vertex_bindings[2].clone()),
                         },
                     ],
                 }),
@@ -569,6 +653,7 @@ impl VisibilityBufferRuntime {
             extent,
             draw_capacity,
             geometry_generation,
+            vertex_bytes,
         });
         ResourceCreations {
             textures: texture_creations,
@@ -961,6 +1046,8 @@ fn create_reconstruct_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 },
                 count: None,
             },
+            storage(5, true),
+            storage(6, true),
         ],
     })
 }
@@ -1003,10 +1090,32 @@ struct IndexTable { values: array<u32>, };
 struct DrawTable { records: array<GpuDrawRecord>, };
 
 @group(0) @binding(0) var visibility_texture: texture_2d<u32>;
-@group(0) @binding(1) var<storage, read> vertices: VertexTable;
+@group(0) @binding(1) var<storage, read> vertices_0: VertexTable;
 @group(0) @binding(2) var<storage, read> indices: IndexTable;
 @group(0) @binding(3) var<storage, read> draws: DrawTable;
 @group(0) @binding(4) var diagnostic_output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var<storage, read> vertices_1: VertexTable;
+@group(0) @binding(6) var<storage, read> vertices_2: VertexTable;
+
+fn visibility_vertex_count() -> u32 {
+    return arrayLength(&vertices_0.records)
+        + arrayLength(&vertices_1.records)
+        + arrayLength(&vertices_2.records);
+}
+
+fn visibility_vertex(index: u32) -> BloomVertex3D {
+    let count_0 = arrayLength(&vertices_0.records);
+    if (index < count_0) {
+        return bloom_decode_vertex3d(vertices_0.records[index]);
+    }
+    var local_index = index - count_0;
+    let count_1 = arrayLength(&vertices_1.records);
+    if (local_index < count_1) {
+        return bloom_decode_vertex3d(vertices_1.records[local_index]);
+    }
+    local_index -= count_1;
+    return bloom_decode_vertex3d(vertices_2.records[local_index]);
+}
 
 fn visibility_fault(pixel: vec2<i32>) {
     textureStore(diagnostic_output, pixel, vec4<f32>(8.0, 0.0, 8.0, 1.0));
@@ -1049,14 +1158,14 @@ fn cs_visibility_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
     let index0 = u32(signed0);
     let index1 = u32(signed1);
     let index2 = u32(signed2);
-    let vertex_count = arrayLength(&vertices.records);
+    let vertex_count = visibility_vertex_count();
     if (index0 >= vertex_count || index1 >= vertex_count || index2 >= vertex_count) {
         visibility_fault(pixel);
         return;
     }
-    let vertex0 = bloom_decode_vertex3d(vertices.records[index0]);
-    let vertex1 = bloom_decode_vertex3d(vertices.records[index1]);
-    let vertex2 = bloom_decode_vertex3d(vertices.records[index2]);
+    let vertex0 = visibility_vertex(index0);
+    let vertex1 = visibility_vertex(index1);
+    let vertex2 = visibility_vertex(index2);
     let clip0 = draw.uniforms.mvp * vec4<f32>(vertex0.position, 1.0);
     let clip1 = draw.uniforms.mvp * vec4<f32>(vertex1.position, 1.0);
     let clip2 = draw.uniforms.mvp * vec4<f32>(vertex2.position, 1.0);
@@ -1280,7 +1389,27 @@ mod tests {
         assert!(raster.contains("out.draw_id = draw_index"));
         assert!(raster.contains("(in.draw_flags & 2u) == 0u"));
         assert!(depth.contains("return vec2<u32>(0xffffffffu, 0xffffffffu)"));
-        assert!(RUNTIME_RECONSTRUCT_WGSL.contains("arrayLength(&vertices.records)"));
+        assert!(RUNTIME_RECONSTRUCT_WGSL.contains("visibility_vertex_count()"));
+        assert!(RUNTIME_RECONSTRUCT_WGSL.contains("@group(0) @binding(6)"));
+    }
+
+    #[test]
+    fn large_vertex_arenas_split_at_aligned_storage_binding_boundaries() {
+        let mut limits = wgpu::Limits::downlevel_defaults();
+        limits.max_storage_buffer_binding_size = 128 * 1024 * 1024;
+        limits.min_storage_buffer_offset_alignment = 256;
+        let vertex_stride = std::mem::size_of::<super::super::Vertex3D>() as u64;
+        let used_bytes = 1_738_262 * vertex_stride;
+        let ranges = visibility_vertex_binding_ranges(&limits, 256 * 1024 * 1024, used_bytes);
+        assert_eq!(ranges[0], (0, 134_217_216));
+        assert_eq!(ranges[1], (134_217_216, used_bytes - 134_217_216));
+        assert_eq!(ranges[2], (0, vertex_stride));
+        assert!(ranges
+            .iter()
+            .all(|&(_, size)| size <= u64::from(limits.max_storage_buffer_binding_size)));
+        assert!(ranges.iter().all(|&(offset, _)| offset
+            % u64::from(limits.min_storage_buffer_offset_alignment)
+            == 0));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
