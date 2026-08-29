@@ -281,6 +281,29 @@ fn profile_taa_reconstruction(eng: &mut EngineState, frames: u32, render_scale: 
     mean
 }
 
+#[test]
+#[ignore = "explicit long-running GPU profiling gate"]
+fn profile_fractional_taa_reconstruction() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    install_glossy_detail_fixture(&mut eng);
+    let frames = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_FRAMES")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("profile frame count"))
+        .unwrap_or(1200);
+    let render_scale = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_RENDER_SCALE")
+        .ok()
+        .map(|value| value.parse::<f32>().expect("profile render scale"))
+        .unwrap_or(0.75);
+    let taa_gpu_us = profile_taa_reconstruction(&mut eng, frames, render_scale);
+    eprintln!(
+        "fractional-reconstruction taa_gpu_us={taa_gpu_us:.3} \
+         frames={frames} render_scale={render_scale:.2}"
+    );
+}
+
 fn temporal_derivative_error(
     previous_reference: &[u8],
     reference: &[u8],
@@ -929,14 +952,16 @@ fn fractional_coplanar_material_boundary_tracks_supersampled_motion() {
     // broad color alone therefore cannot identify the boundary. Keep both
     // native-reference fidelity and temporal response bounded so a future
     // discriminator cannot earn a lower still error by retaining stale detail.
+    // The bounds also preserve the moderate-motion detail refresh that keeps
+    // a valid high-frequency history from accumulating source-phase lag.
     assert!(
-        mean_rgb <= 1.86 && mean_ssim >= 0.9745 && minimum_ssim >= 0.94,
+        mean_rgb <= 1.42 && mean_ssim >= 0.985 && minimum_ssim >= 0.97,
         "fractional coplanar material boundary diverged from supersampled motion: \
          mean_rgb={mean_rgb:.6}, mean_ssim={mean_ssim:.6}, \
          minimum_ssim={minimum_ssim:.6}"
     );
     assert!(
-        derivative_error <= 0.47,
+        derivative_error <= 0.44,
         "fractional coplanar material boundary added excessive temporal variation: \
          derivative_error={derivative_error:.6}"
     );

@@ -1221,7 +1221,16 @@ fn fs_main(in: VsOut) -> TaaOut {
     // Prefer the current frame there even when both individual vectors are
     // small, rather than allowing a long-lived cross-surface history average.
     let divergence_alpha = smoothstep(0.00025, 0.003, velocity_divergence);
-    let motion_ramped = max(mix(current_weight, 0.85, motion_alpha), divergence_alpha);
+    // Moving high-frequency reconstruction must not accumulate a long-lived
+    // phase lag. Its existing detail classifier is already paid for by the
+    // fractional rectification footprint; give those pixels a modest current
+    // floor while leaving smooth surfaces and every stationary path unchanged.
+    let feature_motion_floor = current_feature_lock *
+        select(0.0, 0.15, vel_len >= 0.0005);
+    let motion_ramped = max(
+        max(mix(current_weight, 0.85, motion_alpha), divergence_alpha),
+        feature_motion_floor,
+    );
     // Reactive coverage is injected by the material-aware TAA variant. Keep a
     // concrete zero in the base shader so confidence policy is identical for
     // both variants and diagnostics can report the real persistent lock.

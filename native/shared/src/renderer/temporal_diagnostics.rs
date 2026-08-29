@@ -397,6 +397,12 @@ mod tests {
         assert!(
             TAA_SHADER_WGSL.contains("let color_motion_ramped = max(motion_ramped, disocclusion);")
         );
+        assert!(TAA_SHADER_WGSL.contains(
+            "let feature_motion_floor = current_feature_lock *\n        select(0.0, 0.15, vel_len >= 0.0005);"
+        ));
+        assert!(TAA_SHADER_WGSL.contains(
+            "max(mix(current_weight, 0.85, motion_alpha), divergence_alpha),\n        feature_motion_floor,"
+        ));
         assert!(TAA_SHADER_WGSL.contains("abs(dpdx(vec2<f32>(expected_prev_depth, disocclusion)))"));
         assert!(TAA_SHADER_WGSL.contains("temporal_gradients.y"));
         assert!(!TAA_SHADER_WGSL.contains("dpdx(disocclusion)"));
