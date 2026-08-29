@@ -43,3 +43,40 @@ The workload defaults to `--quality-preset 4`. Use
 an identical shading resolution. Reports record both the requested preset and
 the effective scale, plus the renderer-path/resource snapshot taken after the
 measured window.
+
+## Visibility-buffer A/B workloads
+
+The default `static-ultra` workload uses immediate geometry and therefore does
+not qualify the retained GPU-driven visibility path. Two explicit retained
+workloads exercise that path with the same 32x18 opaque grid:
+
+- `visibility-low-overdraw` submits one layer (576 draws);
+- `visibility-layered-overdraw` submits eight depth-separated layers (4,608
+  draws), with the front layer covering the same screen area.
+
+Run matched uncapped, timestamped processes because
+`BLOOM_VISIBILITY_BUFFER` is selected during renderer initialization:
+
+```sh
+BLOOM_VISIBILITY_BUFFER=off cargo run --release \
+  --manifest-path tools/render-perf/Cargo.toml -- \
+  --width 1920 --height 1080 --warmup 180 --frames 300 \
+  --quality-preset 0 --render-scale 1.0 \
+  --workload visibility-low-overdraw --profile-passes \
+  --out tools/quality/out/visibility-perf/low-off.json
+
+BLOOM_VISIBILITY_BUFFER=shade cargo run --release \
+  --manifest-path tools/render-perf/Cargo.toml -- \
+  --width 1920 --height 1080 --warmup 180 --frames 300 \
+  --quality-preset 0 --render-scale 1.0 \
+  --workload visibility-low-overdraw --profile-passes \
+  --out tools/quality/out/visibility-perf/low-shade.json
+```
+
+Repeat for `visibility-layered-overdraw` and use an alternating order (ABBA)
+when making a performance claim. The report's `workload`, capability snapshot,
+GPU-driven draw counts, visibility runtime state, `gpu_frame_*`,
+`depth_prepass`, and `main_hdr_pass` fields are the qualification contract.
+Shade mode folds ID rasterization into `depth_prepass` and visibility PBR into
+`main_hdr_pass`, so compare those complete pass totals; there is deliberately
+no artificial pass split merely to make the two stages easier to time.

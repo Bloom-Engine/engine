@@ -7,6 +7,43 @@ use bloom_shared::renderer::{Renderer, Vertex3D};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Workload {
+    #[default]
+    StaticUltra,
+    VisibilityLowOverdraw,
+    VisibilityLayeredOverdraw,
+}
+
+impl Workload {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "static-ultra" => Ok(Self::StaticUltra),
+            "visibility-low-overdraw" => Ok(Self::VisibilityLowOverdraw),
+            "visibility-layered-overdraw" => Ok(Self::VisibilityLayeredOverdraw),
+            _ => Err(format!(
+                "--workload must be static-ultra, visibility-low-overdraw, or visibility-layered-overdraw (got {value})"
+            )),
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::StaticUltra => "static-ultra",
+            Self::VisibilityLowOverdraw => "visibility-low-overdraw",
+            Self::VisibilityLayeredOverdraw => "visibility-layered-overdraw",
+        }
+    }
+
+    const fn retained_layers(self) -> u32 {
+        match self {
+            Self::StaticUltra => 0,
+            Self::VisibilityLowOverdraw => 1,
+            Self::VisibilityLayeredOverdraw => 8,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Config {
     width: u32,
@@ -17,6 +54,7 @@ struct Config {
     render_scale: Option<f32>,
     reactive_transparency: bool,
     profile_passes: bool,
+    workload: Workload,
     trace_dir: Option<PathBuf>,
     output: PathBuf,
 }
@@ -46,6 +84,15 @@ struct FrameTiming {
     end_frame_ms: f64,
 }
 
+struct ReportMeasurements {
+    actual_render_scale: f32,
+    render_submit: Percentiles,
+    prepare: Percentiles,
+    end_frame: Percentiles,
+    uploads: Option<UploadStats>,
+    pass_profile: Option<String>,
+}
+
 fn parse_u32(value: Option<String>, flag: &str) -> Result<u32, String> {
     value
         .ok_or_else(|| format!("missing value for {flag}"))?
@@ -69,6 +116,7 @@ fn config() -> Result<Config, String> {
     let mut render_scale = None;
     let mut reactive_transparency = false;
     let mut profile_passes = false;
+    let mut workload = Workload::StaticUltra;
     let mut trace_dir = None;
     let mut output = None;
     let mut args = std::env::args().skip(1);
@@ -86,6 +134,13 @@ fn config() -> Result<Config, String> {
             }
             "--reactive-transparency" => reactive_transparency = true,
             "--profile-passes" => profile_passes = true,
+            "--workload" => {
+                workload = Workload::parse(
+                    &args
+                        .next()
+                        .ok_or_else(|| "missing value for --workload".to_owned())?,
+                )?;
+            }
             "--trace-dir" => {
                 trace_dir = Some(PathBuf::from(
                     args.next()
@@ -113,6 +168,7 @@ fn config() -> Result<Config, String> {
         render_scale,
         reactive_transparency,
         profile_passes,
+        workload,
         trace_dir,
         output: output.ok_or_else(|| "--out is required".to_owned())?,
     })
@@ -162,6 +218,90 @@ fn draw_static_ultra_scene(engine: &mut EngineState) {
             0.5 + 0.5 * (t + 4.189).cos(),
             1.6,
         );
+    }
+}
+
+fn draw_retained_visibility_scene(engine: &mut EngineState) {
+    let renderer = &mut engine.renderer;
+    renderer.set_clear_color(2.0, 2.0, 4.0, 255.0);
+    renderer.begin_mode_3d(
+        0.0, 0.0, 6.0, // eye
+        0.0, 0.0, 0.0, // target
+        0.0, 1.0, 0.0, 55.0, 0.0,
+    );
+    renderer.set_ambient_light(20.0, 24.0, 32.0, 0.12);
+    renderer.set_directional_light(-0.5, -1.0, 0.8, 255.0, 242.0, 230.0, 1.2);
+}
+
+fn setup_retained_visibility_workload(engine: &mut EngineState, layers: u32) {
+    if layers == 0 {
+        return;
+    }
+    const COLUMNS: u32 = 32;
+    const ROWS: u32 = 18;
+    const SPACING: f32 = 0.335;
+    let vertices = vec![
+        Vertex3D {
+            position: [-0.5, -0.5, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            uv: [0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        },
+        Vertex3D {
+            position: [0.5, -0.5, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            uv: [1.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        },
+        Vertex3D {
+            position: [0.5, 0.5, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            uv: [1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        },
+        Vertex3D {
+            position: [-0.5, 0.5, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            uv: [0.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        },
+    ];
+    let indices = vec![0, 2, 1, 0, 3, 2];
+    for layer in (0..layers).rev() {
+        for row in 0..ROWS {
+            for column in 0..COLUMNS {
+                let node = engine.scene.create_node();
+                engine
+                    .scene
+                    .update_geometry(node, vertices.clone(), indices.clone());
+                engine.scene.set_trs(
+                    node,
+                    (column as f32 - (COLUMNS - 1) as f32 * 0.5) * SPACING,
+                    (row as f32 - (ROWS - 1) as f32 * 0.5) * SPACING,
+                    -(layer as f32) * 0.004,
+                    0.0,
+                    SPACING * 1.01,
+                );
+                let roughness = 0.18 + 0.68 * row as f32 / (ROWS - 1) as f32;
+                let metalness = 0.08 + 0.84 * column as f32 / (COLUMNS - 1) as f32;
+                engine.scene.set_material_pbr(node, roughness, metalness);
+                engine.scene.set_material_color(
+                    node,
+                    0.15 + 0.7 * column as f32 / (COLUMNS - 1) as f32,
+                    0.2 + 0.65 * row as f32 / (ROWS - 1) as f32,
+                    0.25 + 0.6 * ((column + row) % 7) as f32 / 6.0,
+                    1.0,
+                );
+            }
+        }
     }
 }
 
@@ -227,10 +367,15 @@ fn setup_reactive_transparency(engine: &mut EngineState) {
     engine.scene.set_material_color(node, 0.1, 0.8, 1.0, 0.65);
 }
 
-fn render_frame(engine: &mut EngineState) -> FrameTiming {
+fn render_frame(engine: &mut EngineState, workload: Workload) -> FrameTiming {
     let frame_start = Instant::now();
     engine.begin_frame();
-    draw_static_ultra_scene(engine);
+    match workload {
+        Workload::StaticUltra => draw_static_ultra_scene(engine),
+        Workload::VisibilityLowOverdraw | Workload::VisibilityLayeredOverdraw => {
+            draw_retained_visibility_scene(engine);
+        }
+    }
     let prepare_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
     let end_start = Instant::now();
     engine.end_frame();
@@ -293,6 +438,7 @@ fn create_engine(config: &Config) -> Result<(EngineState, String), String> {
     }
     let adapter_snapshot = renderer.quality_adapter_json();
     let mut engine = EngineState::new(renderer);
+    setup_retained_visibility_workload(&mut engine, config.workload.retained_layers());
     if config.reactive_transparency {
         setup_reactive_transparency(&mut engine);
     }
@@ -382,12 +528,7 @@ fn write_report(
     config: &Config,
     adapter_snapshot: &str,
     renderer_paths: &str,
-    actual_render_scale: f32,
-    render_submit: Percentiles,
-    prepare: Percentiles,
-    end_frame: Percentiles,
-    uploads: Option<UploadStats>,
-    pass_profile: Option<&str>,
+    measurements: &ReportMeasurements,
 ) -> Result<(), String> {
     let revision = std::env::var("BLOOM_RENDER_PERF_ENGINE_REVISION").unwrap_or_else(|_| {
         std::process::Command::new("git")
@@ -399,7 +540,7 @@ fn write_report(
             .map(|value| value.trim().to_owned())
             .unwrap_or_else(|| "unknown".to_owned())
     });
-    let upload_json = uploads.map_or_else(
+    let upload_json = measurements.uploads.map_or_else(
         || "null".to_owned(),
         |value| {
             format!(
@@ -423,7 +564,7 @@ fn write_report(
             )
         },
     );
-    let pass_profile_json = pass_profile.unwrap_or("null");
+    let pass_profile_json = measurements.pass_profile.as_deref().unwrap_or("null");
     let report = format!(
         concat!(
             "{{\n  \"schema\":\"bloom-render-perf-v1\",\n",
@@ -432,6 +573,7 @@ fn write_report(
             "  \"renderer_paths\":{},\n",
             "  \"resolution\":[{},{}],\n",
             "  \"quality_preset\":{},\n",
+            "  \"workload\":\"{}\",\n",
             "  \"render_scale\":{:.6},\n",
             "  \"reactive_transparency_workload\":{},\n",
             "  \"pass_profile\":{},\n",
@@ -453,27 +595,28 @@ fn write_report(
         config.width,
         config.height,
         config.quality_preset,
-        actual_render_scale,
+        config.workload.label(),
+        measurements.actual_render_scale,
         config.reactive_transparency,
         pass_profile_json,
         config.warmup_frames,
         config.measured_frames,
         config.trace_dir.is_some(),
-        render_submit.mean,
-        render_submit.p50,
-        render_submit.p95,
-        render_submit.p99,
-        render_submit.max,
-        prepare.mean,
-        prepare.p50,
-        prepare.p95,
-        prepare.p99,
-        prepare.max,
-        end_frame.mean,
-        end_frame.p50,
-        end_frame.p95,
-        end_frame.p99,
-        end_frame.max,
+        measurements.render_submit.mean,
+        measurements.render_submit.p50,
+        measurements.render_submit.p95,
+        measurements.render_submit.p99,
+        measurements.render_submit.max,
+        measurements.prepare.mean,
+        measurements.prepare.p50,
+        measurements.prepare.p95,
+        measurements.prepare.p99,
+        measurements.prepare.max,
+        measurements.end_frame.mean,
+        measurements.end_frame.p50,
+        measurements.end_frame.p95,
+        measurements.end_frame.p99,
+        measurements.end_frame.max,
         upload_json,
     );
     if let Some(parent) = config.output.parent() {
@@ -489,7 +632,7 @@ fn run() -> Result<(), String> {
     let (mut engine, adapter_snapshot) = create_engine(&config)?;
     let actual_render_scale = engine.renderer.render_scale();
     for _ in 0..config.warmup_frames {
-        let _ = render_frame(&mut engine);
+        let _ = render_frame(&mut engine, config.workload);
     }
     if config.profile_passes {
         engine.profiler.set_enabled(true);
@@ -497,7 +640,7 @@ fn run() -> Result<(), String> {
     let measurement_start = Instant::now();
     let mut timing_samples = Vec::with_capacity(config.measured_frames as usize);
     for _ in 0..config.measured_frames {
-        timing_samples.push(render_frame(&mut engine));
+        timing_samples.push(render_frame(&mut engine, config.workload));
     }
     let measurement_wall_ms = measurement_start.elapsed().as_secs_f64() * 1000.0;
     let _ = engine.renderer.device.poll(wgpu::PollType::Wait {
@@ -527,17 +670,15 @@ fn run() -> Result<(), String> {
         .as_deref()
         .map(|directory| trace_uploads(directory, config.measured_frames))
         .transpose()?;
-    write_report(
-        &config,
-        &adapter_snapshot,
-        &renderer_paths,
+    let measurements = ReportMeasurements {
         actual_render_scale,
         render_submit,
         prepare,
         end_frame,
         uploads,
-        pass_profile.as_deref(),
-    )?;
+        pass_profile,
+    };
+    write_report(&config, &adapter_snapshot, &renderer_paths, &measurements)?;
     println!(
         "bloom-render-perf {}x{} CPU p50={:.3} p95={:.3} p99={:.3} ms{}",
         config.width,
@@ -545,7 +686,7 @@ fn run() -> Result<(), String> {
         render_submit.p50,
         render_submit.p95,
         render_submit.p99,
-        uploads.map_or(String::new(), |value| format!(
+        measurements.uploads.map_or(String::new(), |value| format!(
             " upload/frame={:.0} bytes",
             value.per_frame.mean
         ))
@@ -557,5 +698,24 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("bloom-render-perf: {error}");
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Workload;
+
+    #[test]
+    fn workload_names_are_stable_and_reject_unknown_values() {
+        for (name, expected_layers) in [
+            ("static-ultra", 0),
+            ("visibility-low-overdraw", 1),
+            ("visibility-layered-overdraw", 8),
+        ] {
+            let workload = Workload::parse(name).expect("documented workload parses");
+            assert_eq!(workload.label(), name);
+            assert_eq!(workload.retained_layers(), expected_layers);
+        }
+        assert!(Workload::parse("visibility").is_err());
     }
 }
