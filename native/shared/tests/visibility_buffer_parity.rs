@@ -14,6 +14,7 @@ const COLUMN_SPACING: f32 = 0.55;
 const ROW_SPACING: f32 = 0.8;
 const CHILD_OUTPUT: &str = "BLOOM_VISIBILITY_PARITY_CHILD_OUTPUT";
 const CHILD_MRT_DIR: &str = "BLOOM_VISIBILITY_PARITY_CHILD_MRT_DIR";
+const EXPECTED_COMPATIBILITY_DRAWS: u64 = 7;
 
 fn layered_compatibility_materials() -> [MaterialLayeredPbr; 6] {
     let material = |lobe_mask| {
@@ -572,9 +573,11 @@ fn visibility_shading_matches_forward_reference() {
                 assert!(visibility_runtime["eligible_draws"]
                     .as_u64()
                     .is_some_and(|draws| draws >= 32));
+                // Six layered opaque draws plus the overlapping MASK draw
+                // must remain forward-owned compatibility geometry.
                 assert!(visibility_runtime["compatibility_draws"]
                     .as_u64()
-                    .is_some_and(|draws| draws >= 6));
+                    .is_some_and(|draws| draws >= EXPECTED_COMPATIBILITY_DRAWS));
                 assert_eq!(visibility_runtime["frame_recorded"], true);
             } else {
                 // Visibility shading is optional on adapters lacking primitive
