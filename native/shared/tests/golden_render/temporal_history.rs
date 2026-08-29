@@ -1205,6 +1205,207 @@ fn camera_motion_sequence_bounds_ghosting_flicker_and_cut_residue() {
 }
 
 #[test]
+fn fractional_fast_orbit_tracks_native_motion_and_fresh_recovery() {
+    const TRANSITION_FRAMES: usize = 4;
+    const RECOVERY_FRAMES: usize = 8;
+    const SETTLE_FRAMES: u32 = 16;
+    const OLD_ANGLE: f32 = -0.55;
+    const NEW_ANGLE: f32 = 0.65;
+
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    configure_taa_motion_corpus(&mut eng.renderer);
+
+    let draw_pose = |eng: &mut EngineState, angle: f32| {
+        let radius = 7.2;
+        let r = &mut eng.renderer;
+        r.set_clear_color(8.0, 10.0, 18.0, 255.0);
+        r.begin_mode_3d(
+            angle.sin() * radius,
+            2.6,
+            angle.cos() * radius,
+            0.0,
+            0.7,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            48.0,
+            0.0,
+        );
+        r.set_ambient_light(150.0, 165.0, 190.0, 0.25);
+        r.add_directional_light(-0.4, -1.0, -0.2, 1.0, 0.95, 0.88, 2.0);
+        r.add_point_light(0.0, 2.5, -1.5, 8.0, 1.0, 0.15, 0.05, 7.0);
+        r.draw_grid(72, 0.16);
+        for column in -16..=16 {
+            let bright = column & 1 == 0;
+            r.draw_cube(
+                f64::from(column) * 0.20,
+                0.65,
+                -0.55 + f64::from(column & 3) * 0.11,
+                0.07,
+                1.30,
+                0.07,
+                if bright { 238.0 } else { 28.0 },
+                if bright { 220.0 } else { 62.0 },
+                if bright { 188.0 } else { 96.0 },
+                255.0,
+            );
+        }
+        r.draw_cube(-1.5, 0.9, 0.2, 1.8, 1.8, 1.8, 240.0, 42.0, 35.0, 255.0);
+        r.draw_cube(1.2, 1.5, -1.2, 1.2, 3.0, 1.2, 25.0, 210.0, 245.0, 255.0);
+        r.draw_sphere(0.3, 0.8, 1.5, 0.8, 245.0, 220.0, 35.0, 255.0);
+    };
+    let settle = |eng: &mut EngineState, angle: f32| {
+        for _ in 0..SETTLE_FRAMES {
+            eng.begin_frame();
+            draw_pose(eng, angle);
+            eng.end_frame();
+        }
+    };
+    let capture = |eng: &mut EngineState, angle: f32| render(eng, 1, |eng| draw_pose(eng, angle)).2;
+    let poses = (0..TRANSITION_FRAMES + RECOVERY_FRAMES)
+        .map(|frame| {
+            if frame < TRANSITION_FRAMES {
+                let t = (frame + 1) as f32 / TRANSITION_FRAMES as f32;
+                OLD_ANGLE + (NEW_ANGLE - OLD_ANGLE) * t
+            } else {
+                NEW_ANGLE
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut capture_path = |render_scale: f32| {
+        eng.renderer.set_render_scale(render_scale);
+        eng.renderer.reset_temporal_history();
+        settle(&mut eng, OLD_ANGLE);
+        poses
+            .iter()
+            .map(|angle| capture(&mut eng, *angle))
+            .collect::<Vec<_>>()
+    };
+    let native = capture_path(1.0);
+    let fractional = capture_path(0.75);
+    drop(capture_path);
+
+    eng.renderer.set_render_scale(0.75);
+    eng.renderer.reset_temporal_history();
+    let fresh_endpoint = (0..TRANSITION_FRAMES + RECOVERY_FRAMES)
+        .map(|_| capture(&mut eng, NEW_ANGLE))
+        .collect::<Vec<_>>();
+
+    let native_metrics = native
+        .iter()
+        .zip(&fractional)
+        .map(|(native, fractional)| calculate_diff_metrics(native, fractional, W, H))
+        .collect::<Vec<_>>();
+    let recovery_metrics = fresh_endpoint[TRANSITION_FRAMES..]
+        .iter()
+        .zip(&fractional[TRANSITION_FRAMES..])
+        .map(|(fresh, recovered)| calculate_diff_metrics(fresh, recovered, W, H))
+        .collect::<Vec<_>>();
+    let derivative_error = native
+        .windows(2)
+        .zip(fractional.windows(2))
+        .map(|(native, fractional)| {
+            let mut error = 0u64;
+            let mut samples = 0u64;
+            for (((native_previous, native_current), fractional_previous), fractional_current) in
+                native[0]
+                    .chunks_exact(4)
+                    .zip(native[1].chunks_exact(4))
+                    .zip(fractional[0].chunks_exact(4))
+                    .zip(fractional[1].chunks_exact(4))
+            {
+                for channel in 0..3 {
+                    let native_delta =
+                        i16::from(native_current[channel]) - i16::from(native_previous[channel]);
+                    let fractional_delta = i16::from(fractional_current[channel])
+                        - i16::from(fractional_previous[channel]);
+                    error += u64::from(native_delta.abs_diff(fractional_delta));
+                    samples += 1;
+                }
+            }
+            error as f64 / samples as f64
+        })
+        .sum::<f64>()
+        / (native.len() - 1) as f64;
+    let mean_rgb = native_metrics
+        .iter()
+        .map(|metrics| metrics.mean_rgb)
+        .sum::<f64>()
+        / native_metrics.len() as f64;
+    let minimum_ssim = native_metrics
+        .iter()
+        .map(|metrics| metrics.ssim)
+        .fold(1.0f64, f64::min);
+    let maximum_mean_rgb = native_metrics
+        .iter()
+        .map(|metrics| metrics.mean_rgb)
+        .fold(0.0f64, f64::max);
+    let recovery_mean_rgb = recovery_metrics
+        .iter()
+        .map(|metrics| metrics.mean_rgb)
+        .sum::<f64>()
+        / recovery_metrics.len() as f64;
+    let recovery_maximum_outliers = recovery_metrics
+        .iter()
+        .map(|metrics| metrics.outlier_pixel_fraction)
+        .fold(0.0f64, f64::max);
+    let movement = calculate_diff_metrics(&native[0], &native[TRANSITION_FRAMES - 1], W, H);
+    let world_translation = 2.0 * 7.2 * f64::from((NEW_ANGLE - OLD_ANGLE) * 0.5).sin();
+    eprintln!(
+        "temporal-corpus fractional-fast-orbit translation_m={world_translation:.6} \
+         movement_rgb={:.6} movement_outliers={:.4}% \
+         native_mean_rgb={mean_rgb:.6} native_max_rgb={maximum_mean_rgb:.6} \
+         native_min_ssim={minimum_ssim:.6} derivative_error={derivative_error:.6} \
+         recovery_mean_rgb={recovery_mean_rgb:.6} recovery_max_outliers={:.4}% \
+         native_frames={native_metrics:?} recovery_frames={recovery_metrics:?}",
+        movement.mean_rgb,
+        movement.outlier_pixel_fraction * 100.0,
+        recovery_maximum_outliers * 100.0,
+    );
+
+    assert!(
+        world_translation >= 6.0,
+        "fast-orbit corpus did not cover the required six-metre translation"
+    );
+    assert!(
+        movement.mean_rgb >= 5.0 && movement.outlier_pixel_fraction >= 0.05,
+        "fast-orbit negative control did not produce a material camera transition: {movement:?}"
+    );
+    // Reference fidelity and temporal derivative are independent: stale
+    // history can look stable while lagging the moving native image, so a
+    // lower derivative error cannot compensate for worse RGB/SSIM.
+    assert!(
+        mean_rgb <= 1.12 && maximum_mean_rgb <= 1.34 && minimum_ssim >= 0.962,
+        "fractional fast orbit diverged from matched native TAA: \
+         mean_rgb={mean_rgb:.6}, maximum_mean_rgb={maximum_mean_rgb:.6}, \
+         minimum_ssim={minimum_ssim:.6}"
+    );
+    assert!(
+        derivative_error <= 1.16,
+        "fractional fast orbit added excessive motion-derivative error: \
+         {derivative_error:.6}"
+    );
+    let final_recovery = recovery_metrics.last().unwrap();
+    assert!(
+        recovery_mean_rgb <= 0.20 && recovery_maximum_outliers <= 0.006,
+        "fast orbit retained excessive path-dependent history during recovery: \
+         mean_rgb={recovery_mean_rgb:.6}, maximum_outliers={recovery_maximum_outliers:.6}"
+    );
+    assert!(
+        final_recovery.mean_rgb <= 0.11
+            && final_recovery.ssim >= 0.9994
+            && final_recovery.mean_rgb <= recovery_metrics[0].mean_rgb * 0.25,
+        "fast orbit did not converge to its phase-matched fresh epoch within eight frames: \
+         initial={:?}, final={final_recovery:?}",
+        recovery_metrics[0],
+    );
+}
+
+#[test]
 fn settled_static_taa_bounds_complete_jitter_cycle_flicker() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
