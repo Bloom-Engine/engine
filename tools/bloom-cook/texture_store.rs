@@ -27,8 +27,20 @@ pub(crate) fn store_texture_command(
     validate_logical_id(logical_id)?;
     let (profile, texture_flags) = AssetProfile::split_optional_flags(flags)?;
     let settings = TextureSettings::parse(texture_flags.iter().map(String::as_str))?;
-    let artifact_format = settings.artifact_format(profile.as_ref());
     let prepared = PreparedTexture::read(input, settings)?;
+    store_prepared_texture(logical_id, input, store, profile, prepared)
+}
+
+pub(crate) fn store_prepared_texture(
+    logical_id: &str,
+    input_label: &Path,
+    store: &Path,
+    profile: Option<AssetProfile>,
+    prepared: PreparedTexture,
+) -> Result<String, String> {
+    validate_logical_id(logical_id)?;
+    let settings = prepared.settings;
+    let artifact_format = settings.artifact_format(profile.as_ref());
     let build_key = hex_hash(build_key_for_profile(
         settings.build_key_sha256(prepared.source_sha256),
         profile.as_ref(),
@@ -49,7 +61,7 @@ pub(crate) fn store_texture_command(
             let artifact = verify_texture_manifest_artifact(&manifest, store, Some(&prepared))?;
             return texture_build_report(
                 logical_id,
-                input,
+                input_label,
                 &manifest_path,
                 &build_key,
                 profile.as_ref(),
@@ -59,7 +71,7 @@ pub(crate) fn store_texture_command(
         }
     }
 
-    let cooked = cook_prepared_texture(input, &prepared, artifact_format)?;
+    let cooked = cook_prepared_texture(input_label, &prepared, artifact_format)?;
     let metadata = validate_dds(&cooked.bytes, cooked.format)?;
     if metadata.width != cooked.width
         || metadata.height != cooked.height
@@ -118,7 +130,7 @@ pub(crate) fn store_texture_command(
 
     texture_build_report(
         logical_id,
-        input,
+        input_label,
         &manifest_path,
         &build_key,
         profile.as_ref(),

@@ -529,7 +529,7 @@ fn parse_index(index: &Value) -> Result<Vec<IndexedEntry>, VirtualGeometryStoreE
         }
         match kind {
             "geometry" => entries.push(parse_entry(value)?),
-            "texture" => {}
+            "texture" | "scene" => {}
             other => {
                 return Err(VirtualGeometryStoreError::Index(format!(
                     "asset index contains unsupported asset kind {other:?}"

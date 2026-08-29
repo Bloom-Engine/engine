@@ -37,6 +37,28 @@ fn card_capture_axes_own_distinct_aligned_uniform_slices() {
 }
 
 mod alpha_coverage;
+
+/// Exact CPU mip policy shared with the offline scene cooker. This is a
+/// build-time integration boundary, not a frame-time renderer API.
+#[doc(hidden)]
+pub fn build_cooked_color_mip_chain(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    coverage_reference: Option<f32>,
+    srgb_rgb: bool,
+) -> (Vec<u8>, u32) {
+    let mip_count = u32::BITS - width.max(height).max(1).leading_zeros();
+    let (bytes, _) = alpha_coverage::build_color_mip_chain(
+        width,
+        height,
+        rgba,
+        mip_count,
+        coverage_reference,
+        srgb_rgb,
+    );
+    (bytes, mip_count)
+}
 mod capability_api;
 mod draw2d;
 mod env_prefilter;

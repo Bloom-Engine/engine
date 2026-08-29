@@ -14,6 +14,14 @@ use layered_pbr_import::{
     layered_pbr_from_material, retain_layered_normal_image_indices, retain_material_tex_coords_1,
     texture_binding_from_info,
 };
+#[path = "models_gltf_material.rs"]
+mod material_import;
+#[cfg(test)]
+use material_import::unsupported_material_extension_diagnostics;
+use material_import::{
+    apply_transmission_hack, emit_unsupported_material_extension_diagnostics,
+    transmission_from_material,
+};
 #[path = "models_gltf_bake.rs"]
 mod bake;
 #[path = "models_gltf_texture_io.rs"]
@@ -125,7 +133,7 @@ fn read_accessor_f32(
     result
 }
 
-pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
+pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
     let gltf = gltf::Gltf::from_slice(data).ok()?;
 
     // Get buffer data
@@ -997,10 +1005,30 @@ pub(super) fn load_gltf_with_textures(
 /// Like load_gltf_with_textures but decodes textures to RGBA without GPU registration.
 /// Returns a StagedModel with decoded textures that can later be committed on the main thread.
 pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
+    load_gltf_staged_impl(data, None, "<staged glTF>")
+}
+
+/// Path-aware staged import for the offline cooker. External buffers/images
+/// resolve relative to the source document, including Bistro's DDS siblings.
+pub fn load_gltf_staged_from_source_path(
+    data: &[u8],
+    source_path: &std::path::Path,
+) -> Option<crate::staging::StagedModel> {
+    let base_dir = source_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    load_gltf_staged_impl(data, Some(base_dir), &source_path.display().to_string())
+}
+
+fn load_gltf_staged_impl(
+    data: &[u8],
+    base_dir: Option<&std::path::Path>,
+    source_label: &str,
+) -> Option<crate::staging::StagedModel> {
     use crate::staging::{StagedModel, StagedTexture};
 
     let gltf = gltf::Gltf::from_slice(data).ok()?;
-    emit_unsupported_material_extension_diagnostics(&gltf, "<staged glTF>");
+    emit_unsupported_material_extension_diagnostics(&gltf, source_label);
 
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
     for buffer in gltf.buffers() {
@@ -1015,6 +1043,8 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                     let mut decoded = Vec::new();
                     let _ = base64_decode(encoded, &mut decoded);
                     buffer_data.push(decoded);
+                } else if let Some(dir) = base_dir {
+                    buffer_data.push(std::fs::read(dir.join(uri)).ok()?);
                 } else {
                     buffer_data.push(Vec::new());
                 }
@@ -1046,68 +1076,57 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
     let mut staged_textures: Vec<StagedTexture> = Vec::new();
     let mut texture_indices: Vec<u32> = Vec::new();
     for (image_idx, image) in gltf.images().enumerate() {
-        match image.source() {
+        let decoded = match image.source() {
             gltf::image::Source::View { view, .. } => {
                 let buf_idx = view.buffer().index();
-                if buf_idx < buffer_data.len() {
+                if let Some(buffer) = buffer_data.get(buf_idx) {
                     let offset = view.offset();
                     let length = view.length();
-                    if offset + length <= buffer_data[buf_idx].len() {
-                        let img_data = &buffer_data[buf_idx][offset..offset + length];
-                        if let Ok(img) = image::load_from_memory(img_data) {
-                            let rgba = img.to_rgba8();
-                            let (w, h) = (rgba.width(), rgba.height());
-                            let data = rgba.into_raw();
-                            let mask_only = mask_only_images.contains(&image_idx);
-                            let mut primary_texture_idx = None;
-                            if !mask_only {
-                                staged_textures.push(StagedTexture {
-                                    data: data.clone(),
-                                    width: w,
-                                    height: h,
-                                    is_normal: normal_image_set.contains(&image_idx),
-                                    is_srgb: !normal_image_set.contains(&image_idx)
-                                        && srgb_image_set.contains(&image_idx),
-                                    alpha_coverage_reference: None,
-                                });
-                                primary_texture_idx = Some(staged_textures.len() as u32);
-                            }
-                            if let Some(references) = mask_coverage_references.get(&image_idx) {
-                                for reference in references {
-                                    staged_textures.push(StagedTexture {
-                                        data: data.clone(),
-                                        width: w,
-                                        height: h,
-                                        is_normal: false,
-                                        is_srgb: true,
-                                        alpha_coverage_reference: Some(*reference),
-                                    });
-                                    mask_texture_indices.insert(
-                                        (image_idx, reference.to_bits()),
-                                        staged_textures.len() as u32,
-                                    );
-                                    primary_texture_idx.get_or_insert(staged_textures.len() as u32);
-                                }
-                            }
-                            // 1-based index into staged_textures. A texture used
-                            // only by MASK materials aliases its first coverage
-                            // variant instead of retaining an unreachable
-                            // ordinary chain.
-                            texture_indices.push(primary_texture_idx.unwrap_or(0));
-                        } else {
-                            texture_indices.push(0);
-                        }
+                    if offset + length <= buffer.len() {
+                        decode_texture_bytes(&buffer[offset..offset + length], "embedded-image")
                     } else {
-                        texture_indices.push(0);
+                        None
                     }
                 } else {
-                    texture_indices.push(0);
+                    None
                 }
             }
-            _ => {
-                texture_indices.push(0);
+            gltf::image::Source::Uri { uri, .. } => {
+                let (bytes, effective_uri) = if let Some(encoded) = uri.strip_prefix("data:") {
+                    let decoded = encoded.find(";base64,").map(|position| {
+                        let mut output = Vec::new();
+                        let _ = base64_decode(&encoded[position + 8..], &mut output);
+                        output
+                    });
+                    (decoded, uri.to_string())
+                } else if let Some(dir) = base_dir {
+                    match std::fs::read(dir.join(uri)) {
+                        Ok(bytes) => (Some(bytes), uri.to_string()),
+                        Err(_) => {
+                            let swapped = swap_extension(uri, "dds");
+                            (std::fs::read(dir.join(&swapped)).ok(), swapped)
+                        }
+                    }
+                } else {
+                    (None, uri.to_string())
+                };
+                bytes.and_then(|bytes| decode_texture_bytes(&bytes, &effective_uri))
             }
-        }
+        };
+        texture_indices.push(decoded.map_or(0, |(rgba, width, height)| {
+            stage_image_variants(
+                image_idx,
+                rgba,
+                width,
+                height,
+                normal_image_set.contains(&image_idx),
+                srgb_image_set.contains(&image_idx),
+                mask_only_images.contains(&image_idx),
+                mask_coverage_references.get(&image_idx).map(Vec::as_slice),
+                &mut staged_textures,
+                &mut mask_texture_indices,
+            )
+        }));
     }
 
     // Detect armature scale (same logic as load_gltf_with_textures)
@@ -1408,6 +1427,49 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         },
         textures: staged_textures,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_image_variants(
+    image_index: usize,
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    is_normal: bool,
+    is_srgb: bool,
+    mask_only: bool,
+    coverage_references: Option<&[f32]>,
+    staged: &mut Vec<crate::staging::StagedTexture>,
+    mask_indices: &mut std::collections::HashMap<MaskTextureVariantKey, u32>,
+) -> u32 {
+    use crate::staging::StagedTexture;
+    let mut primary = None;
+    if !mask_only {
+        staged.push(StagedTexture {
+            data: rgba.clone(),
+            width,
+            height,
+            is_normal,
+            is_srgb: !is_normal && is_srgb,
+            alpha_coverage_reference: None,
+        });
+        primary = Some(staged.len() as u32);
+    }
+    if let Some(references) = coverage_references {
+        for reference in references {
+            staged.push(StagedTexture {
+                data: rgba.clone(),
+                width,
+                height,
+                is_normal: false,
+                is_srgb: true,
+                alpha_coverage_reference: Some(*reference),
+            });
+            mask_indices.insert((image_index, reference.to_bits()), staged.len() as u32);
+            primary.get_or_insert(staged.len() as u32);
+        }
+    }
+    primary.unwrap_or(0)
 }
 
 pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
@@ -1822,128 +1884,6 @@ fn specular_glossiness_texture_selection(
             spec_gloss.glossiness_factor(),
         ],
     ))
-}
-
-fn unsupported_material_extension_diagnostics(
-    gltf: &gltf::Gltf,
-    source_label: &str,
-) -> Vec<String> {
-    let mut diagnostics = Vec::new();
-    for material in gltf.materials() {
-        let name = material
-            .name()
-            .map(|name| format!("\"{name}\""))
-            .or_else(|| material.index().map(|index| format!("#{index}")))
-            .unwrap_or_else(|| "<default>".to_owned());
-        if let Some(extensions) = material.extensions() {
-            for extension in extensions.keys() {
-                if matches!(
-                    extension.as_str(),
-                    "KHR_materials_pbrSpecularGlossiness"
-                        | "KHR_materials_clearcoat"
-                        | "KHR_materials_sheen"
-                        | "KHR_materials_anisotropy"
-                ) {
-                    continue;
-                }
-                diagnostics.push(format!(
-                    "glTF asset \"{source_label}\", material {name}: unsupported extension \
-                     \"{extension}\" is ignored"
-                ));
-            }
-        }
-    }
-    diagnostics
-}
-
-fn emit_unsupported_material_extension_diagnostics(gltf: &gltf::Gltf, source_label: &str) {
-    for diagnostic in unsupported_material_extension_diagnostics(gltf, source_label) {
-        log::warn!("{diagnostic}");
-    }
-}
-
-fn transmission_from_material(
-    mat: &gltf::Material<'_>,
-    runtime_texture_indices: Option<&[u32]>,
-) -> Result<crate::models::MaterialTransmission, String> {
-    use crate::models::{MaterialThicknessSource, MaterialTransmission};
-
-    let mut out = MaterialTransmission::default();
-    if let Some(transmission) = mat.transmission() {
-        out.authored = true;
-        out.factor = transmission.transmission_factor();
-        out.texture = transmission
-            .transmission_texture()
-            .map(|info| texture_binding_from_info(info, runtime_texture_indices));
-    }
-    if let Some(ior) = mat.ior() {
-        out.ior_authored = true;
-        out.ior = ior;
-    }
-    if let Some(volume) = mat.volume() {
-        out.volume_authored = true;
-        out.thickness_factor = volume.thickness_factor();
-        out.thickness_texture = volume
-            .thickness_texture()
-            .map(|info| texture_binding_from_info(info, runtime_texture_indices));
-        out.attenuation_distance = volume.attenuation_distance();
-        out.attenuation_color = volume.attenuation_color();
-        out.thickness_source = MaterialThicknessSource::Authored;
-    }
-    let material = mat
-        .name()
-        .map(|name| format!("\"{name}\""))
-        .or_else(|| mat.index().map(|index| format!("#{index}")))
-        .unwrap_or_else(|| "<default>".to_owned());
-    let invalid = if !out.factor.is_finite() || !(0.0..=1.0).contains(&out.factor) {
-        Some(format!("transmissionFactor {} outside [0, 1]", out.factor))
-    } else if !out.ior.is_finite() || (out.ior != 0.0 && out.ior < 1.0) {
-        Some(format!("ior {} must be zero or at least 1.0", out.ior))
-    } else if !out.thickness_factor.is_finite() || out.thickness_factor < 0.0 {
-        Some(format!("thicknessFactor {} below 0", out.thickness_factor))
-    } else if out.attenuation_distance.is_nan() || out.attenuation_distance <= 0.0 {
-        Some(format!(
-            "attenuationDistance {} must be positive",
-            out.attenuation_distance
-        ))
-    } else if out
-        .attenuation_color
-        .iter()
-        .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
-    {
-        Some(format!(
-            "attenuationColor {:?} has a component outside [0, 1]",
-            out.attenuation_color
-        ))
-    } else {
-        None
-    };
-    if let Some(reason) = invalid {
-        Err(format!(
-            "glTF material {material}: invalid physical extension data: {reason}"
-        ))
-    } else {
-        Ok(out)
-    }
-}
-
-/// Exact pre-refraction approximation retained only for the diagnostic
-/// `BLOOM_GLTF_REFRACTION=0` path: strong transmission becomes mildly tinted,
-/// smooth metal instead of a painted-white dielectric.
-fn apply_transmission_hack(
-    transmission: f32,
-    base_color: &mut [f32; 4],
-    metallic: &mut f32,
-    roughness: &mut f32,
-) {
-    if transmission > 0.5 {
-        *metallic = 1.0;
-        *roughness = roughness.min(0.05);
-        base_color[0] *= 0.85;
-        base_color[1] *= 0.85;
-        base_color[2] *= 0.85;
-        base_color[3] = 1.0;
-    }
 }
 
 #[cfg(test)]

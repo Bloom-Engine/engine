@@ -1,18 +1,19 @@
 # Cooked asset store
 
-Bloom's #136 asset-database foundation stores virtual-geometry and cooked DDS
-texture artifacts under deterministic recipe keys and immutable content hashes.
-Optional platform and quality profiles provide an explicit variant contract
-while preserving the byte-identical unprofiled v1 format. Native geometry
-loading resolves the validated mixed-kind index off-thread and demand-pages
-immutable geometry ranges; indexed texture loading, packed, network, and web
-delivery remain future work.
+Bloom's #136 asset-database foundation stores virtual geometry, cooked DDS
+textures, and source-free `.bscene` model archives under deterministic recipe
+keys and immutable content hashes. Optional platform and quality profiles
+provide an explicit variant contract while preserving the byte-identical
+unprofiled v1 layout. Native geometry, texture, and scene loaders resolve the
+validated mixed-kind index at a worker boundary; shipping scene loads do not
+parse source glTF, buffers, images, or cooker manifests. Packed, network, and
+web delivery remain future work.
 
 ## Build and inspect
 
 ```shell
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
-  geometry-store world/sponza examples/sponza/assets/Sponza.glb out/assets \
+  geometry-store world/sponza/geometry examples/sponza/assets/Sponza.glb out/assets \
   --platform macos --quality high \
   --hierarchy-levels 8 --vertex-format quantized32
 
@@ -23,6 +24,10 @@ cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   texture-store world/sponza/normal examples/sponza/assets/normal.png out/assets \
   --platform macos --quality high --normal
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  scene-store world/sponza examples/sponza/assets/Sponza.glb out/assets \
+  --platform macos --quality high
 
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   asset-inspect world/sponza out/assets --platform macos --quality high
@@ -54,11 +59,11 @@ and indexes, so a validated store can move between machines without changing
 its bytes.
 
 Keep `manifests/`, `variants/`, and `chunks/` together while cooking and run
-`asset-index-inspect` before packaging. A native geometry shipping package may
-then retain only `index.json` and its referenced `chunks/`; source assets and
-manifests are not read by `VirtualGeometryStoreLoader`. Keep the manifests in
-build artifacts for provenance and verification. Old unreferenced chunks are
-safe but are not yet garbage-collected automatically.
+`asset-index-inspect` before packaging. A native shipping package may then
+retain only `index.json` and its referenced chunks: geometry, texture, and
+scene runtime loaders do not read source assets or manifests. Keep manifests
+in build artifacts for provenance and verification. Old unreferenced chunks
+are safe but are not yet garbage-collected automatically.
 
 The store layout is:
 
@@ -68,6 +73,7 @@ out/assets/
   variants/macos/high/world/sponza.json
   chunks/sha256/<artifact-sha256>.bgeo
   chunks/sha256/<artifact-sha256>.dds
+  chunks/sha256/<artifact-sha256>.bscene
   index.json
 ```
 
@@ -114,9 +120,19 @@ RGBA8: RGB retains the exact authored direction at mip zero, vector-filtered
 RGB stores a normalized direction at lower mips, and alpha stores accumulated
 LEADR/Toksvig variance. A representative high-entropy Sponza normal map showed
 visible direction damage under color-error-optimized BC7, so recipe v2 began
-the normal-fidelity exception and recipe v3 makes portable color/data output
-capability-neutral. Store commands reject unknown or duplicate texture
-options instead of silently producing an ambiguous recipe.
+the normal-fidelity exception and recipe v3 made portable color/data output
+capability-neutral. Recipe v4 adds an explicit alpha-coverage reference and
+uses the renderer's exact coverage-preserving mip policy for masked materials.
+Store commands reject unknown or duplicate texture options instead of silently
+producing an ambiguous recipe.
+
+`scene-store` runs the staged model importer offline, sanitizes non-finite
+shading attributes deterministically, deduplicates shared primitives, and
+cooks the complete texture dependency closure. Its `.bscene` payload contains
+placements, transforms, mesh data, the current material contract, texture
+dependency IDs, and optional skeleton/animation data. The archive and manifest
+record sanitation counts; non-finite positions can drop only their affected
+triangles, while invalid transforms and an empty resulting scene fail closed.
 
 ### Manifest examples
 
@@ -169,9 +185,13 @@ files contain no comments or placeholders.
   ],
   "kind": "texture",
   "logical_id": "world/sponza/albedo",
-  "recipe": { "name": "bloom-texture", "version": 3 },
+  "recipe": { "name": "bloom-texture", "version": 4 },
   "schema": "bloom-asset-manifest-v1",
-  "settings": { "color_space": "srgb", "normal_map": false },
+  "settings": {
+    "alpha_coverage_reference": null,
+    "color_space": "srgb",
+    "normal_map": false
+  },
   "source": { "sha256": "<source-sha256>" }
 }
 ```
@@ -194,8 +214,8 @@ and manifest paths for diagnostics. Source path/license provenance remains
 later #136 work.
 
 Recipe version changes are explicit. A future cooker behavior change that can
-change output bytes must increment the relevant geometry or texture recipe
-version even if the container remains readable.
+change output bytes must increment the relevant geometry, texture, or scene
+recipe version even if the container remains readable.
 
 ## Asset benchmark commands
 
@@ -243,6 +263,13 @@ reporting a cache hit:
 `texture-store` applies the same fail-closed cache policy to its source hash,
 recipe/settings, canonical path, file hash/length, and parsed DDS format,
 dimensions, array/depth shape, and mip count.
+
+`scene-store` additionally validates the source-closure hash, canonical texture
+dependency list, sanitation diagnostics, `.bscene` header/version/payload hash,
+and archive structure. A matching scene build verifies every dependency and
+writes nothing. The native `load_cooked_scene_from_store` boundary reads only
+`index.json` and the selected immutable `.bscene`; texture dependencies are
+subsequently resolved through the indexed cooked-texture loader.
 
 A valid hit writes zero chunks and zero manifests. A different source closure,
 source texture, or setting produces a miss and a new immutable chunk;

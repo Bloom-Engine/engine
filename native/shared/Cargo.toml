@@ -19,6 +19,7 @@ web = ["dep:web-time"]
 # Default-on so existing 3D games are unaffected.
 models3d = [
     "dep:bloom-geometry-format",
+    "dep:bloom-scene-format",
     "dep:gltf",
     "dep:image_dds",
     "dep:serde_json",
@@ -45,6 +46,7 @@ cmake = "0.1"
 
 [dependencies]
 bloom-geometry-format = { path = "../../crates/bloom-geometry-format", optional = true }
+bloom-scene-format = { path = "../../crates/bloom-scene-format", optional = true }
 wgpu = "29"
 log = "0.4"
 raw-window-handle = "0.6"

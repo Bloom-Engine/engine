@@ -12,13 +12,14 @@
 //! loadTexture() path as raw images (magic-sniffed).
 //!
 //! Usage:
-//!   bloom-cook texture <in.(png|jpg|bmp|tga)> <out.dds> [--normal] [--linear]
+//!   bloom-cook texture <in.(png|jpg|bmp|tga)> <out.dds> [texture flags]
 //!   bloom-cook texture-dir <in-dir> <out-dir> [--linear]
 //!   bloom-cook texture-store <logical-id> <in> <store> [profile] [texture flags]
 //!   bloom-cook texture-benchmark <in> [texture flags] [--iterations N]
 //!   bloom-cook geometry <in.(glb|gltf)> <out.bgeo> [geometry limits]
 //!   bloom-cook geometry-inspect <in.bgeo>
 //!   bloom-cook geometry-store <logical-id> <in.(glb|gltf)> <store> [profile] [limits]
+//!   bloom-cook scene-store <logical-id> <in.(glb|gltf)> <store> [profile]
 //!   bloom-cook geometry-load-benchmark <in.glb|gltf> <in.bgeo> [--iterations N]
 //!   bloom-cook asset-inspect <logical-id> <store> [profile]
 //!   bloom-cook asset-index <store>
@@ -27,6 +28,7 @@
 //!
 //! --normal  treat as a normal map (linear RGBA8, vector/variance mips)
 //! --linear  non-color data (masks, LUTs): skip the sRGB transfer
+//! --alpha-coverage N  preserve alpha-tested coverage below mip zero
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -41,6 +43,8 @@ mod geometry_format;
 mod geometry_quantization;
 mod hierarchy;
 mod meshlet;
+mod scene_cook;
+mod scene_store;
 mod texture_cook;
 mod texture_store;
 
@@ -163,6 +167,23 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("scene-store") if args.len() >= 4 => {
+            match scene_store::store_scene_command(
+                &args[1],
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                &args[4..],
+            ) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("asset-inspect") if args.len() >= 3 => {
             match asset_store::inspect_asset_command(&args[1], Path::new(&args[2]), &args[3..]) {
                 Ok(report) => {
@@ -212,15 +233,19 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: bloom-cook texture <in> <out.dds> [--normal] [--linear]");
+            eprintln!(
+                "usage: bloom-cook texture <in> <out.dds> \
+                 [--normal] [--linear] [--alpha-coverage N]"
+            );
             eprintln!("       bloom-cook texture-dir <in-dir> <out-dir> [--linear]");
             eprintln!(
                 "       bloom-cook texture-store <logical-id> <in> <store-dir> \
-                 [--platform ID --quality ID] [--normal] [--linear]"
+                 [--platform ID --quality ID] [--normal] [--linear] \
+                 [--alpha-coverage N]"
             );
             eprintln!(
                 "       bloom-cook texture-benchmark <in> [--normal] [--linear] \
-                 [--iterations N]"
+                 [--alpha-coverage N] [--iterations N]"
             );
             eprintln!(
                 "       bloom-cook geometry <in.glb|gltf> <out.bgeo> \
@@ -235,6 +260,10 @@ fn main() -> ExitCode {
             eprintln!(
                 "       bloom-cook geometry-load-benchmark <in.glb|gltf> <in.bgeo> \
                  [--iterations N]"
+            );
+            eprintln!(
+                "       bloom-cook scene-store <logical-id> <in.glb|gltf> <store-dir> \
+                 [--platform ID --quality ID]"
             );
             eprintln!(
                 "       bloom-cook asset-inspect <logical-id> <store-dir> \

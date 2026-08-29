@@ -594,7 +594,7 @@ fn parse_index(index: &Value) -> Result<Vec<IndexedTextureEntry>, CookedTextureS
         }
         match kind {
             "texture" => entries.push(parse_entry(value)?),
-            "geometry" => {}
+            "geometry" | "scene" => {}
             other => {
                 return Err(CookedTextureStoreError::Index(format!(
                     "asset index contains unsupported asset kind {other:?}"

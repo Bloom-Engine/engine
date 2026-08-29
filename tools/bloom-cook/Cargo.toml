@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 bloom-geometry-format = { path = "../../crates/bloom-geometry-format" }
+bloom-scene-format = { path = "../../crates/bloom-scene-format" }
+bloom-shared = { path = "../../native/shared", default-features = false, features = ["models3d"] }
 # encode feature pulls intel_tex_2 for BC7 — the cook tool is the one
 # place that pays that build cost; the engine runtime only decodes.
 image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image", "encode"] }

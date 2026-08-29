@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 /// level zero is left untouched and lower mip alpha stores coverage rather
 /// than an averaged opacity. When absent, this is the renderer's established
 /// four-texel byte average exactly.
-pub(super) fn build_color_mip_chain(
+pub(crate) fn build_color_mip_chain(
     width: u32,
     height: u32,
     data: &[u8],

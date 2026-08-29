@@ -6,6 +6,8 @@
 #[cfg(any(feature = "image-extras", feature = "models3d"))]
 mod adapter_profile;
 pub mod audio;
+#[cfg(all(feature = "models3d", not(target_arch = "wasm32")))]
+pub mod cooked_scene_store;
 #[cfg(all(feature = "image-extras", not(target_arch = "wasm32")))]
 pub mod cooked_texture_store;
 pub mod ffi;
@@ -13,6 +15,8 @@ pub mod ffi;
 pub mod ffi_core;
 pub mod handles;
 pub mod input;
+#[cfg(feature = "models3d")]
+pub mod models_cooked_scene;
 pub mod renderer;
 pub mod string_header;
 pub mod text_renderer;

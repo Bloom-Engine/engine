@@ -157,6 +157,15 @@ pub fn inspect_asset_command(
             &manifest,
         );
     }
+    if kind == "scene" {
+        return crate::scene_store::inspect_scene_manifest(
+            logical_id,
+            store,
+            profile.as_ref(),
+            &manifest_path,
+            &manifest,
+        );
+    }
     require_manifest_kind(kind, "geometry")?;
     let contract = validate_manifest_contract(&manifest)?;
     let artifact = verify_manifest_artifact(&manifest, store, None)?;
@@ -202,6 +211,11 @@ pub(crate) fn indexed_manifest_entry_for_profile(
     let kind = validate_manifest_identity(&manifest, logical_id, profile)?;
     if kind == "texture" {
         return crate::texture_store::indexed_texture_manifest_entry(
+            logical_id, store, profile, &path, &bytes, &manifest,
+        );
+    }
+    if kind == "scene" {
+        return crate::scene_store::indexed_scene_manifest_entry(
             logical_id, store, profile, &path, &bytes, &manifest,
         );
     }
