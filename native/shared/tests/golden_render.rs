@@ -26,6 +26,8 @@ use std::time::Instant;
 #[path = "golden_render/metrics.rs"]
 mod metrics;
 use metrics::{calculate_diff_metrics, select_outlier_gate};
+#[path = "golden_render/fractional_dynamic.rs"]
+mod fractional_dynamic;
 #[path = "golden_render/layered_pbr_motion.rs"]
 mod layered_pbr_motion;
 #[path = "golden_render/layered_pbr_parity.rs"]

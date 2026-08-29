@@ -399,11 +399,17 @@ macro_rules! __bloom_ffi_game_loop {
                 let present_mode = eng.renderer.present_mode_code();
                 let adapter = eng.renderer.quality_adapter_json();
                 let runtime_paths = eng.renderer.quality_runtime_paths_json();
+                let _requested_fixed_timestep = fixed_timestep;
+                // Report the clock the engine actually consumed. Before the
+                // deterministic clock contract this field merely echoed the
+                // requested CLI value while wind/material animation still ran
+                // on wall time, making nominally matched captures incomparable.
+                let active_fixed_timestep = eng.quality_fixed_timestep().unwrap_or(0.0);
                 let report = eng.profiler.quality_report_json(
                     present_mode,
                     warmup_frames.max(0.0) as u32,
                     measured_frames.max(1.0) as u32,
-                    fixed_timestep,
+                    active_fixed_timestep,
                     quality_preset.max(0.0) as u32,
                     render_scale,
                     measurement_wall_ms,

@@ -18,6 +18,13 @@ use std::time::Instant;
 #[cfg(feature = "web")]
 use web_time::Instant;
 
+fn parse_quality_fixed_timestep(value: Option<&str>) -> Option<f64> {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.min(EngineState::MAX_DELTA_TIME))
+}
+
 pub struct EngineState {
     pub renderer: Renderer,
     pub text: TextRenderer,
@@ -51,6 +58,11 @@ pub struct EngineState {
     fps_frame_count: u64,
     current_fps: f64,
     start_time: Instant,
+    /// Deterministic renderer/frame-callback clock used by governed quality
+    /// captures. Public elapsed time remains a wall clock so performance
+    /// measurement cannot accidentally report simulated frame duration.
+    quality_fixed_timestep: Option<f64>,
+    quality_time: f64,
 
     pub should_close: bool,
 
@@ -77,6 +89,9 @@ pub struct EngineState {
 impl EngineState {
     pub fn new(renderer: Renderer) -> Self {
         let now = Instant::now();
+        let quality_fixed_timestep_value = std::env::var("BLOOM_QUALITY_FIXED_TIMESTEP").ok();
+        let quality_fixed_timestep =
+            parse_quality_fixed_timestep(quality_fixed_timestep_value.as_deref());
         let mut profiler = Profiler::new();
         profiler.init_gpu(&renderer.device, &renderer.queue);
         // Ticket 007b: tell the scene graph whether the device was
@@ -110,6 +125,8 @@ impl EngineState {
             fps_frame_count: 0,
             current_fps: 0.0,
             start_time: now,
+            quality_fixed_timestep,
+            quality_time: 0.0,
             should_close: false,
             last_pick: None,
             last_pick_all: Vec::new(),
@@ -129,10 +146,14 @@ impl EngineState {
 
     pub fn begin_frame(&mut self) {
         let now = Instant::now();
-        self.delta_time = now
-            .duration_since(self.last_frame_time)
-            .as_secs_f64()
-            .min(Self::MAX_DELTA_TIME);
+        self.delta_time = if let Some(fixed_timestep) = self.quality_fixed_timestep {
+            self.quality_time += fixed_timestep;
+            fixed_timestep
+        } else {
+            now.duration_since(self.last_frame_time)
+                .as_secs_f64()
+                .min(Self::MAX_DELTA_TIME)
+        };
         self.last_frame_time = now;
 
         // DRS samples wall-clock frame time and may step render_scale
@@ -198,7 +219,7 @@ impl EngineState {
             // material draws. Without this, group 1 (view/proj/camera/
             // lights/shadow) is zero and shaders that read e.g.
             // `view.view_proj` produce offscreen geometry.
-            let t = self.get_time() as f32;
+            let t = self.renderer_time() as f32;
             let dt = self.delta_time as f32;
             self.renderer.material_system_begin_frame(t, dt);
 
@@ -231,10 +252,53 @@ impl EngineState {
     pub fn get_time(&self) -> f64 {
         self.start_time.elapsed().as_secs_f64()
     }
+    fn renderer_time(&self) -> f64 {
+        self.quality_fixed_timestep
+            .map(|_| self.quality_time)
+            .unwrap_or_else(|| self.start_time.elapsed().as_secs_f64())
+    }
+    /// Select or clear the deterministic clock used by quality capture and
+    /// tests. Selecting a clock begins a fresh epoch at time zero so matched
+    /// renderer configurations can replay identical animation phases.
+    pub fn set_quality_fixed_timestep(&mut self, timestep: Option<f64>) {
+        self.quality_fixed_timestep = timestep
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| value.min(Self::MAX_DELTA_TIME));
+        self.quality_time = 0.0;
+        self.delta_time = 0.0;
+        self.last_frame_time = Instant::now();
+    }
+    pub fn quality_fixed_timestep(&self) -> Option<f64> {
+        self.quality_fixed_timestep
+    }
     pub fn screen_width(&self) -> f64 {
         self.renderer.width() as f64
     }
     pub fn screen_height(&self) -> f64 {
         self.renderer.height() as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_quality_fixed_timestep;
+
+    #[test]
+    fn quality_fixed_timestep_parser_accepts_only_positive_finite_values() {
+        assert_eq!(
+            parse_quality_fixed_timestep(Some("0.016666666667")),
+            Some(0.016666666667)
+        );
+        assert_eq!(parse_quality_fixed_timestep(Some("1")), Some(0.25));
+        for invalid in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("-0.1"),
+            Some("NaN"),
+            Some("inf"),
+        ] {
+            assert_eq!(parse_quality_fixed_timestep(invalid), None);
+        }
     }
 }
