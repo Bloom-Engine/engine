@@ -47,12 +47,7 @@ impl AssetProfile {
             let flag = &flags[index];
             if flag != "--platform" && flag != "--quality" {
                 remaining.push(flag.clone());
-                if let Some(value) = flags.get(index + 1) {
-                    remaining.push(value.clone());
-                    index += 2;
-                } else {
-                    index += 1;
-                }
+                index += 1;
                 continue;
             }
             let value = flags
@@ -129,6 +124,18 @@ mod tests {
         let profile = profile.unwrap();
         assert_eq!(profile.label(), "macos/high-end");
         assert_eq!(remaining, ["--hierarchy-levels", "4"]);
+
+        let texture_flags = [
+            "--normal".to_string(),
+            "--platform".to_string(),
+            "portable".to_string(),
+            "--quality".to_string(),
+            "high".to_string(),
+            "--linear".to_string(),
+        ];
+        let (profile, remaining) = AssetProfile::split_optional_flags(&texture_flags).unwrap();
+        assert_eq!(profile.unwrap().label(), "portable/high");
+        assert_eq!(remaining, ["--normal", "--linear"]);
 
         assert!(AssetProfile::new("MacOS", "high").is_err());
         assert!(AssetProfile::new("../macos", "high").is_err());

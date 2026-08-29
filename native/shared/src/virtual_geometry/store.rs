@@ -394,14 +394,28 @@ fn parse_index(index: &Value) -> Result<Vec<IndexedEntry>, VirtualGeometryStoreE
     let mut entries = Vec::with_capacity(values.len());
     let mut identities = BTreeSet::new();
     for value in values {
-        let entry = parse_entry(value)?;
-        let key = (entry.logical_id.clone(), entry.profile.clone());
+        let object = value.as_object().ok_or_else(|| {
+            VirtualGeometryStoreError::Index("asset index entry is not an object".to_string())
+        })?;
+        let kind = required_string(object, "kind")?;
+        let logical_id = required_string(object, "logical_id")?.to_string();
+        validate_logical_id(&logical_id)?;
+        let profile = object.get("profile").map(parse_profile).transpose()?;
+        let key = (logical_id, profile);
         if !identities.insert(key) {
             return Err(VirtualGeometryStoreError::Index(
                 "asset index contains a duplicate logical ID/profile".to_string(),
             ));
         }
-        entries.push(entry);
+        match kind {
+            "geometry" => entries.push(parse_entry(value)?),
+            "texture" => {}
+            other => {
+                return Err(VirtualGeometryStoreError::Index(format!(
+                    "asset index contains unsupported asset kind {other:?}"
+                )))
+            }
+        }
     }
     Ok(entries)
 }

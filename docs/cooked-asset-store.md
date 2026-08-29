@@ -1,11 +1,12 @@
 # Cooked asset store
 
-Bloom's #136 asset-database foundation stores virtual-geometry artifacts under
-deterministic recipe keys and immutable content hashes. Optional platform and
-quality profiles provide an explicit variant contract while preserving the
-byte-identical unprofiled v1 format. Native runtime loading now resolves the
-validated index off-thread and demand-pages immutable geometry ranges; packed,
-network, and web delivery remain future transport work.
+Bloom's #136 asset-database foundation stores virtual-geometry and BC7 texture
+artifacts under deterministic recipe keys and immutable content hashes.
+Optional platform and quality profiles provide an explicit variant contract
+while preserving the byte-identical unprofiled v1 format. Native geometry
+loading resolves the validated mixed-kind index off-thread and demand-pages
+immutable geometry ranges; indexed texture loading, packed, network, and web
+delivery remain future work.
 
 ## Build and inspect
 
@@ -14,6 +15,14 @@ cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   geometry-store world/sponza examples/sponza/assets/Sponza.glb out/assets \
   --platform macos --quality high \
   --hierarchy-levels 8 --vertex-format quantized32
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  texture-store world/sponza/albedo examples/sponza/assets/albedo.png out/assets \
+  --platform macos --quality high
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  texture-store world/sponza/normal examples/sponza/assets/normal.png out/assets \
+  --platform macos --quality high --normal
 
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   asset-inspect world/sponza out/assets --platform macos --quality high
@@ -41,6 +50,7 @@ out/assets/
   manifests/world/sponza.json
   variants/macos/high/world/sponza.json
   chunks/sha256/<artifact-sha256>.bgeo
+  chunks/sha256/<artifact-sha256>.dds
   index.json
 ```
 
@@ -57,7 +67,8 @@ and cannot escape the store.
 
 ## Recipe and manifest contract
 
-`bloom-asset-manifest-v1` records:
+`bloom-asset-manifest-v1` records the common identity, dependency, recipe,
+build-key, and immutable-artifact contract. Geometry manifests record:
 
 - logical ID and asset kind;
 - source-closure SHA-256, covering the glTF/GLB and every resolved buffer;
@@ -69,6 +80,19 @@ and cannot escape the store.
 - canonical source dependency records;
 - relative immutable chunk path, file/payload hashes, byte length, and
   `.bgeo` format version.
+
+Texture manifests use the `bloom-texture` recipe and record:
+
+- the exact source-file SHA-256;
+- whether the source is a normal map and whether it uses linear or sRGB color;
+- a build-key SHA-256 over recipe version, source bytes, and those semantics;
+- canonical BC7 format, width, height, mip count, file hash, byte length, and
+  immutable `.dds` path.
+
+The existing direct `texture` and `texture-dir` commands share the same BC7
+encoder as `texture-store`; normal maps imply linear color. Store commands
+reject unknown or duplicate texture options instead of silently producing an
+ambiguous recipe.
 
 `bloom-asset-manifest-v2` adds a canonical `{ platform, quality }` profile.
 The profile is part of the recipe build key even when two profiles currently
@@ -84,8 +108,8 @@ and manifest paths for diagnostics. Source path/license provenance remains
 later #136 work.
 
 Recipe version changes are explicit. A future cooker behavior change that can
-change output bytes must increment the geometry recipe version even if the
-container remains readable.
+change output bytes must increment the relevant geometry or texture recipe
+version even if the container remains readable.
 
 ## Incremental and corruption behavior
 
@@ -99,10 +123,16 @@ reporting a cache hit:
 - complete chunk and payload hashes;
 - strict `.bgeo` structure, version, source closure, and vertex format.
 
-A valid hit writes zero chunks and zero manifests. A different source closure
-or setting produces a miss and a new immutable chunk; unrelated logical
-manifests are untouched. Multiple logical IDs with identical cooked bytes
-share one chunk.
+`texture-store` applies the same fail-closed cache policy to its source hash,
+recipe/settings, canonical path, file hash/length, and parsed DDS format,
+dimensions, array/depth shape, and mip count.
+
+A valid hit writes zero chunks and zero manifests. A different source closure,
+source texture, or setting produces a miss and a new immutable chunk;
+unrelated logical manifests and chunks are untouched. Multiple logical IDs
+with identical cooked bytes share one chunk. After an asset changes, the
+installed package index deliberately fails stale inspection until one explicit
+`asset-index` rebuild; that rebuild writes only `index.json`.
 
 Malformed manifests and corrupt referenced chunks fail closed. They are not
 silently treated as cache misses, because doing so would hide damage to an
@@ -119,12 +149,12 @@ A store with any profiled entry writes `bloom-asset-index-v2`, sorted by
 logical ID and then platform/quality, with each profiled entry carrying its
 canonical profile.
 
-Each entry contains the logical ID and kind, recipe build key, source-closure
-hash, manifest path/hash, and immutable artifact path/hash/size/format. The
-index contains no timestamps or output-root paths, so two clean stores with
-the same logical manifests produce byte-identical indexes. Duplicate logical
-ID/profile pairs cannot be represented by the canonical path mapping;
-path/content disagreement fails validation.
+Each entry contains the logical ID and kind, recipe build key, source hash,
+manifest path/hash, and kind-specific immutable artifact metadata. The index
+contains no timestamps or output-root paths, so two clean stores with the same
+logical manifests produce byte-identical indexes. Duplicate logical ID/profile
+pairs cannot be represented by the canonical path mapping; path/content
+disagreement fails validation.
 
 An unchanged index writes nothing. `asset-index-inspect` rebuilds the expected
 index in memory from the live manifest tree and requires the installed bytes
@@ -152,8 +182,9 @@ implicit cross-platform, lower-quality, or legacy fallback.
 
 ## Native runtime resolution
 
-`VirtualGeometryStoreLoader` is the source-free native runtime counterpart to
-`asset-resolve`. It owns one bounded worker and exposes a non-blocking
+`VirtualGeometryStoreLoader` is the source-free native geometry counterpart to
+`asset-resolve`. It ignores declared non-geometry index entries, owns one
+bounded worker, and exposes a non-blocking
 `request`/`poll` interface. The caller supplies the logical ID, requested
 platform/quality, ordered fallbacks, and whether an unprofiled legacy entry is
 allowed. Selection follows exactly the offline resolver contract: exact first,
@@ -182,15 +213,19 @@ workflows should continue to run `asset-index-inspect` before packaging.
 
 ## Current boundary
 
-This checkpoint is geometry-only and loose-store-only. It does not yet add:
+This checkpoint remains loose-store-only. It does not yet add:
 
-- texture, material, animation, environment, or world recipes;
+- material, animation, environment, or world recipes;
 - source path/license provenance;
-- dependency-graph invalidation beyond one geometry source closure;
+- dependency-graph invalidation across asset kinds (for example, a material
+  depending on several textures);
 - garbage collection, packed shipping archives, or network-backed stores.
 
-The runtime loader remains opt-in. It changes no default renderer path,
-buffers, shaders, passes, draws, pixels, or frame-time behavior.
+The indexed runtime loader remains geometry-only and opt-in. Cooked `.dds`
+files remain loadable through Bloom's existing texture path, but resolving a
+texture logical ID from `index.json` is later work. This checkpoint changes no
+default renderer path, buffers, shaders, passes, draws, pixels, or frame-time
+behavior.
 
 The canonical variant, fallback, deduplication, and Bistro qualification is
 recorded in `docs/evidence/issue-136-asset-variants-v2.{md,json}`.

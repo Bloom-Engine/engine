@@ -82,6 +82,71 @@ fn native_store_loader_resolves_explicit_profiles_without_blocking_poll() {
 }
 
 #[test]
+fn native_geometry_store_ignores_other_valid_asset_kinds() {
+    let root = temporary_store("mixed-kinds");
+    let asset = hierarchy_asset(hierarchy_archive());
+    let artifact = install_artifact(&root, asset.file_bytes().unwrap());
+    let texture = json!({
+        "artifact": {
+            "bytes": 256,
+            "format": "bc7-rgba-unorm-srgb",
+            "height": 8,
+            "mip_levels": 4,
+            "path": format!("chunks/sha256/{}.dds", hex_hash([3; 32])),
+            "sha256": hex_hash([3; 32]),
+            "width": 8,
+        },
+        "build_key_sha256": hex_hash([5; 32]),
+        "kind": "texture",
+        "logical_id": "textures/cobble",
+        "manifest": {
+            "path": "manifests/textures/cobble.json",
+            "sha256": hex_hash([9; 32]),
+        },
+        "source_sha256": hex_hash([13; 32]),
+    });
+    write_index(
+        &root,
+        vec![texture.clone(), index_entry("city/bistro", None, &artifact)],
+    );
+
+    let mut loader =
+        VirtualGeometryStoreLoader::new(&root, VirtualGeometryStoreConfig::default()).unwrap();
+    let ticket = loader
+        .request(
+            VirtualGeometryStoreRequest::new("city/bistro", profile("portable", "high"))
+                .allow_unprofiled(true),
+        )
+        .unwrap();
+    assert_eq!(
+        wait_for(&mut loader, ticket).unwrap().asset.archive(),
+        asset.archive()
+    );
+
+    drop(loader);
+    let mut unknown = texture;
+    unknown["kind"] = json!("unknown-future-kind");
+    write_index(
+        &root,
+        vec![unknown, index_entry("city/bistro", None, &artifact)],
+    );
+    let mut loader =
+        VirtualGeometryStoreLoader::new(&root, VirtualGeometryStoreConfig::default()).unwrap();
+    let ticket = loader
+        .request(
+            VirtualGeometryStoreRequest::new("city/bistro", profile("portable", "high"))
+                .allow_unprofiled(true),
+        )
+        .unwrap();
+    assert!(matches!(
+        wait_for(&mut loader, ticket),
+        Err(VirtualGeometryStoreError::Index(message))
+            if message.contains("unsupported asset kind")
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn native_store_loader_requires_opt_in_for_unprofiled_and_fails_closed() {
     let root = temporary_store("unprofiled");
     let asset = hierarchy_asset(hierarchy_archive());

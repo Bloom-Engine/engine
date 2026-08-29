@@ -16,6 +16,7 @@
 //! Usage:
 //!   bloom-cook texture <in.(png|jpg|bmp|tga)> <out.dds> [--normal] [--linear]
 //!   bloom-cook texture-dir <in-dir> <out-dir> [--linear]
+//!   bloom-cook texture-store <logical-id> <in> <store> [profile] [texture flags]
 //!   bloom-cook geometry <in.(glb|gltf)> <out.bgeo> [geometry limits]
 //!   bloom-cook geometry-inspect <in.bgeo>
 //!   bloom-cook geometry-store <logical-id> <in.(glb|gltf)> <store> [profile] [limits]
@@ -39,6 +40,8 @@ mod geometry_format;
 mod geometry_quantization;
 mod hierarchy;
 mod meshlet;
+mod texture_cook;
+mod texture_store;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -65,6 +68,23 @@ fn main() -> ExitCode {
                 }
                 Err(e) => {
                     eprintln!("bloom-cook: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("texture-store") if args.len() >= 4 => {
+            match texture_store::store_texture_command(
+                &args[1],
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                &args[4..],
+            ) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
                     ExitCode::FAILURE
                 }
             }
@@ -166,6 +186,10 @@ fn main() -> ExitCode {
             eprintln!("usage: bloom-cook texture <in> <out.dds> [--normal] [--linear]");
             eprintln!("       bloom-cook texture-dir <in-dir> <out-dir> [--linear]");
             eprintln!(
+                "       bloom-cook texture-store <logical-id> <in> <store-dir> \
+                 [--platform ID --quality ID] [--normal] [--linear]"
+            );
+            eprintln!(
                 "       bloom-cook geometry <in.glb|gltf> <out.bgeo> \
                  [--max-vertices N] [--max-triangles N] [--page-bytes N] \
                  [--hierarchy-levels N] [--vertex-format float32|quantized32]"
@@ -192,49 +216,20 @@ fn main() -> ExitCode {
 }
 
 fn cook_texture(input: &Path, output: &Path, flags: &[&str]) -> Result<String, String> {
-    let linear = flags.contains(&"--linear") || flags.contains(&"--normal");
-    let src_len = std::fs::metadata(input)
-        .map_err(|e| format!("{input:?}: {e}"))?
-        .len();
-    let img = image::open(input)
-        .map_err(|e| format!("{input:?}: {e}"))?
-        .to_rgba8();
-
-    // sRGB for color data, linear for normal maps / masks. BC7 keeps full
-    // RGBA; normal maps could use BC5 later but BC7's quality is high
-    // enough that one format keeps the pipeline simple.
-    let format = if linear {
-        image_dds::ImageFormat::BC7RgbaUnorm
-    } else {
-        image_dds::ImageFormat::BC7RgbaUnormSrgb
-    };
-    let dds = image_dds::dds_from_image(
-        &img,
-        format,
-        image_dds::Quality::Normal,
-        image_dds::Mipmaps::GeneratedAutomatic,
-    )
-    .map_err(|e| format!("encode {input:?}: {e}"))?;
-
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{parent:?}: {e}"))?;
-    }
-    let mut out = std::io::BufWriter::new(
-        std::fs::File::create(output).map_err(|e| format!("{output:?}: {e}"))?,
-    );
-    dds.write(&mut out)
-        .map_err(|e| format!("write {output:?}: {e}"))?;
-    drop(out);
-    let dst_len = std::fs::metadata(output).map_err(|e| e.to_string())?.len();
+    let settings = texture_cook::TextureSettings::parse(flags.iter().copied())?;
+    let prepared = texture_cook::PreparedTexture::read(input, settings)?;
+    let source_bytes = prepared.source_bytes.len();
+    let cooked = texture_cook::cook_prepared_texture(input, &prepared)?;
+    geometry_cook::write_atomically(output, &cooked.bytes)?;
     Ok(format!(
         "{} -> {} ({} KB -> {} KB, {}x{}, {} mips)",
         input.display(),
         output.display(),
-        src_len / 1024,
-        dst_len / 1024,
-        img.width(),
-        img.height(),
-        dds.get_num_mipmap_levels(),
+        source_bytes / 1024,
+        cooked.bytes.len() / 1024,
+        cooked.width,
+        cooked.height,
+        cooked.mip_levels,
     ))
 }
 

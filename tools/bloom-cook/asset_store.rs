@@ -17,13 +17,13 @@ use crate::meshlet::MeshletLimits;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const MANIFEST_SCHEMA: &str = "bloom-asset-manifest-v1";
-const PROFILED_MANIFEST_SCHEMA: &str = "bloom-asset-manifest-v2";
-const REPORT_SCHEMA: &str = "bloom-asset-build-report-v1";
-const PROFILED_REPORT_SCHEMA: &str = "bloom-asset-build-report-v2";
-const INSPECT_SCHEMA: &str = "bloom-asset-inspect-report-v1";
-const PROFILED_INSPECT_SCHEMA: &str = "bloom-asset-inspect-report-v2";
-const CHUNK_DIRECTORY: &str = "chunks/sha256";
+pub(crate) const MANIFEST_SCHEMA: &str = "bloom-asset-manifest-v1";
+pub(crate) const PROFILED_MANIFEST_SCHEMA: &str = "bloom-asset-manifest-v2";
+pub(crate) const REPORT_SCHEMA: &str = "bloom-asset-build-report-v1";
+pub(crate) const PROFILED_REPORT_SCHEMA: &str = "bloom-asset-build-report-v2";
+pub(crate) const INSPECT_SCHEMA: &str = "bloom-asset-inspect-report-v1";
+pub(crate) const PROFILED_INSPECT_SCHEMA: &str = "bloom-asset-inspect-report-v2";
+pub(crate) const CHUNK_DIRECTORY: &str = "chunks/sha256";
 
 pub fn store_geometry_command(
     logical_id: &str,
@@ -42,7 +42,10 @@ pub fn store_geometry_command(
 
     if manifest_path.exists() {
         let manifest = read_manifest(&manifest_path)?;
-        validate_manifest_identity(&manifest, logical_id, profile.as_ref())?;
+        require_manifest_kind(
+            validate_manifest_identity(&manifest, logical_id, profile.as_ref())?,
+            "geometry",
+        )?;
         let stored_key = manifest_string(&manifest, "/build_key_sha256")?;
         validate_hex_hash(stored_key, "manifest build key")?;
         if stored_key == build_key {
@@ -144,7 +147,17 @@ pub fn inspect_asset_command(
     }
     let manifest_path = manifest_path_for_profile(store, logical_id, profile.as_ref());
     let manifest = read_manifest(&manifest_path)?;
-    validate_manifest_identity(&manifest, logical_id, profile.as_ref())?;
+    let kind = validate_manifest_identity(&manifest, logical_id, profile.as_ref())?;
+    if kind == "texture" {
+        return crate::texture_store::inspect_texture_manifest(
+            logical_id,
+            store,
+            profile.as_ref(),
+            &manifest_path,
+            &manifest,
+        );
+    }
+    require_manifest_kind(kind, "geometry")?;
     let contract = validate_manifest_contract(&manifest)?;
     let artifact = verify_manifest_artifact(&manifest, store, None)?;
 
@@ -186,7 +199,13 @@ pub(crate) fn indexed_manifest_entry_for_profile(
         .map_err(|error| format!("read manifest {}: {error}", path.display()))?;
     let manifest: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse manifest {}: {error}", path.display()))?;
-    validate_manifest_identity(&manifest, logical_id, profile)?;
+    let kind = validate_manifest_identity(&manifest, logical_id, profile)?;
+    if kind == "texture" {
+        return crate::texture_store::indexed_texture_manifest_entry(
+            logical_id, store, profile, &path, &bytes, &manifest,
+        );
+    }
+    require_manifest_kind(kind, "geometry")?;
     let contract = validate_manifest_contract(&manifest)?;
     let artifact = verify_manifest_artifact(&manifest, store, None)?;
     let mut entry = json!({
@@ -481,32 +500,39 @@ fn validate_manifest_contract(manifest: &Value) -> Result<ManifestContract, Stri
     })
 }
 
-fn read_manifest(path: &Path) -> Result<Value, String> {
+pub(crate) fn read_manifest(path: &Path) -> Result<Value, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("read manifest {}: {error}", path.display()))?;
     serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse manifest {}: {error}", path.display()))
 }
 
-fn validate_manifest_identity(
-    manifest: &Value,
+pub(crate) fn validate_manifest_identity<'a>(
+    manifest: &'a Value,
     logical_id: &str,
     expected_profile: Option<&AssetProfile>,
-) -> Result<(), String> {
+) -> Result<&'a str, String> {
     let actual_profile = manifest_profile(manifest)?;
     if actual_profile.as_ref() != expected_profile {
         return Err("asset manifest profile does not match its path".to_string());
     }
-    if manifest_string(manifest, "/kind")? != "geometry" {
-        return Err("asset manifest kind is not geometry".to_string());
-    }
+    let kind = manifest_string(manifest, "/kind")?;
     if manifest_string(manifest, "/logical_id")? != logical_id {
         return Err("asset manifest logical ID does not match its path".to_string());
+    }
+    Ok(kind)
+}
+
+fn require_manifest_kind(actual: &str, expected: &str) -> Result<(), String> {
+    if actual != expected {
+        return Err(format!(
+            "asset manifest kind is {actual:?}, expected {expected:?}"
+        ));
     }
     Ok(())
 }
 
-fn manifest_profile(manifest: &Value) -> Result<Option<AssetProfile>, String> {
+pub(crate) fn manifest_profile(manifest: &Value) -> Result<Option<AssetProfile>, String> {
     match manifest_string(manifest, "/schema")? {
         MANIFEST_SCHEMA => {
             if manifest.get("profile").is_some() {
@@ -538,14 +564,14 @@ fn build_key_for_profile(base_key_sha256: [u8; 32], profile: Option<&AssetProfil
     sha256(&bytes)
 }
 
-fn manifest_string<'a>(manifest: &'a Value, pointer: &str) -> Result<&'a str, String> {
+pub(crate) fn manifest_string<'a>(manifest: &'a Value, pointer: &str) -> Result<&'a str, String> {
     manifest
         .pointer(pointer)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("asset manifest field {pointer} is missing or not a string"))
 }
 
-fn manifest_u64(manifest: &Value, pointer: &str) -> Result<u64, String> {
+pub(crate) fn manifest_u64(manifest: &Value, pointer: &str) -> Result<u64, String> {
     manifest
         .pointer(pointer)
         .and_then(Value::as_u64)
@@ -557,7 +583,7 @@ fn manifest_u32(manifest: &Value, pointer: &str) -> Result<u32, String> {
     u32::try_from(value).map_err(|_| format!("asset manifest field {pointer} exceeds u32"))
 }
 
-fn validate_hex_hash(value: &str, label: &str) -> Result<(), String> {
+pub(crate) fn validate_hex_hash(value: &str, label: &str) -> Result<(), String> {
     if value.len() != 64
         || !value
             .bytes()
@@ -568,7 +594,7 @@ fn validate_hex_hash(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_hex_hash(value: &str, label: &str) -> Result<[u8; 32], String> {
+pub(crate) fn parse_hex_hash(value: &str, label: &str) -> Result<[u8; 32], String> {
     validate_hex_hash(value, label)?;
     let mut result = [0u8; 32];
     for (index, byte) in result.iter_mut().enumerate() {
@@ -582,7 +608,7 @@ fn manifest_path(store: &Path, logical_id: &str) -> PathBuf {
     store.join("manifests").join(format!("{logical_id}.json"))
 }
 
-fn manifest_path_for_profile(
+pub(crate) fn manifest_path_for_profile(
     store: &Path,
     logical_id: &str,
     profile: Option<&AssetProfile>,
