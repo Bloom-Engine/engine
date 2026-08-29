@@ -385,6 +385,14 @@ allocation-free through the ordinary renderer. Virtual-eligible vertex/index
 payloads are not uploaded to the ordinary static arena. This prevents both a
 per-placement instance from duplicating every mesh in a scene archive and the
 compatibility bridge from quietly duplicating the complete model on the GPU.
+When that compact cache contains skin weights, the bridge consumes the staged
+joint palette through the established cached-skinned draw. The arbitrary
+full-transform and non-compact subset forms reject weighted content because a
+skin palette already owns world placement and drawing the complete source cache
+would duplicate virtual-owned primitives. Translucent and live skeletal
+compatibility coverage are GPU-qualified on both sides of virtual depth;
+`morph-targets` remains an inspectable cooker exclusion for a future ordinary
+morph-animation owner and is never reinterpreted as static virtual geometry.
 
 Missing-page feedback uses two fixed MAP_READ buffers and never waits in the
 render loop. Each completed traversal copies at most 4,096 request records by
