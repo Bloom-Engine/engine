@@ -338,6 +338,25 @@ impl fmt::Display for RendererVirtualGeometryError {
 impl std::error::Error for RendererVirtualGeometryError {}
 
 impl Renderer {
+    /// Derive one cooked-package request from this renderer's accepted device
+    /// features. This is the production entry point for adapter-owned variant
+    /// selection; callers provide only the logical asset and desired quality.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn virtual_geometry_store_request(
+        &self,
+        logical_id: impl Into<String>,
+        quality: &str,
+    ) -> Result<
+        crate::virtual_geometry::VirtualGeometryStoreRequest,
+        crate::virtual_geometry::VirtualGeometryStoreError,
+    > {
+        crate::virtual_geometry::VirtualGeometryStoreRequest::for_device(
+            logical_id,
+            quality,
+            &self.device,
+        )
+    }
+
     /// Cache only the ordinary-renderer half of an exact virtual-geometry
     /// route. The cache is compact: virtual-eligible vertex/index payloads are
     /// never uploaded to the ordinary static arena just to preserve source

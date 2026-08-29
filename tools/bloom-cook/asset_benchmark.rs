@@ -19,7 +19,7 @@ pub(crate) fn benchmark_texture_command(input: &Path, flags: &[String]) -> Resul
     let prepared = PreparedTexture::read(input, settings)?;
 
     let encode_start = Instant::now();
-    let cooked = cook_prepared_texture(input, &prepared)?;
+    let cooked = cook_prepared_texture(input, &prepared, settings.artifact_format(None))?;
     let offline_encode_ms = encode_start.elapsed().as_secs_f64() * 1_000.0;
     let dds = Dds::read(Cursor::new(&cooked.bytes))
         .map_err(|error| format!("parse cooked DDS: {error}"))?;
@@ -57,15 +57,15 @@ pub(crate) fn benchmark_texture_command(input: &Path, flags: &[String]) -> Resul
     let mip_levels = dds.get_num_mipmap_levels();
     let raw_gpu_bytes = rgba8_mip_bytes(source.width(), source.height(), mip_levels);
     let cooked_gpu_bytes = dds.data.len() as u64;
-    let expected_cooked_bytes = if settings.is_normal_map() {
-        raw_gpu_bytes
-    } else {
+    let expected_cooked_bytes = if cooked.format.is_block_compressed() {
         bc_mip_bytes(source.width(), source.height(), mip_levels)
+    } else {
+        raw_gpu_bytes
     };
     if cooked_gpu_bytes != expected_cooked_bytes {
         return Err(format!(
             "DDS payload is {cooked_gpu_bytes} bytes, expected {expected_cooked_bytes} for {}",
-            settings.format_name()
+            cooked.format.name()
         ));
     }
     let quality = texture_quality(
@@ -99,7 +99,7 @@ pub(crate) fn benchmark_texture_command(input: &Path, flags: &[String]) -> Resul
         "quality": quality,
         "schema": "bloom-asset-benchmark-v1",
         "settings": settings.as_json(),
-        "artifact_format": settings.format_name(),
+        "artifact_format": cooked.format.name(),
         "timing_ms": {
             "cooked_dds_cpu_fallback_parse_and_decode": cooked_fallback_decode.as_json(),
             "cooked_dds_parse_for_direct_upload": cooked_parse.as_json(),

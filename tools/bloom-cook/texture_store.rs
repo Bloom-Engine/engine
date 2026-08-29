@@ -10,7 +10,8 @@ use crate::asset_store::{
 use crate::geometry_cook::write_atomically;
 use crate::geometry_format::{hex_hash, sha256};
 use crate::texture_cook::{
-    cook_prepared_texture, PreparedTexture, TextureSettings, TEXTURE_RECIPE_VERSION,
+    cook_prepared_texture, PreparedTexture, TextureArtifactFormat, TextureSettings,
+    TEXTURE_RECIPE_VERSION,
 };
 use image_dds::ddsfile::{Dds, DxgiFormat};
 use serde_json::{json, Value};
@@ -26,6 +27,7 @@ pub(crate) fn store_texture_command(
     validate_logical_id(logical_id)?;
     let (profile, texture_flags) = AssetProfile::split_optional_flags(flags)?;
     let settings = TextureSettings::parse(texture_flags.iter().map(String::as_str))?;
+    let artifact_format = settings.artifact_format(profile.as_ref());
     let prepared = PreparedTexture::read(input, settings)?;
     let build_key = hex_hash(build_key_for_profile(
         settings.build_key_sha256(prepared.source_sha256),
@@ -57,8 +59,8 @@ pub(crate) fn store_texture_command(
         }
     }
 
-    let cooked = cook_prepared_texture(input, &prepared)?;
-    let metadata = validate_dds(&cooked.bytes, settings)?;
+    let cooked = cook_prepared_texture(input, &prepared, artifact_format)?;
+    let metadata = validate_dds(&cooked.bytes, cooked.format)?;
     if metadata.width != cooked.width
         || metadata.height != cooked.height
         || metadata.mip_levels != cooked.mip_levels
@@ -68,13 +70,17 @@ pub(crate) fn store_texture_command(
     let artifact_sha256 = hex_hash(sha256(&cooked.bytes));
     let relative_path = format!("{CHUNK_DIRECTORY}/{artifact_sha256}.dds");
     let artifact_path = store.join(&relative_path);
-    let chunk_written =
-        install_texture_chunk(&artifact_path, &cooked.bytes, &artifact_sha256, settings)?;
+    let chunk_written = install_texture_chunk(
+        &artifact_path,
+        &cooked.bytes,
+        &artifact_sha256,
+        cooked.format,
+    )?;
     let artifact = TextureArtifactSummary {
         relative_path,
         sha256: artifact_sha256,
         bytes: cooked.bytes.len() as u64,
-        format: settings.format_name().to_string(),
+        format: cooked.format.name().to_string(),
         width: metadata.width,
         height: metadata.height,
         mip_levels: metadata.mip_levels,
@@ -208,6 +214,7 @@ struct TextureManifestContract {
     build_key_sha256: String,
     source_sha256: [u8; 32],
     settings: TextureSettings,
+    artifact_format: TextureArtifactFormat,
 }
 
 struct TextureBuildOutcome {
@@ -268,7 +275,7 @@ fn install_texture_chunk(
     path: &Path,
     expected_bytes: &[u8],
     expected_sha256: &str,
-    settings: TextureSettings,
+    artifact_format: TextureArtifactFormat,
 ) -> Result<bool, String> {
     if path.exists() {
         let existing =
@@ -280,7 +287,7 @@ fn install_texture_chunk(
                 path.display()
             ));
         }
-        validate_dds(&existing, settings)
+        validate_dds(&existing, artifact_format)
             .map_err(|error| format!("validate existing chunk {}: {error}", path.display()))?;
         return Ok(false);
     }
@@ -308,7 +315,7 @@ fn verify_texture_manifest_artifact(
     let declared_height = manifest_u32(manifest, "/artifact/height")?;
     let declared_mips = manifest_u32(manifest, "/artifact/mip_levels")?;
     let declared_format = manifest_string(manifest, "/artifact/format")?;
-    if declared_format != contract.settings.format_name() {
+    if declared_format != contract.artifact_format.name() {
         return Err("texture artifact format does not match its settings".to_string());
     }
     let path = store.join(relative_path);
@@ -328,7 +335,7 @@ fn verify_texture_manifest_artifact(
             path.display()
         ));
     }
-    let metadata = validate_dds(&bytes, contract.settings)
+    let metadata = validate_dds(&bytes, contract.artifact_format)
         .map_err(|error| format!("validate chunk {}: {error}", path.display()))?;
     if (metadata.width, metadata.height, metadata.mip_levels)
         != (declared_width, declared_height, declared_mips)
@@ -383,6 +390,7 @@ fn validate_texture_manifest_contract(manifest: &Value) -> Result<TextureManifes
     validate_hex_hash(build_key_sha256, "manifest build key")?;
     let base_key = settings.build_key_sha256(source_sha256);
     let profile = manifest_profile(manifest)?;
+    let artifact_format = settings.artifact_format(profile.as_ref());
     let actual_key = hex_hash(build_key_for_profile(base_key, profile.as_ref()));
     if actual_key != build_key_sha256 {
         return Err(format!(
@@ -393,6 +401,7 @@ fn validate_texture_manifest_contract(manifest: &Value) -> Result<TextureManifes
         build_key_sha256: build_key_sha256.to_string(),
         source_sha256,
         settings,
+        artifact_format,
     })
 }
 
@@ -417,10 +426,15 @@ struct TextureMetadata {
     mip_levels: u32,
 }
 
-fn validate_dds(bytes: &[u8], settings: TextureSettings) -> Result<TextureMetadata, String> {
+fn validate_dds(
+    bytes: &[u8],
+    artifact_format: TextureArtifactFormat,
+) -> Result<TextureMetadata, String> {
     let dds = Dds::read(Cursor::new(bytes)).map_err(|error| format!("parse DDS: {error}"))?;
-    let expected_format = match settings.format_name() {
+    let expected_format = match artifact_format.name() {
         "rgba8-unorm-normal-variance" => DxgiFormat::R8G8B8A8_UNorm,
+        "rgba8-unorm" => DxgiFormat::R8G8B8A8_UNorm,
+        "rgba8-unorm-srgb" => DxgiFormat::R8G8B8A8_UNorm_sRGB,
         "bc7-rgba-unorm" => DxgiFormat::BC7_UNorm,
         "bc7-rgba-unorm-srgb" => DxgiFormat::BC7_UNorm_sRGB,
         format => return Err(format!("unsupported texture artifact format {format:?}")),
@@ -628,6 +642,7 @@ mod tests {
             store_texture_command("textures/mask-normal", &source, &root, &normal_flags).unwrap();
         let linear: Value = serde_json::from_str(&linear).unwrap();
         let normal: Value = serde_json::from_str(&normal).unwrap();
+        assert_eq!(linear["artifact"]["format"], "rgba8-unorm");
         assert_ne!(linear["build_key_sha256"], normal["build_key_sha256"]);
         assert_ne!(linear["artifact"]["sha256"], normal["artifact"]["sha256"]);
         assert_eq!(normal["writes"]["chunks"], 1);
@@ -653,6 +668,18 @@ mod tests {
             alternate["artifact"]["sha256"]
         );
         assert_eq!(alternate["writes"]["chunks"], 0);
+
+        let desktop_flags = vec![
+            "--platform".to_string(),
+            "macos".to_string(),
+            "--quality".to_string(),
+            "high".to_string(),
+        ];
+        let desktop =
+            store_texture_command("textures/mask-desktop", &source, &root, &desktop_flags).unwrap();
+        let desktop: Value = serde_json::from_str(&desktop).unwrap();
+        assert_eq!(desktop["artifact"]["format"], "bc7-rgba-unorm-srgb");
+        assert_ne!(desktop["artifact"]["sha256"], linear["artifact"]["sha256"]);
 
         let inspect_flags = vec![
             "--platform".to_string(),

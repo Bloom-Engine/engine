@@ -1,11 +1,12 @@
 //! bloom-cook — offline asset cooking for the Bloom engine.
 //!
 //! Today: texture cooking. PNG/JPEG/BMP/TGA → DDS with a full precomputed
-//! mip chain. Color/data textures use BC7 for 4x less VRAM on desktop BC
-//! adapters. Normal maps remain RGBA8 so their vector-aware direction and
-//! variance mips are not damaged by a color-error BC7 objective. Cooked DDS
-//! also avoids source-image inflate and runtime mip generation. Disk size
-//! varies with content, so cook for runtime memory, quality, and load time.
+//! mip chain. Native desktop color/data profiles use BC7 for 4x less VRAM on
+//! BC-capable adapters; the portable profile uses capability-neutral RGBA8.
+//! Normal maps remain RGBA8 so their vector-aware direction and variance mips
+//! are not damaged by a color-error BC7 objective. Cooked DDS also avoids
+//! source-image inflate and runtime mip generation. Disk size varies with
+//! content, so cook for runtime memory, quality, and load time.
 //!
 //! The engine loads cooked .dds transparently through the same
 //! loadTexture() path as raw images (magic-sniffed).
@@ -255,7 +256,8 @@ fn cook_texture(input: &Path, output: &Path, flags: &[&str]) -> Result<String, S
     let settings = texture_cook::TextureSettings::parse(flags.iter().copied())?;
     let prepared = texture_cook::PreparedTexture::read(input, settings)?;
     let source_bytes = prepared.source_bytes.len();
-    let cooked = texture_cook::cook_prepared_texture(input, &prepared)?;
+    let cooked =
+        texture_cook::cook_prepared_texture(input, &prepared, settings.artifact_format(None))?;
     geometry_cook::write_atomically(output, &cooked.bytes)?;
     Ok(format!(
         "{} -> {} ({} KB -> {} KB, {}x{}, {} mips)",

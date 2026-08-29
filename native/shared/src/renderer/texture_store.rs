@@ -681,9 +681,9 @@ impl Renderer {
     /// Gated on `image-extras` (DDS is a beyond-PNG runtime codec).
     ///
     /// BC7 uploads compressed on adapters with `TEXTURE_COMPRESSION_BC`;
-    /// RGBA8 normal maps upload their quality-preserving direction/variance
-    /// mip chain on every adapter. Unsupported formats return `None` so the
-    /// caller can take the CPU decode path.
+    /// portable RGBA8 color/data and quality-preserving normal-map mip chains
+    /// upload on every adapter. Unsupported formats return `None` so the caller
+    /// can take the CPU decode path.
     #[cfg(feature = "image-extras")]
     pub fn register_texture_dds(&mut self, dds: &image_dds::ddsfile::Dds) -> Option<u32> {
         let surface = image_dds::Surface::from_dds(dds).ok()?;

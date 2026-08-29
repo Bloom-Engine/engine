@@ -1,10 +1,45 @@
 //! Deterministic texture preparation shared by direct and store cooking.
 
+use crate::asset_profile::AssetProfile;
 use crate::geometry_format::sha256;
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub(crate) const TEXTURE_RECIPE_VERSION: u32 = 2;
+pub(crate) const TEXTURE_RECIPE_VERSION: u32 = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TextureArtifactFormat {
+    Bc7Linear,
+    Bc7Srgb,
+    Rgba8Linear,
+    Rgba8Srgb,
+    Rgba8NormalVariance,
+}
+
+impl TextureArtifactFormat {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Bc7Linear => "bc7-rgba-unorm",
+            Self::Bc7Srgb => "bc7-rgba-unorm-srgb",
+            Self::Rgba8Linear => "rgba8-unorm",
+            Self::Rgba8Srgb => "rgba8-unorm-srgb",
+            Self::Rgba8NormalVariance => "rgba8-unorm-normal-variance",
+        }
+    }
+
+    pub(crate) const fn image_format(self) -> image_dds::ImageFormat {
+        match self {
+            Self::Bc7Linear => image_dds::ImageFormat::BC7RgbaUnorm,
+            Self::Bc7Srgb => image_dds::ImageFormat::BC7RgbaUnormSrgb,
+            Self::Rgba8Linear | Self::Rgba8NormalVariance => image_dds::ImageFormat::Rgba8Unorm,
+            Self::Rgba8Srgb => image_dds::ImageFormat::Rgba8UnormSrgb,
+        }
+    }
+
+    pub(crate) const fn is_block_compressed(self) -> bool {
+        matches!(self, Self::Bc7Linear | Self::Bc7Srgb)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TextureSettings {
@@ -68,13 +103,19 @@ impl TextureSettings {
         })
     }
 
-    pub(crate) fn format_name(self) -> &'static str {
+    pub(crate) fn artifact_format(self, profile: Option<&AssetProfile>) -> TextureArtifactFormat {
         if self.normal_map {
-            "rgba8-unorm-normal-variance"
+            TextureArtifactFormat::Rgba8NormalVariance
+        } else if profile.is_some_and(|profile| profile.platform() == "portable") {
+            if self.linear {
+                TextureArtifactFormat::Rgba8Linear
+            } else {
+                TextureArtifactFormat::Rgba8Srgb
+            }
         } else if self.linear {
-            "bc7-rgba-unorm"
+            TextureArtifactFormat::Bc7Linear
         } else {
-            "bc7-rgba-unorm-srgb"
+            TextureArtifactFormat::Bc7Srgb
         }
     }
 
@@ -84,16 +125,6 @@ impl TextureSettings {
 
     pub(crate) fn is_srgb(self) -> bool {
         !self.linear
-    }
-
-    fn image_format(self) -> image_dds::ImageFormat {
-        if self.normal_map {
-            image_dds::ImageFormat::Rgba8Unorm
-        } else if self.linear {
-            image_dds::ImageFormat::BC7RgbaUnorm
-        } else {
-            image_dds::ImageFormat::BC7RgbaUnormSrgb
-        }
     }
 
     pub(crate) fn build_key_sha256(self, source_sha256: [u8; 32]) -> [u8; 32] {
@@ -131,15 +162,20 @@ pub(crate) struct CookedTexture {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) mip_levels: u32,
+    pub(crate) format: TextureArtifactFormat,
 }
 
 pub(crate) fn cook_prepared_texture(
     input: &Path,
     prepared: &PreparedTexture,
+    format: TextureArtifactFormat,
 ) -> Result<CookedTexture, String> {
     let image = image::load_from_memory(&prepared.source_bytes)
         .map_err(|error| format!("decode {}: {error}", input.display()))?
         .to_rgba8();
+    if prepared.settings.is_normal_map() != (format == TextureArtifactFormat::Rgba8NormalVariance) {
+        return Err("normal-map semantics do not match the selected artifact format".to_string());
+    }
     let dds = if prepared.settings.is_normal_map() {
         let (mip_data, mip_levels) = build_normal_mip_chain(&image);
         normal_mip_chain_dds(
@@ -147,13 +183,13 @@ pub(crate) fn cook_prepared_texture(
             image.height(),
             mip_levels,
             &mip_data,
-            prepared.settings.image_format(),
+            format.image_format(),
         )
         .map_err(|error| format!("encode {}: {error}", input.display()))?
     } else {
         image_dds::dds_from_image(
             &image,
-            prepared.settings.image_format(),
+            format.image_format(),
             image_dds::Quality::Normal,
             image_dds::Mipmaps::GeneratedAutomatic,
         )
@@ -167,6 +203,7 @@ pub(crate) fn cook_prepared_texture(
         width: image.width(),
         height: image.height(),
         mip_levels: dds.get_num_mipmap_levels(),
+        format,
     })
 }
 
@@ -248,6 +285,32 @@ fn build_normal_mip_chain(image: &image::RgbaImage) -> (Vec<u8>, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_profiles_use_capability_neutral_rgba8() {
+        let color = TextureSettings::parse(std::iter::empty()).unwrap();
+        let data = TextureSettings::parse(["--linear"]).unwrap();
+        let normal = TextureSettings::parse(["--normal"]).unwrap();
+        let portable = AssetProfile::new("portable", "high").unwrap();
+        let macos = AssetProfile::new("macos", "high").unwrap();
+        assert_eq!(color.artifact_format(None), TextureArtifactFormat::Bc7Srgb);
+        assert_eq!(
+            color.artifact_format(Some(&portable)),
+            TextureArtifactFormat::Rgba8Srgb
+        );
+        assert_eq!(
+            data.artifact_format(Some(&portable)),
+            TextureArtifactFormat::Rgba8Linear
+        );
+        assert_eq!(
+            color.artifact_format(Some(&macos)),
+            TextureArtifactFormat::Bc7Srgb
+        );
+        assert_eq!(
+            normal.artifact_format(Some(&portable)),
+            TextureArtifactFormat::Rgba8NormalVariance
+        );
+    }
 
     #[test]
     fn flat_normal_chain_keeps_direction_and_zero_variance() {

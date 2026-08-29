@@ -11,9 +11,10 @@ invocation remains useful for investigation and reference generation.
 
 ## `bloom-cook` — offline asset cooking
 
-The cooker produces BC7 color/data textures, quality-preserving RGBA8 normal
-DDS textures with vector/variance mips, and the versioned meshlet geometry
-artifacts used by the staged virtualized-geometry work:
+The cooker produces BC7 native color/data textures, capability-neutral RGBA8
+portable variants, quality-preserving RGBA8 normal DDS textures with
+vector/variance mips, and the versioned meshlet geometry artifacts used by the
+staged virtualized-geometry work:
 
 ```shell
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \

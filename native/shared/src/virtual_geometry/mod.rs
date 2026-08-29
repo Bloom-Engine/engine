@@ -45,8 +45,8 @@ pub use shading::GpuVirtualVisibilityShading;
 pub use store::{
     ResolvedVirtualGeometryAsset, VirtualGeometryAssetProfile, VirtualGeometrySelectionKind,
     VirtualGeometryStoreConfig, VirtualGeometryStoreError, VirtualGeometryStoreLoader,
-    VirtualGeometryStoreRequest, VirtualGeometryStoreSelection, VirtualGeometryStoreTelemetry,
-    VirtualGeometryStoreTicket,
+    VirtualGeometryStoreRequest, VirtualGeometryStoreRequestPolicy, VirtualGeometryStoreSelection,
+    VirtualGeometryStoreTelemetry, VirtualGeometryStoreTicket,
 };
 pub use streaming::{
     GpuVirtualPageStreamer, GpuVirtualStreamingConfig, GpuVirtualStreamingError,

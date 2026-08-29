@@ -107,15 +107,16 @@ Texture manifests use the `bloom-texture` recipe and record:
   immutable `.dds` path.
 
 The existing direct `texture` and `texture-dir` commands share the same policy
-as `texture-store`. Color and linear data use BC7. Normal maps imply linear
-color and use RGBA8: RGB retains the exact authored direction at mip zero,
-vector-filtered RGB stores a normalized direction at lower mips, and alpha
-stores accumulated LEADR/Toksvig variance. A representative high-entropy
-Sponza normal map showed visible direction damage under color-error-optimized
-BC7, so recipe v2 deliberately spends RGBA8 memory for normal fidelity until
-a separately qualified normal-specific platform encoding exists. Store
-commands reject unknown or duplicate texture options instead of silently
-producing an ambiguous recipe.
+as `texture-store`. Unprofiled and native-platform color/linear data use BC7;
+the canonical `portable` profile uses RGBA8 so it is loadable without an
+optional compression feature. Normal maps imply linear color and always use
+RGBA8: RGB retains the exact authored direction at mip zero, vector-filtered
+RGB stores a normalized direction at lower mips, and alpha stores accumulated
+LEADR/Toksvig variance. A representative high-entropy Sponza normal map showed
+visible direction damage under color-error-optimized BC7, so recipe v2 began
+the normal-fidelity exception and recipe v3 makes portable color/data output
+capability-neutral. Store commands reject unknown or duplicate texture
+options instead of silently producing an ambiguous recipe.
 
 ### Manifest examples
 
@@ -168,7 +169,7 @@ files contain no comments or placeholders.
   ],
   "kind": "texture",
   "logical_id": "world/sponza/albedo",
-  "recipe": { "name": "bloom-texture", "version": 2 },
+  "recipe": { "name": "bloom-texture", "version": 3 },
   "schema": "bloom-asset-manifest-v1",
   "settings": { "color_space": "srgb", "normal_map": false },
   "source": { "sha256": "<source-sha256>" }
@@ -335,11 +336,23 @@ implicit cross-platform, lower-quality, or legacy fallback.
 
 `VirtualGeometryStoreLoader` is the source-free native geometry counterpart to
 `asset-resolve`. It ignores declared non-geometry index entries, owns one
-bounded worker, and exposes a non-blocking
-`request`/`poll` interface. The caller supplies the logical ID, requested
-platform/quality, ordered fallbacks, and whether an unprofiled legacy entry is
-allowed. Selection follows exactly the offline resolver contract: exact first,
-caller-ordered fallbacks next, and unprofiled only when explicitly enabled.
+bounded worker, and exposes a non-blocking `request`/`poll` interface. Explicit
+requests still supply the logical ID, requested platform/quality, ordered
+fallbacks, and whether an unprofiled legacy entry is allowed. Selection
+follows exactly the offline resolver contract: exact first, caller-ordered
+fallbacks next, and unprofiled only when explicitly enabled.
+
+Production renderer callers should instead use
+`Renderer::virtual_geometry_store_request(logical_id, quality)`. It derives the
+platform from the compiled runtime and the compression path from the accepted
+`wgpu::Device` features. A macOS/Windows/Linux device with accepted BC support
+requests its native profile and carries exactly one same-quality `portable`
+fallback. Other devices request `portable` directly. It never silently lowers
+quality or opts into unprofiled assets. Each automatic or fallback result logs
+and exposes a `bloom-runtime-asset-selection-v1` JSON report containing the
+requested/selected profiles, BC capability, runtime platform, selection kind,
+fallback rank, and stable reason such as `adapter-portable-profile` or
+`portable-fallback-after-native-miss`.
 
 The loader worker performs every potentially blocking startup operation:
 reading and parsing `index.json`, checking its schema/count/duplicate
@@ -372,9 +385,11 @@ development and fallback while each shipping path is qualified.
 2. Finish the build with `asset-index` and gate CI/release packaging with
    `asset-index-inspect`. Do not package a stale index.
 3. For native virtual geometry, replace render-thread source glTF parsing with
-   a bounded `VirtualGeometryStoreLoader::request`/`poll` flow. Pass the target
-   platform/quality and every allowed fallback explicitly, then register the
-   returned `Arc<VirtualGeometryAsset>` through the established pool path.
+   a bounded `VirtualGeometryStoreLoader::request`/`poll` flow. Use the
+   renderer-owned request constructor for adapter selection, or build a fully
+   explicit request when testing a particular fallback. Register the returned
+   `Arc<VirtualGeometryAsset>` through the established pool path and retain its
+   structured selection report in startup diagnostics.
 4. For textures, ship the cooked `.dds` beside or instead of the source image.
    Bloom's existing texture loader magic-sniffs DDS, and glTF image lookup can
    retry `foo.dds` when `foo.png` is absent. Indexed logical texture resolution
@@ -401,8 +416,9 @@ This checkpoint remains loose-store-only. It does not yet add:
 - garbage collection, packed shipping archives, or network-backed stores.
 
 The indexed runtime loader remains geometry-only and opt-in. Cooked `.dds`
-files remain loadable through Bloom's existing texture path, but resolving a
-texture logical ID from `index.json` is later work. This checkpoint changes no
+files remain loadable through Bloom's existing texture path, and portable
+profile files use capability-neutral RGBA8, but resolving a texture logical ID
+from `index.json` is later work. The automatic profile constructor changes no
 default renderer path, buffers, shaders, passes, draws, pixels, or frame-time
 behavior.
 

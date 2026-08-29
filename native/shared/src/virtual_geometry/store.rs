@@ -44,6 +44,23 @@ impl VirtualGeometryAssetProfile {
     pub fn label(&self) -> String {
         format!("{}/{}", self.platform, self.quality)
     }
+
+    fn as_json(&self) -> Value {
+        serde_json::json!({
+            "platform": self.platform,
+            "quality": self.quality,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VirtualGeometryStoreRequestPolicy {
+    Explicit,
+    Adapter {
+        runtime_platform: &'static str,
+        bc_supported: bool,
+        native_profile_selected: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +69,7 @@ pub struct VirtualGeometryStoreRequest {
     pub requested: VirtualGeometryAssetProfile,
     pub fallbacks: Vec<VirtualGeometryAssetProfile>,
     pub allow_unprofiled: bool,
+    policy: VirtualGeometryStoreRequestPolicy,
 }
 
 impl VirtualGeometryStoreRequest {
@@ -61,7 +79,48 @@ impl VirtualGeometryStoreRequest {
             requested,
             fallbacks: Vec::new(),
             allow_unprofiled: false,
+            policy: VirtualGeometryStoreRequestPolicy::Explicit,
         }
+    }
+
+    /// Build the canonical package request from the renderer's accepted
+    /// device features. Desktop BC devices request their native platform and
+    /// carry one explicit portable fallback. Devices without BC request the
+    /// capability-neutral portable package directly.
+    pub fn for_device(
+        logical_id: impl Into<String>,
+        quality: &str,
+        device: &wgpu::Device,
+    ) -> Result<Self, VirtualGeometryStoreError> {
+        Self::for_runtime_features(logical_id, quality, device.features())
+    }
+
+    fn for_runtime_features(
+        logical_id: impl Into<String>,
+        quality: &str,
+        features: wgpu::Features,
+    ) -> Result<Self, VirtualGeometryStoreError> {
+        let runtime_platform = runtime_platform_profile();
+        let bc_supported = features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+        let native_profile_selected = desktop_bc_profile(runtime_platform) && bc_supported;
+        let selected_platform = if native_profile_selected {
+            runtime_platform
+        } else {
+            "portable"
+        };
+        let requested = VirtualGeometryAssetProfile::new(selected_platform, quality)?;
+        let mut request = Self::new(logical_id, requested);
+        request.policy = VirtualGeometryStoreRequestPolicy::Adapter {
+            runtime_platform,
+            bc_supported,
+            native_profile_selected,
+        };
+        if native_profile_selected {
+            request
+                .fallbacks
+                .push(VirtualGeometryAssetProfile::new("portable", quality)?);
+        }
+        Ok(request)
     }
 
     pub fn with_fallback(mut self, fallback: VirtualGeometryAssetProfile) -> Self {
@@ -82,11 +141,56 @@ pub enum VirtualGeometrySelectionKind {
     UnprofiledFallback,
 }
 
+impl VirtualGeometrySelectionKind {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Fallback => "fallback",
+            Self::UnprofiledFallback => "unprofiled-fallback",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VirtualGeometryStoreSelection {
     pub kind: VirtualGeometrySelectionKind,
+    pub requested_profile: VirtualGeometryAssetProfile,
     pub selected_profile: Option<VirtualGeometryAssetProfile>,
     pub fallback_rank: Option<u32>,
+    pub reason: &'static str,
+    pub request_policy: VirtualGeometryStoreRequestPolicy,
+}
+
+impl VirtualGeometryStoreSelection {
+    fn as_json(&self) -> Value {
+        let policy = match self.request_policy {
+            VirtualGeometryStoreRequestPolicy::Explicit => {
+                serde_json::json!({"kind": "explicit"})
+            }
+            VirtualGeometryStoreRequestPolicy::Adapter {
+                runtime_platform,
+                bc_supported,
+                native_profile_selected,
+            } => serde_json::json!({
+                "bc_supported": bc_supported,
+                "kind": "adapter",
+                "native_profile_selected": native_profile_selected,
+                "runtime_platform": runtime_platform,
+            }),
+        };
+        serde_json::json!({
+            "fallback_rank": self.fallback_rank,
+            "kind": self.kind.name(),
+            "policy": policy,
+            "reason": self.reason,
+            "requested_profile": self.requested_profile.as_json(),
+            "selected_profile": self.selected_profile.as_ref().map(VirtualGeometryAssetProfile::as_json),
+        })
+    }
+
+    pub fn report_json(&self) -> String {
+        self.as_json().to_string()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +200,19 @@ pub struct ResolvedVirtualGeometryAsset {
     pub artifact_path: PathBuf,
     pub artifact_bytes: u64,
     pub asset: Arc<VirtualGeometryAsset>,
+}
+
+impl ResolvedVirtualGeometryAsset {
+    pub fn report_json(&self) -> String {
+        serde_json::json!({
+            "artifact_bytes": self.artifact_bytes,
+            "artifact_path": self.artifact_path.display().to_string(),
+            "logical_id": self.logical_id,
+            "schema": "bloom-runtime-asset-selection-v1",
+            "selection": self.selection.as_json(),
+        })
+        .to_string()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -246,6 +363,15 @@ impl VirtualGeometryStoreLoader {
                         self.telemetry.completed_requests.saturating_add(1);
                     match &completion.result {
                         Ok(resolved) => {
+                            if resolved.selection.request_policy
+                                != VirtualGeometryStoreRequestPolicy::Explicit
+                                || resolved.selection.kind != VirtualGeometrySelectionKind::Exact
+                            {
+                                log::info!(
+                                    "bloom: cooked asset selection = {}",
+                                    resolved.report_json()
+                                );
+                            }
                             self.telemetry.loaded_artifact_bytes = self
                                 .telemetry
                                 .loaded_artifact_bytes
@@ -485,8 +611,21 @@ fn select_entry(
             (*entry).clone(),
             VirtualGeometryStoreSelection {
                 kind: VirtualGeometrySelectionKind::Exact,
+                requested_profile: request.requested.clone(),
                 selected_profile: entry.profile.clone(),
                 fallback_rank: None,
+                reason: match request.policy {
+                    VirtualGeometryStoreRequestPolicy::Explicit => "requested-profile",
+                    VirtualGeometryStoreRequestPolicy::Adapter {
+                        native_profile_selected: true,
+                        ..
+                    } => "adapter-native-profile",
+                    VirtualGeometryStoreRequestPolicy::Adapter {
+                        native_profile_selected: false,
+                        ..
+                    } => "adapter-portable-profile",
+                },
+                request_policy: request.policy,
             },
         ));
     }
@@ -499,8 +638,16 @@ fn select_entry(
                 (*entry).clone(),
                 VirtualGeometryStoreSelection {
                     kind: VirtualGeometrySelectionKind::Fallback,
+                    requested_profile: request.requested.clone(),
                     selected_profile: entry.profile.clone(),
                     fallback_rank: Some(rank as u32),
+                    reason: match request.policy {
+                        VirtualGeometryStoreRequestPolicy::Explicit => "ordered-explicit-fallback",
+                        VirtualGeometryStoreRequestPolicy::Adapter { .. } => {
+                            "portable-fallback-after-native-miss"
+                        }
+                    },
+                    request_policy: request.policy,
                 },
             ));
         }
@@ -511,8 +658,11 @@ fn select_entry(
                 (*entry).clone(),
                 VirtualGeometryStoreSelection {
                     kind: VirtualGeometrySelectionKind::UnprofiledFallback,
+                    requested_profile: request.requested.clone(),
                     selected_profile: None,
                     fallback_rank: None,
+                    reason: "explicit-unprofiled-fallback",
+                    request_policy: request.policy,
                 },
             ));
         }
@@ -548,7 +698,62 @@ fn validate_request(
             )));
         }
     }
+    if let VirtualGeometryStoreRequestPolicy::Adapter {
+        runtime_platform,
+        bc_supported,
+        native_profile_selected,
+    } = request.policy
+    {
+        let expected_native = desktop_bc_profile(runtime_platform) && bc_supported;
+        let expected_platform = if expected_native {
+            runtime_platform
+        } else {
+            "portable"
+        };
+        let expected_fallbacks = if expected_native {
+            vec![VirtualGeometryAssetProfile::new(
+                "portable",
+                request.requested.quality(),
+            )?]
+        } else {
+            Vec::new()
+        };
+        if runtime_platform != runtime_platform_profile()
+            || native_profile_selected != expected_native
+            || request.requested.platform() != expected_platform
+            || request.fallbacks != expected_fallbacks
+            || request.allow_unprofiled
+        {
+            return Err(VirtualGeometryStoreError::InvalidRequest(
+                "adapter-owned asset request was mutated after capability selection".to_string(),
+            ));
+        }
+    }
     Ok(())
+}
+
+const fn runtime_platform_profile() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else if cfg!(target_os = "tvos") {
+        "tvos"
+    } else if cfg!(target_os = "visionos") {
+        "visionos"
+    } else {
+        "portable"
+    }
+}
+
+fn desktop_bc_profile(platform: &str) -> bool {
+    matches!(platform, "macos" | "windows" | "linux")
 }
 
 fn validate_logical_id(value: &str) -> Result<(), VirtualGeometryStoreError> {
@@ -616,6 +821,78 @@ fn required_u64(
     object.get(field).and_then(Value::as_u64).ok_or_else(|| {
         VirtualGeometryStoreError::Index(format!("asset index field {field:?} is missing"))
     })
+}
+
+#[cfg(test)]
+mod request_policy_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_policy_selects_native_bc_or_portable_without_silent_fallback() {
+        let native = VirtualGeometryStoreRequest::for_runtime_features(
+            "city/bistro",
+            "high",
+            wgpu::Features::TEXTURE_COMPRESSION_BC,
+        )
+        .unwrap();
+        if desktop_bc_profile(runtime_platform_profile()) {
+            assert_eq!(native.requested.platform(), runtime_platform_profile());
+            assert_eq!(native.fallbacks.len(), 1);
+            assert_eq!(native.fallbacks[0].label(), "portable/high");
+        } else {
+            assert_eq!(native.requested.label(), "portable/high");
+            assert!(native.fallbacks.is_empty());
+        }
+
+        let portable = VirtualGeometryStoreRequest::for_runtime_features(
+            "city/bistro",
+            "high",
+            wgpu::Features::empty(),
+        )
+        .unwrap();
+        assert_eq!(portable.requested.label(), "portable/high");
+        assert!(portable.fallbacks.is_empty());
+        assert_eq!(
+            portable.policy,
+            VirtualGeometryStoreRequestPolicy::Adapter {
+                runtime_platform: runtime_platform_profile(),
+                bc_supported: false,
+                native_profile_selected: false,
+            }
+        );
+
+        let entry = IndexedEntry {
+            logical_id: "city/bistro".to_string(),
+            profile: Some(VirtualGeometryAssetProfile::new("portable", "high").unwrap()),
+            artifact_path: PathBuf::from("unused.bgeo"),
+            identity: ArtifactIdentity {
+                bytes: 1,
+                format_version: 2,
+                file_sha256: [1; 32],
+                payload_sha256: [2; 32],
+                source_sha256: [3; 32],
+            },
+        };
+        let (_, selection) = select_entry(&[entry], &native).unwrap();
+        if desktop_bc_profile(runtime_platform_profile()) {
+            assert_eq!(selection.kind, VirtualGeometrySelectionKind::Fallback);
+            assert_eq!(selection.reason, "portable-fallback-after-native-miss");
+            assert_eq!(selection.fallback_rank, Some(0));
+        } else {
+            assert_eq!(selection.kind, VirtualGeometrySelectionKind::Exact);
+            assert_eq!(selection.reason, "adapter-portable-profile");
+        }
+        let report: Value = serde_json::from_str(&selection.report_json()).unwrap();
+        assert_eq!(report["policy"]["kind"], "adapter");
+        assert_eq!(report["selected_profile"]["platform"], "portable");
+
+        let mut mutated = portable;
+        mutated.allow_unprofiled = true;
+        assert!(validate_request(&mutated)
+            .unwrap_err()
+            .to_string()
+            .contains("mutated after capability selection"));
+    }
 }
 
 fn parse_hash(value: &str, label: &str) -> Result<[u8; 32], VirtualGeometryStoreError> {
