@@ -325,7 +325,11 @@ impl Renderer {
 
     /// Allocation-free bridge from the model/archive ownership route to the
     /// compatibility renderer. Virtual placements from the same route are
-    /// submitted separately through `submit_virtual_geometry`.
+    /// submitted separately through `submit_virtual_geometry`. A compact
+    /// compatibility cache that contains skin weights consumes the staged
+    /// joint palette through the established cached-skinned path; a full-model
+    /// subset cannot do that without also drawing virtual-owned primitives and
+    /// therefore fails closed.
     #[cfg(feature = "models3d")]
     pub fn draw_model_cached_compatibility(
         &mut self,
@@ -347,8 +351,15 @@ impl Renderer {
             if source_indices.is_empty() {
                 return true;
             }
-            self.draw_model_cached(handle_bits, position, scale, tint);
+            if self.is_model_skinned(handle_bits) {
+                self.draw_model_cached_skinned(handle_bits, position, scale, tint);
+            } else {
+                self.draw_model_cached(handle_bits, position, scale, tint);
+            }
             return true;
+        }
+        if self.is_model_skinned(handle_bits) {
+            return false;
         }
         self.draw_model_cached_mesh_subset(
             handle_bits,
@@ -363,6 +374,9 @@ impl Renderer {
     }
 
     /// Full-transform form of `draw_model_cached_compatibility`.
+    /// Skinned palettes already own world placement, so callers must use the
+    /// position/scale form after staging the palette instead of supplying a
+    /// second arbitrary transform here.
     #[cfg(feature = "models3d")]
     pub fn draw_model_cached_compatibility_transform(
         &mut self,
@@ -383,8 +397,14 @@ impl Renderer {
             if source_indices.is_empty() {
                 return true;
             }
+            if self.is_model_skinned(handle_bits) {
+                return false;
+            }
             self.draw_model_cached_transform(handle_bits, model_matrix, tint);
             return true;
+        }
+        if self.is_model_skinned(handle_bits) {
+            return false;
         }
         self.draw_model_cached_mesh_subset_transform(
             handle_bits,

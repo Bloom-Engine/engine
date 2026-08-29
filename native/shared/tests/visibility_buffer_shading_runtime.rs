@@ -171,15 +171,15 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         .renderer
         .enable_virtual_geometry(
             GpuVirtualGeometryConfig {
-                capacity_bytes: u64::from(bloom_geometry_format::MIN_PAGE_BYTES),
+                capacity_bytes: u64::from(bloom_geometry_format::MIN_PAGE_BYTES) * 2,
                 page_stride_bytes: bloom_geometry_format::MIN_PAGE_BYTES,
-                max_meshes: 1,
+                max_meshes: 2,
                 max_page_records: 4,
                 max_cluster_records: 4,
                 max_clusters_per_group: 4,
                 max_hierarchy_levels: 4,
-                max_upload_bytes_per_frame: u64::from(bloom_geometry_format::MIN_PAGE_BYTES),
-                max_upload_pages_per_frame: 1,
+                max_upload_bytes_per_frame: u64::from(bloom_geometry_format::MIN_PAGE_BYTES) * 2,
+                max_upload_pages_per_frame: 2,
                 max_evictions_per_frame: 1,
             },
             GpuVirtualTraversalConfig {
@@ -220,7 +220,10 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     );
 
     let queue = engine.renderer.queue.clone();
-    let virtual_asset = Arc::new(virtual_triangle_asset());
+    let virtual_asset = Arc::new(virtual_triangle_asset(
+        [1; 32],
+        &[(1, CompatibilityReason::AlphaBlend)],
+    ));
     let virtual_mesh = {
         let pool = engine
             .renderer
@@ -503,6 +506,160 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         "front compatibility pixel did not retain its authored red alpha blend: virtual={front_virtual:?}, composed={front_composed:?}"
     );
 
+    // A second exact source closure proves that cooker-routed skinning keeps
+    // the established palette path instead of silently submitting bind-pose
+    // vertices as a static compatibility draw.
+    let skinned_asset = Arc::new(virtual_triangle_asset(
+        [2; 32],
+        &[(1, CompatibilityReason::Skinned)],
+    ));
+    let skinned_virtual_mesh = engine
+        .renderer
+        .virtual_geometry_pool_mut()
+        .expect("virtual pool remains enabled")
+        .register_mesh(&queue, Arc::clone(&skinned_asset))
+        .expect("skinned compatibility fixture registers beside the first asset");
+    let mut skinned_vertices = compatibility_vertices_for_skinning();
+    skinned_vertices[2].joints = [1.0, 0.0, 0.0, 0.0];
+    let skinned_mesh = Arc::new(MeshData {
+        vertices: skinned_vertices,
+        secondary_tex_coords: None,
+        indices: vec![0, 1, 2],
+        texture_idx: None,
+        normal_texture_idx: None,
+        metallic_roughness_texture_idx: None,
+        specular_glossiness_factor: None,
+        emissive_texture_idx: None,
+        occlusion_texture_idx: None,
+        metallic_factor: 0.0,
+        roughness_factor: 1.0,
+        emissive_factor: [0.0; 3],
+        alpha_mode: MaterialAlphaMode::Opaque,
+        alpha_cutoff: 0.0,
+        alpha_coverage_mips: false,
+        double_sided: true,
+        transmission: MaterialTransmission::default(),
+        layered_pbr: MaterialLayeredPbr::default(),
+    });
+    let skinned_model = ModelData {
+        meshes: vec![Arc::clone(&material_model.meshes[0]), skinned_mesh],
+        mesh_transforms: vec![placement(-0.65, 0.0), IDENTITY_MAT4],
+        mesh_cast_shadows: vec![true; 2],
+        mesh_sources: vec![
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 0,
+                placement_index: 0,
+            }),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 1,
+                placement_index: 0,
+            }),
+        ],
+        source_geometry_sha256: Some([2; 32]),
+        bbox_min: [-0.65, -0.65, -0.2],
+        bbox_max: [0.65, 0.65, 0.2],
+    };
+    engine
+        .renderer
+        .bind_model_virtual_materials(skinned_virtual_mesh, &skinned_model)
+        .expect("skinned fixture derives its virtual material binding");
+    let skinned_route = skinned_model
+        .route_virtual_geometry(&skinned_asset)
+        .expect("skinned source closure partitions exactly");
+    assert_eq!(skinned_route.virtual_placements.len(), 1);
+    assert_eq!(skinned_route.compatibility_placements.len(), 1);
+    assert!(matches!(
+        skinned_route.compatibility_placements[0].route,
+        ModelVirtualCompatibilityRoute::Cooked(record)
+            if record.reason == CompatibilityReason::Skinned
+    ));
+    let skinned_handle = 0x5647_534b_494e_4e45;
+    assert!(engine.renderer.cache_model_virtual_compatibility(
+        skinned_handle,
+        &skinned_model,
+        &skinned_route,
+    ));
+    assert!(engine.renderer.is_model_skinned(skinned_handle));
+    assert!(
+        !engine.renderer.draw_model_cached_compatibility_transform(
+            skinned_handle,
+            IDENTITY_MAT4,
+            [1.0; 4],
+            &skinned_route,
+        ),
+        "arbitrary outer transforms must fail closed for world-space skin palettes"
+    );
+    let skinned_instances = skinned_route
+        .virtual_instances(
+            skinned_virtual_mesh,
+            64,
+            IDENTITY_MAT4,
+            IDENTITY_MAT4,
+            [1.0; 4],
+        )
+        .expect("skinned fixture virtual placement produces one instance");
+
+    let capture_skinned = |engine: &mut bloom_shared::EngineState,
+                           palette: Option<[[[f32; 4]; 4]; 2]>| {
+        engine.begin_frame();
+        engine.renderer.reset_temporal_history();
+        engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
+        engine
+            .renderer
+            .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+        engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+        if let Some(palette) = palette {
+            engine.renderer.set_joint_matrices(&palette);
+            assert!(engine.renderer.draw_model_cached_compatibility(
+                skinned_handle,
+                [0.0; 3],
+                1.0,
+                [1.0; 4],
+                &skinned_route,
+            ));
+        }
+        engine
+            .renderer
+            .submit_virtual_geometry_current_view(&skinned_instances, 1.0)
+            .expect("skinned compatibility virtual half submits");
+        engine.renderer.screenshot_requested = true;
+        engine.end_frame();
+        take_rgba_screenshot(&mut engine.renderer)
+    };
+    let virtual_only = capture_skinned(&mut engine, None);
+    let behind = placement(-0.65, -0.2);
+    let skinned_behind = capture_skinned(&mut engine, Some([behind, behind]));
+    assert_eq!(
+        rgba_pixel(&skinned_behind, 60, 64),
+        rgba_pixel(&virtual_only, 60, 64),
+        "skinned compatibility geometry behind virtual coverage ignored shared depth"
+    );
+    let front = placement(-0.65, 0.2);
+    let skinned_front = capture_skinned(&mut engine, Some([front, front]));
+    let front_virtual = rgba_pixel(&virtual_only, 60, 64);
+    let front_skinned = rgba_pixel(&skinned_front, 60, 64);
+    assert_ne!(
+        front_skinned, front_virtual,
+        "front skinned compatibility coverage did not compose over virtual shading"
+    );
+    assert!(
+        front_skinned[2] > front_virtual[2] && front_skinned[0] < front_virtual[0],
+        "skinned compatibility pixel did not retain its authored blue material: virtual={front_virtual:?}, composed={front_skinned:?}"
+    );
+    let bent = placement(-0.15, 0.2);
+    let skinned_bent = capture_skinned(&mut engine, Some([front, bent]));
+    let deformed_pixels = skinned_front
+        .chunks_exact(4)
+        .zip(skinned_bent.chunks_exact(4))
+        .filter(|(rigid, bent)| rigid != bent)
+        .count();
+    assert!(
+        deformed_pixels > 32,
+        "changing the routed joint palette did not deform visible compatibility coverage"
+    );
+
     let steady: serde_json::Value =
         serde_json::from_str(&engine.renderer.quality_runtime_paths_json())
             .expect("steady-state runtime report is JSON");
@@ -516,7 +673,10 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     );
 }
 
-fn virtual_triangle_asset() -> VirtualGeometryAsset {
+fn virtual_triangle_asset(
+    source_sha256: [u8; 32],
+    compatibility: &[(u32, CompatibilityReason)],
+) -> VirtualGeometryAsset {
     let mut payload = Vec::new();
     for position in [
         [0.0_f32, 0.0, 0.0],
@@ -540,7 +700,8 @@ fn virtual_triangle_asset() -> VirtualGeometryAsset {
     let payload_hash = sha256(&payload);
     let page_table_offset = HEADER_BYTES + CLUSTER_RECORD_BYTES;
     let compatibility_table_offset = page_table_offset + PAGE_RECORD_BYTES;
-    let payload_offset = compatibility_table_offset + COMPATIBILITY_RECORD_BYTES;
+    let payload_offset =
+        compatibility_table_offset + compatibility.len() * COMPATIBILITY_RECORD_BYTES;
     let file_bytes = payload_offset + payload.len();
     let mut bytes = Vec::with_capacity(file_bytes);
     bytes.extend_from_slice(&MAGIC);
@@ -548,11 +709,11 @@ fn virtual_triangle_asset() -> VirtualGeometryAsset {
     push_u32(&mut bytes, HEADER_BYTES as u32);
     push_u32(&mut bytes, ENDIAN_TAG);
     push_u32(&mut bytes, 0);
-    bytes.extend_from_slice(&[1; 32]);
+    bytes.extend_from_slice(&source_sha256);
     bytes.extend_from_slice(&payload_hash);
     push_u32(&mut bytes, 1);
     push_u32(&mut bytes, 1);
-    push_u32(&mut bytes, 1);
+    push_u32(&mut bytes, compatibility.len() as u32);
     push_u32(&mut bytes, 0);
     push_u64(&mut bytes, HEADER_BYTES as u64);
     push_u64(&mut bytes, page_table_offset as u64);
@@ -595,10 +756,12 @@ fn virtual_triangle_asset() -> VirtualGeometryAsset {
     bytes.extend_from_slice(&payload_hash);
     push_u64(&mut bytes, 0);
     assert_eq!(bytes.len(), compatibility_table_offset);
-    push_u32(&mut bytes, 0);
-    push_u32(&mut bytes, 1);
-    push_u32(&mut bytes, CompatibilityReason::AlphaBlend as u32);
-    push_u32(&mut bytes, 0);
+    for &(primitive_index, reason) in compatibility {
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, primitive_index);
+        push_u32(&mut bytes, reason as u32);
+        push_u32(&mut bytes, 0);
+    }
     assert_eq!(bytes.len(), payload_offset);
     bytes.extend_from_slice(&payload);
     VirtualGeometryAsset::from_bytes(bytes).expect("minimal virtual triangle fixture is valid")
@@ -624,4 +787,35 @@ fn push_f32x3(bytes: &mut Vec<u8>, value: [f32; 3]) {
 
 fn rgba_pixel(image: &[u8], x: usize, y: usize) -> &[u8] {
     &image[(y * 128 + x) * 4..(y * 128 + x + 1) * 4]
+}
+
+fn compatibility_vertices_for_skinning() -> Vec<Vertex3D> {
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        .into_iter()
+        .map(|position| Vertex3D {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            color: [0.05, 0.2, 0.95, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            joints: [0.0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn take_rgba_screenshot(renderer: &mut bloom_shared::renderer::Renderer) -> Vec<u8> {
+    let (_, _, mut pixels) = renderer
+        .screenshot_data
+        .take()
+        .expect("renderer produced a screenshot");
+    if matches!(
+        renderer.surface_format(),
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    ) {
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+    }
+    pixels
 }
