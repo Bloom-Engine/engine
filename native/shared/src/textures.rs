@@ -210,7 +210,7 @@ impl TextureManager {
                 height,
             });
         }
-        // No BC support on this adapter (mobile GL): CPU-decode the top
+        // Unsupported DDS format or missing BC support: CPU-decode the top
         // mip and feed the regular RGBA path (which regenerates mips).
         match image_dds::image_from_dds(&dds, 0) {
             Ok(rgba) => {

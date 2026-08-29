@@ -1,7 +1,7 @@
 # Cooked asset store
 
-Bloom's #136 asset-database foundation stores virtual-geometry and BC7 texture
-artifacts under deterministic recipe keys and immutable content hashes.
+Bloom's #136 asset-database foundation stores virtual-geometry and cooked DDS
+texture artifacts under deterministic recipe keys and immutable content hashes.
 Optional platform and quality profiles provide an explicit variant contract
 while preserving the byte-identical unprofiled v1 format. Native geometry
 loading resolves the validated mixed-kind index off-thread and demand-pages
@@ -103,13 +103,19 @@ Texture manifests use the `bloom-texture` recipe and record:
 - the exact source-file SHA-256;
 - whether the source is a normal map and whether it uses linear or sRGB color;
 - a build-key SHA-256 over recipe version, source bytes, and those semantics;
-- canonical BC7 format, width, height, mip count, file hash, byte length, and
+- canonical DDS format, width, height, mip count, file hash, byte length, and
   immutable `.dds` path.
 
-The existing direct `texture` and `texture-dir` commands share the same BC7
-encoder as `texture-store`; normal maps imply linear color. Store commands
-reject unknown or duplicate texture options instead of silently producing an
-ambiguous recipe.
+The existing direct `texture` and `texture-dir` commands share the same policy
+as `texture-store`. Color and linear data use BC7. Normal maps imply linear
+color and use RGBA8: RGB retains the exact authored direction at mip zero,
+vector-filtered RGB stores a normalized direction at lower mips, and alpha
+stores accumulated LEADR/Toksvig variance. A representative high-entropy
+Sponza normal map showed visible direction damage under color-error-optimized
+BC7, so recipe v2 deliberately spends RGBA8 memory for normal fidelity until
+a separately qualified normal-specific platform encoding exists. Store
+commands reject unknown or duplicate texture options instead of silently
+producing an ambiguous recipe.
 
 ### Manifest examples
 
@@ -162,7 +168,7 @@ files contain no comments or placeholders.
   ],
   "kind": "texture",
   "logical_id": "world/sponza/albedo",
-  "recipe": { "name": "bloom-texture", "version": 1 },
+  "recipe": { "name": "bloom-texture", "version": 2 },
   "schema": "bloom-asset-manifest-v1",
   "settings": { "color_space": "srgb", "normal_map": false },
   "source": { "sha256": "<source-sha256>" }
@@ -189,6 +195,37 @@ later #136 work.
 Recipe version changes are explicit. A future cooker behavior change that can
 change output bytes must increment the relevant geometry or texture recipe
 version even if the container remains readable.
+
+## Asset benchmark commands
+
+The benchmark commands emit machine-readable `bloom-asset-benchmark-v1` JSON.
+Texture measurements report source/cooked disk bytes, complete mip-chain GPU
+bytes, top-mip quality, source-decode versus DDS-parse time, CPU fallback
+decode time, and offline encode time:
+
+```shell
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  texture-benchmark examples/intel-sponza/assets/textures/curtain_fabric_red_BaseColor.png \
+  --iterations 15
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  texture-benchmark examples/intel-sponza/assets/textures/curtain_fabric_Normal.png \
+  --normal --iterations 5
+```
+
+Geometry compares a source glTF import—including buffers and images—with a
+full cooked-file read, structural validation, and payload hashes:
+
+```shell
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  geometry-load-benchmark examples/renderer-test/assets/DamagedHelmet.glb \
+  /tmp/helmet.bgeo --iterations 25
+```
+
+Timing uses a warm OS cache and excludes GPU resource creation/upload. The DDS
+"direct upload" measurement is container parsing only; it does not claim GPU
+upload latency. Exact commands, thresholds, adapter/host context, and accepted
+results live in the corresponding issue evidence rather than mutable prose.
 
 ## Incremental and corruption behavior
 

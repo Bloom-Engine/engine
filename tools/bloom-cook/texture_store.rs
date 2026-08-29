@@ -1,4 +1,4 @@
-//! Deterministic content-addressed storage for cooked BC7 textures.
+//! Deterministic content-addressed storage for cooked textures.
 
 use crate::asset_profile::AssetProfile;
 use crate::asset_store::{
@@ -419,10 +419,11 @@ struct TextureMetadata {
 
 fn validate_dds(bytes: &[u8], settings: TextureSettings) -> Result<TextureMetadata, String> {
     let dds = Dds::read(Cursor::new(bytes)).map_err(|error| format!("parse DDS: {error}"))?;
-    let expected_format = if settings.format_name() == "bc7-rgba-unorm" {
-        DxgiFormat::BC7_UNorm
-    } else {
-        DxgiFormat::BC7_UNorm_sRGB
+    let expected_format = match settings.format_name() {
+        "rgba8-unorm-normal-variance" => DxgiFormat::R8G8B8A8_UNorm,
+        "bc7-rgba-unorm" => DxgiFormat::BC7_UNorm,
+        "bc7-rgba-unorm-srgb" => DxgiFormat::BC7_UNorm_sRGB,
+        format => return Err(format!("unsupported texture artifact format {format:?}")),
     };
     if dds.get_dxgi_format() != Some(expected_format) {
         return Err(format!(
@@ -602,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn profiled_texture_keys_include_semantics_and_profile_but_deduplicate_bytes() {
+    fn profiled_texture_keys_include_semantics_and_deduplicate_matching_profiles() {
         let root = temporary_root("texture-profile");
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("mask.png");
@@ -628,8 +629,30 @@ mod tests {
         let linear: Value = serde_json::from_str(&linear).unwrap();
         let normal: Value = serde_json::from_str(&normal).unwrap();
         assert_ne!(linear["build_key_sha256"], normal["build_key_sha256"]);
-        assert_eq!(linear["artifact"]["sha256"], normal["artifact"]["sha256"]);
-        assert_eq!(normal["writes"]["chunks"], 0);
+        assert_ne!(linear["artifact"]["sha256"], normal["artifact"]["sha256"]);
+        assert_eq!(normal["writes"]["chunks"], 1);
+
+        let alternate_profile_flags = vec![
+            "--normal".to_string(),
+            "--platform".to_string(),
+            "portable".to_string(),
+            "--quality".to_string(),
+            "ultra".to_string(),
+        ];
+        let alternate = store_texture_command(
+            "textures/mask-normal-alt",
+            &source,
+            &root,
+            &alternate_profile_flags,
+        )
+        .unwrap();
+        let alternate: Value = serde_json::from_str(&alternate).unwrap();
+        assert_ne!(normal["build_key_sha256"], alternate["build_key_sha256"]);
+        assert_eq!(
+            normal["artifact"]["sha256"],
+            alternate["artifact"]["sha256"]
+        );
+        assert_eq!(alternate["writes"]["chunks"], 0);
 
         let inspect_flags = vec![
             "--platform".to_string(),
@@ -645,7 +668,10 @@ mod tests {
         .unwrap();
         let inspection: Value = serde_json::from_str(&inspection).unwrap();
         assert_eq!(inspection["profile"]["platform"], "portable");
-        assert_eq!(inspection["artifact"]["format"], "bc7-rgba-unorm");
+        assert_eq!(
+            inspection["artifact"]["format"],
+            "rgba8-unorm-normal-variance"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

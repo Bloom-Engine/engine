@@ -1,14 +1,11 @@
 //! bloom-cook — offline asset cooking for the Bloom engine.
 //!
-//! Today: texture cooking. PNG/JPEG/BMP/TGA → BC7-compressed DDS with a
-//! full precomputed mip chain. The wins, in order: 4x less VRAM than
-//! RGBA8 on devices whose adapter exposes BC texture support (all
-//! desktops), much faster loads (no PNG inflate, no runtime mip
-//! generation), and precomputed mips identical across machines. Disk
-//! size versus PNG varies with content (BC7 is a fixed 1 byte/px +
-//! mips; PNG entropy-codes), so cook for runtime wins, not disk.
-//! Devices without BC decode cooked files on the CPU at load — one
-//! cooked artifact ships everywhere.
+//! Today: texture cooking. PNG/JPEG/BMP/TGA → DDS with a full precomputed
+//! mip chain. Color/data textures use BC7 for 4x less VRAM on desktop BC
+//! adapters. Normal maps remain RGBA8 so their vector-aware direction and
+//! variance mips are not damaged by a color-error BC7 objective. Cooked DDS
+//! also avoids source-image inflate and runtime mip generation. Disk size
+//! varies with content, so cook for runtime memory, quality, and load time.
 //!
 //! The engine loads cooked .dds transparently through the same
 //! loadTexture() path as raw images (magic-sniffed).
@@ -17,19 +14,22 @@
 //!   bloom-cook texture <in.(png|jpg|bmp|tga)> <out.dds> [--normal] [--linear]
 //!   bloom-cook texture-dir <in-dir> <out-dir> [--linear]
 //!   bloom-cook texture-store <logical-id> <in> <store> [profile] [texture flags]
+//!   bloom-cook texture-benchmark <in> [texture flags] [--iterations N]
 //!   bloom-cook geometry <in.(glb|gltf)> <out.bgeo> [geometry limits]
 //!   bloom-cook geometry-inspect <in.bgeo>
 //!   bloom-cook geometry-store <logical-id> <in.(glb|gltf)> <store> [profile] [limits]
+//!   bloom-cook geometry-load-benchmark <in.glb|gltf> <in.bgeo> [--iterations N]
 //!   bloom-cook asset-inspect <logical-id> <store> [profile]
 //!   bloom-cook asset-index <store>
 //!   bloom-cook asset-index-inspect <store>
 //!   bloom-cook asset-resolve <logical-id> <store> --platform ID --quality ID [fallbacks]
 //!
-//! --normal  treat as a normal map (linear color, BC7)
+//! --normal  treat as a normal map (linear RGBA8, vector/variance mips)
 //! --linear  non-color data (masks, LUTs): skip the sRGB transfer
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod asset_benchmark;
 mod asset_index;
 mod asset_profile;
 mod asset_resolver;
@@ -89,6 +89,18 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("texture-benchmark") if args.len() >= 2 => {
+            match asset_benchmark::benchmark_texture_command(Path::new(&args[1]), &args[2..]) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("geometry") if args.len() >= 3 => {
             match geometry_cook::cook_geometry_command(
                 Path::new(&args[1]),
@@ -123,6 +135,22 @@ fn main() -> ExitCode {
                 Path::new(&args[2]),
                 Path::new(&args[3]),
                 &args[4..],
+            ) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("geometry-load-benchmark") if args.len() >= 3 => {
+            match asset_benchmark::benchmark_geometry_command(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                &args[3..],
             ) {
                 Ok(report) => {
                     println!("{report}");
@@ -190,6 +218,10 @@ fn main() -> ExitCode {
                  [--platform ID --quality ID] [--normal] [--linear]"
             );
             eprintln!(
+                "       bloom-cook texture-benchmark <in> [--normal] [--linear] \
+                 [--iterations N]"
+            );
+            eprintln!(
                 "       bloom-cook geometry <in.glb|gltf> <out.bgeo> \
                  [--max-vertices N] [--max-triangles N] [--page-bytes N] \
                  [--hierarchy-levels N] [--vertex-format float32|quantized32]"
@@ -198,6 +230,10 @@ fn main() -> ExitCode {
             eprintln!(
                 "       bloom-cook geometry-store <logical-id> <in.glb|gltf> <store-dir> \
                  [--platform ID --quality ID] [geometry limits]"
+            );
+            eprintln!(
+                "       bloom-cook geometry-load-benchmark <in.glb|gltf> <in.bgeo> \
+                 [--iterations N]"
             );
             eprintln!(
                 "       bloom-cook asset-inspect <logical-id> <store-dir> \

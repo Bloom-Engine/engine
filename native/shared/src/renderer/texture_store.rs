@@ -677,44 +677,35 @@ impl Renderer {
 }
 
 impl Renderer {
-    /// Register a cooked BC7 DDS texture (output of bloom-cook).
+    /// Register a cooked DDS texture (output of bloom-cook).
     /// Gated on `image-extras` (DDS is a beyond-PNG runtime codec).
     ///
-    /// On adapters with `TEXTURE_COMPRESSION_BC` the precomputed mip
-    /// chain uploads compressed — 4x less VRAM than RGBA8. Returns None
-    /// when the device lacks BC support; the caller falls back to CPU
-    /// decode through the normal RGBA path.
+    /// BC7 uploads compressed on adapters with `TEXTURE_COMPRESSION_BC`;
+    /// RGBA8 normal maps upload their quality-preserving direction/variance
+    /// mip chain on every adapter. Unsupported formats return `None` so the
+    /// caller can take the CPU decode path.
     #[cfg(feature = "image-extras")]
     pub fn register_texture_dds(&mut self, dds: &image_dds::ddsfile::Dds) -> Option<u32> {
-        if !self
-            .device
-            .features()
-            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+        let surface = image_dds::Surface::from_dds(dds).ok()?;
+        let layout = cooked_dds_layout(surface.image_format)?;
+        if layout.requires_bc
+            && !self
+                .device
+                .features()
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
         {
             return None;
         }
-        let surface = image_dds::Surface::from_dds(dds).ok()?;
         // Engine convention: game textures bind as non-sRGB (the
         // pipeline applies the transfer itself — see register_texture's
-        // Rgba8Unorm). Both BC7 variants therefore map to the Unorm
-        // view; the sRGB flag in the DDS only records authoring intent.
-        let dds_srgb = matches!(
-            surface.image_format,
-            image_dds::ImageFormat::BC7RgbaUnormSrgb
-        );
-        let format = match surface.image_format {
-            image_dds::ImageFormat::BC7RgbaUnormSrgb | image_dds::ImageFormat::BC7RgbaUnorm => {
-                wgpu::TextureFormat::Bc7RgbaUnorm
-            }
-            // Other BCn variants can map here as the cook tool grows.
-            _ => return None,
-        };
+        // Rgba8Unorm). Container sRGB therefore records authoring intent
+        // without selecting a hardware-sRGB texture view.
         let width = surface.width;
         let height = surface.height;
         let mip_count = surface.mipmaps.max(1);
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cooked_bc7"),
+            label: Some(layout.texture_label),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -723,18 +714,18 @@ impl Renderer {
             mip_level_count: mip_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format,
+            format: layout.format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
-        // BC7: 4x4 blocks, 16 bytes each; Surface::get hands back each
-        // mip's slice (truncated files yield None — bail cleanly).
+        // Surface::get returns exactly one mip. Truncated files fail before
+        // any subsequent mip is submitted.
         for mip in 0..mip_count {
             let mw = (width >> mip).max(1);
             let mh = (height >> mip).max(1);
-            let blocks_w = mw.div_ceil(4);
-            let blocks_h = mh.div_ceil(4);
+            let blocks_w = mw.div_ceil(layout.block_width);
+            let blocks_h = mh.div_ceil(layout.block_height);
             let mip_data = surface.get(0, 0, mip)?;
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -746,7 +737,7 @@ impl Renderer {
                 mip_data,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(blocks_w * 16),
+                    bytes_per_row: Some(blocks_w * layout.bytes_per_block),
                     rows_per_image: Some(blocks_h),
                 },
                 wgpu::Extent3d {
@@ -759,7 +750,7 @@ impl Renderer {
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cooked_bc7_bg"),
+            label: Some(layout.bind_group_label),
             layout: &self.texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -778,7 +769,7 @@ impl Renderer {
             width,
             height,
             mip_count,
-            if dds_srgb {
+            if layout.srgb {
                 TextureColorSpace::Srgb
             } else {
                 TextureColorSpace::Linear
@@ -791,5 +782,98 @@ impl Renderer {
         self.texture_sizes.push((width, height));
         self.global_texture_ids.push(global_id);
         Some(idx)
+    }
+}
+
+#[cfg(feature = "image-extras")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CookedDdsLayout {
+    format: wgpu::TextureFormat,
+    block_width: u32,
+    block_height: u32,
+    bytes_per_block: u32,
+    requires_bc: bool,
+    srgb: bool,
+    texture_label: &'static str,
+    bind_group_label: &'static str,
+}
+
+#[cfg(feature = "image-extras")]
+fn cooked_dds_layout(format: image_dds::ImageFormat) -> Option<CookedDdsLayout> {
+    use image_dds::ImageFormat;
+    let (format, block_width, block_height, bytes_per_block, requires_bc, srgb, labels) =
+        match format {
+            ImageFormat::BC7RgbaUnorm => (
+                wgpu::TextureFormat::Bc7RgbaUnorm,
+                4,
+                4,
+                16,
+                true,
+                false,
+                ("cooked_bc7", "cooked_bc7_bg"),
+            ),
+            ImageFormat::BC7RgbaUnormSrgb => (
+                wgpu::TextureFormat::Bc7RgbaUnorm,
+                4,
+                4,
+                16,
+                true,
+                true,
+                ("cooked_bc7", "cooked_bc7_bg"),
+            ),
+            ImageFormat::Rgba8Unorm => (
+                wgpu::TextureFormat::Rgba8Unorm,
+                1,
+                1,
+                4,
+                false,
+                false,
+                ("cooked_rgba8", "cooked_rgba8_bg"),
+            ),
+            ImageFormat::Rgba8UnormSrgb => (
+                wgpu::TextureFormat::Rgba8Unorm,
+                1,
+                1,
+                4,
+                false,
+                true,
+                ("cooked_rgba8", "cooked_rgba8_bg"),
+            ),
+            _ => return None,
+        };
+    Some(CookedDdsLayout {
+        format,
+        block_width,
+        block_height,
+        bytes_per_block,
+        requires_bc,
+        srgb,
+        texture_label: labels.0,
+        bind_group_label: labels.1,
+    })
+}
+
+#[cfg(all(test, feature = "image-extras"))]
+mod cooked_dds_layout_tests {
+    use super::*;
+
+    #[test]
+    fn rgba8_normal_layout_does_not_require_bc_support() {
+        let layout = cooked_dds_layout(image_dds::ImageFormat::Rgba8Unorm).unwrap();
+        assert_eq!(layout.format, wgpu::TextureFormat::Rgba8Unorm);
+        assert_eq!((layout.block_width, layout.block_height), (1, 1));
+        assert_eq!(layout.bytes_per_block, 4);
+        assert!(!layout.requires_bc);
+        assert!(!layout.srgb);
+    }
+
+    #[test]
+    fn bc7_layout_retains_block_geometry_and_authoring_space() {
+        let layout = cooked_dds_layout(image_dds::ImageFormat::BC7RgbaUnormSrgb).unwrap();
+        assert_eq!(layout.format, wgpu::TextureFormat::Bc7RgbaUnorm);
+        assert_eq!((layout.block_width, layout.block_height), (4, 4));
+        assert_eq!(layout.bytes_per_block, 16);
+        assert!(layout.requires_bc);
+        assert!(layout.srgb);
     }
 }

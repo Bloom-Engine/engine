@@ -11,8 +11,9 @@ invocation remains useful for investigation and reference generation.
 
 ## `bloom-cook` — offline asset cooking
 
-The cooker produces BC7 texture artifacts and the versioned, opt-in meshlet
-geometry artifacts used by the staged virtualized-geometry work:
+The cooker produces BC7 color/data textures, quality-preserving RGBA8 normal
+DDS textures with vector/variance mips, and the versioned meshlet geometry
+artifacts used by the staged virtualized-geometry work:
 
 ```shell
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
@@ -20,6 +21,14 @@ cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
 
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   geometry-inspect /tmp/helmet.bgeo
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  texture-benchmark examples/intel-sponza/assets/textures/curtain_fabric_red_BaseColor.png \
+  --iterations 15
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  geometry-load-benchmark examples/renderer-test/assets/DamagedHelmet.glb \
+  /tmp/helmet.bgeo --iterations 25
 ```
 
 The geometry path is offline-only today. It does not change ordinary glTF
