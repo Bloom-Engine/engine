@@ -6,15 +6,16 @@
 //! reached Bloom's authoritative PBR evaluator and all four MRT outputs.
 
 use bloom_geometry_format::{
-    sha256, CLUSTER_RECORD_BYTES, ENDIAN_TAG, FLAG_COARSE_ROOT, FLAG_DOUBLE_SIDED, HEADER_BYTES,
-    MAGIC, MIN_PAGE_BYTES, NO_RELATION, PAGE_RECORD_BYTES, VERSION,
+    sha256, CompatibilityReason, CLUSTER_RECORD_BYTES, COMPATIBILITY_RECORD_BYTES, ENDIAN_TAG,
+    FLAG_COARSE_ROOT, FLAG_DOUBLE_SIDED, HEADER_BYTES, MAGIC, MIN_PAGE_BYTES, NO_RELATION,
+    PAGE_RECORD_BYTES, VERSION,
 };
 use bloom_shared::{
     models::{
         MaterialAlphaMode, MaterialLayeredPbr, MaterialTransmission, MeshData, ModelData,
-        ModelPrimitiveSource,
+        ModelPrimitiveSource, ModelVirtualCompatibilityRoute,
     },
-    renderer::Vertex3D,
+    renderer::{Vertex3D, IDENTITY_MAT4},
     virtual_geometry::{
         GpuVirtualGeometryConfig, GpuVirtualInstance, GpuVirtualTraversalConfig,
         VirtualGeometryAsset,
@@ -182,8 +183,8 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
                 max_evictions_per_frame: 1,
             },
             GpuVirtualTraversalConfig {
-                max_instances: 1,
-                max_selected_clusters: 4,
+                max_instances: 2,
+                max_selected_clusters: 8,
                 max_page_requests: 4,
             },
         )
@@ -219,13 +220,14 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     );
 
     let queue = engine.renderer.queue.clone();
+    let virtual_asset = Arc::new(virtual_triangle_asset());
     let virtual_mesh = {
         let pool = engine
             .renderer
             .virtual_geometry_pool_mut()
             .expect("enabled renderer owns its virtual pool");
         let mesh = pool
-            .register_mesh(&queue, Arc::new(virtual_triangle_asset()))
+            .register_mesh(&queue, Arc::clone(&virtual_asset))
             .expect("minimal virtual triangle registers");
         mesh
     };
@@ -338,6 +340,169 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     assert_eq!(virtual_geometry["hiz_history_valid"], true);
     assert_eq!(virtual_geometry["hiz_captures_submitted"], 2);
     assert_eq!(virtual_geometry["hiz_history_instances"], 1);
+
+    // Exercise the production model/archive split with two overlapping pairs:
+    // an alpha-blended compatibility primitive behind the left virtual
+    // triangle, and the same primitive in front of the right triangle. This
+    // catches both missing compatibility submission and depth/composition
+    // regressions at the virtual/ordinary boundary.
+    let mut compatibility_vertices = vertices.clone();
+    for (vertex, position) in
+        compatibility_vertices
+            .iter_mut()
+            .zip([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    {
+        vertex.position = position;
+        vertex.color = [0.95, 0.05, 0.1, 0.65];
+    }
+    let compatibility_mesh = Arc::new(MeshData {
+        vertices: compatibility_vertices,
+        secondary_tex_coords: None,
+        indices: vec![0, 1, 2],
+        texture_idx: None,
+        normal_texture_idx: None,
+        metallic_roughness_texture_idx: None,
+        specular_glossiness_factor: None,
+        emissive_texture_idx: None,
+        occlusion_texture_idx: None,
+        metallic_factor: 0.0,
+        roughness_factor: 1.0,
+        emissive_factor: [0.0; 3],
+        alpha_mode: MaterialAlphaMode::Blend,
+        alpha_cutoff: 0.0,
+        alpha_coverage_mips: false,
+        double_sided: true,
+        transmission: MaterialTransmission::default(),
+        layered_pbr: MaterialLayeredPbr::default(),
+    });
+    let placement = |x: f32, z: f32| {
+        [
+            [1.3, 0.0, 0.0, 0.0],
+            [0.0, 1.3, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [x, -0.65, z, 1.0],
+        ]
+    };
+    let mixed_model = ModelData {
+        meshes: vec![
+            Arc::clone(&material_model.meshes[0]),
+            Arc::clone(&compatibility_mesh),
+            Arc::clone(&material_model.meshes[0]),
+            compatibility_mesh,
+        ],
+        mesh_transforms: vec![
+            placement(-1.4, 0.0),
+            placement(-1.4, -0.2),
+            placement(0.1, 0.0),
+            placement(0.1, 0.2),
+        ],
+        mesh_cast_shadows: vec![true; 4],
+        mesh_sources: vec![
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 0,
+                placement_index: 0,
+            }),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 1,
+                placement_index: 0,
+            }),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 0,
+                placement_index: 1,
+            }),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 1,
+                placement_index: 1,
+            }),
+        ],
+        source_geometry_sha256: Some([1; 32]),
+        bbox_min: [-1.4, -0.65, -0.2],
+        bbox_max: [1.4, 0.65, 0.2],
+    };
+    let route = mixed_model
+        .route_virtual_geometry(&virtual_asset)
+        .expect("mixed source closure partitions exactly");
+    assert_eq!(route.virtual_placements.len(), 2);
+    assert_eq!(route.compatibility_placements.len(), 2);
+    assert!(route
+        .compatibility_placements
+        .iter()
+        .all(|placement| matches!(
+            placement.route,
+            ModelVirtualCompatibilityRoute::Cooked(record)
+                if record.reason == CompatibilityReason::AlphaBlend
+        )));
+    let compatibility_handle = 0x5647_434f_4d50_4154;
+    assert!(engine.renderer.cache_model_virtual_compatibility(
+        compatibility_handle,
+        &mixed_model,
+        &route,
+    ));
+    let mixed_instances = route
+        .virtual_instances(virtual_mesh, 32, IDENTITY_MAT4, IDENTITY_MAT4, [1.0; 4])
+        .expect("mixed virtual placements produce bounded instances");
+
+    let capture_mixed =
+        |engine: &mut bloom_shared::EngineState, draw_compatibility: bool| -> Vec<u8> {
+            engine.begin_frame();
+            engine.renderer.reset_temporal_history();
+            engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
+            engine
+                .renderer
+                .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+            engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+            if draw_compatibility {
+                assert!(engine.renderer.draw_model_cached_compatibility(
+                    compatibility_handle,
+                    [0.0; 3],
+                    1.0,
+                    [1.0; 4],
+                    &route,
+                ));
+            }
+            engine
+                .renderer
+                .submit_virtual_geometry_current_view(&mixed_instances, 1.0)
+                .expect("mixed virtual batch submits");
+            engine.renderer.screenshot_requested = true;
+            engine.end_frame();
+            let (_, _, mut pixels) = engine
+                .renderer
+                .screenshot_data
+                .take()
+                .expect("mixed compatibility frame produced a screenshot");
+            if matches!(
+                engine.renderer.surface_format(),
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+            ) {
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+            }
+            pixels
+        };
+    let virtual_pair = capture_mixed(&mut engine, false);
+    let composed_pair = capture_mixed(&mut engine, true);
+    assert_eq!(
+        rgba_pixel(&composed_pair, 43, 64),
+        rgba_pixel(&virtual_pair, 43, 64),
+        "compatibility geometry behind virtual coverage ignored shared depth"
+    );
+    let front_virtual = rgba_pixel(&virtual_pair, 75, 64);
+    let front_composed = rgba_pixel(&composed_pair, 75, 64);
+    assert_ne!(
+        front_composed, front_virtual,
+        "front alpha-blended compatibility coverage did not compose over virtual shading"
+    );
+    assert!(
+        front_composed[0] > front_virtual[0] && front_composed[1] < front_virtual[1],
+        "front compatibility pixel did not retain its authored red alpha blend: virtual={front_virtual:?}, composed={front_composed:?}"
+    );
+
     let steady: serde_json::Value =
         serde_json::from_str(&engine.renderer.quality_runtime_paths_json())
             .expect("steady-state runtime report is JSON");
@@ -374,7 +539,8 @@ fn virtual_triangle_asset() -> VirtualGeometryAsset {
     payload.resize(payload.len().div_ceil(16) * 16, 0);
     let payload_hash = sha256(&payload);
     let page_table_offset = HEADER_BYTES + CLUSTER_RECORD_BYTES;
-    let payload_offset = page_table_offset + PAGE_RECORD_BYTES;
+    let compatibility_table_offset = page_table_offset + PAGE_RECORD_BYTES;
+    let payload_offset = compatibility_table_offset + COMPATIBILITY_RECORD_BYTES;
     let file_bytes = payload_offset + payload.len();
     let mut bytes = Vec::with_capacity(file_bytes);
     bytes.extend_from_slice(&MAGIC);
@@ -386,11 +552,11 @@ fn virtual_triangle_asset() -> VirtualGeometryAsset {
     bytes.extend_from_slice(&payload_hash);
     push_u32(&mut bytes, 1);
     push_u32(&mut bytes, 1);
-    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 1);
     push_u32(&mut bytes, 0);
     push_u64(&mut bytes, HEADER_BYTES as u64);
     push_u64(&mut bytes, page_table_offset as u64);
-    push_u64(&mut bytes, payload_offset as u64);
+    push_u64(&mut bytes, compatibility_table_offset as u64);
     push_u64(&mut bytes, payload_offset as u64);
     push_u64(&mut bytes, payload.len() as u64);
     push_u64(&mut bytes, file_bytes as u64);
@@ -428,6 +594,11 @@ fn virtual_triangle_asset() -> VirtualGeometryAsset {
     push_u32(&mut bytes, 0);
     bytes.extend_from_slice(&payload_hash);
     push_u64(&mut bytes, 0);
+    assert_eq!(bytes.len(), compatibility_table_offset);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 1);
+    push_u32(&mut bytes, CompatibilityReason::AlphaBlend as u32);
+    push_u32(&mut bytes, 0);
     assert_eq!(bytes.len(), payload_offset);
     bytes.extend_from_slice(&payload);
     VirtualGeometryAsset::from_bytes(bytes).expect("minimal virtual triangle fixture is valid")
@@ -449,4 +620,8 @@ fn push_f32x3(bytes: &mut Vec<u8>, value: [f32; 3]) {
     for component in value {
         push_f32(bytes, component);
     }
+}
+
+fn rgba_pixel(image: &[u8], x: usize, y: usize) -> &[u8] {
+    &image[(y * 128 + x) * 4..(y * 128 + x + 1) * 4]
 }
