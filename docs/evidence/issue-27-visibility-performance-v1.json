@@ -1,0 +1,81 @@
+{
+  "schema": "bloom-visibility-performance-evidence-v1",
+  "revision": "0cce864179cfe1e2d0cbf973784b2eb91df4cf58",
+  "date": "2026-08-29",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "device_type": "integratedgpu",
+    "backend": "metal",
+    "capability_tier": "high-end"
+  },
+  "protocol": {
+    "resolution": [1600, 900],
+    "quality_preset": 0,
+    "render_scale": 1.0,
+    "warmup_frames": 180,
+    "measured_frames": 240,
+    "uncapped": true,
+    "gpu_timestamps_available": true,
+    "order": ["off-a", "shade-a", "shade-b", "off-b"],
+    "samples_per_mode": 2
+  },
+  "workloads": {
+    "visibility-low-overdraw": {
+      "layers": 1,
+      "submitted_draws": 576,
+      "off": {
+        "gpu_frame_mean_ms": 0.927790,
+        "gpu_frame_p95_ms": 0.955480,
+        "depth_prepass_gpu_mean_ms": 0.206709,
+        "main_hdr_pass_gpu_mean_ms": 0.2813725
+      },
+      "shade": {
+        "eligible_draws": 576,
+        "compatibility_draws": 0,
+        "gpu_frame_mean_ms": 1.0242975,
+        "gpu_frame_p95_ms": 1.0494165,
+        "depth_prepass_gpu_mean_ms": 0.2075405,
+        "main_hdr_pass_gpu_mean_ms": 0.2992035
+      },
+      "delta_percent": {
+        "gpu_frame_mean": 10.401869,
+        "gpu_frame_p95": 9.831341,
+        "depth_prepass_mean": 0.402256,
+        "main_hdr_pass_mean": 6.337151
+      }
+    },
+    "visibility-layered-overdraw": {
+      "layers": 8,
+      "submitted_draws": 4608,
+      "off": {
+        "gpu_frame_mean_ms": 2.5351825,
+        "gpu_frame_p95_ms": 2.8681245,
+        "depth_prepass_gpu_mean_ms": 1.181747,
+        "main_hdr_pass_gpu_mean_ms": 0.755443
+      },
+      "shade": {
+        "eligible_draws": 4608,
+        "compatibility_draws": 0,
+        "gpu_frame_mean_ms": 2.4844895,
+        "gpu_frame_p95_ms": 2.6633535,
+        "depth_prepass_gpu_mean_ms": 1.1126985,
+        "main_hdr_pass_gpu_mean_ms": 0.806813
+      },
+      "delta_percent": {
+        "gpu_frame_mean": -1.999580,
+        "gpu_frame_p95": -7.139544,
+        "depth_prepass_mean": -5.842917,
+        "main_hdr_pass_mean": 6.799984
+      }
+    }
+  },
+  "activation_gates": {
+    "low_overdraw_max_mean_regression_percent": 5.0,
+    "low_overdraw_pass": false,
+    "layered_minimum_mean_improvement_percent": 5.0,
+    "layered_pass": false,
+    "default_activation_qualified": false
+  },
+  "production_renderer_changed": false,
+  "decision": "retain opt-in visibility shading; measured activation gates fail"
+}
