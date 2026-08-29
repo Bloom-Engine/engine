@@ -77,9 +77,10 @@ fn fs_virtual_visibility(
     // Masked clusters remain on compatibility rendering until this pass owns
     // the exact alpha-coverage texture/sampler and cutoff contract.
     if ((in.flags & BLOOM_VIRTUAL_FLAG_ALPHA_MASKED) != 0u) { discard; }
-    // Bloom's established opaque scene path intentionally rasterizes both
-    // faces and preserves the authored geometric normal on back faces. Keep
-    // virtualized opaque geometry on that same contract: changing residency
-    // must not make legal-but-reversed imported surfaces disappear.
+    // Match the ordinary retained-scene pipeline: glTF single-sided opaque
+    // primitives cull back faces, while explicitly double-sided materials
+    // retain both orientations. The raster builtin already includes any
+    // winding reversal introduced by a mirrored instance transform.
+    if ((in.flags & BLOOM_VIRTUAL_FLAG_DOUBLE_SIDED) == 0u && !front_facing) { discard; }
     return bloom_encode_virtual_visibility(in.draw_index, primitive_id, front_facing);
 }

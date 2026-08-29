@@ -45,6 +45,7 @@ struct GeometrySource {
     source_meshes: usize,
     source_primitives: usize,
     eligible_triangles: u64,
+    sanitized_non_finite_tangent_vertices: u64,
 }
 
 pub(crate) struct PreparedGeometry {
@@ -213,6 +214,8 @@ pub(crate) fn cook_prepared_geometry(
             "meshes": source.source_meshes,
             "primitives": source.source_primitives,
             "eligible_triangles": source.eligible_triangles,
+            "sanitized_non_finite_tangent_vertices":
+                source.sanitized_non_finite_tangent_vertices,
         },
         "cooked": {
             "meshlets": archive.clusters.len(),
@@ -387,6 +390,7 @@ fn load_geometry_source(path: &Path) -> Result<GeometrySource, String> {
     let mut compatibility = Vec::new();
     let mut source_primitives = 0usize;
     let mut eligible_triangles = 0u64;
+    let mut sanitized_non_finite_tangent_vertices = 0u64;
     let source_meshes = gltf.meshes().len();
 
     for mesh in gltf.meshes() {
@@ -410,6 +414,16 @@ fn load_geometry_source(path: &Path) -> Result<GeometrySource, String> {
             } else if material.alpha_mode() == gltf::material::AlphaMode::Blend {
                 Some((
                     CompatibilityReason::AlphaBlend,
+                    material_index.unwrap_or(u32::MAX),
+                ))
+            } else if material_has_active_transmission(&material) {
+                Some((
+                    CompatibilityReason::Transmission,
+                    material_index.unwrap_or(u32::MAX),
+                ))
+            } else if material_has_layered_pbr(&material) {
+                Some((
+                    CompatibilityReason::LayeredPbr,
                     material_index.unwrap_or(u32::MAX),
                 ))
             } else {
@@ -470,7 +484,7 @@ fn load_geometry_source(path: &Path) -> Result<GeometrySource, String> {
                 )?,
                 None => generate_normals(&positions, &indices),
             };
-            let tangents = match reader.read_tangents() {
+            let mut tangents = match reader.read_tangents() {
                 Some(tangents) => collect_attribute(
                     tangents,
                     positions.len(),
@@ -480,6 +494,11 @@ fn load_geometry_source(path: &Path) -> Result<GeometrySource, String> {
                 )?,
                 None => vec![[0.0; 4]; positions.len()],
             };
+            for tangent in &mut tangents {
+                if sanitize_non_finite_tangent(tangent) {
+                    sanitized_non_finite_tangent_vertices += 1;
+                }
+            }
             let uv0 = match reader.read_tex_coords(0) {
                 Some(uvs) => collect_attribute(
                     uvs.into_f32(),
@@ -551,7 +570,44 @@ fn load_geometry_source(path: &Path) -> Result<GeometrySource, String> {
         source_meshes,
         source_primitives,
         eligible_triangles,
+        sanitized_non_finite_tangent_vertices,
     })
+}
+
+fn sanitize_non_finite_tangent(tangent: &mut [f32; 4]) -> bool {
+    if tangent.iter().all(|component| component.is_finite()) {
+        return false;
+    }
+    // glTF tangents are optional. A malformed optional tangent cannot be
+    // reconstructed faithfully, so retain Bloom's established missing-
+    // tangent contract instead of feeding NaN into meshoptimizer or inventing
+    // a direction that would enable normal mapping.
+    *tangent = [0.0; 4];
+    true
+}
+
+fn material_has_active_transmission(material: &gltf::Material<'_>) -> bool {
+    material.transmission().is_some_and(|transmission| {
+        let factor = transmission.transmission_factor();
+        factor.is_finite() && factor > 0.0
+    })
+}
+
+fn material_has_layered_pbr(material: &gltf::Material<'_>) -> bool {
+    // The virtual material ABI currently owns base metallic/roughness and
+    // specular-glossiness only. Conservatively keep any explicitly authored
+    // layered extension on the ordinary renderer—even an authored default—so
+    // a future virtual implementation cannot reinterpret it silently.
+    [
+        "KHR_materials_clearcoat",
+        "KHR_materials_specular",
+        "KHR_materials_ior",
+        "KHR_materials_sheen",
+        "KHR_materials_anisotropy",
+        "KHR_materials_iridescence",
+    ]
+    .into_iter()
+    .any(|extension| material.extension_value(extension).is_some())
 }
 
 fn collect_attribute<T>(
@@ -813,6 +869,22 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_optional_tangents_become_the_missing_tangent_sentinel() {
+        let mut valid = [1.0, 0.0, 0.0, -1.0];
+        assert!(!sanitize_non_finite_tangent(&mut valid));
+        assert_eq!(valid, [1.0, 0.0, 0.0, -1.0]);
+
+        for invalid in [
+            [f32::NAN, f32::NAN, f32::NAN, 0.0],
+            [1.0, f32::INFINITY, 0.0, 1.0],
+        ] {
+            let mut sanitized = invalid;
+            assert!(sanitize_non_finite_tangent(&mut sanitized));
+            assert_eq!(sanitized, [0.0; 4]);
+        }
+    }
+
+    #[test]
     fn minimal_glb_loads_and_cooks_without_images() {
         let bytes = minimal_triangle_glb();
         let path = std::env::temp_dir().join(format!(
@@ -865,6 +937,42 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_physical_materials_are_inspectable_compatibility_routes() {
+        for (extension, body, expected_reason) in [
+            (
+                "KHR_materials_transmission",
+                json!({ "transmissionFactor": 0.9 }),
+                CompatibilityReason::Transmission,
+            ),
+            (
+                "KHR_materials_clearcoat",
+                json!({ "clearcoatFactor": 0.5 }),
+                CompatibilityReason::LayeredPbr,
+            ),
+        ] {
+            let bytes = minimal_triangle_glb_with_raw_material(
+                Some(json!({ "extensions": { (extension): body } })),
+                &[extension],
+            );
+            let path = std::env::temp_dir().join(format!(
+                "bloom-cook-{extension}-{}-{}.glb",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            let source = load_geometry_source(&path).unwrap();
+            let _ = std::fs::remove_file(&path);
+            assert!(source.primitives.is_empty());
+            assert_eq!(source.compatibility.len(), 1);
+            assert_eq!(source.compatibility[0].reason, expected_reason);
+            assert_eq!(source.compatibility[0].detail, 0);
+        }
+    }
+
+    #[test]
     fn atomic_output_can_replace_an_existing_artifact() {
         let path = std::env::temp_dir().join(format!(
             "bloom-cook-atomic-{}-{}.bgeo",
@@ -885,6 +993,18 @@ mod tests {
     }
 
     fn minimal_triangle_glb_with_material(base_color_factor: Option<[f32; 4]>) -> Vec<u8> {
+        let material = base_color_factor.map(|factor| {
+            json!({
+                "pbrMetallicRoughness": { "baseColorFactor": factor }
+            })
+        });
+        minimal_triangle_glb_with_raw_material(material, &[])
+    }
+
+    fn minimal_triangle_glb_with_raw_material(
+        material: Option<serde_json::Value>,
+        extensions_used: &[&str],
+    ) -> Vec<u8> {
         let mut binary = Vec::new();
         for value in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
             binary.extend_from_slice(&value.to_le_bytes());
@@ -893,15 +1013,15 @@ mod tests {
             binary.extend_from_slice(&index.to_le_bytes());
         }
         binary.resize(binary.len().div_ceil(4) * 4, 0);
-        let material_json = base_color_factor.map_or_else(String::new, |factor| {
-            format!(
-                "\"materials\":{},",
-                serde_json::json!([{
-                    "pbrMetallicRoughness": { "baseColorFactor": factor }
-                }])
-            )
+        let material_json = material.as_ref().map_or_else(String::new, |material| {
+            format!("\"materials\":[{material}],")
         });
-        let primitive_material = if base_color_factor.is_some() {
+        let extensions_json = if extensions_used.is_empty() {
+            String::new()
+        } else {
+            format!("\"extensionsUsed\":{},", json!(extensions_used))
+        };
+        let primitive_material = if material.is_some() {
             r#", "material":0"#
         } else {
             ""
@@ -909,6 +1029,7 @@ mod tests {
         let json = format!(
             r#"{{
                 "asset":{{"version":"2.0"}},
+                {extensions_json}
                 "buffers":[{{"byteLength":{}}}],
                 "bufferViews":[
                     {{"buffer":0,"byteOffset":0,"byteLength":36}},

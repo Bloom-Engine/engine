@@ -766,7 +766,7 @@ pub(super) fn load_gltf_with_textures(
                 // skip normal-map perturbation for this mesh.
                 let tangents: Vec<[f32; 4]> = reader
                     .read_tangents()
-                    .map(|iter| iter.collect())
+                    .map(|iter| iter.map(sanitize_imported_tangent).collect())
                     .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
                 let joint_vals: Option<Vec<[u16; 4]>> =
                     reader.read_joints(0).map(|iter| iter.into_u16().collect());
@@ -1206,7 +1206,7 @@ fn load_gltf_staged_impl(
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
             let tangents: Vec<[f32; 4]> = reader
                 .read_tangents()
-                .map(|iter| iter.collect())
+                .map(|iter| iter.map(sanitize_imported_tangent).collect())
                 .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
             let joint_vals: Option<Vec<[u16; 4]>> =
                 reader.read_joints(0).map(|iter| iter.into_u16().collect());
@@ -1522,7 +1522,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
             let tangents: Vec<[f32; 4]> = reader
                 .read_tangents()
-                .map(|iter| iter.collect())
+                .map(|iter| iter.map(sanitize_imported_tangent).collect())
                 .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
             let joint_vals: Option<Vec<[u16; 4]>> =
                 reader.read_joints(0).map(|iter| iter.into_u16().collect());
@@ -1672,6 +1672,17 @@ fn multiply_rgba(lhs: [f32; 4], rhs: [f32; 4]) -> [f32; 4] {
         lhs[2] * rhs[2],
         lhs[3] * rhs[3],
     ]
+}
+
+fn sanitize_imported_tangent(tangent: [f32; 4]) -> [f32; 4] {
+    if tangent.iter().all(|component| component.is_finite()) {
+        tangent
+    } else {
+        // Tangents are optional in glTF. Treat a malformed optional tangent
+        // as missing so every renderer path receives the same finite sentinel
+        // instead of relying on backend-specific NaN behavior.
+        [0.0; 4]
+    }
 }
 
 type MaskTextureVariantKey = (usize, u32);

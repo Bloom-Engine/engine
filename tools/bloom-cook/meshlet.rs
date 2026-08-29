@@ -162,7 +162,7 @@ pub fn build_leaf_meshlets(
     Ok(result)
 }
 
-fn validate_primitive(primitive: &StaticPrimitive) -> Result<(), String> {
+pub(crate) fn validate_primitive(primitive: &StaticPrimitive) -> Result<(), String> {
     if primitive.vertices.is_empty() {
         return Err(format!(
             "mesh {} primitive {} has no vertices",
@@ -178,20 +178,24 @@ fn validate_primitive(primitive: &StaticPrimitive) -> Result<(), String> {
         ));
     }
     for (vertex_index, vertex) in primitive.vertices.iter().enumerate() {
-        let finite = vertex
-            .position
-            .iter()
-            .chain(vertex.normal.iter())
-            .chain(vertex.tangent.iter())
-            .chain(vertex.uv0.iter())
-            .chain(vertex.uv1.iter())
-            .chain(vertex.color.iter())
-            .all(|component| component.is_finite());
-        if !finite {
-            return Err(format!(
-                "mesh {} primitive {} vertex {vertex_index} contains NaN/Inf",
-                primitive.mesh_index, primitive.primitive_index
-            ));
+        for (attribute, components) in [
+            ("POSITION", vertex.position.as_slice()),
+            ("NORMAL", vertex.normal.as_slice()),
+            ("TANGENT", vertex.tangent.as_slice()),
+            ("TEXCOORD_0", vertex.uv0.as_slice()),
+            ("TEXCOORD_1", vertex.uv1.as_slice()),
+            ("COLOR_0", vertex.color.as_slice()),
+        ] {
+            if let Some((component_index, component)) = components
+                .iter()
+                .enumerate()
+                .find(|(_, component)| !component.is_finite())
+            {
+                return Err(format!(
+                    "mesh {} primitive {} vertex {vertex_index} {attribute}[{component_index}]={component:?} contains NaN/Inf",
+                    primitive.mesh_index, primitive.primitive_index
+                ));
+            }
         }
     }
     if let Some(index) = primitive
@@ -444,8 +448,8 @@ mod tests {
             .contains("triangle list"));
         source.indices = vec![0, 1, 2];
         source.vertices[1].position[0] = f32::NAN;
-        assert!(build_leaf_meshlets(&source, MeshletLimits::default())
-            .unwrap_err()
-            .contains("NaN/Inf"));
+        let error = build_leaf_meshlets(&source, MeshletLimits::default()).unwrap_err();
+        assert!(error.contains("vertex 1 POSITION[0]=NaN"), "{error}");
+        assert!(error.contains("NaN/Inf"), "{error}");
     }
 }

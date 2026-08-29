@@ -8,8 +8,8 @@
 
 use crate::geometric_error::maximum_vertex_deviation;
 use crate::meshlet::{
-    build_leaf_meshlets, Meshlet, MeshletBounds, MeshletLimits, StaticPrimitive, StaticVertex,
-    FLAG_COARSE_ROOT, NO_RELATION,
+    build_leaf_meshlets, validate_primitive, Meshlet, MeshletBounds, MeshletLimits,
+    StaticPrimitive, StaticVertex, FLAG_COARSE_ROOT, NO_RELATION,
 };
 use meshopt::{SimplifyOptions, VertexDataAdapter};
 use std::cmp::Reverse;
@@ -85,6 +85,10 @@ pub fn build_spatial_leaf_meshlets(
     limits: MeshletLimits,
 ) -> Result<Vec<Meshlet>, String> {
     let limits = limits.validate()?;
+    // Reject malformed source data before passing it into meshoptimizer. A
+    // later local-cluster validation can only report the remapped meshlet
+    // index, which hides the offending source accessor element.
+    validate_primitive(primitive)?;
     let maximum_triangles = (limits.max_triangles / 4) * 4;
     if maximum_triangles < 4 {
         return build_leaf_meshlets(primitive, limits);

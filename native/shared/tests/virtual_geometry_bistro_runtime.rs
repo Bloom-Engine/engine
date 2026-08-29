@@ -22,6 +22,7 @@ const END_X: f32 = START_X + 3.748170285;
 const END_Z: f32 = START_Z + 4.685212856;
 const MOTION_STEPS: u32 = 30;
 const MOTION_SAMPLE_INTERVAL: u32 = 5;
+const EXPECTED_PLACEMENTS: usize = 2_909;
 
 #[derive(Clone, Copy, Debug)]
 struct ImageMetrics {
@@ -233,7 +234,7 @@ fn run_virtual_child(scene_path: &Path, archive_path: &Path, directory: &Path) {
                 max_evictions_per_frame: 1_024,
             },
             GpuVirtualTraversalConfig {
-                max_instances: 2_048,
+                max_instances: 4_096,
                 max_selected_clusters: 524_288,
                 max_page_requests: 65_536,
             },
@@ -436,7 +437,7 @@ fn load_model(engine: &mut EngineState, scene_path: &Path) -> f64 {
         .expect("loaded Bistro model");
     assert_eq!(
         model.meshes.len(),
-        1_176,
+        EXPECTED_PLACEMENTS,
         "unexpected Bistro placement corpus"
     );
     model_handle

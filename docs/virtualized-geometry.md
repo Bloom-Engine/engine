@@ -95,10 +95,13 @@ but uses this fixed 32-byte vertex layout:
 
 The tangent-valid bit preserves an imported all-zero missing-tangent sentinel;
 the decoder does not manufacture a direction that could silently enable
-normal mapping. Values outside the representable safety contract—non-finite
-components, UVs outside finite binary16, colors outside 0–1, invalid
-directions or handedness—fail the packed cook. Unknown flags, non-zero
-padding, non-finite half values, or a malformed sentinel fail strict
+normal mapping. Because tangents are optional in glTF, a source tangent with
+any non-finite component is normalized to that missing-tangent sentinel and
+the sanitized vertex count is written to the cook report; the ordinary
+importer applies the same finite contract. Other values outside the
+representable safety contract—non-finite components, UVs outside finite
+binary16, colors outside 0–1, invalid directions or handedness—fail the packed
+cook. Unknown flags, non-zero padding, non-finite half values, or a malformed sentinel fail strict
 inspection.
 
 Packed payloads are not selected automatically. The lossless version 1 path
@@ -214,6 +217,8 @@ does not produce virtualized meshlets:
 | A mesh referenced by a skinned node | `skinned` |
 | A primitive with morph targets | `morph-targets` |
 | `alphaMode: BLEND` | `alpha-blend` |
+| Active `KHR_materials_transmission` | `transmission` |
+| Authored clearcoat, specular/IOR, sheen, anisotropy, or iridescence | `layered-pbr` |
 
 An entirely incompatible asset still produces a valid metadata-only `.bgeo`.
 For example, Fox records its skinned primitive and zero pages. This makes the
@@ -346,13 +351,14 @@ Adapters with `MULTI_DRAW_INDIRECT_COUNT` use the exact counted stream. Other
 qualified adapters use the bounded 22-bin GPU compaction path, whose submitted
 vertex amplification is strictly below 2x and whose empty bins carry zero
 instances. Alpha-masked clusters are discarded and remain compatibility-owned;
-opaque clusters follow Bloom's established two-face scene-raster contract even
-when the glTF material is not marked double-sided. This preserves legal but
-reversed/mirrored imported surfaces when residency changes. The face bit is
-retained for later shading, while material double-sidedness still controls
-normal-cone safety and material response. The 128-byte frame record already
-carries current and previous view-projection transforms, although this raster
-consumes only the current transform.
+opaque clusters follow the ordinary retained-scene glTF contract: single-sided
+materials discard raster back faces and explicitly double-sided materials keep
+both. Raster front-facing state already accounts for winding changes caused by
+mirrored instance transforms. The face bit is retained for later shading,
+while material double-sidedness also controls normal-cone safety and material
+response. The 128-byte frame record already carries current and previous
+view-projection transforms, although this raster consumes only the current
+transform.
 
 The renderer integration remains deliberately explicit:
 

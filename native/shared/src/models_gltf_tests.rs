@@ -7,6 +7,20 @@ fn minimal_triangle_glb(material: &str) -> Vec<u8> {
     minimal_triangle_glb_with_node_scale(material, None)
 }
 
+#[test]
+fn non_finite_optional_tangents_become_the_missing_tangent_sentinel() {
+    assert_eq!(
+        sanitize_imported_tangent([1.0, 0.0, 0.0, -1.0]),
+        [1.0, 0.0, 0.0, -1.0]
+    );
+    for invalid in [
+        [f32::NAN, f32::NAN, f32::NAN, 0.0],
+        [1.0, f32::INFINITY, 0.0, 1.0],
+    ] {
+        assert_eq!(sanitize_imported_tangent(invalid), [0.0; 4]);
+    }
+}
+
 fn minimal_triangle_glb_with_node_scale(material: &str, node_scale: Option<[f32; 3]>) -> Vec<u8> {
     let mut binary = Vec::new();
     for value in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {

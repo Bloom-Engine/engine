@@ -49,6 +49,8 @@ pub enum CompatibilityReason {
     Skinned = 2,
     MorphTargets = 3,
     AlphaBlend = 4,
+    Transmission = 5,
+    LayeredPbr = 6,
 }
 
 impl CompatibilityReason {
@@ -58,6 +60,8 @@ impl CompatibilityReason {
             Self::Skinned => "skinned",
             Self::MorphTargets => "morph-targets",
             Self::AlphaBlend => "alpha-blend",
+            Self::Transmission => "transmission",
+            Self::LayeredPbr => "layered-pbr",
         }
     }
 
@@ -67,8 +71,36 @@ impl CompatibilityReason {
             2 => Ok(Self::Skinned),
             3 => Ok(Self::MorphTargets),
             4 => Ok(Self::AlphaBlend),
+            5 => Ok(Self::Transmission),
+            6 => Ok(Self::LayeredPbr),
             _ => Err(format!("unknown compatibility reason code {code}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompatibilityReason;
+
+    #[test]
+    fn compatibility_reason_codes_and_labels_are_stable() {
+        for (code, reason, label) in [
+            (
+                1,
+                CompatibilityReason::NonTriangleTopology,
+                "non-triangle-topology",
+            ),
+            (2, CompatibilityReason::Skinned, "skinned"),
+            (3, CompatibilityReason::MorphTargets, "morph-targets"),
+            (4, CompatibilityReason::AlphaBlend, "alpha-blend"),
+            (5, CompatibilityReason::Transmission, "transmission"),
+            (6, CompatibilityReason::LayeredPbr, "layered-pbr"),
+        ] {
+            assert_eq!(CompatibilityReason::from_code(code).unwrap(), reason);
+            assert_eq!(reason.label(), label);
+        }
+        assert!(CompatibilityReason::from_code(0).is_err());
+        assert!(CompatibilityReason::from_code(7).is_err());
     }
 }
 
