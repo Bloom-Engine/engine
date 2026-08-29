@@ -41,6 +41,10 @@ tools/bloom-reference/*.png
 tools/bloom-diff/diff-*.png
 tools/validate-out/
 
+# Local cooked-asset stores (CI should cache or publish these explicitly)
+/.cache/bloom/
+/out/assets/
+
 # Throwaway probe scripts
 /test_*.ts
 _perry_stubs.o

@@ -43,6 +43,23 @@ Logical IDs are relative slash-separated ASCII identifiers. Empty components,
 Dots within a component are preserved; `chair.v2` and `chair.v3` cannot map to
 the same manifest.
 
+### Store/cache location
+
+The final positional argument is the complete store and cache root. There is
+no hidden user-global cache and no environment-variable default. For local
+development, use an ignored repository-relative directory such as
+`out/assets`; for CI, use a job cache or artifact directory such as
+`.cache/bloom/assets`. The absolute root is deliberately absent from manifests
+and indexes, so a validated store can move between machines without changing
+its bytes.
+
+Keep `manifests/`, `variants/`, and `chunks/` together while cooking and run
+`asset-index-inspect` before packaging. A native geometry shipping package may
+then retain only `index.json` and its referenced `chunks/`; source assets and
+manifests are not read by `VirtualGeometryStoreLoader`. Keep the manifests in
+build artifacts for provenance and verification. Old unreferenced chunks are
+safe but are not yet garbage-collected automatically.
+
 The store layout is:
 
 ```text
@@ -93,6 +110,68 @@ The existing direct `texture` and `texture-dir` commands share the same BC7
 encoder as `texture-store`; normal maps imply linear color. Store commands
 reject unknown or duplicate texture options instead of silently producing an
 ambiguous recipe.
+
+### Manifest examples
+
+These illustrative unprofiled manifests show the complete field shape. Hash
+placeholders stand for canonical 64-character lowercase SHA-256 strings; real
+files contain no comments or placeholders.
+
+```json
+{
+  "artifact": {
+    "bytes": 1446496,
+    "format_version": 2,
+    "path": "chunks/sha256/<artifact-sha256>.bgeo",
+    "payload_sha256": "<payload-sha256>",
+    "sha256": "<artifact-sha256>"
+  },
+  "build_key_sha256": "<build-key-sha256>",
+  "dependencies": [
+    { "kind": "source-closure", "sha256": "<source-sha256>" }
+  ],
+  "kind": "geometry",
+  "logical_id": "quality/damaged-helmet",
+  "recipe": { "name": "bloom-geometry", "version": 3 },
+  "schema": "bloom-asset-manifest-v1",
+  "settings": {
+    "hierarchy_levels": 8,
+    "max_triangles_per_meshlet": 124,
+    "max_vertices_per_meshlet": 64,
+    "page_budget_bytes": 65536,
+    "vertex_format": "quantized32"
+  },
+  "source": { "sha256": "<source-sha256>" }
+}
+```
+
+```json
+{
+  "artifact": {
+    "bytes": 1398256,
+    "format": "bc7-rgba-unorm-srgb",
+    "height": 1024,
+    "mip_levels": 11,
+    "path": "chunks/sha256/<artifact-sha256>.dds",
+    "sha256": "<artifact-sha256>",
+    "width": 1024
+  },
+  "build_key_sha256": "<build-key-sha256>",
+  "dependencies": [
+    { "kind": "source-file", "sha256": "<source-sha256>" }
+  ],
+  "kind": "texture",
+  "logical_id": "world/sponza/albedo",
+  "recipe": { "name": "bloom-texture", "version": 1 },
+  "schema": "bloom-asset-manifest-v1",
+  "settings": { "color_space": "srgb", "normal_map": false },
+  "source": { "sha256": "<source-sha256>" }
+}
+```
+
+Profiled v2 manifests have the same kind-specific fields plus
+`"profile": { "platform": "macos", "quality": "high" }`; the profile is
+also part of the build key.
 
 `bloom-asset-manifest-v2` adds a canonical `{ platform, quality }` profile.
 The profile is part of the recipe build key even when two profiles currently
@@ -166,6 +245,41 @@ The index build report distinguishes total referenced bytes from unique chunk
 bytes. Several logical IDs may share one immutable chunk without hiding their
 individual references; the same is true of several platform/quality variants.
 
+## CI use
+
+Treat the source-to-logical-ID command list as tracked build input. Invoke the
+same commands for every clean or restored-cache job, then build and inspect the
+index. Cooker cache hits are fully revalidated, so restoring a damaged cache
+fails the job rather than silently recooking over it.
+
+```shell
+set -euo pipefail
+
+store=.cache/bloom/assets
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  geometry-store quality/damaged-helmet \
+  examples/renderer-test/assets/DamagedHelmet.glb "$store" \
+  --platform portable --quality high \
+  --hierarchy-levels 8 --vertex-format quantized32
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  texture-store quality/bloom-full embed-perry/bloomFull.png "$store" \
+  --platform portable --quality high
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  asset-index "$store"
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  asset-index-inspect "$store"
+```
+
+Use the cooker revision, target profile, and source-lock revision in the CI
+cache key to control storage growth. That outer cache key is an optimization,
+not a correctness boundary: every manifest still recomputes its recipe key and
+validates its referenced chunk. Run the release `bloom-cook` tests in the tool
+job when changing recipes or formats. Build the index only after all asset
+commands finish; publish it together with every referenced chunk.
+
 ## Explicit variant resolution
 
 `asset-resolve` validates the installed index against every live manifest and
@@ -210,6 +324,34 @@ This runtime intentionally does not rebuild the index from manifests. Shipping
 stores may omit manifests and all source assets; `index.json` plus its immutable
 `chunks/` references are the runtime contract. Installers and development
 workflows should continue to run `asset-index-inspect` before packaging.
+
+## Migration from direct source loading
+
+Migration is deliberately incremental; source loading remains available for
+development and fallback while each shipping path is qualified.
+
+1. Add deterministic `geometry-store` and `texture-store` commands to the
+   asset build, retaining the existing source files and logical naming.
+2. Finish the build with `asset-index` and gate CI/release packaging with
+   `asset-index-inspect`. Do not package a stale index.
+3. For native virtual geometry, replace render-thread source glTF parsing with
+   a bounded `VirtualGeometryStoreLoader::request`/`poll` flow. Pass the target
+   platform/quality and every allowed fallback explicitly, then register the
+   returned `Arc<VirtualGeometryAsset>` through the established pool path.
+4. For textures, ship the cooked `.dds` beside or instead of the source image.
+   Bloom's existing texture loader magic-sniffs DDS, and glTF image lookup can
+   retry `foo.dds` when `foo.png` is absent. Indexed logical texture resolution
+   is not implemented yet, so packaging must still map authored texture paths
+   to the cooked DDS files rather than pretending the texture index is a
+   runtime API.
+5. Remove source glTF/images from a shipping target only after its cold-start,
+   variant/fallback, and visual-quality tests pass on that target. Keep direct
+   source loading enabled in development until the complete scene, material,
+   skin/animation, and texture dependency set has a cooked runtime path.
+
+If a runtime reports an unsupported manifest, index, geometry format, or
+recipe-derived artifact, recook with the shipping executable's matching cooker
+revision. Never rewrite version fields or weaken hash validation in place.
 
 ## Current boundary
 
