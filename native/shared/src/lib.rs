@@ -3,7 +3,11 @@
 // the crate root rather than leaving 16+ warnings in every build.
 #![allow(static_mut_refs)]
 
+#[cfg(any(feature = "image-extras", feature = "models3d"))]
+mod adapter_profile;
 pub mod audio;
+#[cfg(all(feature = "image-extras", not(target_arch = "wasm32")))]
+pub mod cooked_texture_store;
 pub mod ffi;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffi_core;

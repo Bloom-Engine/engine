@@ -7,6 +7,7 @@
 //! wait for storage.
 
 use super::{ArtifactIdentity, VirtualGeometryAsset, VirtualGeometryLoadError};
+use crate::adapter_profile::AdapterAssetProfilePlan;
 use bloom_geometry_format::hex_hash;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,22 +101,15 @@ impl VirtualGeometryStoreRequest {
         quality: &str,
         features: wgpu::Features,
     ) -> Result<Self, VirtualGeometryStoreError> {
-        let runtime_platform = runtime_platform_profile();
-        let bc_supported = features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
-        let native_profile_selected = desktop_bc_profile(runtime_platform) && bc_supported;
-        let selected_platform = if native_profile_selected {
-            runtime_platform
-        } else {
-            "portable"
-        };
-        let requested = VirtualGeometryAssetProfile::new(selected_platform, quality)?;
+        let plan = AdapterAssetProfilePlan::from_features(features);
+        let requested = VirtualGeometryAssetProfile::new(plan.selected_platform(), quality)?;
         let mut request = Self::new(logical_id, requested);
         request.policy = VirtualGeometryStoreRequestPolicy::Adapter {
-            runtime_platform,
-            bc_supported,
-            native_profile_selected,
+            runtime_platform: plan.runtime_platform(),
+            bc_supported: plan.bc_supported(),
+            native_profile_selected: plan.native_profile_selected(),
         };
-        if native_profile_selected {
+        if plan.has_portable_fallback() {
             request
                 .fallbacks
                 .push(VirtualGeometryAssetProfile::new("portable", quality)?);
@@ -704,13 +698,8 @@ fn validate_request(
         native_profile_selected,
     } = request.policy
     {
-        let expected_native = desktop_bc_profile(runtime_platform) && bc_supported;
-        let expected_platform = if expected_native {
-            runtime_platform
-        } else {
-            "portable"
-        };
-        let expected_fallbacks = if expected_native {
+        let expected = AdapterAssetProfilePlan::from_bc_support(bc_supported);
+        let expected_fallbacks = if expected.has_portable_fallback() {
             vec![VirtualGeometryAssetProfile::new(
                 "portable",
                 request.requested.quality(),
@@ -718,9 +707,9 @@ fn validate_request(
         } else {
             Vec::new()
         };
-        if runtime_platform != runtime_platform_profile()
-            || native_profile_selected != expected_native
-            || request.requested.platform() != expected_platform
+        if runtime_platform != expected.runtime_platform()
+            || native_profile_selected != expected.native_profile_selected()
+            || request.requested.platform() != expected.selected_platform()
             || request.fallbacks != expected_fallbacks
             || request.allow_unprofiled
         {
@@ -730,30 +719,6 @@ fn validate_request(
         }
     }
     Ok(())
-}
-
-const fn runtime_platform_profile() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "android") {
-        "android"
-    } else if cfg!(target_os = "ios") {
-        "ios"
-    } else if cfg!(target_os = "tvos") {
-        "tvos"
-    } else if cfg!(target_os = "visionos") {
-        "visionos"
-    } else {
-        "portable"
-    }
-}
-
-fn desktop_bc_profile(platform: &str) -> bool {
-    matches!(platform, "macos" | "windows" | "linux")
 }
 
 fn validate_logical_id(value: &str) -> Result<(), VirtualGeometryStoreError> {
@@ -835,8 +800,9 @@ mod request_policy_tests {
             wgpu::Features::TEXTURE_COMPRESSION_BC,
         )
         .unwrap();
-        if desktop_bc_profile(runtime_platform_profile()) {
-            assert_eq!(native.requested.platform(), runtime_platform_profile());
+        let bc_plan = AdapterAssetProfilePlan::from_bc_support(true);
+        if bc_plan.native_profile_selected() {
+            assert_eq!(native.requested.platform(), bc_plan.runtime_platform());
             assert_eq!(native.fallbacks.len(), 1);
             assert_eq!(native.fallbacks[0].label(), "portable/high");
         } else {
@@ -855,7 +821,8 @@ mod request_policy_tests {
         assert_eq!(
             portable.policy,
             VirtualGeometryStoreRequestPolicy::Adapter {
-                runtime_platform: runtime_platform_profile(),
+                runtime_platform: AdapterAssetProfilePlan::from_bc_support(false)
+                    .runtime_platform(),
                 bc_supported: false,
                 native_profile_selected: false,
             }
@@ -874,7 +841,7 @@ mod request_policy_tests {
             },
         };
         let (_, selection) = select_entry(&[entry], &native).unwrap();
-        if desktop_bc_profile(runtime_platform_profile()) {
+        if bc_plan.native_profile_selected() {
             assert_eq!(selection.kind, VirtualGeometrySelectionKind::Fallback);
             assert_eq!(selection.reason, "portable-fallback-after-native-miss");
             assert_eq!(selection.fallback_rank, Some(0));

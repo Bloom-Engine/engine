@@ -106,6 +106,31 @@ impl TextureManager {
         })
     }
 
+    /// Upload a worker-validated indexed DDS without falling back to source
+    /// decode or regenerating mips. Adapter-owned requests are expected to
+    /// select a directly uploadable package; a mismatch therefore fails
+    /// explicitly instead of hiding a packaging error.
+    #[cfg(all(feature = "image-extras", not(target_arch = "wasm32")))]
+    pub fn load_resolved_cooked_texture(
+        &mut self,
+        renderer: &mut Renderer,
+        resolved: &crate::cooked_texture_store::ResolvedCookedTexture,
+    ) -> Result<f64, crate::cooked_texture_store::CookedTextureStoreError> {
+        let bind_group_idx = renderer
+            .register_texture_dds_kind(resolved.dds(), resolved.format.is_normal_map())
+            .ok_or_else(|| {
+                crate::cooked_texture_store::CookedTextureStoreError::Upload(format!(
+                "selected {} artifact is not directly supported by the accepted device features",
+                resolved.format.name()
+            ))
+            })?;
+        Ok(self.textures.alloc(TextureData {
+            bind_group_idx,
+            width: resolved.width,
+            height: resolved.height,
+        }))
+    }
+
     pub fn unload_texture(&mut self, handle: f64, renderer: &mut Renderer) {
         if let Some(tex) = self.textures.free(handle) {
             renderer.unload_texture(tex.bind_group_idx);

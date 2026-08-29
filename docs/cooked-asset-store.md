@@ -334,24 +334,25 @@ implicit cross-platform, lower-quality, or legacy fallback.
 
 ## Native runtime resolution
 
-`VirtualGeometryStoreLoader` is the source-free native geometry counterpart to
-`asset-resolve`. It ignores declared non-geometry index entries, owns one
-bounded worker, and exposes a non-blocking `request`/`poll` interface. Explicit
-requests still supply the logical ID, requested platform/quality, ordered
-fallbacks, and whether an unprofiled legacy entry is allowed. Selection
-follows exactly the offline resolver contract: exact first, caller-ordered
-fallbacks next, and unprofiled only when explicitly enabled.
+`VirtualGeometryStoreLoader` and `CookedTextureStoreLoader` are the source-free
+native counterparts to `asset-resolve`. Each ignores the other declared asset
+kind, owns one bounded worker, and exposes a non-blocking `request`/`poll`
+interface. Explicit requests still supply the logical ID, requested
+platform/quality, ordered fallbacks, and whether an unprofiled legacy entry is
+allowed. Selection follows exactly the offline resolver contract: exact first,
+caller-ordered fallbacks next, and unprofiled only when explicitly enabled.
 
 Production renderer callers should instead use
-`Renderer::virtual_geometry_store_request(logical_id, quality)`. It derives the
-platform from the compiled runtime and the compression path from the accepted
+`Renderer::virtual_geometry_store_request(logical_id, quality)` and
+`Renderer::cooked_texture_store_request(logical_id, quality)`. Both use one
+shared adapter-profile plan derived from the compiled runtime and the accepted
 `wgpu::Device` features. A macOS/Windows/Linux device with accepted BC support
 requests its native profile and carries exactly one same-quality `portable`
-fallback. Other devices request `portable` directly. It never silently lowers
+fallback. Other devices request `portable` directly. Neither silently lowers
 quality or opts into unprofiled assets. Each automatic or fallback result logs
-and exposes a `bloom-runtime-asset-selection-v1` JSON report containing the
-requested/selected profiles, BC capability, runtime platform, selection kind,
-fallback rank, and stable reason such as `adapter-portable-profile` or
+and exposes structured JSON containing the requested/selected profiles, BC
+capability, runtime platform, selection kind, fallback rank, and a stable
+reason such as `adapter-portable-profile` or
 `portable-fallback-after-native-miss`.
 
 The loader worker performs every potentially blocking startup operation:
@@ -362,6 +363,15 @@ identity. It retains only validated archive metadata and the coarse-root page
 prefix. The update or render thread only enqueues and polls. Completed assets
 use the existing `Arc<VirtualGeometryAsset>` registration path, so renderer
 setup remains simple and existing direct-byte callers are unchanged.
+
+The texture worker additionally validates the selected immutable file length
+and SHA-256, canonical `.dds` path, declared format/dimensions/mip count, DXGI
+container format, single-layer 2D shape, and complete surface layout. It
+rejects BC inside an automatically selected `portable` profile or on a device
+without accepted BC support. The update thread passes the completed result to
+`TextureManager::load_resolved_cooked_texture`, which uses Bloom's established
+DDS uploader. This indexed path deliberately has no source decode or mip-
+regeneration fallback: a package/device mismatch is an actionable error.
 
 After registration, GPU missing-page feedback queues exact file ranges on the
 page worker. Each result is checked against its independent page SHA-256 before
@@ -390,12 +400,12 @@ development and fallback while each shipping path is qualified.
    explicit request when testing a particular fallback. Register the returned
    `Arc<VirtualGeometryAsset>` through the established pool path and retain its
    structured selection report in startup diagnostics.
-4. For textures, ship the cooked `.dds` beside or instead of the source image.
-   Bloom's existing texture loader magic-sniffs DDS, and glTF image lookup can
-   retry `foo.dds` when `foo.png` is absent. Indexed logical texture resolution
-   is not implemented yet, so packaging must still map authored texture paths
-   to the cooked DDS files rather than pretending the texture index is a
-   runtime API.
+4. For native textures, queue the renderer-owned request through
+   `CookedTextureStoreLoader`, poll during an ordinary update, then pass the
+   validated result to `TextureManager::load_resolved_cooked_texture`. Direct
+   paths remain available during migration: Bloom's existing texture loader
+   magic-sniffs DDS, and glTF image lookup can retry `foo.dds` when `foo.png`
+   is absent.
 5. Remove source glTF/images from a shipping target only after its cold-start,
    variant/fallback, and visual-quality tests pass on that target. Keep direct
    source loading enabled in development until the complete scene, material,
@@ -415,12 +425,10 @@ This checkpoint remains loose-store-only. It does not yet add:
   depending on several textures);
 - garbage collection, packed shipping archives, or network-backed stores.
 
-The indexed runtime loader remains geometry-only and opt-in. Cooked `.dds`
-files remain loadable through Bloom's existing texture path, and portable
-profile files use capability-neutral RGBA8, but resolving a texture logical ID
-from `index.json` is later work. The automatic profile constructor changes no
-default renderer path, buffers, shaders, passes, draws, pixels, or frame-time
-behavior.
+The indexed native runtime loaders remain opt-in and loose-store-only. Web
+package fetch/integration and packed archives remain later work. The automatic
+profile constructors and validated texture upload path change no default
+renderer path, buffers, shaders, passes, draws, pixels, or frame-time behavior.
 
 The canonical variant, fallback, deduplication, and Bistro qualification is
 recorded in `docs/evidence/issue-136-asset-variants-v2.{md,json}`.

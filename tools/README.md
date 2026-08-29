@@ -32,8 +32,9 @@ cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   /tmp/helmet.bgeo --iterations 25
 ```
 
-The geometry path is offline-only today. It does not change ordinary glTF
-rendering or allocate runtime resources. See
+Cooking remains offline and does not change ordinary source loading by
+default. Native runtime consumers can opt into indexed, source-free geometry
+and texture store loaders with adapter-owned package selection. See
 [`docs/virtualized-geometry.md`](../docs/virtualized-geometry.md) for the
 format, corruption guarantees, limits, compatibility reasons, and staged
 runtime boundary.

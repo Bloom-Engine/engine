@@ -677,6 +677,25 @@ impl Renderer {
 }
 
 impl Renderer {
+    /// Derive a cooked texture package request from this renderer's accepted
+    /// device features. Callers provide only the logical ID and desired
+    /// quality; platform and portable fallback policy remain renderer-owned.
+    #[cfg(all(feature = "image-extras", not(target_arch = "wasm32")))]
+    pub fn cooked_texture_store_request(
+        &self,
+        logical_id: impl Into<String>,
+        quality: &str,
+    ) -> Result<
+        crate::cooked_texture_store::CookedTextureStoreRequest,
+        crate::cooked_texture_store::CookedTextureStoreError,
+    > {
+        crate::cooked_texture_store::CookedTextureStoreRequest::for_device(
+            logical_id,
+            quality,
+            &self.device,
+        )
+    }
+
     /// Register a cooked DDS texture (output of bloom-cook).
     /// Gated on `image-extras` (DDS is a beyond-PNG runtime codec).
     ///
@@ -686,6 +705,15 @@ impl Renderer {
     /// can take the CPU decode path.
     #[cfg(feature = "image-extras")]
     pub fn register_texture_dds(&mut self, dds: &image_dds::ddsfile::Dds) -> Option<u32> {
+        self.register_texture_dds_kind(dds, false)
+    }
+
+    #[cfg(feature = "image-extras")]
+    pub(crate) fn register_texture_dds_kind(
+        &mut self,
+        dds: &image_dds::ddsfile::Dds,
+        is_normal_map: bool,
+    ) -> Option<u32> {
         let surface = image_dds::Surface::from_dds(dds).ok()?;
         let layout = cooked_dds_layout(surface.image_format)?;
         if layout.requires_bc
@@ -726,6 +754,11 @@ impl Renderer {
             let mh = (height >> mip).max(1);
             let blocks_w = mw.div_ceil(layout.block_width);
             let blocks_h = mh.div_ceil(layout.block_height);
+            // WebGPU copies compressed tail mips in physical block texels.
+            // A virtual 2x2 BC7 mip therefore has one 4x4 physical block;
+            // passing the virtual extent is rejected as an unaligned copy.
+            let copy_width = blocks_w * layout.block_width;
+            let copy_height = blocks_h * layout.block_height;
             let mip_data = surface.get(0, 0, mip)?;
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -741,8 +774,8 @@ impl Renderer {
                     rows_per_image: Some(blocks_h),
                 },
                 wgpu::Extent3d {
-                    width: mw,
-                    height: mh,
+                    width: copy_width,
+                    height: copy_height,
                     depth_or_array_layers: 1,
                 },
             );
@@ -769,12 +802,18 @@ impl Renderer {
             width,
             height,
             mip_count,
-            if layout.srgb {
-                TextureColorSpace::Srgb
-            } else {
+            if is_normal_map || !layout.srgb {
                 TextureColorSpace::Linear
+            } else {
+                TextureColorSpace::Srgb
             },
-            TextureSemantic::BaseColor,
+            if is_normal_map {
+                TextureSemantic::Normal
+            } else if layout.srgb {
+                TextureSemantic::BaseColor
+            } else {
+                TextureSemantic::MetallicRoughness
+            },
             false,
         );
         self.texture_bind_groups.push(bind_group);
