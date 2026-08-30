@@ -254,7 +254,9 @@ run_component() {
         tools/quality/vsm_caster_coverage.py \
         tools/quality/vsm_debug_views.py \
         tools/quality/vsm_motion_corpus.py \
-        tools/quality/prepare_bistro.py
+        tools/quality/prepare_bistro.py \
+        tools/ci/web_smoke.py \
+        tools/ci/test_web_smoke.py
       python3 -m unittest \
         tools/quality/test_run.py \
         tools/quality/test_khronos_materials.py \
@@ -264,6 +266,7 @@ run_component() {
         tools/quality/test_vsm_caster_coverage.py \
         tools/quality/test_vsm_debug_views.py \
         tools/quality/test_vsm_motion_corpus.py \
+        tools/ci/test_web_smoke.py \
         -v
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml

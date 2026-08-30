@@ -77,6 +77,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         current_depth_key,
         current_raw.a > 0.001,
     );
+    // Derivatives must execute in uniform fragment control flow. Browser
+    // WebGPU validates this strictly, so compute the depth footprint before
+    // the per-pixel off-screen history early return below.
+    let depth_base_tolerance = 0.02 + abs(expected_prev_depth) * 0.005;
+    let depth_gradient = abs(dpdx(expected_prev_depth)) + abs(dpdy(expected_prev_depth));
 
     // 3×3 box pre-filter + neighborhood min/max. One texel spread
     // across 9 samples hides single-pixel glossy-ray sparkles in a
@@ -124,8 +129,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let current_hit = current_raw.a > 0.001;
     let history_hit = history_raw.a > 0.0;
     let provenance_disocclusion = select(1.0, 0.0, current_hit == history_hit);
-    let depth_base_tolerance = 0.02 + abs(expected_prev_depth) * 0.005;
-    let depth_gradient = abs(dpdx(expected_prev_depth)) + abs(dpdy(expected_prev_depth));
     let depth_tolerance = max(
         depth_base_tolerance,
         min(depth_gradient * 2.0, depth_base_tolerance * 4.0),

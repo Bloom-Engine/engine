@@ -33,6 +33,7 @@ fn negotiated_headless_device_constructs_the_complete_renderer() {
     assert!(public["adapter"]["renderer_capabilities"]["paths"]["materials"].is_string());
     assert!(public["material_binding"]["selected_tier"].is_string());
     assert!(public["runtime_support"]["path_tracing"].is_boolean());
+    assert!(public["runtime_support"]["ssgi_trace_backend"].is_string());
     assert!(public["runtime_support"]["gpu_driven"]["enabled"].is_boolean());
     assert_eq!(
         public["runtime_support"]["gpu_driven"]["visibility_routed_indirect_streams"],

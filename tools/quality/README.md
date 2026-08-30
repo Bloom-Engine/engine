@@ -44,6 +44,26 @@ python3 tools/quality/run.py faults
 python3 -m unittest tools/quality/test_run.py -v
 ```
 
+To qualify the browser fallback renderer in real Chrome after building the
+WASM package:
+
+```sh
+./scripts/ci-check.sh --web --component wasm-build
+./scripts/ci-check.sh --web --component browser-smoke
+```
+
+The browser gate first proves presentation with a known 2D frame, then loads
+the canonical Damaged Helmet through the production model importer and renders
+matched native 1.0, fractional 0.75 TAA, and fractional 0.75 no-TAA camera
+sequences. It rejects WebGPU validation errors, incomplete or flat output,
+missing motion, excessive fractional-to-native RGB or motion-derivative error,
+unexpected hardware ray-query use, and an inactive software SSGI fallback.
+`target/ci/web-smoke/result.json` records the limits, measured metrics, adapter,
+material residency, active runtime paths, and relative image directories. CI
+uploads that directory on success and failure for review. Browser GPU timestamp
+profiling is not inferred from compositor screenshots; performance changes
+still require the native fixed-step qualification contract below.
+
 To isolate an intermittent detailed-Bistro temporal defect by renderer owner,
 capture the same admitted scene, camera excursion, return pose, and 32-frame
 stationary burst with TAA, SSGI, SSR, and Hi-Z occlusion removed one at a time:
