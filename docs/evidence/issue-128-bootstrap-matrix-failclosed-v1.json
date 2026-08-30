@@ -1,0 +1,181 @@
+{
+  "schema": "bloom-quality-bootstrap-matrix-failclosed-evidence-v1",
+  "git_commit": "465c5f50d0dd95799f3d01935401f08f5df9fa92",
+  "adapter": {
+    "backend": "metal",
+    "name": "Apple M1 Max",
+    "device_type": "integratedgpu",
+    "capability_tier": "high-end"
+  },
+  "defect": {
+    "missing_baseline_suppressed_performance_failures": true,
+    "missing_baseline_suppressed_missing_intermediate_finalization": true,
+    "fix": "evaluate non-visual runtime and performance contracts before independent visual baseline availability",
+    "production_renderer_changed": false
+  },
+  "full_capture": {
+    "suite": "full",
+    "machine_class": "apple-m1-max-metal",
+    "git_dirty": false,
+    "cases_completed": 9,
+    "cases_expected": 9,
+    "approved_baselines_present": 0,
+    "approved_baselines_expected": 9,
+    "baseline_review_bundle_generated": true,
+    "baseline_installed": false,
+    "cases": [
+      {
+        "id": "pbr-spheres-high",
+        "cpu_mean_ms": 3.267171,
+        "cpu_p95_ms": 5.800626,
+        "gpu_mean_ms": 19.626654,
+        "gpu_p95_ms": 23.667081,
+        "wall_mean_ms": 8.006977,
+        "cpu_p95_budget_ms": 5.0,
+        "gpu_p95_budget_ms": 20.0,
+        "performance_passed": false,
+        "intermediate_count": 30
+      },
+      {
+        "id": "pbr-spheres-constrained",
+        "cpu_mean_ms": 1.968603,
+        "cpu_p95_ms": 4.287917,
+        "gpu_mean_ms": 5.75983,
+        "gpu_p95_ms": 7.075165,
+        "wall_mean_ms": 4.470633,
+        "performance_applicable_to_selected_machine_class": false,
+        "intermediate_count": 8
+      },
+      {
+        "id": "damaged-helmet",
+        "cpu_mean_ms": 3.113229,
+        "cpu_p95_ms": 5.074417,
+        "gpu_mean_ms": 8.170058,
+        "gpu_p95_ms": 11.955958,
+        "wall_mean_ms": 6.32418,
+        "cpu_p95_budget_ms": 6.0,
+        "gpu_p95_budget_ms": 12.0,
+        "performance_passed": true,
+        "intermediate_count": 30
+      },
+      {
+        "id": "sponza-interior",
+        "cpu_mean_ms": 3.273458,
+        "cpu_p95_ms": 5.390126,
+        "gpu_mean_ms": 43.27744,
+        "gpu_p95_ms": 57.115625,
+        "wall_mean_ms": 11.127376,
+        "cpu_p95_budget_ms": 10.0,
+        "gpu_p95_budget_ms": 55.0,
+        "performance_passed": false,
+        "intermediate_count": 30
+      },
+      {
+        "id": "bistro-exterior",
+        "cpu_mean_ms": 7.501942,
+        "cpu_p95_ms": 16.390793,
+        "gpu_mean_ms": 44.762568,
+        "gpu_p95_ms": 70.004996,
+        "wall_mean_ms": 16.392062,
+        "performance_applicable_to_selected_machine_class": false,
+        "intermediate_count": 30
+      },
+      {
+        "id": "skinned-alpha-motion",
+        "cpu_mean_ms": 5.909842,
+        "cpu_p95_ms": 15.706543,
+        "gpu_mean_ms": 13.619746,
+        "gpu_p95_ms": 29.771747,
+        "wall_mean_ms": 12.2336,
+        "cpu_p95_budget_ms": 10.0,
+        "gpu_p95_budget_ms": 30.0,
+        "performance_passed": false,
+        "intermediate_count": 30
+      },
+      {
+        "id": "draw-light-stress",
+        "cpu_mean_ms": 15.811722,
+        "cpu_p95_ms": 21.474123,
+        "gpu_mean_ms": 25.53305,
+        "gpu_p95_ms": 38.158915,
+        "wall_mean_ms": 20.418629,
+        "performance_applicable_to_selected_machine_class": false,
+        "intermediate_count": 30
+      },
+      {
+        "id": "weighted-transparency",
+        "cpu_mean_ms": 3.987632,
+        "cpu_p95_ms": 7.76554,
+        "gpu_mean_ms": 24.579061,
+        "gpu_p95_ms": 31.926791,
+        "wall_mean_ms": 27.264847,
+        "cpu_p95_budget_ms": 12.0,
+        "gpu_p95_budget_ms": 30.0,
+        "performance_passed": false,
+        "intermediate_count": 30
+      },
+      {
+        "id": "masked-alpha-coverage",
+        "cpu_mean_ms": 3.239782,
+        "cpu_p95_ms": 4.355377,
+        "gpu_mean_ms": 15.167638,
+        "gpu_p95_ms": 21.836915,
+        "wall_mean_ms": 18.995963,
+        "cpu_p95_budget_ms": 12.0,
+        "gpu_p95_budget_ms": 30.0,
+        "performance_passed": true,
+        "intermediate_count": 30
+      }
+    ],
+    "steady_state_resources": {
+      "all_cases_bind_group_creations": 0,
+      "all_cases_graph_compiles": 0,
+      "all_cases_first_use_pipeline_creations": 0,
+      "all_cases_transient_physical_texture_creations": 0,
+      "all_cases_transient_physical_buffer_creations": 0,
+      "all_cases_command_encoder_creations_per_frame": 1
+    }
+  },
+  "constrained_repeats": {
+    "machine_class": "apple-m1-metal-constrained",
+    "cpu_p95_ms": [
+      5.093501,
+      4.551707,
+      3.855416
+    ],
+    "cpu_p95_median_ms": 4.551707,
+    "cpu_p95_budget_ms": 5.0,
+    "gpu_p95_ms": [
+      7.099168,
+      6.882,
+      7.235292
+    ],
+    "gpu_p95_median_ms": 7.099168,
+    "gpu_p95_budget_ms": 8.0,
+    "runs_passing_both_budgets": 2,
+    "runs_total": 3,
+    "median_performance_passed": true
+  },
+  "dominant_gpu_pass_means_ms": {
+    "pbr_spheres_high_bloom": 10.191866,
+    "sponza_interior_bloom": 25.669234,
+    "weighted_transparency_bloom": 9.218419,
+    "weighted_transparency_composition": 4.04461
+  },
+  "validation": {
+    "quality_runner_tests_passed": 13,
+    "quality_contract_python_tests_passed": 48,
+    "bloom_diff_tests_passed": 3,
+    "cooker_tests_passed": 48,
+    "full_capture_contracts_completed": 9,
+    "missing_required_intermediates": 0,
+    "python_compile_passed": true,
+    "diff_check_passed": true
+  },
+  "runner_fix_passed": true,
+  "qualification_passed": false,
+  "visual_baselines_approved": false,
+  "full_metal_performance_qualified": false,
+  "vulkan_qualified": false,
+  "parent_issue_closed": false
+}
