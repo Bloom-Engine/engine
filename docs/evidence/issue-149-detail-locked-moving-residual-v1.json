@@ -1,0 +1,114 @@
+{
+  "schema": "bloom-detail-locked-moving-residual-evidence-v1",
+  "comparison_base": "08d0010",
+  "policy": {
+    "name": "detail-lock-weighted",
+    "base_strength": 0.02,
+    "detail_locked_strength": 0.06,
+    "classifier": "fractional-luma-variance-lock",
+    "additional_samples": 0,
+    "additional_resources": 0,
+    "additional_passes": 0
+  },
+  "owner_control": {
+    "ssgi_on_native_frame_rmse": 0.013151818899997997,
+    "ssgi_off_native_frame_rmse": 0.013158897393940775,
+    "ssgi_on_native_motion_derivative_rmse": 0.00980821239881193,
+    "ssgi_off_native_motion_derivative_rmse": 0.009800297904829556,
+    "conclusion": "ssgi-is-not-the-residual-owner"
+  },
+  "sponza_native_match": {
+    "configuration": {
+      "frames": 32,
+      "warmup_frames": 16,
+      "width": 1600,
+      "height": 900,
+      "render_scale": 0.75,
+      "native_render_scale": 1.0,
+      "ssgi_enabled": true
+    },
+    "base": {
+      "native_frame_rmse": 0.013151818899997997,
+      "native_motion_derivative_rmse": 0.00980821239881193,
+      "mean_luma_rmse": 0.0130188149375,
+      "mean_ssim": 0.974230242875,
+      "mean_oklab_delta": 0.009279738625,
+      "mean_edge_delta": 0.0052362731875
+    },
+    "candidate": {
+      "native_frame_rmse": 0.01310889811492736,
+      "native_motion_derivative_rmse": 0.009744126622730716,
+      "mean_luma_rmse": 0.012986682875,
+      "mean_ssim": 0.97470023109375,
+      "mean_oklab_delta": 0.00922091125,
+      "mean_edge_delta": 0.00511472734375
+    },
+    "limits": {
+      "max_native_frame_rmse": 0.01313,
+      "max_native_motion_derivative_rmse": 0.00978,
+      "max_mean_luma_rmse": 0.013,
+      "min_mean_ssim": 0.9745,
+      "max_mean_oklab_delta": 0.00925,
+      "max_mean_edge_delta": 0.0052
+    },
+    "repeat": {
+      "within_governed_reproducibility_bounds": true,
+      "worst_luma_rmse": 0.000131256,
+      "minimum_ssim": 0.999996364,
+      "worst_oklab_delta": 0.000001625,
+      "worst_edge_delta": 0.000001706
+    }
+  },
+  "material_regions_frame_31": {
+    "curtain": {
+      "base_ssim": 0.96973902,
+      "candidate_ssim": 0.970941067,
+      "base_edge_delta": 0.007165674,
+      "candidate_edge_delta": 0.006875222
+    },
+    "stone": {
+      "base_ssim": 0.982596397,
+      "candidate_ssim": 0.982864082,
+      "base_edge_delta": 0.003263679,
+      "candidate_edge_delta": 0.003206099
+    },
+    "foliage": {
+      "base_ssim": 0.922514915,
+      "candidate_ssim": 0.922938347,
+      "base_edge_delta": 0.010677589,
+      "candidate_edge_delta": 0.010574368
+    },
+    "ceiling": {
+      "base_ssim": 0.982633293,
+      "candidate_ssim": 0.983071506,
+      "base_edge_delta": 0.003538633,
+      "candidate_edge_delta": 0.003449133
+    }
+  },
+  "performance_us": {
+    "frames_per_run": 1200,
+    "base_runs": [1497.615, 1758.967, 1506.277],
+    "candidate_runs": [1593.861, 1522.042, 1562.422],
+    "base_mean": 1587.619666667,
+    "candidate_mean": 1559.441666667,
+    "relative_change": -0.017748568
+  },
+  "validation": {
+    "quality_tool_tests_passed": 69,
+    "quality_preset_tests_passed": 11,
+    "shared_tests_passed": 483,
+    "shared_tests_ignored": 1,
+    "golden_gpu_tests_passed": 86,
+    "golden_gpu_tests_ignored": 3,
+    "ffi_functions": 492
+  },
+  "endpoint_sha256": {
+    "native_first": "0e781584c1469617a03c925979f729983a0dc33aa899aa72054f874f5eb54b4b",
+    "native_last": "9d2f2ffc2fe5701e794315240b96510f95e39d4c475406b91f5e65675eae87a1",
+    "fractional_first": "84a713de1d9c4f0eadb39024bb3113d823870e84705d34afac2093de741926f5",
+    "fractional_last": "3d8d538103873f0eaa9057e4445fb76dc4ae27f7492b77df8d8c9171cca491b7",
+    "fractional_repeat_first": "2a210fb652f4ac916ff56071e5fb8900bfdd1b8809a2b7f0924eebcef1d07375",
+    "fractional_repeat_last": "30adb17d820434b3bd3fdc69116954a6b14f1662ffeb2bcca270d8674c4dd7f3"
+  },
+  "passed": true
+}

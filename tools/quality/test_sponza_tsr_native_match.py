@@ -7,6 +7,7 @@ from tools.quality.sponza_tsr_native_match import (
     aggregate_frame_metrics,
     enforce_limits,
     enforce_reproducibility,
+    enforce_visual_limits,
     fractional_repeat_identity,
     verify_capture,
 )
@@ -79,6 +80,21 @@ class SponzaTsrNativeMatchTests(unittest.TestCase):
         aggregate["aggregate"]["rmse_luminance"]["max"] = 0.0021
         with self.assertRaisesRegex(QualificationError, "governed reproducibility"):
             enforce_reproducibility(aggregate)
+
+    def test_optional_perceptual_limits_use_correct_direction(self) -> None:
+        metrics = {
+            "aggregate": {
+                "rmse_luminance": {"mean": 0.013},
+                "ssim_luminance": {"mean": 0.975},
+                "mean_oklab_delta": {"mean": 0.009},
+                "mean_edge_delta": {"mean": 0.005},
+            }
+        }
+        enforce_visual_limits(metrics, 0.013, 0.975, 0.009, 0.005)
+        with self.assertRaisesRegex(QualificationError, "ssim_luminance"):
+            enforce_visual_limits(metrics, None, 0.976, None, None)
+        with self.assertRaisesRegex(QualificationError, "mean_edge_delta"):
+            enforce_visual_limits(metrics, None, None, None, 0.0049)
 
 
 if __name__ == "__main__":

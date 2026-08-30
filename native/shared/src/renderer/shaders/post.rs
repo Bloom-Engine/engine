@@ -1358,8 +1358,16 @@ fn fs_main(in: VsOut) -> TaaOut {
         3.0 * alpha,
         reconstruction_scale >= 0.75,
     );
-    let moving_reconstruction_detail_weight =
-        select(0.0, 0.02, reconstruction_geometry_phase);
+    // Retain the qualified two-percent moving residual on every fractional
+    // surface. Pixels already admitted by the production high-frequency
+    // detail classifier receive a bounded additional four percent. This
+    // targets alpha-cutout foliage and authored microtexture without changing
+    // smooth surfaces, adding samples, or widening the classifier.
+    let moving_reconstruction_detail_weight = select(
+        0.0,
+        0.02 + 0.04 * current_feature_lock,
+        reconstruction_geometry_phase,
+    );
     blended = max(
         blended + reconstruction_detail *
             ((reconstruction_detail_weight * settled_static +

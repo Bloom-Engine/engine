@@ -1281,6 +1281,18 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         Some(0.02)
     );
     assert_eq!(
+        reconstruction["camera_motion_reconstruction_detail_policy"].as_str(),
+        Some("detail-lock-weighted")
+    );
+    assert_eq!(
+        reconstruction["camera_motion_reconstruction_detail_locked_strength"].as_f64(),
+        Some(0.06)
+    );
+    assert_eq!(
+        reconstruction["camera_motion_reconstruction_detail_classifier"].as_str(),
+        Some("fractional-luma-variance-lock")
+    );
+    assert_eq!(
         reconstruction["camera_motion_reconstruction_additional_samples"].as_u64(),
         Some(0)
     );

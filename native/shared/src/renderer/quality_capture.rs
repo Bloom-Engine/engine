@@ -1253,6 +1253,11 @@ impl Renderer {
             "false"
         });
         out.push_str(",\"camera_motion_reconstruction_detail_strength\":0.02");
+        out.push_str(",\"camera_motion_reconstruction_detail_policy\":\"detail-lock-weighted\"");
+        out.push_str(",\"camera_motion_reconstruction_detail_locked_strength\":0.06");
+        out.push_str(
+            ",\"camera_motion_reconstruction_detail_classifier\":\"fractional-luma-variance-lock\"",
+        );
         out.push_str(",\"camera_motion_reconstruction_additional_samples\":0");
         out.push_str(",\"output_detail_filter\":\"depth-aware-local-luma-hull\"");
         out.push_str(",\"output_detail_strength\":");

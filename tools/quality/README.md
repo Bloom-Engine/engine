@@ -100,8 +100,12 @@ frame-indexed camera crawl and the runner captures native 1.0, fractional
 ```sh
 python3 tools/quality/sponza_tsr_native_match.py \
   --output /tmp/bloom-sponza-tsr-native-match \
-  --max-native-frame-rmse 0.0133 \
-  --max-native-motion-derivative-rmse 0.0100
+  --max-native-frame-rmse 0.01313 \
+  --max-native-motion-derivative-rmse 0.00978 \
+  --max-mean-luma-rmse 0.0130 \
+  --min-mean-ssim 0.9745 \
+  --max-mean-oklab-delta 0.00925 \
+  --max-mean-edge-delta 0.0052
 ```
 
 The runner forces a fixed timestep and pixel-exact headless output, rejects an
@@ -111,6 +115,8 @@ hardware-ray reproducibility bounds, and records both streamed RGB reference
 errors and per-frame `bloom-diff` metrics. Use `--analyze-only --skip-build`
 to re-evaluate an existing output directory without recapturing it. Captures
 are diagnostic evidence; the command never installs or approves a baseline.
+Use `--ssgi 0` in a separate output directory as an owner-isolation control;
+the governed default keeps SSGI enabled.
 
 For the official Khronos alpha, transmission, volume, and ordering controls:
 

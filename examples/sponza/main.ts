@@ -15,7 +15,7 @@ import {
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
-  setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
+  setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled, setSsgiEnabled,
   setQualityPreset, setRenderScale, QualityPreset,
   getCommandLineArgs, resize,
 } from "bloom/core";
@@ -46,6 +46,7 @@ let capturePath = "";
 let frameCount = 0;
 let initYaw = 0.0;
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
+let ssgiOverride = -1; // -1 = default, 0 = force off, 1 = force on
 let vsmMotionPath = false;
 let tsrSequenceDirectory = "";
 let tsrSequenceFrames = 0;
@@ -64,6 +65,9 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--ssgi" && i + 1 < argv.length) {
+    ssgiOverride = parseInt(argv[i + 1]);
   }
   if (argv[i] === "--vsm-motion-path") {
     vsmMotionPath = true;
@@ -112,6 +116,8 @@ setEnvIntensity(1.5);
 setAutoExposure(true);
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
+if (ssgiOverride === 0) { setSsgiEnabled(false); }
+if (ssgiOverride === 1) { setSsgiEnabled(true); }
 // Warm indoor haze catches the atrium light. Density kept low so
 // corridors don't wash out; height falloff keeps upper-wall detail.
 setFog(0.86, 0.82, 0.72, 0.010, 0.0, 0.12);

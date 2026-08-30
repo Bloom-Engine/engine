@@ -414,6 +414,9 @@ mod tests {
             .contains("camera_moving && accepted_history >= 0.99 && feature_shading_stable"));
         assert!(TAA_SHADER_WGSL
             .contains("let stable_history = mix(clamped_history, history, rectification_lock);"));
+        assert!(TAA_SHADER_WGSL.contains(
+            "0.02 + 0.04 * current_feature_lock,\n        reconstruction_geometry_phase,"
+        ));
         assert!(TAA_SHADER_WGSL
             .contains("pack_temporal_history(next_history_confidence, 0.0, next_feature_lock)"));
         assert!(!TAA_SHADER_WGSL.contains("disocclusion <= 0.01"));

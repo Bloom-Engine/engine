@@ -83,6 +83,7 @@ def capture_sequence(
     width: int,
     height: int,
     quality_preset: int,
+    ssgi: int,
     fixed_timestep: str,
     timeout_seconds: float,
 ) -> list[Path]:
@@ -93,6 +94,8 @@ def capture_sequence(
         "1",
         "--quality-preset",
         str(quality_preset),
+        "--ssgi",
+        str(ssgi),
         "--render-scale",
         str(render_scale),
         "--tsr-sequence",
@@ -328,6 +331,40 @@ def enforce_limits(metrics: dict[str, float], max_frame: float | None, max_motio
             raise QualificationError(f"{name} {metrics[name]:.9f} exceeds {limit:.9f}")
 
 
+def enforce_visual_limits(
+    frame_metrics: dict[str, object],
+    max_luma_rmse: float | None,
+    min_ssim: float | None,
+    max_oklab_delta: float | None,
+    max_edge_delta: float | None,
+) -> None:
+    aggregate = frame_metrics["aggregate"]
+    limits = (
+        ("rmse_luminance", "mean", max_luma_rmse, lambda measured, limit: measured <= limit),
+        ("ssim_luminance", "mean", min_ssim, lambda measured, limit: measured >= limit),
+        (
+            "mean_oklab_delta",
+            "mean",
+            max_oklab_delta,
+            lambda measured, limit: measured <= limit,
+        ),
+        (
+            "mean_edge_delta",
+            "mean",
+            max_edge_delta,
+            lambda measured, limit: measured <= limit,
+        ),
+    )
+    for metric, statistic, limit, accepted in limits:
+        if limit is None:
+            continue
+        measured = float(aggregate[metric][statistic])
+        if not accepted(measured, limit):
+            raise QualificationError(
+                f"bloom-diff {metric}.{statistic} {measured:.9f} violates {limit:.9f}"
+            )
+
+
 def build_tools(repository: Path, build_sponza: bool, timeout_seconds: float) -> Path:
     if build_sponza:
         result = subprocess.run(
@@ -371,12 +408,17 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=1600)
     parser.add_argument("--height", type=int, default=900)
     parser.add_argument("--quality-preset", type=int, default=3, choices=range(5))
+    parser.add_argument("--ssgi", type=int, default=1, choices=(0, 1))
     parser.add_argument("--fixed-timestep", default="0.016666666667")
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--analyze-only", action="store_true")
     parser.add_argument("--max-native-frame-rmse", type=float)
     parser.add_argument("--max-native-motion-derivative-rmse", type=float)
+    parser.add_argument("--max-mean-luma-rmse", type=float)
+    parser.add_argument("--min-mean-ssim", type=float)
+    parser.add_argument("--max-mean-oklab-delta", type=float)
+    parser.add_argument("--max-mean-edge-delta", type=float)
     args = parser.parse_args()
     repository = Path(__file__).resolve().parents[2]
     example_directory = repository / "examples" / "sponza"
@@ -408,6 +450,7 @@ def main() -> int:
                     args.width,
                     args.height,
                     args.quality_preset,
+                    args.ssgi,
                     args.fixed_timestep,
                     args.timeout_seconds,
                 )
@@ -447,6 +490,13 @@ def main() -> int:
             args.output / "bloom-diff",
             args.timeout_seconds,
         )
+        enforce_visual_limits(
+            frame_metrics,
+            args.max_mean_luma_rmse,
+            args.min_mean_ssim,
+            args.max_mean_oklab_delta,
+            args.max_mean_edge_delta,
+        )
         document = {
             "schema": SCHEMA,
             "passed": True,
@@ -456,6 +506,7 @@ def main() -> int:
                 "width": dimensions[0],
                 "height": dimensions[1],
                 "quality_preset": args.quality_preset,
+                "ssgi_enabled": bool(args.ssgi),
                 "native_render_scale": 1.0,
                 "fractional_render_scale": 0.75,
                 "fixed_timestep": args.fixed_timestep,
@@ -476,6 +527,10 @@ def main() -> int:
                 "max_native_frame_rmse": args.max_native_frame_rmse,
                 "max_native_motion_derivative_rmse":
                     args.max_native_motion_derivative_rmse,
+                "max_mean_luma_rmse": args.max_mean_luma_rmse,
+                "min_mean_ssim": args.min_mean_ssim,
+                "max_mean_oklab_delta": args.max_mean_oklab_delta,
+                "max_mean_edge_delta": args.max_mean_edge_delta,
             },
         }
         (args.output / "result.json").write_text(
