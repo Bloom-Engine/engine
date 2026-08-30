@@ -407,6 +407,7 @@ pub(super) fn create_ssgi_rt(
             // retain the resolved HDR evidence without another shader pass.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });

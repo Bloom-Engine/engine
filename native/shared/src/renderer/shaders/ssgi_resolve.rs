@@ -30,21 +30,7 @@ struct ResolveParams {
 @group(0) @binding(5) var hiz_samp: sampler;
 @group(0) @binding(6) var resolve_history_tex: texture_2d<f32>;
 @group(0) @binding(7) var velocity_tex: texture_2d<f32>;
-
-struct VsOut {
-    @builtin(position) clip_pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-    let x = f32((vid & 1u) * 4u) - 1.0;
-    let y = f32((vid >> 1u) * 4u) - 1.0;
-    var out: VsOut;
-    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
-    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
-    return out;
-}
+@group(0) @binding(8) var resolve_out: texture_storage_2d<rgba16float, write>;
 
 // The tiny probe-space pass writes a geometry-aware reconstruction into layer
 // zero after temporal completes. The other layers retain current samples for
@@ -65,9 +51,8 @@ fn continuous_probe_coordinate(t: f32) -> f32 {
     return t * t * (3.0 - 2.0 * t);
 }
 
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let linear_z = textureSampleLevel(hiz0, hiz_samp, in.uv, 0.0).r;
+fn resolve_pixel(uv: vec2<f32>) -> vec4<f32> {
+    let linear_z = textureSampleLevel(hiz0, hiz_samp, uv, 0.0).r;
     if (linear_z >= HIZ_SKY_Z * 0.5) {
         return vec4<f32>(0.0);
     }
@@ -82,15 +67,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let p11 = u.proj_row01.y;
     let p20 = u.proj_row01.z;
     let p21 = u.proj_row01.w;
-    let P_vs = view_pos_from_linear(in.uv, linear_z, p00, p11, p20, p21);
+    let P_vs = view_pos_from_linear(uv, linear_z, p00, p11, p20, p21);
     let P_ws = (u.inv_view * vec4<f32>(P_vs, 1.0)).xyz;
 
     // Reconstruct pixel normal (same 3-tap trick as the placement pass).
     let texel = vec2<f32>(1.0 / half_w, 1.0 / half_h);
-    let zr = textureSampleLevel(hiz0, hiz_samp, in.uv + vec2<f32>(texel.x, 0.0), 0.0).r;
-    let zu = textureSampleLevel(hiz0, hiz_samp, in.uv + vec2<f32>(0.0, -texel.y), 0.0).r;
-    let Pr = view_pos_from_linear(in.uv + vec2<f32>(texel.x, 0.0), zr, p00, p11, p20, p21);
-    let Pu = view_pos_from_linear(in.uv + vec2<f32>(0.0, -texel.y), zu, p00, p11, p20, p21);
+    let zr = textureSampleLevel(hiz0, hiz_samp, uv + vec2<f32>(texel.x, 0.0), 0.0).r;
+    let zu = textureSampleLevel(hiz0, hiz_samp, uv + vec2<f32>(0.0, -texel.y), 0.0).r;
+    let Pr = view_pos_from_linear(uv + vec2<f32>(texel.x, 0.0), zr, p00, p11, p20, p21);
+    let Pu = view_pos_from_linear(uv + vec2<f32>(0.0, -texel.y), zu, p00, p11, p20, p21);
     let N_vs = safe_probe_direction(
         cross(Pr - P_vs, Pu - P_vs),
         vec3<f32>(0.0, 0.0, 1.0),
@@ -112,8 +97,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let blend_broad = view_facing < 0.80;
 
     // Pixel's grid-space fractional position (which probes surround it?).
-    let px_x = in.uv.x * half_w;
-    let px_y = in.uv.y * half_h;
+    let px_x = uv.x * half_w;
+    let px_y = uv.y * half_h;
     // Align reconstruction to this frame's actual jittered probe positions.
     // The prior resolve-only shift moved weights over the same fixed samples;
     // it could not remove their screen-space radiance lattice.
@@ -261,13 +246,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var resolved = accum;
     var velocity = vec2<f32>(0.0);
     if (u.params.w > 0.5) {
-        velocity = textureSampleLevel(velocity_tex, radiance_samp, in.uv, 0.0).xy;
+        velocity = textureSampleLevel(velocity_tex, radiance_samp, uv, 0.0).xy;
     }
     let velocity_length = length(velocity);
     let motion_amount = smoothstep(0.000001, 0.00005, velocity_length);
     let previous_uv = vec2<f32>(
-        in.uv.x - velocity.x,
-        in.uv.y + velocity.y,
+        uv.x - velocity.x,
+        uv.y + velocity.y,
     );
     let history_in_bounds =
         all(previous_uv >= vec2<f32>(0.0)) &&
@@ -311,5 +296,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Alpha is private to SSGI resolve history. Scene composition consumes RGB
     // only, so preserve receiver linear depth here for next-frame validation.
     return vec4<f32>(resolved, linear_z);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= u.size.x || gid.y >= u.size.y) { return; }
+    // Match raster pixel-center interpolation exactly. Compute avoids a
+    // render-pass attachment transition without changing reconstruction UVs.
+    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / vec2<f32>(u.size.xy);
+    textureStore(resolve_out, vec2<i32>(gid.xy), resolve_pixel(uv));
 }
 ";
