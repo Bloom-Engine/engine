@@ -4,6 +4,9 @@
   "description": "Bloom Engine: native TypeScript game engine compiled by Perry",
   "main": "src/index.ts",
   "types": "src/index.ts",
+  "bin": {
+    "bloom-web": "native/web/build.sh"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./core": "./src/core/index.ts",
@@ -29,6 +32,19 @@
     "native/shared/src/**",
     "native/shared/shaders/**",
     "native/shared/assets/**",
+    "crates/bloom-geometry-format/Cargo.toml",
+    "crates/bloom-geometry-format/Cargo.lock",
+    "crates/bloom-geometry-format/src/**",
+    "crates/bloom-scene-format/Cargo.toml",
+    "crates/bloom-scene-format/Cargo.lock",
+    "crates/bloom-scene-format/src/**",
+    "native/third_party/bloom_jolt/CMakeLists.txt",
+    "native/third_party/bloom_jolt/include/**",
+    "native/third_party/bloom_jolt/src/**",
+    "native/third_party/JoltPhysics/Build/**",
+    "native/third_party/JoltPhysics/Jolt/**",
+    "native/third_party/JoltPhysics/Jolt.cmake",
+    "native/third_party/JoltPhysics/LICENSE",
     "native/macos/Cargo.toml",
     "native/macos/Cargo.lock",
     "native/macos/src/**",
@@ -62,6 +78,7 @@
     "native/web/Cargo.lock",
     "native/web/src/**",
     "native/web/build.sh",
+    "native/web/splice_game.py",
     "native/web/index.html",
     "native/web/bloom_glue.js",
     "native/web/jolt_bridge.js"

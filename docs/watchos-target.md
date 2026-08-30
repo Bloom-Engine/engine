@@ -52,7 +52,7 @@ Limitations.
 
 watchOS builds go through Perry. The engine's watch crate (`native/watchos`) and
 Perry's runtime are tier-3 Rust targets built with nightly `-Z build-std`. See
-the Perry [watchOS platform docs](../../../perry/perry/docs/src/platforms/watchos.md)
+the Perry [watchOS platform docs](https://github.com/PerryTS/perry/blob/main/docs/src/platforms/watchos.md)
 for the full toolchain setup; the engine-specific parts are:
 
 - Compile the game with **`--features watchos-swift-app`** so the engine's
@@ -95,6 +95,10 @@ SwiftUI shell owns the run loop and calls into the game thread.
 watchOS has no keyboard or pointer. Two input sources are bridged:
 
 ```typescript
+import {
+  getCrownRotation, getPlatform, getTouchCount, isWatch, Platform,
+} from "@bloomengine/engine/core";
+
 const turn = getCrownRotation();   // Digital Crown delta (radians) since last call
 const touches = getTouchCount();   // taps on the watch face
 ```
@@ -105,7 +109,9 @@ const touches = getTouchCount();   // taps on the watch face
 - **Taps** — surfaced through the same touch API as iOS (`getTouchCount()` /
   `getTouchX/Y()`), so `isWatch()` branches can treat any tap as e.g. "jump".
 
-Use `isWatch()` (or `getPlatform() === Platform.WATCH`) to gate watch input.
+Use `isWatch()` (or `getPlatform() === Platform.WATCHOS`) to gate watch input.
+The watch-specific helpers are exported from `@bloomengine/engine/core`; they
+are not part of the root barrel export.
 
 ## 2D Camera
 
