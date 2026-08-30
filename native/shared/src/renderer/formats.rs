@@ -69,10 +69,10 @@ mod taa_history_format_tests {
     }
 }
 
-/// Number of bloom mip levels. 5 mips gives a long-tail glow that
-/// covers ~32× the source pixel size. More mips = more haloing,
+/// Number of bloom mip levels. 4 mips gives a long-tail glow that
+/// covers ~16× the source pixel size. More mips = more haloing,
 /// fewer = less coverage. Each mip is half the previous size.
-pub(super) const BLOOM_MIP_COUNT: u32 = 5;
+pub(super) const BLOOM_MIP_COUNT: u32 = 4;
 
 /// SSAO RT layout: R = GTAO occlusion (bilaterally blurred), G =
 /// contact-shadow factor (passed through blur unchanged so the fine-
