@@ -8,6 +8,7 @@
 
 import {
   initWindow, closeWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
+  captureFrameToPng, isFrameCaptureReady,
   setEnvClearFromHdr, setTargetFPS, getDeltaTime, getFPS,
   isKeyDown, isKeyPressed,
   getMouseDeltaX, getMouseDeltaY,
@@ -15,6 +16,7 @@ import {
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
+  setQualityPreset, setRenderScale, QualityPreset,
   getCommandLineArgs, resize,
 } from "bloom/core";
 import { parseQualityRun, QualityRun } from "bloom/quality";
@@ -45,6 +47,13 @@ let frameCount = 0;
 let initYaw = 0.0;
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
 let vsmMotionPath = false;
+let tsrSequenceDirectory = "";
+let tsrSequenceFrames = 0;
+let tsrSequenceWarmupFrames = 16;
+let tsrSequenceWidth = 1600;
+let tsrSequenceHeight = 900;
+let tsrSequenceRenderScale = 0.75;
+let tsrSequenceQualityPreset = 3;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -59,6 +68,27 @@ for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--vsm-motion-path") {
     vsmMotionPath = true;
   }
+  if (argv[i] === "--render-scale" && i + 1 < argv.length) {
+    tsrSequenceRenderScale = clamp(parseFloat(argv[i + 1]), 0.5, 1.0);
+  }
+  if (argv[i] === "--quality-preset" && i + 1 < argv.length) {
+    tsrSequenceQualityPreset = Math.max(0, Math.min(4, Math.floor(parseFloat(argv[i + 1]))));
+  }
+  if (argv[i] === "--tsr-sequence" && i + 5 < argv.length) {
+    tsrSequenceDirectory = argv[i + 1];
+    tsrSequenceFrames = Math.max(2, Math.floor(parseFloat(argv[i + 2])));
+    tsrSequenceWarmupFrames = Math.max(1, Math.floor(parseFloat(argv[i + 3])));
+    tsrSequenceWidth = Math.max(1, Math.floor(parseFloat(argv[i + 4])));
+    tsrSequenceHeight = Math.max(1, Math.floor(parseFloat(argv[i + 5])));
+  }
+}
+
+const tsrSequenceMode = qualityConfig === null && tsrSequenceDirectory.length > 0;
+
+function tsrSequencePath(index: number): string {
+  let label = `${index}`;
+  while (label.length < 3) label = `0${label}`;
+  return `${tsrSequenceDirectory}/sequence-${label}.png`;
 }
 
 // ---- Init ----
@@ -66,6 +96,13 @@ initWindow(SCREEN_W, SCREEN_H, "Bloom Sponza", 0);
 if (qualityConfig !== null) resize(SCREEN_W, SCREEN_H, SCREEN_W, SCREEN_H);
 setTargetFPS(60);
 let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qualityConfig) : null;
+if (tsrSequenceMode) {
+  resize(tsrSequenceWidth, tsrSequenceHeight, SCREEN_W, SCREEN_H);
+  setTargetFPS(0);
+  setQualityPreset(tsrSequenceQualityPreset as QualityPreset);
+  setRenderScale(tsrSequenceRenderScale);
+  setTaaEnabled(true);
+}
 setEnvClearFromHdr("assets/outdoor.hdr");
 enableShadows();
 
@@ -100,11 +137,28 @@ let camYaw = initYaw;
 let camPitch = 0.0;
 let cursorLocked = false;
 let fixtureFrame = 0;
+let tsrSequenceWarmupRendered = 0;
+let tsrSequenceCaptureIndex = 0;
 
 // ---- Main loop ----
 while (!windowShouldClose()) {
   const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
   const dt = qualityRun !== null ? qualityRun.deltaTime() : getDeltaTime();
+
+  // Frame-indexed subpixel crawl used by the matched native/fractional corpus.
+  // The total 0.008-radian yaw is roughly 0.36 output pixels per frame over a
+  // 32-frame, 1600-wide sequence; the small lateral translation exercises
+  // depth-layer disocclusion without turning this into a fast-motion test.
+  if (tsrSequenceMode) {
+    const progress = tsrSequenceWarmupRendered < tsrSequenceWarmupFrames
+      ? 0.0
+      : (tsrSequenceCaptureIndex + 1) / tsrSequenceFrames;
+    camX = -0.12 + 0.24 * progress;
+    camY = 2.0;
+    camZ = 0.0;
+    camYaw = -0.004 + 0.008 * progress;
+    camPitch = 0.0;
+  }
 
   // Camera controls
   if (cursorLocked) {
@@ -176,7 +230,7 @@ while (!windowShouldClose()) {
   endMode3D();
 
   // Never bake a wall-clock FPS counter into a deterministic baseline.
-  if (qualityRun === null) {
+  if (qualityRun === null && !tsrSequenceMode) {
     drawText("Bloom Sponza", 10, 10, 20, { r: 255, g: 255, b: 255, a: 255 });
     const fps = getFPS();
     const ms = fps > 0.0 ? 1000.0 / fps : 0.0;
@@ -191,7 +245,12 @@ while (!windowShouldClose()) {
   }
 
   // Auto-capture for automated testing
-  if (qualityCapture && qualityRun !== null) {
+  let tsrSequenceCaptureAccepted = false;
+  if (tsrSequenceMode && tsrSequenceWarmupRendered >= tsrSequenceWarmupFrames) {
+    tsrSequenceCaptureAccepted = captureFrameToPng(
+      tsrSequencePath(tsrSequenceCaptureIndex),
+    );
+  } else if (qualityCapture && qualityRun !== null) {
     qualityRun.requestCapture();
   } else if (qualityRun === null && captureFrames > 0) {
     frameCount = frameCount + 1;
@@ -200,6 +259,27 @@ while (!windowShouldClose()) {
   }
 
   endDrawing();
+  if (tsrSequenceMode) {
+    if (tsrSequenceWarmupRendered < tsrSequenceWarmupFrames) {
+      tsrSequenceWarmupRendered = tsrSequenceWarmupRendered + 1;
+    } else {
+      if (!tsrSequenceCaptureAccepted || !isFrameCaptureReady()) {
+        console.error(
+          `BLOOM_TSR_SEQUENCE_ERROR frame=${tsrSequenceCaptureIndex} ` +
+          `accepted=${tsrSequenceCaptureAccepted}`,
+        );
+        break;
+      }
+      tsrSequenceCaptureIndex = tsrSequenceCaptureIndex + 1;
+      if (tsrSequenceCaptureIndex >= tsrSequenceFrames) {
+        console.error(
+          `BLOOM_TSR_SEQUENCE_DONE frames=${tsrSequenceFrames} ` +
+          `directory=${tsrSequenceDirectory}`,
+        );
+        break;
+      }
+    }
+  }
   if (qualityRun !== null && qualityRun.endFrame()) break;
 }
 

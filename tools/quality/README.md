@@ -93,6 +93,25 @@ adjacent-frame motion derivatives. It also records exact dimensions and
 endpoint hashes so differently posed or incomplete sequences cannot silently
 be compared.
 
+For the full-resolution Sponza motion gate, the example owns a deterministic
+frame-indexed camera crawl and the runner captures native 1.0, fractional
+0.75, and an independent fractional repeat:
+
+```sh
+python3 tools/quality/sponza_tsr_native_match.py \
+  --output /tmp/bloom-sponza-tsr-native-match \
+  --max-native-frame-rmse 0.0133 \
+  --max-native-motion-derivative-rmse 0.0100
+```
+
+The runner forces a fixed timestep and pixel-exact headless output, rejects an
+incomplete or incorrectly sized sequence, proves that the native negative
+control actually moves, checks repeat captures against the manifest's
+hardware-ray reproducibility bounds, and records both streamed RGB reference
+errors and per-frame `bloom-diff` metrics. Use `--analyze-only --skip-build`
+to re-evaluate an existing output directory without recapturing it. Captures
+are diagnostic evidence; the command never installs or approves a baseline.
+
 For the official Khronos alpha, transmission, volume, and ordering controls:
 
 ```sh
