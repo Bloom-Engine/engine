@@ -11,7 +11,7 @@ together:
 | Low | 0.67 | Off | Catmull-Rom | 0.25 | Bloom |
 | Medium | 0.75 | On | Catmull-Rom | 0.40 | Shadows, SSAO, bloom |
 | High | 0.85 | On | Catmull-Rom | 0.45 | Medium + SSR, SSGI, subtle chromatic aberration |
-| Ultra | 1.00 | On | Native | 0.50 | Full effect stack |
+| Ultra | 1.00 | On | Native | 0.85 | Full effect stack |
 
 `setQualityPreset()` applies the row as one operation. Call individual setters
 afterward to override it:

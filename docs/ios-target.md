@@ -85,9 +85,10 @@ reads slot 0 — released, but still holding its last coordinates — as if it w
 live, which presents as a finger frozen where it left the glass. Scan
 `0..getMaxTouchPoints()` and skip slots that `isTouchActive(i)` rejects.
 
-Gamepad is **not** implemented on iOS (`GCController` is never polled), despite
-the framework being linked. `isGamepadAvailable()` returns false. tvOS has the
-code to copy if this is ever needed.
+Gamepad input polls the first connected extended controller through
+`GCController`. MFi, Xbox, and PlayStation-compatible controllers populate six
+axes (two sticks and two triggers), face/shoulder buttons, and the D-pad. The
+mapping is compile-verified and still needs broader on-device coverage.
 
 ## Renderer notes
 
@@ -103,9 +104,9 @@ code to copy if this is ever needed.
 
 ## Known gaps
 
-- **No CI build.** No workflow compiles `native/ios/`; the only iOS gate is
-  `tools/validate-ffi.js`, which parses `lib.rs` for symbol names and proves
-  nothing about whether the crate compiles or runs.
+- **Compile-only CI.** The mobile-target matrix compiles `native/ios/` for an
+  arm64 device and both arm64/x86_64 simulators. It does not run the renderer or
+  input paths on an iOS device, so device smoke coverage remains manual.
 - **EN-024** — iOS reports pixels where macOS reports points, so `getScreenWidth()`
   and 2D HUD coordinates do not carry across Apple targets. Games currently
   compensate themselves (scale the 2D pass through a `beginMode2D` zoom).

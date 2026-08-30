@@ -1,6 +1,8 @@
 # @bloomengine/jolt-prebuilt
 
-Prebuilt JoltPhysics + bloom_jolt static libraries for every (os, arch) Bloom Engine targets.
+Prebuilt JoltPhysics + bloom_jolt static libraries for Bloom Engine's published
+target matrix. Targets without a published archive use the engine package's C++
+source fallback.
 
 ## Why this exists
 
@@ -33,10 +35,15 @@ Each variant directory contains `libJolt.a` (or `Jolt.lib` on Windows) and `libb
 
 ## How `@bloomengine/engine` finds it
 
-The engine's `native/shared/build.rs` walks up from `CARGO_MANIFEST_DIR` looking for `node_modules/@bloomengine/jolt-prebuilt/lib/<os>-<arch>/`. If found, it links the prebuilt archives and skips cmake entirely. If not found (or the env var `BLOOM_JOLT_FROM_SOURCE=1` is set), it falls back to building Jolt from the C++ source bundled in `@bloomengine/engine` — the existing dev workflow.
+The engine's `native/shared/build.rs` walks up from `CARGO_MANIFEST_DIR` looking
+for `node_modules/@bloomengine/jolt-prebuilt/lib/<os>-<arch>/`. If found, it
+links the prebuilt archives and skips cmake entirely. If not found (or the env
+var `BLOOM_JOLT_FROM_SOURCE=1` is set), it builds Jolt from the C++ source
+bundled in `@bloomengine/engine`.
 
 ## Build / publish
 
 Built by `.github/workflows/release.yml` on each tag push — a matrix job per platform produces the libraries on the appropriate native runner (`macos-14` for Apple targets, `ubuntu-22.04` for Linux/Android, `windows-latest` for Windows) and uploads them as artifacts. A final assembly job collects every artifact into this package's `lib/` tree and publishes via OIDC trusted publishing.
 
-The published version always matches the corresponding `@bloomengine/engine` version they were built against.
+This package is versioned independently. `@bloomengine/engine` pins the
+compatible prebuilt version in its dependencies.

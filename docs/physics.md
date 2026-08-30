@@ -76,7 +76,7 @@ Matches or exceeds UE5's built-in physics surface.
 | 2 | **Character controller** (`CharacterVirtual` — slope + stair handling) | ✅ | ✅ |
 | 2 | **Soft bodies** — cloth, rope, jelly (per-vertex pinning via `invMass=0`) | ✅ | ✅ |
 | 2 | **Wheeled vehicles** — 4-wheel, ray collision tester, engine + differential | ✅ | ✅ |
-| 2 | **Ragdolls** (EN-025) — built at runtime from the skinned skeleton; capsule-per-bone + limited six-DOF joints | ✅ (via `createRagdoll()` in `bloom/models`, `native/shared/src/ragdoll.rs`) | — |
+| 2 | **Ragdolls** (EN-025) — built at runtime from the skinned skeleton; capsule-per-bone + limited six-DOF joints | ✅ (via `createRagdoll()` in `@bloomengine/engine/models`, `native/shared/src/ragdoll.rs`) | — |
 
 Six-DOF constraints exist in the shim (`bj_constraint_six_dof`) but are
 internal-only — ragdoll articulation uses a locked-translation wrapper; there
@@ -90,7 +90,7 @@ damping setters on web, raycast world-space normals (currently returns (0,1,0)
 ## TypeScript API quick-start
 
 ```typescript
-import * as physics from '@bloom/physics';
+import * as physics from '@bloomengine/engine/physics';
 
 // 1. Create a world (once, on game start).
 const world = physics.createWorld({ gravity: { x: 0, y: -9.81, z: 0 } });
