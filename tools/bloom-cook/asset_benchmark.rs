@@ -302,7 +302,12 @@ fn texture_quality(
     let mut normal_angle_sum = 0.0;
     let mut normal_angle_max = 0.0f64;
     let pixels = (width as usize) * (height as usize);
-    for (reference, candidate) in reference.chunks_exact(4).zip(candidate.chunks_exact(4)) {
+    for (reference, candidate) in reference
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(candidate.as_chunks::<4>().0)
+    {
         for channel in 0..3 {
             let delta = reference[channel].abs_diff(candidate[channel]);
             sum_abs_rgb += u64::from(delta);

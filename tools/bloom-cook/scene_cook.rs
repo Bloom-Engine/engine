@@ -150,7 +150,9 @@ fn convert_primitive(
         .saturating_add(invalid_positions.iter().filter(|value| **value).count() as u64);
     let indices = mesh
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter(|triangle| {
             let invalid = triangle.iter().any(|index| {
                 invalid_positions
