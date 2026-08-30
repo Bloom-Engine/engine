@@ -95,6 +95,12 @@ jobs:
           BLOOM_QUALITY_TIMEOUT: "1800"
         run: ./scripts/ci-check.sh --hardware --component quality-run
 
+      - name: Prove fractional reconstruction preserves native performance advantage
+        if: always() && inputs.suite != 'virtual-geometry'
+        env:
+          BLOOM_PROFILE_FRACTIONAL_TAA_OUT: tools/quality/out/ci-fractional-native-throughput
+        run: ./scripts/ci-check.sh --hardware --component fractional-native-throughput
+
       - name: Qualify 10M virtual geometry on Metal
         if: always()
         env:
@@ -123,6 +129,9 @@ jobs:
           if [[ -f tools/quality/out/ci-metal-constrained/summary.md ]]; then
             cat tools/quality/out/ci-metal-constrained/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [[ -f tools/quality/out/ci-fractional-native-throughput/summary.md ]]; then
+            cat tools/quality/out/ci-fractional-native-throughput/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [[ -f tools/quality/out/ci-virtual-geometry-metal/qualification.md ]]; then
             cat tools/quality/out/ci-virtual-geometry-metal/qualification.md >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -136,6 +145,7 @@ jobs:
             target/ci/examples
             tools/quality/out/ci-metal
             tools/quality/out/ci-metal-constrained
+            tools/quality/out/ci-fractional-native-throughput
             tools/quality/out/ci-virtual-geometry-metal
             tools/quality/out/ci-faults
           if-no-files-found: warn
@@ -183,6 +193,12 @@ jobs:
           BLOOM_QUALITY_TIMEOUT: "1800"
         run: ./scripts/ci-check.sh --hardware --component quality-run
 
+      - name: Prove fractional reconstruction preserves native performance advantage
+        if: always() && inputs.suite != 'virtual-geometry'
+        env:
+          BLOOM_PROFILE_FRACTIONAL_TAA_OUT: tools/quality/out/ci-fractional-native-throughput
+        run: ./scripts/ci-check.sh --hardware --component fractional-native-throughput
+
       - name: Qualify 10M virtual geometry on Vulkan
         if: always()
         env:
@@ -198,6 +214,9 @@ jobs:
           if [[ -f tools/quality/out/ci-vulkan/summary.md ]]; then
             cat tools/quality/out/ci-vulkan/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [[ -f tools/quality/out/ci-fractional-native-throughput/summary.md ]]; then
+            cat tools/quality/out/ci-fractional-native-throughput/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [[ -f tools/quality/out/ci-virtual-geometry-vulkan/qualification.md ]]; then
             cat tools/quality/out/ci-virtual-geometry-vulkan/qualification.md >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -209,6 +228,7 @@ jobs:
           name: quality-nvidia-rtx4080-vulkan-${{ github.run_attempt }}
           path: |
             tools/quality/out/ci-vulkan
+            tools/quality/out/ci-fractional-native-throughput
             tools/quality/out/ci-virtual-geometry-vulkan
             tools/quality/out/ci-faults
           if-no-files-found: warn

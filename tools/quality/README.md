@@ -411,6 +411,26 @@ Defined classes:
 - `nvidia-rtx4080-vulkan`: Vulkan discrete high-end baseline, including VRAM;
 - `apple-m1-metal-constrained`: constrained preset/render-scale gate.
 
+The high-end hardware jobs also prove that temporal reconstruction retains a
+real throughput advantage rather than assuming one from pixel count:
+
+```sh
+BLOOM_PROFILE_FRACTIONAL_TAA_OUT=tools/quality/out/local-fractional-native \
+./scripts/ci-check.sh --hardware --component fractional-native-throughput
+```
+
+The gate alternates three 0.75/native-1.0 pairs at 1600x900 with identical TAA,
+scene, camera crawl, and quality-preset-4 settings. Every run excludes 120
+warm-up frames and measures 600 frames in complete profiler windows. It records
+raw end-to-end wall, instrumented CPU, timestamped GPU, p50/p95, and TAA-pass
+timings, then requires at least a 5% median advantage in both end-to-end and
+timestamped GPU work. Per-frame GPU readback deliberately serializes these
+focused profiles; this makes wall time pessimistic but identical between the
+two scales and prevents vsync or queued work from fabricating the advantage.
+`result.json` also records the adapter, limits, every paired run, and the final
+steady-state resource counters. Metal and Vulkan jobs upload the result and
+append its `summary.md` to the job summary.
+
 The virtual-geometry portability gate is separate from the ordinary scene
 manifest because it deterministically generates and cooks a 10M-source-
 triangle asset before rendering it. Run it with an explicit backend so the

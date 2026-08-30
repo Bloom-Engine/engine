@@ -281,6 +281,124 @@ fn profile_taa_reconstruction(eng: &mut EngineState, frames: u32, render_scale: 
     mean
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ReconstructionThroughputProfile {
+    wall_mean_us: f64,
+    wall_p50_us: f64,
+    wall_p95_us: f64,
+    cpu_mean_us: f64,
+    cpu_p50_us: f64,
+    cpu_p95_us: f64,
+    gpu_mean_us: f64,
+    gpu_p50_us: f64,
+    gpu_p95_us: f64,
+    taa_gpu_mean_us: f64,
+}
+
+fn throughput_stats(mut samples: Vec<f64>) -> (f64, f64, f64) {
+    assert!(
+        !samples.is_empty(),
+        "throughput profile produced no samples"
+    );
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let p50 = samples[((samples.len() - 1) as f64 * 0.50).floor() as usize];
+    let p95 = samples[((samples.len() - 1) as f64 * 0.95).ceil() as usize];
+    (mean, p50, p95)
+}
+
+fn profile_reconstruction_throughput(
+    eng: &mut EngineState,
+    frames: u32,
+    render_scale: f32,
+) -> ReconstructionThroughputProfile {
+    const WINDOW_FRAMES: u32 = 120;
+    assert!(
+        frames >= WINDOW_FRAMES && frames.is_multiple_of(WINDOW_FRAMES),
+        "throughput frames must be a positive multiple of {WINDOW_FRAMES}"
+    );
+    eng.renderer.resize(1600, 900, 1600, 900);
+    configure_glossy_detail_capture(&mut eng.renderer, true, render_scale);
+    let camera_step = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_CAMERA_STEP")
+        .ok()
+        .map(|value| value.parse::<f32>().expect("profile camera step"))
+        .unwrap_or(0.002);
+    for frame in 0..120 {
+        eng.begin_frame();
+        draw_glossy_detail_fixture(eng, frame as f32 * camera_step);
+        eng.end_frame();
+    }
+
+    eng.profiler.set_enabled(true);
+    let mut wall_samples = Vec::with_capacity(frames as usize);
+    let mut cpu_samples = Vec::with_capacity(frames as usize);
+    let mut gpu_samples = Vec::with_capacity(frames as usize);
+    let mut taa_gpu_windows = Vec::with_capacity((frames / WINDOW_FRAMES) as usize);
+    for frame in 0..frames {
+        let started = std::time::Instant::now();
+        eng.begin_frame();
+        draw_glossy_detail_fixture(eng, (frame + 120) as f32 * camera_step);
+        eng.end_frame();
+        wall_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+        if (frame + 1).is_multiple_of(WINDOW_FRAMES) {
+            let history = eng.profiler.frame_history();
+            assert_eq!(
+                history.len(),
+                WINDOW_FRAMES as usize,
+                "profiler did not retain one complete throughput window"
+            );
+            cpu_samples.extend(history.iter().map(|(cpu, _)| *cpu));
+            gpu_samples.extend(history.iter().map(|(_, gpu)| *gpu));
+            let taa_gpu_us = eng
+                .profiler
+                .snapshot()
+                .into_iter()
+                .find_map(|(label, _, gpu)| (label == "taa_pass").then_some(gpu?))
+                .expect("throughput profile produced no TAA timestamp");
+            taa_gpu_windows.push(taa_gpu_us);
+        }
+    }
+    eng.profiler.set_enabled(false);
+
+    let (wall_mean_us, wall_p50_us, wall_p95_us) = throughput_stats(wall_samples);
+    let (cpu_mean_us, cpu_p50_us, cpu_p95_us) = throughput_stats(cpu_samples);
+    let (gpu_mean_us, gpu_p50_us, gpu_p95_us) = throughput_stats(gpu_samples);
+    let taa_gpu_mean_us = taa_gpu_windows.iter().sum::<f64>() / taa_gpu_windows.len() as f64;
+    ReconstructionThroughputProfile {
+        wall_mean_us,
+        wall_p50_us,
+        wall_p95_us,
+        cpu_mean_us,
+        cpu_p50_us,
+        cpu_p95_us,
+        gpu_mean_us,
+        gpu_p50_us,
+        gpu_p95_us,
+        taa_gpu_mean_us,
+    }
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    assert!(!values.is_empty(), "median requires at least one sample");
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    values[values.len() / 2]
+}
+
+fn throughput_profile_json(profile: ReconstructionThroughputProfile) -> serde_json::Value {
+    serde_json::json!({
+        "wall_mean_us": profile.wall_mean_us,
+        "wall_p50_us": profile.wall_p50_us,
+        "wall_p95_us": profile.wall_p95_us,
+        "cpu_mean_us": profile.cpu_mean_us,
+        "cpu_p50_us": profile.cpu_p50_us,
+        "cpu_p95_us": profile.cpu_p95_us,
+        "gpu_mean_us": profile.gpu_mean_us,
+        "gpu_p50_us": profile.gpu_p50_us,
+        "gpu_p95_us": profile.gpu_p95_us,
+        "taa_gpu_mean_us": profile.taa_gpu_mean_us,
+    })
+}
+
 #[test]
 #[ignore = "explicit long-running GPU profiling gate"]
 fn profile_fractional_taa_reconstruction() {
@@ -301,6 +419,168 @@ fn profile_fractional_taa_reconstruction() {
     eprintln!(
         "fractional-reconstruction taa_gpu_us={taa_gpu_us:.3} \
          frames={frames} render_scale={render_scale:.2}"
+    );
+}
+
+#[test]
+#[ignore = "explicit long-running native-vs-fractional throughput gate"]
+fn profile_fractional_taa_native_advantage() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    install_glossy_detail_fixture(&mut eng);
+    let frames = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_FRAMES")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("profile frame count"))
+        .unwrap_or(600);
+    let pairs = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_PAIRS")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("profile pair count"))
+        .unwrap_or(3)
+        .max(1);
+    let minimum_advantage = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_MIN_ADVANTAGE")
+        .ok()
+        .map(|value| value.parse::<f64>().expect("minimum advantage"))
+        .unwrap_or(0.05);
+    let mut fractional = Vec::with_capacity(pairs as usize);
+    let mut native = Vec::with_capacity(pairs as usize);
+    for pair in 0..pairs {
+        let order = if pair % 2 == 0 {
+            [("fractional", 0.75), ("native", 1.0)]
+        } else {
+            [("native", 1.0), ("fractional", 0.75)]
+        };
+        for (label, scale) in order {
+            let profile = profile_reconstruction_throughput(&mut eng, frames, scale);
+            eprintln!(
+                "fractional-native-throughput pair={pair} label={label} scale={scale:.2} \
+                 wall_mean_us={:.3} wall_p50_us={:.3} wall_p95_us={:.3} \
+                 cpu_mean_us={:.3} cpu_p50_us={:.3} cpu_p95_us={:.3} \
+                 gpu_mean_us={:.3} gpu_p50_us={:.3} gpu_p95_us={:.3} \
+                 taa_gpu_mean_us={:.3}",
+                profile.wall_mean_us,
+                profile.wall_p50_us,
+                profile.wall_p95_us,
+                profile.cpu_mean_us,
+                profile.cpu_p50_us,
+                profile.cpu_p95_us,
+                profile.gpu_mean_us,
+                profile.gpu_p50_us,
+                profile.gpu_p95_us,
+                profile.taa_gpu_mean_us,
+            );
+            if label == "fractional" {
+                fractional.push(profile);
+            } else {
+                native.push(profile);
+            }
+        }
+    }
+
+    let fractional_wall = median(fractional.iter().map(|run| run.wall_mean_us).collect());
+    let native_wall = median(native.iter().map(|run| run.wall_mean_us).collect());
+    let fractional_gpu = median(fractional.iter().map(|run| run.gpu_mean_us).collect());
+    let native_gpu = median(native.iter().map(|run| run.gpu_mean_us).collect());
+    let wall_advantage = 1.0 - fractional_wall / native_wall;
+    let gpu_advantage = 1.0 - fractional_gpu / native_gpu;
+    let passed = wall_advantage >= minimum_advantage && gpu_advantage >= minimum_advantage;
+    eprintln!(
+        "fractional-native-throughput-summary pairs={pairs} frames_per_run={frames} \
+         fractional_wall_median_us={fractional_wall:.3} native_wall_median_us={native_wall:.3} \
+         wall_advantage={wall_advantage:.6} fractional_gpu_median_us={fractional_gpu:.3} \
+         native_gpu_median_us={native_gpu:.3} gpu_advantage={gpu_advantage:.6} \
+         minimum_advantage={minimum_advantage:.6}"
+    );
+    if let Ok(output) = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_OUT") {
+        let output = std::path::PathBuf::from(output);
+        std::fs::create_dir_all(&output).expect("create fractional throughput output");
+        let adapter: serde_json::Value =
+            serde_json::from_str(&eng.renderer.quality_adapter_json()).expect("adapter JSON");
+        let runtime: serde_json::Value =
+            serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+                .expect("runtime paths JSON");
+        let camera_step = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_CAMERA_STEP")
+            .ok()
+            .map(|value| value.parse::<f64>().expect("profile camera step"))
+            .unwrap_or(0.002);
+        let result = serde_json::json!({
+            "schema": "bloom-fractional-native-throughput-v1",
+            "git_commit": git_commit(),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "adapter": adapter,
+            "configuration": {
+                "output_extent": [1600, 900],
+                "fractional_render_scale": 0.75,
+                "native_render_scale": 1.0,
+                "warmup_frames_per_run": 120,
+                "measured_frames_per_run": frames,
+                "pairs": pairs,
+                "camera_step": camera_step,
+                "taa": true,
+                "quality_preset": 4,
+                "profiler_gpu_readback_serialized": true,
+            },
+            "limits": {
+                "min_wall_advantage": minimum_advantage,
+                "min_gpu_advantage": minimum_advantage,
+            },
+            "fractional_runs": fractional
+                .iter()
+                .copied()
+                .map(throughput_profile_json)
+                .collect::<Vec<_>>(),
+            "native_runs": native
+                .iter()
+                .copied()
+                .map(throughput_profile_json)
+                .collect::<Vec<_>>(),
+            "summary": {
+                "fractional_wall_median_us": fractional_wall,
+                "native_wall_median_us": native_wall,
+                "wall_advantage": wall_advantage,
+                "fractional_gpu_median_us": fractional_gpu,
+                "native_gpu_median_us": native_gpu,
+                "gpu_advantage": gpu_advantage,
+            },
+            "steady_state_resources": runtime["steady_state_resources"].clone(),
+            "passed": passed,
+        });
+        std::fs::write(
+            output.join("result.json"),
+            serde_json::to_string_pretty(&result).expect("serialize throughput result") + "\n",
+        )
+        .expect("write fractional throughput result");
+        let summary = format!(
+            "# Fractional 0.75 vs native 1.0 throughput\n\n\
+             - status: **{}**\n\
+             - adapter: `{}` / `{}`\n\
+             - pairs: `{pairs}` × `{frames}` measured frames after 120 warm-up frames\n\
+             - end-to-end median: `{fractional_wall:.3} us` vs `{native_wall:.3} us` ({:.2}% advantage)\n\
+             - timestamped GPU median: `{fractional_gpu:.3} us` vs `{native_gpu:.3} us` ({:.2}% advantage)\n\
+             - required advantage: `{:.2}%`\n",
+            if passed { "pass" } else { "fail" },
+            result["adapter"]["name"].as_str().unwrap_or("unknown"),
+            result["adapter"]["backend"].as_str().unwrap_or("unknown"),
+            wall_advantage * 100.0,
+            gpu_advantage * 100.0,
+            minimum_advantage * 100.0,
+        );
+        std::fs::write(output.join("summary.md"), summary)
+            .expect("write fractional throughput summary");
+    }
+    assert!(
+        wall_advantage >= minimum_advantage,
+        "fractional 0.75 reconstruction did not preserve its end-to-end performance advantage: \
+         fractional={fractional_wall:.3}us native={native_wall:.3}us \
+         advantage={wall_advantage:.3} required={minimum_advantage:.3}"
+    );
+    assert!(
+        gpu_advantage >= minimum_advantage,
+        "fractional 0.75 reconstruction did not preserve its GPU performance advantage: \
+         fractional={fractional_gpu:.3}us native={native_gpu:.3}us \
+         advantage={gpu_advantage:.3} required={minimum_advantage:.3}"
     );
 }
 

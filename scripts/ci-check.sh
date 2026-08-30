@@ -81,7 +81,7 @@ lane_components() {
     full) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory host-build wasm-build" ;;
     web) printf '%s\n' "wasm-check wasm-build browser-smoke" ;;
     cross) printf '%s\n' "target-check" ;;
-    hardware) printf '%s\n' "example-compile quality-check quality-faults quality-run virtual-geometry-stress" ;;
+    hardware) printf '%s\n' "example-compile quality-check quality-faults quality-run fractional-native-throughput virtual-geometry-stress" ;;
     *)
       echo "unknown lane: $1" >&2
       return 2
@@ -401,6 +401,24 @@ run_component() {
           --out "$quality_out" \
           --timeout "${BLOOM_QUALITY_TIMEOUT:-1800}"
       fi
+      ;;
+    fractional-native-throughput)
+      throughput_out="${BLOOM_PROFILE_FRACTIONAL_TAA_OUT:-tools/quality/out/ci-fractional-native-throughput}"
+      if [ "${throughput_out#/}" = "$throughput_out" ]; then
+        throughput_out="$ROOT/$throughput_out"
+      fi
+      hr "qualify fractional 0.75 throughput against native 1.0"
+      (
+        cd native/shared
+        BLOOM_PROFILE_FRACTIONAL_TAA_OUT="$throughput_out" \
+        BLOOM_PROFILE_FRACTIONAL_TAA_FRAMES="${BLOOM_PROFILE_FRACTIONAL_TAA_FRAMES:-600}" \
+        BLOOM_PROFILE_FRACTIONAL_TAA_PAIRS="${BLOOM_PROFILE_FRACTIONAL_TAA_PAIRS:-3}" \
+        BLOOM_PROFILE_FRACTIONAL_TAA_MIN_ADVANTAGE="${BLOOM_PROFILE_FRACTIONAL_TAA_MIN_ADVANTAGE:-0.05}" \
+        BLOOM_PROFILE_FRACTIONAL_TAA_CAMERA_STEP="${BLOOM_PROFILE_FRACTIONAL_TAA_CAMERA_STEP:-0.002}" \
+        cargo test --release --test golden_render \
+          quality_presets::profile_fractional_taa_native_advantage \
+          -- --exact --ignored --nocapture
+      )
       ;;
     virtual-geometry-stress)
       if [ -z "${BLOOM_VIRTUAL_STRESS_PLATFORM:-}" ] || [ -z "${BLOOM_VIRTUAL_STRESS_BACKEND:-}" ]; then
