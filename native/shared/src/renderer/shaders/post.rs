@@ -9,12 +9,13 @@
 ///   Karis-style soft threshold first to extract HDR brights and
 ///   suppress fireflies. Used only when sampling the source HDR
 ///   into bloom mip 0.
-/// - `fs_upsample`: 9-tap tent-filter upsample, additive blend
-///   (set via wgpu's blend state on the upsample pipeline).
+/// - `fs_upsample`: the same separable 9-tap tent reconstructed by
+///   four bilinear half-texel samples, additive blend (set via wgpu's
+///   blend state on the upsample pipeline).
 ///
 /// Uniform: `params.xy` = source texel size (1/src_w, 1/src_h);
-/// `params.z` = bloom intensity (only used by upsample); `params.w`
-/// reserved.
+/// `params.z` = filter radius (only used by upsample); `params.w` =
+/// HDR threshold (only used by the threshold downsample).
 pub(in crate::renderer) const BLOOM_SHADER_WGSL: &str = "
 struct BloomParams {
     /// xy = source texel size (1/src_w, 1/src_h),
@@ -152,30 +153,30 @@ fn fs_threshold_downsample(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(downsample_13(in.uv, u.params.xy, true), 1.0);
 }
 
-// 9-tap tent filter upsample (Sledgehammer). Texel-radius scaled by
-// the small radius factor in u.params.z (defaults to ~1.0 — wider
-// = more blurry overlap). Output is BLENDED additively into the
+// Separable 3x3 tent filter upsample (Sledgehammer). With the governed
+// radius of exactly one source texel, four bilinear samples at the
+// half-texel diagonals reproduce the original weights exactly:
+//
+//     1 2 1
+//     2 4 2  / 16
+//     1 2 1
+//
+// This is the same filter as nine point samples, with five fewer texture
+// operations per upsample pixel. Output is BLENDED additively into the
 // destination via the upsample pipeline's blend state.
 @fragment
 fn fs_upsample(in: VsOut) -> @location(0) vec4<f32> {
-    let dx = u.params.x * u.params.z;
-    let dy = u.params.y * u.params.z;
+    let dx = 0.5 * u.params.x * u.params.z;
+    let dy = 0.5 * u.params.y * u.params.z;
     let uv = in.uv;
 
     var sum = vec3<f32>(0.0);
-    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>(-dx,  dy)).rgb * 1.0;
-    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0,  dy)).rgb * 2.0;
-    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( dx,  dy)).rgb * 1.0;
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>(-dx,  dy)).rgb;
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( dx,  dy)).rgb;
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>(-dx, -dy)).rgb;
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( dx, -dy)).rgb;
 
-    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>(-dx,  0.0)).rgb * 2.0;
-    sum = sum + textureSample(src_tex, src_samp, uv).rgb                          * 4.0;
-    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( dx,  0.0)).rgb * 2.0;
-
-    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>(-dx, -dy)).rgb * 1.0;
-    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0, -dy)).rgb * 2.0;
-    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( dx, -dy)).rgb * 1.0;
-
-    return vec4<f32>(sum * (1.0 / 16.0), 1.0);
+    return vec4<f32>(sum * 0.25, 1.0);
 }
 ";
 

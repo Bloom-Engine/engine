@@ -6,6 +6,10 @@
 use super::*;
 use wgpu::util::DeviceExt;
 
+// The four bilinear bloom-upsample taps in BLOOM_SHADER_WGSL reproduce the
+// governed 3x3 tent only at one source texel of radius.
+const BLOOM_UPSAMPLE_FILTER_RADIUS: f32 = 1.0;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub(super) enum CompositeSource {
@@ -137,7 +141,7 @@ impl Renderer {
         let downsample_count = BLOOM_MIP_COUNT as usize;
         let upsample_count = downsample_count.saturating_sub(1);
         let (render_width, render_height) = self.render_extent();
-        let filter_radius = 1.0_f32;
+        let filter_radius = BLOOM_UPSAMPLE_FILTER_RADIUS;
         let threshold = bloom_threshold(self.auto_exposure, self.manual_exposure);
 
         // These texel sizes are immutable until the next resize. Initialize
@@ -261,9 +265,9 @@ impl Renderer {
         // followed by additive upsample back up the chain.
         // ============================================================
         if self.bloom_enabled {
-            let bloom_filter_radius = 1.0_f32; // upsample tent radius
-                                               // Texel sizes are fixed until resize. Only the threshold in the
-                                               // first pass can change at runtime, and only when exposure does.
+            let bloom_filter_radius = BLOOM_UPSAMPLE_FILTER_RADIUS;
+            // Texel sizes are fixed until resize. Only the threshold in the
+            // first pass can change at runtime, and only when exposure does.
             let threshold = bloom_threshold(self.auto_exposure, self.manual_exposure);
             if threshold.to_bits() != self.bloom_threshold_written.to_bits() {
                 let params = BloomParams {
@@ -360,8 +364,13 @@ mod tests {
     use super::{
         bloom_mip_extent, bloom_threshold, exposure_update_rate, reactive_taa_cache_key,
         ssgi_composite_weight, taa_camera_moving, taa_current_weight, CompositeSource,
-        PostFxSource, SsrCompositeSource,
+        PostFxSource, SsrCompositeSource, BLOOM_UPSAMPLE_FILTER_RADIUS,
     };
+
+    #[test]
+    fn bloom_bilinear_upsample_keeps_its_one_texel_filter_contract() {
+        assert_eq!(BLOOM_UPSAMPLE_FILTER_RADIUS, 1.0);
+    }
 
     #[test]
     fn bloom_mip_extent_matches_half_resolution_chain_and_never_reaches_zero() {

@@ -406,3 +406,20 @@ pub(super) use post::{
     MOTION_BLUR_SHADER_WGSL, RCAS_SHADER_WGSL, SCENE_COMPOSE_SHADER_WGSL, SSS_SHADER_WGSL,
     TAA_SHADER_WGSL, UPSCALE_SHADER_WGSL,
 };
+
+#[cfg(test)]
+mod post_tests {
+    use super::BLOOM_SHADER_WGSL;
+
+    #[test]
+    fn bloom_upsample_is_the_four_bilinear_tent() {
+        let upsample = BLOOM_SHADER_WGSL
+            .split("fn fs_upsample")
+            .nth(1)
+            .expect("bloom upsample entry point");
+        assert_eq!(upsample.matches("textureSample(src_tex").count(), 4);
+        assert!(upsample.contains("let dx = 0.5 * u.params.x * u.params.z;"));
+        assert!(upsample.contains("let dy = 0.5 * u.params.y * u.params.z;"));
+        assert!(upsample.contains("sum * 0.25"));
+    }
+}
