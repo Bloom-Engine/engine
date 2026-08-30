@@ -421,5 +421,121 @@ class ReproducibilityTests(unittest.TestCase):
         self.assertTrue(any("uncapped" in item for item in failures))
 
 
+class QualificationFailureOrderingTests(unittest.TestCase):
+    def test_missing_baseline_does_not_suppress_runtime_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            case = {
+                "id": "sample",
+                "description": "sample",
+                "quality_tier": "high",
+                "resolution": [1, 1],
+                "render_scale": 1.0,
+                "seed": 0,
+                "fixed_timestep": 1 / 60,
+                "warmup_frames": 1,
+                "measured_frames": 1,
+                "camera": {
+                    "position": [0.0, 0.0, 1.0],
+                    "target": [0.0, 0.0, 0.0],
+                    "up": [0.0, 1.0, 0.0],
+                    "fov_y_degrees": 45.0,
+                    "animation": "still",
+                },
+                "settings": {"quality_preset": 3},
+                "capture": {
+                    "working_dir": ".",
+                    "command": ["fake-capture", "{candidate}"],
+                },
+                "reference": {
+                    "path": "tools/quality/baselines/portable/missing.png"
+                },
+                "required_intermediates": ["hdr-scene"],
+                "budgets": {
+                    "machine_class": "test-machine",
+                    "max_cpu_frame_p95_ms": 1.0,
+                    "max_gpu_frame_p95_ms": 2.0,
+                },
+            }
+            machine = {
+                "id": "test-machine",
+                "hard_gate": True,
+                "hard_metrics": ["cpu", "gpu"],
+                "backend": "metal",
+                "gpu": "Test GPU",
+            }
+
+            def capture(
+                argv: list[str],
+                cwd: Path,
+                timeout_seconds: float,
+                env: dict[str, str] | None = None,
+            ) -> quality.CommandResult:
+                del timeout_seconds
+                Path(argv[1]).write_bytes(b"candidate")
+                assert env is not None
+                Path(env["BLOOM_QUALITY_TELEMETRY"]).write_text(
+                    json.dumps(
+                        {
+                            "adapter": {
+                                "availability": "reported",
+                                "backend": "metal",
+                                "name": "Test GPU",
+                                "features": [],
+                            },
+                            "cpu_frame_p95_ms": 4.0,
+                            "gpu_frame_p95_ms": 5.0,
+                            "uncapped": True,
+                            "warmup_excluded": True,
+                            "shader_compilation_excluded": True,
+                            "gpu_timestamps_available": True,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return quality.CommandResult(
+                    argv=list(argv),
+                    cwd=str(cwd),
+                    returncode=0,
+                    duration_ms=1.0,
+                    stdout="",
+                    stderr="",
+                    timed_out=False,
+                )
+
+            with (
+                mock.patch.object(quality, "REPO_ROOT", root),
+                mock.patch.object(
+                    quality,
+                    "verify_assets",
+                    return_value=[{"path": "asset", "status": "pass"}],
+                ),
+                mock.patch.object(quality, "run_command", side_effect=capture),
+                mock.patch.object(quality, "png_dimensions", return_value=(1, 1)),
+                mock.patch.object(quality, "telemetry_contract_failures", return_value=[]),
+            ):
+                record = quality.run_case(
+                    case,
+                    root / "out",
+                    root / "bloom-diff",
+                    set(),
+                    True,
+                    machine,
+                    True,
+                    1.0,
+                    set(),
+                )
+
+            self.assertEqual(record["status"], "fail")
+            self.assertTrue(record["report_only_failure"])
+            self.assertIn("missing named intermediates: ['hdr-scene']", record["failures"])
+            self.assertIn("cpu_frame_p95_ms 4.0000 > 1.0000", record["failures"])
+            self.assertIn("gpu_frame_p95_ms 5.0000 > 2.0000", record["failures"])
+            self.assertIn(
+                "approved baseline missing: tools/quality/baselines/portable/missing.png",
+                record["failures"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

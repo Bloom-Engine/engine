@@ -1273,10 +1273,18 @@ def run_case(
     missing_intermediates = sorted(required_intermediates - produced_names)
     if missing_intermediates:
         record["failures"].append(f"missing named intermediates: {missing_intermediates}")
+    # Baselines are independently governed and may legitimately be absent
+    # during initial corpus bring-up. Do not let that suppress the runtime,
+    # resource, or hard-performance contracts that the completed capture can
+    # already prove. In particular, report-only bootstrap runs must expose
+    # budget failures before a human installs the first visual reference.
+    record["failures"].extend(performance_failures(case, telemetry, machine))
     reference = repo_path(case["reference"]["path"])
     if not reference.exists():
         record["status"] = "fail"
         record["failures"].append(f"approved baseline missing: {case['reference']['path']}")
+        if report_only:
+            record["report_only_failure"] = True
         return record
     diff_argv = diff_command(
         diff_bin, case, reference, candidate, case_dir, report_only=False
@@ -1301,12 +1309,6 @@ def run_case(
         record["failures"].append("bloom-diff did not produce metrics.json")
     if diff_result.returncode != 0:
         record["failures"].append(f"visual thresholds failed (exit {diff_result.returncode})")
-    record["failures"].extend(
-        performance_failures(case, telemetry, machine)
-    )
-    record["failures"].extend(
-        f"missing named intermediate {item}" for item in missing_intermediates
-    )
     record["status"] = "pass" if not record["failures"] else "fail"
     if report_only and record["status"] == "fail":
         record["report_only_failure"] = True
