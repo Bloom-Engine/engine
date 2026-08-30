@@ -9,6 +9,11 @@ Bloom compiles your game to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU — on
 > API on raylib's — in our view one of the best API designs in gamedev. Bloom is an
 > independent implementation, not a port — [how Bloom relates to raylib »](#how-bloom-relates-to-raylib)
 
+> **Release status:** this branch documents the upcoming 0.5 API. The latest stable
+> npm release is 0.4.16; shared quick-start code works on both, while breaking
+> field and convention changes are listed in the
+> [0.5 migration guide](docs/migration-0.5.md).
+
 ## Install
 
 ```bash
@@ -23,13 +28,13 @@ pnpm add @bloomengine/engine
 yarn add @bloomengine/engine
 ```
 
-The npm package ships the TypeScript API alongside the engine's Rust sources and the bundled [JoltPhysics](https://github.com/jrouwe/JoltPhysics) C++ shim, so a single `install` is enough — there's no separate native download step.
+The npm package ships the TypeScript API, Rust sources, and the [JoltPhysics](https://github.com/jrouwe/JoltPhysics) C++ fallback. It also installs compatible prebuilt Jolt libraries through `@bloomengine/jolt-prebuilt`, so supported targets normally avoid the C++ build without requiring a separate download.
 
 You'll also need:
 
 - **Perry** — the TypeScript AOT compiler that turns your game into a native binary or WASM module. It also drives the engine's native build.
 - **Rust toolchain** ([rustup.rs](https://rustup.rs)) — Perry invokes Cargo to compile the engine's platform crate the first time you build for each target.
-- For web builds only: [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) (`cargo install wasm-pack`).
+- For web builds only: [wasm-pack](https://crates.io/crates/wasm-pack) (`cargo install wasm-pack`).
 
 ## Quick Start
 
@@ -65,15 +70,15 @@ runGame((dt) => {
 Build for web:
 
 ```bash
-./native/web/build.sh main.ts
+npm exec -- bloom-web main.ts --output dist/web
 cd dist/web && python3 -m http.server 8080
 ```
 
 ## Features
 
-- **Simple API** — Functions, not classes. The entire API fits on a cheatsheet. ([design rationale](docs/design-api.md))
+- **Simple API** — A function-first gameplay API with plain data handles. ([design rationale](docs/design-api.md))
 - **True native** — Compiles to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU via wgpu.
-- **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, Android, and Web from one codebase.
+- **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, watchOS, visionOS, Android, and Web from one codebase.
 - **Unified 2D/3D** — Shapes, textures, text, 3D models, and audio in one engine.
 - **Coherent quality tiers** — Resolution, TAA, upscale filtering, sharpening,
   and effects move together from 0.50-scale Off to native-resolution Ultra.
@@ -84,7 +89,7 @@ cd dist/web && python3 -m http.server 8080
 
 Bloom's public API is heavily inspired by [raylib](https://github.com/raysan5/raylib).
 raylib's API is, in our opinion, one of the best in the gamedev space — a flat library
-of plain functions, no classes, small enough to learn from a cheatsheet — so we model
+of plain functions, no gameplay object hierarchy, small enough to learn from a cheatsheet — so we model
 ours on it. You'll recognize the shape immediately: `initWindow`, `beginDrawing`,
 `clearBackground`, `drawText`, and modules named core / shapes / textures / text /
 audio / models.
@@ -113,6 +118,7 @@ setting the bar. ([full design rationale](docs/design-api.md))
 | **VFX** | `@bloomengine/engine/vfx` | GPU particle systems + decals |
 | **World** | `@bloomengine/engine/world` | `.world.json` loading, validation, instantiation ([docs](docs/world-format.md)) |
 | **Mobile** | `@bloomengine/engine/mobile` | Virtual joystick/buttons, touch-input helpers |
+| **Quality** | `@bloomengine/engine/quality` | Deterministic quality-run and capture helpers |
 
 ## Platforms
 
@@ -124,6 +130,7 @@ setting the bar. ([full design rationale](docs/design-api.md))
 | iOS | Metal | Touch + gamepad |
 | tvOS | Metal | Siri Remote + gamepad |
 | watchOS | SwiftUI Canvas (2D) + SceneKit (3D) | Digital Crown + taps ([docs](docs/watchos-target.md)) |
+| visionOS | Metal | Spatial input |
 | Android | Vulkan / OpenGL ES | Touch + gamepad |
 | **Web** | **WebGPU / WebGL** | **Keyboard + mouse + touch + gamepad** |
 
@@ -138,6 +145,12 @@ src/                  TypeScript API
   audio/              Sound + music
   models/             3D models
   math/               Vectors, matrices, easing
+  mobile/             Touch controls
+  scene/              Retained scene graph
+  physics/            Jolt physics
+  world/              World-format runtime
+  vfx/                Particles and decals
+  quality/            Qualification helpers
 
 native/               Rust implementations
   shared/             Cross-platform core (wgpu, fontdue, gltf)
@@ -148,6 +161,8 @@ native/               Rust implementations
   linux/              Vulkan/OpenGL + X11 + ALSA
   android/            Vulkan/OpenGL ES + NativeActivity + AAudio
   web/                WebGPU/WebGL + Canvas + Web Audio (WASM)
+  watchos/            SwiftUI Canvas + SceneKit
+  visionos/           Metal + UIKit
 
 examples/
   pong/               Complete working example (~170 lines)
@@ -158,8 +173,8 @@ examples/
 Install Node.js, Python 3.11 or newer, the stable Rust toolchain with
 `rustfmt`, `clippy`, and the `wasm32-unknown-unknown` target. The full and web
 lanes also require
-[wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Chrome or
-Chromium for the real-browser WebGPU smoke. Native builds need the platform
+[wasm-pack](https://crates.io/crates/wasm-pack) and a current WebGPU-capable
+browser for the real-browser smoke. Native builds need the platform
 dependencies listed in `.github/workflows/test.yml` (CMake and a C++ compiler
 everywhere, X11/audio development packages on Linux, and the MSVC developer
 environment on Windows).
@@ -195,7 +210,7 @@ command inventory cannot silently differ from local development.
 
 ## Types
 
-Plain interfaces, no classes:
+Gameplay-facing resource and math types are plain interfaces:
 
 ```typescript
 interface Vec2 { x: number; y: number }
@@ -203,7 +218,7 @@ interface Vec3 { x: number; y: number; z: number }
 interface Color { r: number; g: number; b: number; a: number }
 interface Rect { x: number; y: number; width: number; height: number }
 interface Camera2D { offset: Vec2; target: Vec2; rotation: number; zoom: number }
-interface Camera3D { position: Vec3; target: Vec3; up: Vec3; fovy: number; projection: number }
+interface Camera3D { position: Vec3; target: Vec3; up: Vec3; fovy: number; projection: "perspective" | "orthographic" }
 interface Texture { handle: number; width: number; height: number }
 interface Sound { handle: number }
 interface Model { handle: number }
@@ -240,17 +255,24 @@ const character = loadModel("assets/models/character.glb");
 const anim = loadModelAnimation("assets/models/character.glb");
 
 // In your game loop:
-updateModelAnimation(anim, 0, getTime(), 1.0, 0, 0, 0);
+updateModelAnimation(anim, 0, getTime(), 1.0, 0, 0, 0, 0);
 drawModel(character, { x: 0, y: 0, z: 0 }, 1.0, Colors.WHITE);
 ```
 
 Key functions:
 - `loadModel(path)` -- loads GLB with skin data (JOINTS_0, WEIGHTS_0)
 - `loadModelAnimation(path)` -- loads skeleton + animation channels from GLB
-- `updateModelAnimation(handle, animIndex, time, scale, px, py, pz)` -- samples animation, computes joint matrices
+- `updateModelAnimation(handle, animIndex, time, scale, px, py, pz, rotY)` -- samples animation, computes joint matrices
 - `drawModel(model, position, scale, tint)` -- renders with GPU skinning
 
 For the full pipeline (Blender export, pitfalls, architecture), see [docs/skeletal-animation.md](docs/skeletal-animation.md).
+
+## Documentation languages
+
+The API reference and repository documentation are maintained in English. The
+website's marketing pages are localized, but the language switcher labels the
+technical reference as English-only rather than presenting unreviewed machine
+translations as authoritative documentation.
 
 ## Made with Bloom
 

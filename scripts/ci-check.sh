@@ -208,6 +208,8 @@ run_component() {
       node tools/check-ci-contract.js
       hr "FFI/schema parity"
       node tools/validate-ffi.js
+      hr "documentation and package contracts"
+      node tools/validate-docs.js
       hr "file-size ratchet"
       node tools/check-file-lines.js
       ;;

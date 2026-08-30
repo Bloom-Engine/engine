@@ -7,9 +7,10 @@
 philosophy lives on in `README.md` and the raylib-modeled `src/` API).
 Both were removed 2026-07-06; git history has them.
 
-## Status vs. plan (as-built, 2026-07-16)
+## Historical status snapshot (2026-07-16)
 
-This document is the *plan*; the code has made choices where the plan
+This section is retained as a dated snapshot, not current as-built
+documentation. This document is the *plan*; the code has made choices where the plan
 offered options, and diverged where reality was cheaper:
 
 - **API/backends:** wgpu 29 (DX12/Metal/Vulkan/WebGPU through one
