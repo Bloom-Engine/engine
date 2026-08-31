@@ -1,0 +1,90 @@
+{
+  "schema": "bloom-virtual-geometry-conservative-hiz-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "e930a5e057ebe1059b8def5a2461f169a783b1a7",
+  "date": "2026-08-26",
+  "pyramid": {
+    "base_width": 256,
+    "base_height": 256,
+    "mip_count": 9,
+    "format": "r32float",
+    "reduction": "maximum-linear-depth",
+    "texture_bytes": 349524,
+    "separate_textures_for_metal": true,
+    "virtual_only_shared_downsamples": 0,
+    "private_reduce_passes": 9
+  },
+  "safety": {
+    "whole_atomic_group_only": true,
+    "all_in_frustum_clusters_must_be_occluded": true,
+    "previous_current_footprint_union": true,
+    "query_expansion_base_cells": 2,
+    "accepted_motion_base_cells": 1,
+    "relative_depth_bias": 0.02,
+    "absolute_depth_bias": 0.1,
+    "camera_cut_fails_open": true,
+    "resize_fails_open": true,
+    "skipped_frame_fails_open": true,
+    "new_instance_fails_open": true,
+    "near_plane_or_offscreen_fails_open": true,
+    "history_promoted_after_submit": true
+  },
+  "default_path": {
+    "explicit_opt_in": true,
+    "ordinary_virtual_hiz_textures": 0,
+    "ordinary_virtual_hiz_passes": 0,
+    "idle_virtual_capture_passes": 0,
+    "native_no_models_source_path_changed": false
+  },
+  "metal_oracle": {
+    "backend": "metal",
+    "occluder_linear_depth": 2.0,
+    "stable_instance_depth_approx": 10.0,
+    "stable_selected_clusters": 0,
+    "stable_occlusion_culled_groups": 2,
+    "stable_uncertain_groups": 0,
+    "camera_motion_selected_clusters": 4,
+    "camera_motion_occlusion_culled_groups": 0,
+    "camera_motion_uncertain_groups_minimum": 2,
+    "new_instance_selected_clusters": 4,
+    "new_instance_occlusion_culled_groups": 0,
+    "new_instance_uncertain_groups_minimum": 2
+  },
+  "production_renderer": {
+    "four_mrt_integration": "pass",
+    "captures_submitted": 2,
+    "history_instances": 1,
+    "disabled_report_texture_bytes": 0,
+    "disabled_report_history_valid": false,
+    "unrelated_pixels_changed": 0
+  },
+  "qualification": {
+    "shared_unit_tests_passed": 458,
+    "shared_unit_tests_ignored": 1,
+    "golden_tests_passed": 77,
+    "golden_tests_ignored": 2,
+    "focused_virtual_geometry_tests_passed": 38,
+    "production_virtual_four_mrt_metal_test": "pass",
+    "native_no_default_check": "pass",
+    "wasm_web_models3d_check": "pass",
+    "format": "pass",
+    "diff_check": "pass",
+    "strict_quick_lint": "pass",
+    "file_size_ratchet": {
+      "status": "pre_existing_failures_only",
+      "slice_files_over_ceiling": 0,
+      "pre_existing_files_over_ceiling": [
+        "native/shared/src/renderer/shaders/post.rs",
+        "native/shared/src/renderer/shaders/ssgi.rs",
+        "native/shared/tests/golden_render/temporal_history.rs"
+      ]
+    }
+  },
+  "acceptance_boxes_changed": 0,
+  "remaining": [
+    "asynchronous issue-136 store and index IO",
+    "approved Bistro motion and parity corpus",
+    "10-million-source-triangle stress asset",
+    "integrated and discrete Metal Vulkan and Direct3D 12 qualification"
+  ]
+}

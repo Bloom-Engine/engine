@@ -1,0 +1,114 @@
+{
+  "schema": "bloom-web-fallback-tsr-evidence-v1",
+  "comparison_base": "26b1893",
+  "defect": {
+    "previous_browser_smoke_passed": true,
+    "production_3d_pipeline_failed": "ssr_temporal_pipeline",
+    "validation_error": "dpdy must only be called from uniform control flow",
+    "cause": "depth footprint derivatives evaluated after a fragment-varying off-screen early return",
+    "fix": "evaluate the existing depth derivatives before divergent history control flow",
+    "additional_samples": 0,
+    "additional_bindings": 0,
+    "additional_resources": 0,
+    "additional_passes": 0,
+    "additional_persistent_bytes": 0
+  },
+  "browser_gate": {
+    "schema": "bloom-web-browser-smoke-v2",
+    "scene": "canonical DamagedHelmet.glb plus floor and thin primitives",
+    "warmup_frames": 12,
+    "sequence_frames": 8,
+    "native_render_scale": 1.0,
+    "fractional_render_scale": 0.75,
+    "controls": [
+      "native-taa",
+      "fractional-taa",
+      "fractional-no-taa"
+    ],
+    "final": {
+      "native_frame_rmse": 0.027498780985991535,
+      "native_motion_derivative_rmse": 0.024833870488265825,
+      "native_motion_activity_rgb_8bit": 0.2252454844006568,
+      "fractional_motion_activity_rgb_8bit": 0.6254224137931035,
+      "fractional_scene_luma_stddev_8bit": 68.80709356228735,
+      "no_taa_native_frame_rmse": 0.029252787516314115,
+      "no_taa_native_motion_derivative_rmse": 0.014404376058592202
+    },
+    "limits": {
+      "max_native_frame_rmse": 0.03,
+      "max_native_motion_derivative_rmse": 0.027,
+      "min_motion_activity_rgb_8bit": 0.05,
+      "min_fractional_scene_luma_stddev_8bit": 12.0
+    },
+    "repeat": {
+      "native_frame_rmse": 0.027499949882585282,
+      "native_motion_derivative_rmse": 0.024833867564814892
+    },
+    "runtime": {
+      "backend": "browserwebgpu",
+      "capability_tier": "modern",
+      "hardware_ray_query": false,
+      "ssgi_trace_backend": "hiz-screen",
+      "material_tier": "B",
+      "material_residency": {
+        "materials": 1,
+        "meshes": 1,
+        "textures": 5,
+        "samplers": 2,
+        "buffer_views": 2,
+        "stale_fallbacks": 0,
+        "limit_fallbacks": 0
+      }
+    },
+    "endpoint_sha256": {
+      "native_first": "9a262a2592e371d493bfb7df477a015e08fe8851823fb0550c769798d7fcac16",
+      "native_last": "23fc563f50ed3dbc8c8f1859d0c1655cade7c19e5dfcce25e77da16ef2bd90e0",
+      "fractional_first": "8b332680a42814e67d6a4ba0d718dc887e91f153b22d3b2205cb070f7fd4a7e2",
+      "fractional_last": "0155a24c301749bb68ea85a344208e76ae2b79ab9095b72cc5310cff453fa29d",
+      "no_taa_first": "643ce72bf78a494052adde7a1c928d530ca77a457533701d5eba541679e3ceb6",
+      "no_taa_last": "1caed2d1e95c78d9cbc060757819f4187850a3e3bcc627ebfe7a66ad4b38b2bc"
+    }
+  },
+  "performance": {
+    "fixture": "pbr-spheres quality-preset-3 scale-1.0",
+    "warmup_frames": 120,
+    "measured_frames": 300,
+    "base_gpu_frame_mean_ms_runs": [
+      33.856949,
+      33.373425,
+      34.510888
+    ],
+    "candidate_gpu_frame_mean_ms_runs": [
+      33.652467,
+      34.318845,
+      32.828617
+    ],
+    "base_gpu_frame_mean_ms": 33.913754,
+    "candidate_gpu_frame_mean_ms": 33.59997633333334,
+    "gpu_frame_mean_relative_change": -0.009252224530102438,
+    "base_gpu_frame_p95_mean_ms": 51.424834,
+    "candidate_gpu_frame_p95_mean_ms": 51.73969466666667,
+    "gpu_frame_p95_relative_change": 0.006122735693549819,
+    "base_ssr_pass_mean_ms": 3.0437596666666664,
+    "candidate_ssr_pass_mean_ms": 3.0178336666666663,
+    "ssr_pass_relative_change": -0.008517755289264572,
+    "classification": "no-measurable-regression",
+    "steady_state_resource_churn_zero": true
+  },
+  "validation": {
+    "browser_final_repeats_passed": 2,
+    "quality_contract_python_tests_passed": 47,
+    "bloom_diff_tests_passed": 3,
+    "cooker_tests_passed": 48,
+    "shared_tests_passed": 483,
+    "shared_tests_ignored": 1,
+    "golden_gpu_tests_passed": 86,
+    "golden_gpu_tests_ignored": 3,
+    "wasm_check_passed": true,
+    "device_negotiation_tests_passed": 1,
+    "rust_format_passed": true,
+    "diff_check_passed": true
+  },
+  "passed": true,
+  "parent_issue_closed": false
+}

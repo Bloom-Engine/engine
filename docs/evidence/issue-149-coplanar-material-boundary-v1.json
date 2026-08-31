@@ -1,0 +1,60 @@
+{
+  "schema": "bloom-tsr-coplanar-material-boundary-evidence-v1",
+  "issue": 149,
+  "comparison_base": "e12f3d4053dd7a07ff067cae9cf4fc4c1312c0e2",
+  "candidate_revision": "commit-containing-this-artifact",
+  "adapter": "Apple M1 Max",
+  "backend": "Metal",
+  "production_pixel_changes": false,
+  "oracle": {
+    "frames": 12,
+    "candidate_scale": 0.75,
+    "reference": "2x-raster-box-filtered-to-output",
+    "camera_step": 0.03,
+    "crop": [112, 48, 32, 160],
+    "shared_base_texture": "two-texel-checker",
+    "perceptual_roughness": [0.08, 0.92],
+    "accepted": {
+      "mean_rgb": 1.818761,
+      "mean_ssim": 0.974989,
+      "minimum_ssim": 0.942141,
+      "motion_derivative_error": 0.456143
+    },
+    "enforced": {
+      "maximum_mean_rgb": 1.86,
+      "minimum_mean_ssim": 0.9745,
+      "minimum_frame_ssim": 0.94,
+      "maximum_motion_derivative_error": 0.47
+    }
+  },
+  "rejected_material_class_prototype": {
+    "source": "current-frame-rg8-metallic-roughness",
+    "roughness_classes": 3,
+    "history_storage": "packed-in-existing-rg16float-provenance",
+    "added_history_bytes": 0,
+    "added_texture_reads_per_output_pixel": 1,
+    "added_bindings": 1,
+    "policies": [
+      {
+        "name": "full-mismatch-rejection-gentle-pan",
+        "base": { "mean_rgb": 0.148244, "ssim": 0.999155, "derivative_error": 0.017981 },
+        "candidate": { "mean_rgb": 0.146714, "ssim": 0.999161, "derivative_error": 0.018478 },
+        "decision": "rejected-temporal-derivative-regression"
+      },
+      {
+        "name": "half-mismatch-rejection-fast-pan",
+        "base": { "mean_rgb": 0.217459, "ssim": 0.998074, "derivative_error": 0.050829 },
+        "candidate": { "mean_rgb": 0.214269, "ssim": 0.998065, "derivative_error": 0.051781 },
+        "decision": "rejected-ssim-and-temporal-derivative-regression"
+      },
+      {
+        "name": "rectification-detail-lock-kill-only",
+        "base": { "mean_rgb": 1.818761, "ssim": 0.974989, "derivative_error": 0.456143 },
+        "candidate": { "mean_rgb": 1.818452, "ssim": 0.974988, "derivative_error": 0.456155 },
+        "decision": "rejected-effect-within-quantization-and-extra-bandwidth"
+      }
+    ],
+    "production_changes_removed": true
+  },
+  "next_constraint": "stable-renderer-authored-identity-or-existing-fetch-reuse-required"
+}

@@ -4,6 +4,9 @@
   "description": "Bloom Engine: native TypeScript game engine compiled by Perry",
   "main": "src/index.ts",
   "types": "src/index.ts",
+  "bin": {
+    "bloom-web": "native/web/build.sh"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./core": "./src/core/index.ts",
@@ -17,7 +20,8 @@
     "./scene": "./src/scene/index.ts",
     "./physics": "./src/physics/index.ts",
     "./world": "./src/world/index.ts",
-    "./vfx": "./src/vfx/index.ts"
+    "./vfx": "./src/vfx/index.ts",
+    "./quality": "./src/quality/index.ts"
   },
   "files": [
     "src/",
@@ -28,6 +32,19 @@
     "native/shared/src/**",
     "native/shared/shaders/**",
     "native/shared/assets/**",
+    "crates/bloom-geometry-format/Cargo.toml",
+    "crates/bloom-geometry-format/Cargo.lock",
+    "crates/bloom-geometry-format/src/**",
+    "crates/bloom-scene-format/Cargo.toml",
+    "crates/bloom-scene-format/Cargo.lock",
+    "crates/bloom-scene-format/src/**",
+    "native/third_party/bloom_jolt/CMakeLists.txt",
+    "native/third_party/bloom_jolt/include/**",
+    "native/third_party/bloom_jolt/src/**",
+    "native/third_party/JoltPhysics/Build/**",
+    "native/third_party/JoltPhysics/Jolt/**",
+    "native/third_party/JoltPhysics/Jolt.cmake",
+    "native/third_party/JoltPhysics/LICENSE",
     "native/macos/Cargo.toml",
     "native/macos/Cargo.lock",
     "native/macos/src/**",
@@ -61,6 +78,7 @@
     "native/web/Cargo.lock",
     "native/web/src/**",
     "native/web/build.sh",
+    "native/web/splice_game.py",
     "native/web/index.html",
     "native/web/bloom_glue.js",
     "native/web/jolt_bridge.js"
@@ -165,6 +183,25 @@
           "returns": "void"
         },
         {
+          "name": "bloom_capture_frame_to_png",
+          "params": [
+            "string"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_capture_debug_intermediates",
+          "params": [
+            "string"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_capture_frame_ready",
+          "params": [],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_clear_background",
           "params": [
             "f64",
@@ -179,7 +216,7 @@
           "params": [
             "string"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_target_fps",
@@ -1005,7 +1042,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_compile_material_from_file",
@@ -1123,7 +1160,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_create_texture_array",
@@ -1167,7 +1204,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_material_shading_model",
@@ -1175,7 +1212,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_material_probe_visible",
@@ -1183,7 +1220,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_material_foliage",
@@ -1195,7 +1232,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_post_pass",
@@ -1207,7 +1244,7 @@
         {
           "name": "bloom_clear_post_pass",
           "params": [],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_add_post_pass",
@@ -1219,7 +1256,7 @@
         {
           "name": "bloom_clear_all_post_passes",
           "params": [],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_draw_material",
@@ -1565,7 +1602,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_ambient_light",
@@ -1575,7 +1612,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_directional_light",
@@ -1588,7 +1625,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_procedural_sky",
@@ -1598,7 +1635,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_sun_direction",
@@ -1608,7 +1645,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_fog",
@@ -1620,14 +1657,14 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_chromatic_aberration",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_vignette",
@@ -1635,28 +1672,72 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_film_grain",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_sharpen_strength",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_present_mode",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_present_mode",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_material_binding_capabilities",
+          "params": [],
+          "returns": "string"
+        },
+        {
+          "name": "bloom_get_renderer_capabilities",
+          "params": [],
+          "returns": "string"
+        },
+        {
+          "name": "bloom_get_imported_refraction_mode",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_transparency_composition_mode",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_transparency_composition_mode",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_active_transparency_composition_mode",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_material_binding_tier_override",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
         },
         {
           "name": "bloom_set_sun_shafts",
@@ -1667,35 +1748,35 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_auto_exposure",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_taa_enabled",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_occlusion_culling",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_render_scale",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_get_render_scale",
@@ -1707,14 +1788,14 @@
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_cas_strength",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_get_physical_width",
@@ -1732,35 +1813,40 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_manual_exposure",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_env_intensity",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_ssgi_enabled",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_path_tracing",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_reset_temporal_history",
+          "params": [],
+          "returns": "f64"
         },
         {
           "name": "bloom_path_tracing_supported",
@@ -1772,14 +1858,14 @@
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_ssgi_radius",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_dof",
@@ -1788,84 +1874,91 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_quality_preset",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_shadows_enabled",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_shadows_always_fresh",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_bloom_enabled",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_bloom_intensity",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_tonemap",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_color_saturation",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
         },
         {
           "name": "bloom_set_auto_exposure_key",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_auto_exposure_rate",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_ssao_enabled",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_ssao_intensity",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_ssao_radius",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_wind",
@@ -1875,7 +1968,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_launch_process",
@@ -1887,11 +1980,23 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_command_line_arg_count",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_command_line_arg",
+          "params": [
+            "f64"
+          ],
+          "returns": "string"
+        },
+        {
           "name": "bloom_set_output_scale",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_get_output_scale",
@@ -1904,14 +2009,14 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_foliage_shadow_motion",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_cloud_shadows",
@@ -1921,28 +2026,28 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_ssr_enabled",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_motion_blur_enabled",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_sss_enabled",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_set_profiler_enabled",
@@ -1959,6 +2064,19 @@
         {
           "name": "bloom_get_profiler_frame_gpu_us",
           "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_write_quality_telemetry",
+          "params": [
+            "string",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {
@@ -2377,6 +2495,39 @@
           "returns": "void"
         },
         {
+          "name": "bloom_add_shadowed_point_light",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_add_shadowed_spot_light",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_scene_create_node",
           "params": [],
           "returns": "f64"
@@ -2394,7 +2545,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_set_cast_shadow",
@@ -2402,7 +2553,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_set_gi_only",
@@ -2410,7 +2561,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_set_receive_shadow",
@@ -2418,7 +2569,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_set_parent",
@@ -2426,7 +2577,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_set_transform",
@@ -2434,7 +2585,7 @@
             "f64",
             "i64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_set_trs",
@@ -2446,7 +2597,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_update_geometry",
@@ -2480,7 +2631,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_update_geometry_scratch",
@@ -2502,7 +2653,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_attach_model_lod",
@@ -2513,7 +2664,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_set_material_color",
@@ -2524,7 +2675,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_set_material_pbr",
@@ -2533,7 +2684,43 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_scene_set_material_emissive",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_scene_set_material_layered_pbr",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_set_material_texture",
@@ -2541,7 +2728,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_node_count",
@@ -2631,7 +2818,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_gen_mesh_spline_ribbon",
@@ -2741,7 +2928,7 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_scene_get_user_data",
@@ -2776,12 +2963,12 @@
         {
           "name": "bloom_enable_shadows",
           "params": [],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_disable_shadows",
           "params": [],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_dump_shadow_map",
@@ -2814,14 +3001,14 @@
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_postfx_set_hovered",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_postfx_set_outline_color",
@@ -2831,14 +3018,14 @@
             "f64",
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_postfx_set_outline_thickness",
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_project_to_screen",

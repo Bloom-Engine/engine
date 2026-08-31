@@ -1,0 +1,95 @@
+{
+  "schema": "bloom-virtual-geometry-scaling-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "219344b3ef9d1d2bebcbc267eb90764c8e1a6892",
+  "backend": "metal",
+  "adapter": "Apple M1 Max",
+  "adapter_type": "integratedgpu",
+  "resolution": [640, 360],
+  "warmup_frames": 180,
+  "measured_frames": 120,
+  "archive": {
+    "source_triangles": 10000000,
+    "clusters": 245500,
+    "pages": 8496,
+    "bytes": 582052704,
+    "sha256": "13ab0d150328b9f67ebc8abbe0d73891a10d72033bc3a18b4d9f6a8364cbd864",
+    "index_sha256": "5c69a9a6cbf979d4c8483b3d8adc980cbe23d73862d5a79457051fe626d053c8"
+  },
+  "scaling": {
+    "instance_growth": 100.0,
+    "candidate_group_growth": 110.0,
+    "selected_cluster_growth": 143.94366197183098,
+    "selector_gpu_growth": 1.5333819319737567,
+    "points": [
+      {
+        "instances": 1,
+        "candidate_groups": 4,
+        "visible_groups": 4,
+        "frustum_culled_groups": 0,
+        "selected_clusters": 71,
+        "resident_pages": 65,
+        "selector_gpu_mean_ms": 0.956131,
+        "draw_emission_gpu_mean_ms": 0.076975,
+        "gpu_frame_mean_ms": 1.537271,
+        "wall_frame_mean_ms": 4.0802958333333335
+      },
+      {
+        "instances": 10,
+        "candidate_groups": 40,
+        "visible_groups": 40,
+        "frustum_culled_groups": 0,
+        "selected_clusters": 710,
+        "resident_pages": 148,
+        "selector_gpu_mean_ms": 1.058582,
+        "draw_emission_gpu_mean_ms": 0.092753,
+        "gpu_frame_mean_ms": 2.180538,
+        "wall_frame_mean_ms": 5.953603816666667
+      },
+      {
+        "instances": 100,
+        "candidate_groups": 440,
+        "visible_groups": 440,
+        "frustum_culled_groups": 0,
+        "selected_clusters": 10220,
+        "resident_pages": 955,
+        "selector_gpu_mean_ms": 1.466114,
+        "draw_emission_gpu_mean_ms": 0.108194,
+        "gpu_frame_mean_ms": 4.169199,
+        "wall_frame_mean_ms": 6.077394441666667
+      }
+    ],
+    "validation": "pass"
+  },
+  "full_runtime": {
+    "gpu_frame_p95_ms": 6.952625,
+    "pool_capacity_bytes": 67108864,
+    "resident_pages": 955,
+    "streaming_io_requests": 370,
+    "streaming_io_failures": 0,
+    "fallback_groups": 0,
+    "missing_current_pages": 0,
+    "selected_overflow": 0,
+    "request_overflow": 0,
+    "invalid_records": 0,
+    "depth_limit_fallbacks": 0,
+    "pending_streaming_groups": 0
+  },
+  "thresholds_ms": {
+    "maximum_wall_frame_mean": 16.666666666666668,
+    "maximum_gpu_frame_mean": 8.0,
+    "maximum_gpu_frame_p95": 12.0,
+    "maximum_selector_gpu_mean": 3.0,
+    "maximum_draw_emission_gpu_mean": 0.5
+  },
+  "qualification": {
+    "clean_driver": "pass",
+    "scaling_gate": "pass",
+    "renderer_strict_clippy": "pass",
+    "quality_tool_tests_passed": 58,
+    "format": "pass",
+    "diff_whitespace": "pass",
+    "new_file_size_overages": 0,
+    "unrelated_preexisting_file_size_overages": 3
+  }
+}

@@ -17,20 +17,38 @@ web = ["dep:web-time"]
 # games disable this via Perry's `[native-library."<pkg>"]` feature
 # forwarding to drop gltf/gltf_json/image_dds from the binary entirely.
 # Default-on so existing 3D games are unaffected.
-models3d = ["dep:gltf", "dep:image_dds"]
+models3d = [
+    "dep:bloom-geometry-format",
+    "dep:bloom-scene-format",
+    "dep:gltf",
+    "dep:image_dds",
+    "dep:serde_json",
+]
 # EN-014 — image codecs beyond PNG. `image::load_from_memory` is
 # format-agnostic, so disabling this only changes which file formats
 # decode at runtime; PNG always works.
-# image_dds rides along: cooked BC7 .dds textures are "image formats
-# beyond PNG" in the same sense as jpeg/bmp/tga (decode-only here; the
-# encoder lives in tools/bloom-cook).
-image-extras = ["image/jpeg", "image/bmp", "image/tga", "image/hdr", "dep:image_dds"]
+# image_dds rides along: cooked DDS textures are "image formats beyond PNG"
+# in the same sense as jpeg/bmp/tga (decode-only here; the encoder lives in
+# tools/bloom-cook). serde_json and sha2 validate the opt-in native cooked-
+# texture index and immutable chunks; neither is used by the ordinary path.
+image-extras = [
+    "image/jpeg",
+    "image/bmp",
+    "image/tga",
+    "image/hdr",
+    "dep:image_dds",
+    "dep:serde_json",
+    "dep:sha2",
+]
 
 [build-dependencies]
 cmake = "0.1"
 
 [dependencies]
+bloom-geometry-format = { path = "../../crates/bloom-geometry-format", optional = true }
+bloom-scene-format = { path = "../../crates/bloom-scene-format", optional = true }
 wgpu = "29"
+log = "0.4"
 raw-window-handle = "0.6"
 fontdue = "0.9"
 libc = "0.2"
@@ -38,7 +56,18 @@ bytemuck = { version = "1", features = ["derive"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image"], optional = true }
-gltf = { version = "1", features = ["KHR_materials_pbrSpecularGlossiness", "KHR_materials_transmission"], optional = true }
+gltf = { version = "1", features = [
+    "extensions",
+    "extras",
+    "KHR_materials_ior",
+    "KHR_materials_pbrSpecularGlossiness",
+    "KHR_materials_specular",
+    "KHR_materials_transmission",
+    "KHR_materials_volume",
+    "KHR_texture_transform",
+], optional = true }
+serde_json = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
 lewton = "0.10"
 minimp3 = { version = "0.5", optional = true }
 earcutr = "0.4"
@@ -60,3 +89,6 @@ web-sys = { version = "0.3", features = ["console"] }
 
 [dev-dependencies]
 pollster = "0.4"
+# Live GPU-object counters are enabled only while compiling tests. Production
+# builds keep wgpu's counter atomics disabled.
+wgpu = { version = "29", features = ["counters"] }

@@ -22,7 +22,7 @@ import {
   getProfilerFrameCpuUs, getProfilerFrameGpuUs,
   setQualityPreset, QualityPreset,
   setShadowsEnabled, setSsaoEnabled, setSsrEnabled, setSsgiEnabled,
-  setRenderScale, setUpscaleMode, setCasStrength,
+  setRenderScale, setUpscaleMode, setCasStrength, getCommandLineArgs,
 } from "bloom/core";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
@@ -43,8 +43,7 @@ const MOVE_SPEED = 5.0;
 const SPRINT_MULT = 2.5;
 
 // Auto-capture args
-declare const process: { argv: string[] };
-const argv: string[] = process.argv;
+const argv: string[] = getCommandLineArgs();
 let captureFrames = 0;
 let capturePath = "";
 let frameCount = 0;
@@ -103,7 +102,7 @@ const sweepUpscaleN: number[] = new Array(sweepCount);
 sweepUpscaleN[0] = 1; sweepUpscaleN[1] = 1; sweepUpscaleN[2] = 1; sweepUpscaleN[3] = 1; sweepUpscaleN[4] = 0;
 const sweepCas: number[] = new Array(sweepCount);
 sweepCas[0] = 0.0; sweepCas[1] = 0.0; sweepCas[2] = 0.4; sweepCas[3] = 0.5; sweepCas[4] = 0.0;
-for (let i = 2; i < argv.length; i = i + 1) {
+for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
     capturePath = argv[i + 2];

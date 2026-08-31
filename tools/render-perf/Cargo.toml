@@ -1,0 +1,22 @@
+[package]
+name = "bloom-render-perf"
+version = "0.1.0"
+edition = "2021"
+description = "Controlled native renderer submit-time and upload-volume qualification"
+
+[[bin]]
+name = "bloom-render-perf"
+path = "src/main.rs"
+
+[dependencies]
+bloom-shared = { path = "../../native/shared", default-features = false }
+pollster = "0.4"
+# Trace is enabled only in this qualification tool. Normal engine builds keep
+# wgpu API tracing disabled and pay none of its serialization/file-I/O cost.
+wgpu = { version = "29", features = ["trace"] }
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "thin"
+codegen-units = 1

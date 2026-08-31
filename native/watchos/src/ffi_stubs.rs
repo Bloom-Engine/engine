@@ -15,7 +15,17 @@
 }
 #[no_mangle] pub extern "C" fn bloom_take_screenshot(_p0: i64) {
 }
-#[no_mangle] pub extern "C" fn bloom_set_env_clear_from_hdr(_p0: i64) {
+#[no_mangle] pub extern "C" fn bloom_capture_frame_to_png(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_capture_debug_intermediates(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_capture_frame_ready() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_env_clear_from_hdr(_p0: i64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_is_key_repeated(_p0: f64) -> f64 {
     0.0
@@ -103,7 +113,8 @@
 #[no_mangle] pub extern "C" fn bloom_create_instance_buffer_scratch(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_material_params_scratch(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_material_params_scratch(_p0: f64, _p1: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_compile_material_from_file(_p0: i64, _p1: f64) -> f64 {
     0.0
@@ -147,7 +158,8 @@
 #[no_mangle] pub extern "C" fn bloom_create_planar_reflection(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_material_reflection_probe(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_material_reflection_probe(_p0: f64, _p1: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_create_texture_array(_p0: i64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
     0.0
@@ -158,23 +170,29 @@
 #[no_mangle] pub extern "C" fn bloom_create_texture_array_scratch(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_material_texture_array(_p0: f64, _p1: f64, _p2: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_material_texture_array(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_material_shading_model(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_material_shading_model(_p0: f64, _p1: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_material_probe_visible(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_material_probe_visible(_p0: f64, _p1: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_material_foliage(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_material_foliage(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_set_post_pass(_p0: i64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_clear_post_pass() {
+#[no_mangle] pub extern "C" fn bloom_clear_post_pass() -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_add_post_pass(_p0: i64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_clear_all_post_passes() {
+#[no_mangle] pub extern "C" fn bloom_clear_all_post_passes() -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_draw_material(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64) {
 }
@@ -273,34 +291,65 @@
 #[no_mangle] pub extern "C" fn bloom_create_mesh_scratch(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_joint_test(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_joint_test(_p0: f64, _p1: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_ambient_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_ambient_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_directional_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_directional_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_procedural_sky(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_procedural_sky(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_sun_direction(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_sun_direction(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_fog(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_fog(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_sharpen_strength(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_sharpen_strength(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_present_mode(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_present_mode(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_get_present_mode() -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_occlusion_culling(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_get_imported_refraction_mode() -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_render_scale(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_transparency_composition_mode(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_transparency_composition_mode() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_active_transparency_composition_mode() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_material_binding_tier_override(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_occlusion_culling(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_render_scale(_p0: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_get_render_scale() -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_upscale_mode(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_upscale_mode(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_cas_strength(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_cas_strength(_p0: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_get_physical_width() -> f64 {
     0.0
@@ -308,66 +357,104 @@
 #[no_mangle] pub extern "C" fn bloom_get_physical_height() -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_auto_resolution(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_auto_resolution(_p0: f64, _p1: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_env_intensity(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_env_intensity(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_ssgi_enabled(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_ssgi_enabled(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_path_tracing(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_path_tracing(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_reset_temporal_history() -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_path_tracing_supported() -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_ssgi_intensity(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_ssgi_intensity(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_ssgi_radius(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_ssgi_radius(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_dof(_p0: f64, _p1: f64, _p2: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_dof(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_quality_preset(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_quality_preset(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_shadows_enabled(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_shadows_enabled(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_shadows_always_fresh(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_shadows_always_fresh(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_bloom_enabled(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_bloom_enabled(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_bloom_intensity(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_bloom_intensity(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_tonemap(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_tonemap(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_auto_exposure_key(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_color_saturation(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_auto_exposure_rate(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_auto_exposure_key(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_ssao_enabled(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_auto_exposure_rate(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_ssao_intensity(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_ssao_enabled(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_ssao_radius(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_ssao_intensity(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_wind(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_ssao_radius(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_wind(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_launch_process(_p0: i64, _p1: i64, _p2: i64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_output_scale(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_command_line_arg_count() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_command_line_arg(_p0: f64) -> i64 {
+    0
+}
+#[no_mangle] pub extern "C" fn bloom_set_output_scale(_p0: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_get_output_scale() -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_model_foliage_wind(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_model_foliage_wind(_p0: f64, _p1: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_foliage_shadow_motion(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_foliage_shadow_motion(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_cloud_shadows(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_cloud_shadows(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_motion_blur_enabled(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_motion_blur_enabled(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_sss_enabled(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_sss_enabled(_p0: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_set_profiler_enabled(_p0: f64) {
 }
@@ -375,6 +462,9 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_write_quality_telemetry(_p0: i64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_print_profiler_summary() {
@@ -450,17 +540,34 @@
 }
 #[no_mangle] pub extern "C" fn bloom_unregister_frame_callback(_p0: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_scene_set_gi_only(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_add_shadowed_point_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_scene_set_trs(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+#[no_mangle] pub extern "C" fn bloom_add_shadowed_spot_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_scene_set_transform16(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64) {
+#[no_mangle] pub extern "C" fn bloom_scene_set_gi_only(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_trs(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_transform16(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_scene_update_geometry_scratch(_p0: f64, _p1: f64, _p2: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_scene_set_lod(_p0: f64, _p1: f64, _p2: i64, _p3: f64, _p4: i64, _p5: f64, _p6: f64) {
+#[no_mangle] pub extern "C" fn bloom_scene_set_lod(_p0: f64, _p1: f64, _p2: i64, _p3: f64, _p4: i64, _p5: f64, _p6: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_scene_attach_model_lod(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+#[no_mangle] pub extern "C" fn bloom_scene_attach_model_lod(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_emissive(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_layered_pbr(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64, _p18: f64, _p19: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_scene_node_vertex_count(_p0: f64) -> f64 {
     0.0
@@ -490,7 +597,8 @@
 #[no_mangle] pub extern "C" fn bloom_pick_all_distance(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_scene_set_material_water(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_water(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_gen_mesh_spline_ribbon(_p0: i64, _p1: f64, _p2: i64, _p3: f64) -> f64 {
     0.0
@@ -528,7 +636,8 @@
 #[no_mangle] pub extern "C" fn bloom_scene_get_bounds_max_z(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_scene_set_user_data(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_scene_set_user_data(_p0: f64, _p1: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_scene_get_user_data(_p0: f64) -> f64 {
     0.0
@@ -537,19 +646,25 @@
 }
 #[no_mangle] pub extern "C" fn bloom_scene_subtract_box(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_enable_shadows() {
+#[no_mangle] pub extern "C" fn bloom_enable_shadows() -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_disable_shadows() {
+#[no_mangle] pub extern "C" fn bloom_disable_shadows() -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_dump_shadow_map(_p0: i64) {
 }
-#[no_mangle] pub extern "C" fn bloom_postfx_set_selected(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_postfx_set_selected(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_postfx_set_hovered(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_postfx_set_hovered(_p0: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_postfx_set_outline_color(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+#[no_mangle] pub extern "C" fn bloom_postfx_set_outline_color(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_postfx_set_outline_thickness(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_postfx_set_outline_thickness(_p0: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_project_to_screen(_p0: f64, _p1: f64, _p2: f64) -> f64 {
     0.0

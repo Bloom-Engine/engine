@@ -32,17 +32,17 @@ pub(super) struct Uniforms2D {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct Uniforms3D {
-    pub(super) mvp: [[f32; 4]; 4],
-    pub(super) model: [[f32; 4]; 4],
-    pub(super) prev_mvp: [[f32; 4]; 4],
-    pub(super) model_tint: [f32; 4],
+pub(crate) struct Uniforms3D {
+    pub(crate) mvp: [[f32; 4]; 4],
+    pub(crate) model: [[f32; 4]; 4],
+    pub(crate) prev_mvp: [[f32; 4]; 4],
+    pub(crate) model_tint: [f32; 4],
     /// x = joint-buffer base offset for this draw (added to vertex joint
     /// indices by the scene VS), y = 1.0 for skinned cached draws else
     /// 0.0, zw unused. Lets GPU-resident skinned models share the static
     /// cached-model path: the VB keeps RAW joint indices and the per-draw
     /// uniform carries the frame's pose offset instead.
-    pub(super) misc: [f32; 4],
+    pub(crate) misc: [f32; 4],
 }
 
 /// Scene-pipeline per-material factors — the scalar parts of a glTF
@@ -52,13 +52,16 @@ pub(super) struct Uniforms3D {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SceneMaterialUniforms {
     /// x = metallic_factor, y = roughness_factor,
-    /// z = has_mr_texture (1.0 = sample mr_tex and multiply, 0.0 = ignore
-    ///     mr_tex and use factors directly),
+    /// z = texture workflow (0.0 = scalar factors, 1.0 = glTF
+    ///     metallic-roughness GB, 2.0 = specular-glossiness RGBA),
     /// w = alpha_cutoff (0.0 = OPAQUE mode, >0 = MASK/BLEND — fragments
     ///     whose base-colour alpha is below this are discarded).
     pub metal_rough: [f32; 4],
-    /// rgb = emissive_factor, w = padding
+    /// rgb = emissive_factor, w = base-color lower mips store MASK coverage.
     pub emissive: [f32; 4],
+    /// rgb = KHR specularFactor, a = glossinessFactor. Only consumed when
+    /// metal_rough.z selects the specular-glossiness texture workflow.
+    pub spec_gloss: [f32; 4],
 }
 
 impl SceneMaterialUniforms {
@@ -67,16 +70,119 @@ impl SceneMaterialUniforms {
         roughness: f32,
         emissive: [f32; 3],
         has_mr_texture: bool,
+        specular_glossiness_factor: Option<[f32; 4]>,
         alpha_cutoff: f32,
+        alpha_coverage_mips: bool,
     ) -> Self {
         Self {
             metal_rough: [
                 metallic,
                 roughness,
-                if has_mr_texture { 1.0 } else { 0.0 },
+                if specular_glossiness_factor.is_some() {
+                    2.0
+                } else if has_mr_texture {
+                    1.0
+                } else {
+                    0.0
+                },
                 alpha_cutoff,
             ],
-            emissive: [emissive[0], emissive[1], emissive[2], 0.0],
+            emissive: [
+                emissive[0],
+                emissive[1],
+                emissive[2],
+                if alpha_coverage_mips { 1.0 } else { 0.0 },
+            ],
+            spec_gloss: specular_glossiness_factor.unwrap_or([1.0; 4]),
+        }
+    }
+}
+
+/// Scalar/UV contract used only by imported refractive scene materials.
+///
+/// Keeping this in a separate UBO and bind-group layout is deliberate:
+/// ordinary opaque/masked/BLEND materials retain their original 32-byte
+/// material UBO and binding footprint.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct SceneTransmissionUniforms {
+    /// x = transmission factor, y = IOR, z = authored thickness factor,
+    /// w = transmission texture is bound and usable.
+    pub(crate) transmission: [f32; 4],
+    /// rgb = attenuation color, w = attenuation distance in world units.
+    /// w == 0 denotes the glTF infinite-distance/no-absorption default.
+    pub(crate) attenuation: [f32; 4],
+    /// xy = offset, zw = scale for KHR_texture_transform.
+    pub(crate) transmission_uv: [f32; 4],
+    /// xy = cos/sin(rotation), z = thickness texture is bound/usable,
+    /// w = transmission texture UV selector (0 = UV0, 1 = UV1).
+    pub(crate) transmission_rotation: [f32; 4],
+    /// xy = offset, zw = scale for the thickness texture.
+    pub(crate) thickness_uv: [f32; 4],
+    /// xy = cos/sin(rotation), z = thickness texture UV selector, w reserved.
+    pub(crate) thickness_rotation: [f32; 4],
+}
+
+impl SceneTransmissionUniforms {
+    pub(crate) fn new(
+        transmission: crate::models::MaterialTransmission,
+        has_transmission_texture: bool,
+        has_thickness_texture: bool,
+    ) -> Self {
+        let transmission_transform = transmission
+            .texture
+            .map(|binding| binding.transform)
+            .unwrap_or_default();
+        let thickness_transform = transmission
+            .thickness_texture
+            .map(|binding| binding.transform)
+            .unwrap_or_default();
+        let attenuation_distance = if transmission.attenuation_distance.is_finite()
+            && transmission.attenuation_distance > 0.0
+        {
+            transmission.attenuation_distance
+        } else {
+            0.0
+        };
+        let (transmission_sin, transmission_cos) = transmission_transform.rotation.sin_cos();
+        let (thickness_sin, thickness_cos) = thickness_transform.rotation.sin_cos();
+        Self {
+            transmission: [
+                transmission.factor.clamp(0.0, 1.0),
+                transmission.effective_ior(),
+                transmission.effective_thickness_factor(),
+                has_transmission_texture as u8 as f32,
+            ],
+            attenuation: [
+                transmission.attenuation_color[0].clamp(0.0, 1.0),
+                transmission.attenuation_color[1].clamp(0.0, 1.0),
+                transmission.attenuation_color[2].clamp(0.0, 1.0),
+                attenuation_distance,
+            ],
+            transmission_uv: [
+                transmission_transform.offset[0],
+                transmission_transform.offset[1],
+                transmission_transform.scale[0],
+                transmission_transform.scale[1],
+            ],
+            transmission_rotation: [
+                transmission_cos,
+                transmission_sin,
+                has_thickness_texture as u8 as f32,
+                transmission_transform.tex_coord as f32,
+            ],
+            thickness_uv: [
+                thickness_transform.offset[0],
+                thickness_transform.offset[1],
+                thickness_transform.scale[0],
+                thickness_transform.scale[1],
+            ],
+            thickness_rotation: [
+                thickness_cos,
+                thickness_sin,
+                thickness_transform.tex_coord as f32,
+                0.0,
+            ],
         }
     }
 }
@@ -94,27 +200,27 @@ pub(crate) const MAX_POINT_LIGHTS: usize = 256;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct DirLight {
-    pub(super) direction: [f32; 4],  // xyz + intensity
-    pub(super) color: [f32; 4],      // rgb + _pad
+    pub(super) direction: [f32; 4], // xyz + intensity
+    pub(super) color: [f32; 4],     // rgb + _pad
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct PointLight {
-    pub(super) position: [f32; 4],   // xyz + range
-    pub(super) color: [f32; 4],      // rgb + intensity
+    pub(super) position: [f32; 4], // xyz + range
+    pub(super) color: [f32; 4],    // rgb + intensity
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct LightingUniforms {
-    pub(super) ambient: [f32; 4],                              // rgb + intensity
-    pub(super) light_dir: [f32; 4],                             // xyz + intensity (legacy, kept for compat)
-    pub(super) light_color: [f32; 4],                           // rgb + _pad (legacy)
-    pub(super) dir_light_count: [f32; 4],                       // [count, 0, 0, 0]
-    pub(super) dir_lights: [DirLight; MAX_DIR_LIGHTS],          // additional directional lights
-    pub(super) point_light_count: [f32; 4],                     // [count, 0, 0, 0]
-    pub(super) point_lights: [PointLight; MAX_POINT_LIGHTS],    // point lights
+    pub(super) ambient: [f32; 4],                      // rgb + intensity
+    pub(super) light_dir: [f32; 4],                    // xyz + intensity (legacy, kept for compat)
+    pub(super) light_color: [f32; 4],                  // rgb + _pad (legacy)
+    pub(super) dir_light_count: [f32; 4],              // [count, 0, 0, 0]
+    pub(super) dir_lights: [DirLight; MAX_DIR_LIGHTS], // additional directional lights
+    pub(super) point_light_count: [f32; 4],            // [count, 0, 0, 0]
+    pub(super) point_lights: [PointLight; MAX_POINT_LIGHTS], // point lights
     /// Camera world-space position (xyz) + env intensity multiplier
     /// (w). Scene shader uses xyz to compute V = normalize(camera_pos
     /// - world_pos) for GGX specular, and multiplies w into every env
@@ -158,9 +264,15 @@ impl LightingUniforms {
             light_dir: [0.5, 1.0, 0.3, 0.7],
             light_color: [1.0, 1.0, 1.0, 0.0],
             dir_light_count: [0.0; 4],
-            dir_lights: [DirLight { direction: [0.0; 4], color: [0.0; 4] }; MAX_DIR_LIGHTS],
+            dir_lights: [DirLight {
+                direction: [0.0; 4],
+                color: [0.0; 4],
+            }; MAX_DIR_LIGHTS],
             point_light_count: [0.0; 4],
-            point_lights: [PointLight { position: [0.0; 4], color: [0.0; 4] }; MAX_POINT_LIGHTS],
+            point_lights: [PointLight {
+                position: [0.0; 4],
+                color: [0.0; 4],
+            }; MAX_POINT_LIGHTS],
             // w = env_intensity multiplier for IBL + sky. 1.0 matches
             // the path-traced reference; apps with bright HDR envs
             // typically dial to 0.2–0.5 via set_env_intensity.
@@ -189,9 +301,21 @@ impl Vertex2D {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x2 },
-                wgpu::VertexAttribute { offset: 8, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
-                wgpu::VertexAttribute { offset: 16, shader_location: 2, format: wgpu::VertexFormat::Float32x4 },
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 8,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
             ],
         }
     }
@@ -204,9 +328,9 @@ pub struct Vertex3D {
     pub normal: [f32; 3],
     pub color: [f32; 4],
     pub uv: [f32; 2],
-    pub joints: [f32; 4],   // bone indices (as floats for simplicity)
-    pub weights: [f32; 4],  // bone weights (sum to 1.0, or all 0.0 for unskinned)
-    pub tangent: [f32; 4],  // xyz = tangent direction, w = bitangent sign (±1). All zero = no tangent data; scene shader then skips normal mapping.
+    pub joints: [f32; 4],  // bone indices (as floats for simplicity)
+    pub weights: [f32; 4], // bone weights (sum to 1.0, or all 0.0 for unskinned)
+    pub tangent: [f32; 4], // xyz = tangent direction, w = bitangent sign (±1). All zero = no tangent data; scene shader then skips normal mapping.
 }
 
 impl Default for Vertex3D {
@@ -221,15 +345,60 @@ impl Vertex3D {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },   // position
-                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },  // normal
-                wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x4 },  // color
-                wgpu::VertexAttribute { offset: 40, shader_location: 3, format: wgpu::VertexFormat::Float32x2 },  // uv
-                wgpu::VertexAttribute { offset: 48, shader_location: 4, format: wgpu::VertexFormat::Float32x4 },  // joints
-                wgpu::VertexAttribute { offset: 64, shader_location: 5, format: wgpu::VertexFormat::Float32x4 },  // weights
-                wgpu::VertexAttribute { offset: 80, shader_location: 6, format: wgpu::VertexFormat::Float32x4 },  // tangent
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                }, // position
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                }, // normal
+                wgpu::VertexAttribute {
+                    offset: 24,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x4,
+                }, // color
+                wgpu::VertexAttribute {
+                    offset: 40,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x2,
+                }, // uv
+                wgpu::VertexAttribute {
+                    offset: 48,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32x4,
+                }, // joints
+                wgpu::VertexAttribute {
+                    offset: 64,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                }, // weights
+                wgpu::VertexAttribute {
+                    offset: 80,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                }, // tangent
             ],
         }
+    }
+}
+
+/// Refractive-only glTF TEXCOORD_1 stream.
+///
+/// This is deliberately a separate vertex buffer at slot 1/location 7. It is
+/// allocated and fetched only for physical materials that actually sample
+/// UV1, so `Vertex3D` and every ordinary scene pipeline remain unchanged.
+pub(crate) fn secondary_uv_desc() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: 7,
+            format: wgpu::VertexFormat::Float32x2,
+        }],
     }
 }
 
@@ -245,10 +414,10 @@ impl Vertex3D {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceData3D {
-    pub position: [f32; 3],   // world-space position
-    pub rot_y:    f32,        // Y-axis rotation in radians
-    pub scale:    f32,        // uniform scale multiplier (1.0 = no scale)
-    pub tint:     [f32; 4],   // RGBA tint multiplier (1,1,1,1 = no tint)
+    pub position: [f32; 3], // world-space position
+    pub rot_y: f32,         // Y-axis rotation in radians
+    pub scale: f32,         // uniform scale multiplier (1.0 = no scale)
+    pub tint: [f32; 4],     // RGBA tint multiplier (1,1,1,1 = no tint)
     /// EN-026 — was pure padding to the 16-byte boundary; now carried to the
     /// shader as `@location(11) instance_extra: vec3<f32>`. The three floats
     /// were already being uploaded, so exposing them costs nothing: no stride
@@ -256,7 +425,7 @@ pub struct InstanceData3D {
     /// velocity-stretch length, random seed); anything else can leave them 0
     /// and simply not declare location 11 — a vertex buffer may carry
     /// attributes the shader does not consume.
-    pub extra:    [f32; 3],
+    pub extra: [f32; 3],
 }
 
 impl InstanceData3D {
@@ -265,11 +434,31 @@ impl InstanceData3D {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
-                wgpu::VertexAttribute { offset: 0,  shader_location: 7,  format: wgpu::VertexFormat::Float32x3 },  // position
-                wgpu::VertexAttribute { offset: 12, shader_location: 8,  format: wgpu::VertexFormat::Float32 },    // rot_y
-                wgpu::VertexAttribute { offset: 16, shader_location: 9,  format: wgpu::VertexFormat::Float32 },    // scale
-                wgpu::VertexAttribute { offset: 20, shader_location: 10, format: wgpu::VertexFormat::Float32x4 },  // tint
-                wgpu::VertexAttribute { offset: 36, shader_location: 11, format: wgpu::VertexFormat::Float32x3 },  // extra (EN-026)
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x3,
+                }, // position
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32,
+                }, // rot_y
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32,
+                }, // scale
+                wgpu::VertexAttribute {
+                    offset: 20,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Float32x4,
+                }, // tint
+                wgpu::VertexAttribute {
+                    offset: 36,
+                    shader_location: 11,
+                    format: wgpu::VertexFormat::Float32x3,
+                }, // extra (EN-026)
             ],
         }
     }
@@ -430,7 +619,6 @@ pub(super) struct AerialParams {
     pub(super) knobs: [f32; 4],
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct HizLinearizeParams {
@@ -578,6 +766,16 @@ pub(super) struct ProbeTraceParams {
     /// carry these for uniform-buffer size parity; Hi-Z ignores
     /// them.
     pub(super) wsrc_cascades: [[f32; 4]; 3],
+    /// Directional-shadow transforms used by cardless HW hits. The detailed
+    /// Bistro has more primitives than the fixed Mesh-Card atlas can cover,
+    /// so the fallback must query the same visibility as the primary pass
+    /// instead of inventing unoccluded sunlight.
+    pub(super) shadow_vps: [[[f32; 4]; 4]; 3],
+    /// xyz = camera-space cascade split distances, w unused.
+    pub(super) shadow_splits: [f32; 4],
+    /// x = comparison bias, y = shadows enabled, z = coherent card lighting,
+    /// w unused.
+    pub(super) shadow_params: [f32; 4],
 }
 
 /// PT-2 — fixed size of the kernel's texture binding array. Real texture
@@ -620,29 +818,105 @@ pub(super) struct PtParamsCpu {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeTemporalParams {
-    /// x = alpha (EMA), y = force_refresh (1→alpha=1), z = grid_w (f32), w = grid_h (f32)
+    /// x = integrated phase-ring reciprocal (1/16),
+    /// y = force_refresh (1→seed every phase with current),
+    /// z = grid_w (f32), w = grid_h (f32)
     pub(super) params: [f32; 4],
+    /// x = half_w, y = half_h, z = tile_size, w = projection p00.
+    pub(super) size: [f32; 4],
+    /// x = hardware ray provenance/confidence available,
+    /// y = current angular phase [0, 15],
+    /// z = short output-blend current weight, w unused.
+    pub(super) confidence: [f32; 4],
+    /// x = persistent world-cache capacity, y = static lighting/scene
+    /// signature, z = monotonic probe frame, w = cache writes allowed.
+    pub(super) world_cache: [u32; 4],
+}
+
+/// Persistent SSGI world-surface cache entry. This lives in the tail of the
+/// existing probe-header buffer (not a separate allocation). The two atomics
+/// form an immutable hash key and a sequence lock; the remaining vec4 records
+/// mirror the shader ABI.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(super) struct ProbeWorldCacheEntryCpu {
+    pub(super) key: u32,
+    pub(super) sequence: u32,
+    pub(super) _padding: [u32; 2],
+    pub(super) world_pos: [f32; 4],
+    pub(super) normal: [f32; 4],
+    pub(super) diffuse: [f32; 4],
+}
+
+pub(super) const PROBE_WORLD_CACHE_FACTOR: u32 = 4;
+
+/// Returns `(header_bytes, cache_offset, cache_bytes, cache_capacity)` for the
+/// single storage buffer shared by screen-probe headers and the persistent
+/// world-surface cache. Storage-buffer binding offsets must be 256-byte
+/// aligned on every supported WebGPU adapter.
+pub(super) fn probe_storage_buffer_layout(
+    probe_count: u32,
+    world_cache_enabled: bool,
+) -> (u64, u64, u64, u32) {
+    const STORAGE_OFFSET_ALIGNMENT: u64 = 256;
+    let header_bytes = u64::from(probe_count) * std::mem::size_of::<ProbeHeaderCpu>() as u64;
+    let cache_offset = header_bytes.div_ceil(STORAGE_OFFSET_ALIGNMENT) * STORAGE_OFFSET_ALIGNMENT;
+    let cache_capacity = if world_cache_enabled {
+        probe_count.saturating_mul(PROBE_WORLD_CACHE_FACTOR).max(1)
+    } else {
+        1
+    };
+    let cache_bytes =
+        u64::from(cache_capacity) * std::mem::size_of::<ProbeWorldCacheEntryCpu>() as u64;
+    (header_bytes, cache_offset, cache_bytes, cache_capacity)
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeResolveParams {
     pub(super) inv_view: [[f32; 4]; 4],
+    /// Previous camera view used to validate the reprojected resolve depth.
+    pub(super) prev_view: [[f32; 4]; 4],
     pub(super) proj_row01: [f32; 4],
     /// x = half_w, y = half_h, z = grid_w, w = grid_h
     pub(super) size: [u32; 4],
-    /// x = tile_size (16.0), y = intensity, zw unused
+    /// x = tile_size, y = intensity, z = minimum current resolve weight
+    /// (1 = reject history), w = camera moving.
     pub(super) params: [f32; 4],
+    /// x = finite placement phase [0, 15], y = sub-tile jitter active.
+    pub(super) temporal: [f32; 4],
 }
 
 /// On-GPU `ProbeHeader` layout (must match PROBE_HELPERS_WGSL's struct).
-/// 32 bytes per probe.
+/// 112 bytes per probe. Diffuse stores the temporally accumulated convolution;
+/// current_diffuse lets the later probe-space reconstruction clamp history to
+/// the current-frame neighborhood without a new texture allocation. Placement
+/// snapshots geometry and the integrated result before temporal workgroups run.
+/// The final 16-byte record stores unfiltered temporal RGB and a current-frame
+/// reconstruction energy ratio used only by fallback resolve.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeHeaderCpu {
     pub(super) world_pos: [f32; 4],
     pub(super) normal: [f32; 4],
+    pub(super) diffuse: [f32; 4],
+    pub(super) current_diffuse: [f32; 4],
+    pub(super) previous_world_pos: [f32; 4],
+    pub(super) previous_normal: [f32; 4],
+    pub(super) previous_diffuse: [f32; 4],
 }
+
+pub(super) const PROBE_HEADER_RW_LAYOUT_ENTRY: wgpu::BindGroupLayoutEntry =
+    wgpu::BindGroupLayoutEntry {
+        binding: 4,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
 
 /// Ticket 013 V3 — CardCaptureParams. ortho_vp + base_color + emissive.
 /// 96 bytes; we allocate 128 for uniform-alignment headroom.
@@ -650,15 +924,17 @@ pub(super) struct ProbeHeaderCpu {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct CardCaptureParams {
     pub(super) ortho_vp: [[f32; 4]; 4],
-    pub(super) base_color: [f32; 4],  // rgb = factor, w = has_base_texture (0/1)
-    pub(super) emissive: [f32; 4],    // rgb = emissive_factor, w = has_emissive_texture (0/1)
+    pub(super) base_color: [f32; 4], // rgb = factor, w = has_base_texture (0/1)
+    pub(super) emissive: [f32; 4],   // rgb = emissive_factor, w = has_emissive_texture (0/1)
 }
 
 /// Ticket 013 V2 — orthographic projection for the 6 signed axes.
 /// `face_axis` encoding:
 ///   0 → +X, 1 → -X, 2 → +Y, 3 → -Y, 4 → +Z, 5 → -Z.
 /// For each face we pick the two orthogonal AABB axes and map them
-/// to clip-space [-1, +1]. The ±pair for each axis differ only in
+/// to clip-space [-1, +1]. Render-target V grows down, so consumers
+/// invert the projected clip-space Y when converting between object
+/// position and card-atlas UV. The ±pair for each axis differ only in
 /// the sign of the "u" clip axis so that when the HW shader picks
 /// axis N at hit and projects the hit into card UV, the UV lines up
 /// with the mesh geometry as seen FROM that face.
@@ -670,47 +946,47 @@ pub(super) fn build_card_ortho_v2(face_axis: u32, bmin: [f32; 3], bmax: [f32; 3]
     let cy = bmin[1] + bmax[1];
     let cz = bmin[2] + bmax[2];
     match face_axis {
-        // +X → project onto YZ; clip.x = y, clip.y = z.
+        // +X → project onto YZ; depth 0 at bmax.x, 1 at bmin.x.
         0 => [
-            [0.0, 0.0, 0.0, 0.0],
-            [2.0/wy, 0.0, 0.0, 0.0],
-            [0.0, 2.0/wz, 0.0, 0.0],
-            [-cy/wy, -cz/wz, 0.0, 1.0],
+            [0.0, 0.0, -1.0 / wx, 0.0],
+            [2.0 / wy, 0.0, 0.0, 0.0],
+            [0.0, 2.0 / wz, 0.0, 0.0],
+            [-cy / wy, -cz / wz, bmax[0] / wx, 1.0],
         ],
-        // -X → flip u so the -X view is the mirror of +X. clip.x = -y, clip.y = z.
+        // -X → flip u; depth 0 at bmin.x, 1 at bmax.x.
         1 => [
-            [0.0, 0.0, 0.0, 0.0],
-            [-2.0/wy, 0.0, 0.0, 0.0],
-            [0.0, 2.0/wz, 0.0, 0.0],
-            [cy/wy, -cz/wz, 0.0, 1.0],
+            [0.0, 0.0, 1.0 / wx, 0.0],
+            [-2.0 / wy, 0.0, 0.0, 0.0],
+            [0.0, 2.0 / wz, 0.0, 0.0],
+            [cy / wy, -cz / wz, -bmin[0] / wx, 1.0],
         ],
-        // +Y → project onto XZ; clip.x = x, clip.y = z.
+        // +Y → project onto XZ; depth 0 at bmax.y, 1 at bmin.y.
         2 => [
-            [2.0/wx, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [0.0, 2.0/wz, 0.0, 0.0],
-            [-cx/wx, -cz/wz, 0.0, 1.0],
+            [2.0 / wx, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0 / wy, 0.0],
+            [0.0, 2.0 / wz, 0.0, 0.0],
+            [-cx / wx, -cz / wz, bmax[1] / wy, 1.0],
         ],
-        // -Y → flip u; clip.x = -x, clip.y = z.
+        // -Y → flip u; depth 0 at bmin.y, 1 at bmax.y.
         3 => [
-            [-2.0/wx, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [0.0, 2.0/wz, 0.0, 0.0],
-            [cx/wx, -cz/wz, 0.0, 1.0],
+            [-2.0 / wx, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0 / wy, 0.0],
+            [0.0, 2.0 / wz, 0.0, 0.0],
+            [cx / wx, -cz / wz, -bmin[1] / wy, 1.0],
         ],
-        // +Z → project onto XY; clip.x = x, clip.y = y.
+        // +Z → project onto XY; depth 0 at bmax.z, 1 at bmin.z.
         4 => [
-            [2.0/wx, 0.0, 0.0, 0.0],
-            [0.0, 2.0/wy, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [-cx/wx, -cy/wy, 0.0, 1.0],
+            [2.0 / wx, 0.0, 0.0, 0.0],
+            [0.0, 2.0 / wy, 0.0, 0.0],
+            [0.0, 0.0, -1.0 / wz, 0.0],
+            [-cx / wx, -cy / wy, bmax[2] / wz, 1.0],
         ],
-        // -Z → flip u; clip.x = -x, clip.y = y.
+        // -Z → flip u; depth 0 at bmin.z, 1 at bmax.z.
         _ => [
-            [-2.0/wx, 0.0, 0.0, 0.0],
-            [0.0, 2.0/wy, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [cx/wx, -cy/wy, 0.0, 1.0],
+            [-2.0 / wx, 0.0, 0.0, 0.0],
+            [0.0, 2.0 / wy, 0.0, 0.0],
+            [0.0, 0.0, 1.0 / wz, 0.0],
+            [cx / wx, -cy / wy, -bmin[2] / wz, 1.0],
         ],
     }
 }
@@ -735,6 +1011,8 @@ pub(super) struct SdfClipmapBakeJob {
     pub(super) origin: [f32; 3],
     pub(super) aabb_min: [f32; 4],
     pub(super) aabb_max: [f32; 4],
+    pub(super) scene_version: u64,
+    pub(super) transparent_gi: bool,
     pub(super) uniform: wgpu::Buffer,
     pub(super) bind_group: wgpu::BindGroup,
     pub(super) next_z: u32,
@@ -806,6 +1084,47 @@ pub(super) struct CardSlotMetaCpu {
     /// Mesh's world transform. Multiplied into the object-space
     /// card-plane position to land in world space for shadow lookup.
     pub(super) transform: [[f32; 4]; 4],
+    /// Inverse-transpose of the transform's linear block, stored as three
+    /// vec4 columns so the GPU storage layout remains 16-byte aligned.
+    pub(super) normal_transform: [[f32; 4]; 3],
+}
+
+pub(super) fn card_normal_transform(m: &[[f32; 4]; 4]) -> [[f32; 4]; 3] {
+    // Inverse-transpose of the world transform's linear block. Store columns
+    // as padded vec4s so WGSL can evaluate M * n without layout ambiguity.
+    let a = m[0][0];
+    let b = m[1][0];
+    let c = m[2][0];
+    let d = m[0][1];
+    let e = m[1][1];
+    let f = m[2][1];
+    let g = m[0][2];
+    let h = m[1][2];
+    let i = m[2][2];
+
+    let inv00 = e * i - f * h;
+    let inv10 = f * g - d * i;
+    let inv20 = d * h - e * g;
+    let inv01 = c * h - b * i;
+    let inv11 = a * i - c * g;
+    let inv21 = b * g - a * h;
+    let inv02 = b * f - c * e;
+    let inv12 = c * d - a * f;
+    let inv22 = a * e - b * d;
+    let det = a * inv00 + b * inv10 + c * inv20;
+    if det.abs() < 1e-10 {
+        return [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+    }
+    let s = 1.0 / det;
+    [
+        [inv00 * s, inv01 * s, inv02 * s, 0.0],
+        [inv10 * s, inv11 * s, inv12 * s, 0.0],
+        [inv20 * s, inv21 * s, inv22 * s, 0.0],
+    ]
 }
 
 /// Ticket 007b — per-TLAS-instance GI shading input. Indexed by the
@@ -824,18 +1143,20 @@ pub(super) struct InstanceGiDataCpu {
     /// unavailable; ticket 013's textured path still drives lighting
     /// from this flat normal but multiplies the sampled albedo in.
     pub(super) normal_ws: [f32; 3],
-    pub(super) _pad0: f32,
+    /// Matches the forward material's culling contract. Zero means a ray hit
+    /// on the triangle back face must be skipped; one keeps both faces.
+    pub(super) double_sided: f32,
     /// Ticket 013 — card slot for textured hit shading.
     /// `card_slot.xy` = atlas slot coord (0..CARD_SLOTS_PER_ROW).
     /// `card_slot.z` = dominant axis (0=X, 1=Y, 2=Z).
     /// `card_slot.w` = flag (1.0 = card captured, 0.0 = no card → fall
     /// back to `albedo` flat value).
     pub(super) card_slot: [f32; 4],
-    /// Object-space AABB min (xyz) + unused pad (w). The HW paths
+    /// Object-space AABB min (xyz) + transmission absorption R (w). The HW paths
     /// transform hits into object space (hit.world_to_object) and
     /// compare against THESE — do not world-ify them.
     pub(super) card_aabb_min: [f32; 4],
-    /// Object-space AABB max (xyz) + unused pad (w).
+    /// Object-space AABB max (xyz) + transmission absorption G (w).
     pub(super) card_aabb_max: [f32; 4],
     /// EN-023 — WORLD-space AABB min/max. The SDF trace has no
     /// world_to_object (it marches a world-space clipmap), so its
@@ -843,7 +1164,9 @@ pub(super) struct InstanceGiDataCpu {
     /// object-space-only bounds, every transformed instance fell
     /// through to the flat-gray analytic fallback — zero colored
     /// bounce on non-RT adapters (round-2 audit F4).
+    /// `world_aabb_min.w` stores transmission absorption B.
     pub(super) world_aabb_min: [f32; 4],
+    /// `world_aabb_max.w` stores BLEND coverage (1 for OPAQUE/MASK).
     pub(super) world_aabb_max: [f32; 4],
     /// PT-2 — geometry window into the PT megabuffers + texture id.
     /// x = first vertex (Vertex3D-stride slot) in pt_geo_vertices,
@@ -852,15 +1175,21 @@ pub(super) struct InstanceGiDataCpu {
     /// z == 0 marks "no geometry window" (kernel falls back to the
     /// flat normal + card albedo, i.e. PT-1 behaviour).
     pub(super) geo: [u32; 4],
-    /// PT-2 — x = roughness, y = metalness, z/w unused.
+    /// PT-2 — x = roughness, y = metalness. Transparent GI reuses the
+    /// formerly-unused lanes: z = dielectric transmission weight,
+    /// w = normal-incidence Fresnel pass fraction.
     pub(super) mat_params: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct SsrTemporalParams {
-    /// x = blend_alpha (0.1), yzw unused
+    /// x = blend_alpha (0.1), y = 1 for perspective depth, 0 for orthographic.
     pub(super) params: [f32; 4],
+    /// Current inverse view-projection and previous view-projection provide the
+    /// exact previous-frame geometric depth expected at a reprojected pixel.
+    pub(super) inv_vp: [[f32; 4]; 4],
+    pub(super) prev_vp: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -891,7 +1220,9 @@ pub(super) struct SceneComposeParams {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct TaaParams {
-    /// x = blend factor (current-frame weight), yzw padding.
+    /// abs(x) = blend factor (current-frame weight), sign(x) = camera motion,
+    /// yz = current jitter UV,
+    /// abs(w) = render scale; sign(w) = perspective (+) / orthographic (-).
     pub(super) params: [f32; 4],
     pub(super) inv_vp: [[f32; 4]; 4],
     pub(super) prev_vp: [[f32; 4]; 4],
@@ -936,6 +1267,110 @@ pub(super) struct CompositeParams {
     /// z = vignette softness, w = grain strength.
     pub(super) filmic: [f32; 4],
     /// x = grain seed (frame index, animates the noise),
-    /// y = sharpen strength, zw padding.
+    /// y = sharpen strength, z = camera motion, w = path-tracing session.
     pub(super) misc: [f32; 4],
+    /// x = output saturation (1 = neutral), yzw reserved.
+    pub(super) color: [f32; 4],
+}
+#[cfg(test)]
+mod physical_uv_tests {
+    use super::*;
+    use crate::models::{MaterialTextureBinding, MaterialTextureTransform, MaterialTransmission};
+    use crate::renderer::CARD_AXES_PER_MESH;
+
+    fn binding(tex_coord: u32) -> MaterialTextureBinding {
+        MaterialTextureBinding {
+            source_texture_index: 0,
+            source_image_index: 0,
+            runtime_texture_idx: Some(1),
+            transform: MaterialTextureTransform {
+                tex_coord,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn secondary_uv_keeps_established_vertex_and_uniform_abis() {
+        assert_eq!(std::mem::size_of::<Vertex3D>(), 96);
+        assert_eq!(std::mem::size_of::<SceneTransmissionUniforms>(), 96);
+        assert_eq!(std::mem::size_of::<SsrTemporalParams>(), 144);
+        let layout = secondary_uv_desc();
+        assert_eq!(layout.array_stride, 8);
+        assert_eq!(layout.attributes.len(), 1);
+        assert_eq!(layout.attributes[0].shader_location, 7);
+    }
+
+    #[test]
+    fn scene_material_uniform_selects_specular_glossiness_without_an_extra_sample() {
+        assert_eq!(std::mem::size_of::<SceneMaterialUniforms>(), 48);
+        let factors = [0.2, 0.4, 0.8, 0.65];
+        let uniform =
+            SceneMaterialUniforms::new(0.0, 1.0, [0.0; 3], true, Some(factors), 0.0, false);
+        assert_eq!(uniform.metal_rough[2], 2.0);
+        assert_eq!(uniform.spec_gloss, factors);
+        let ordinary = SceneMaterialUniforms::new(0.3, 0.7, [0.0; 3], true, None, 0.0, false);
+        assert_eq!(ordinary.metal_rough[2], 1.0);
+    }
+
+    #[test]
+    fn probe_header_matches_shader_storage_abi() {
+        assert_eq!(std::mem::size_of::<ProbeHeaderCpu>(), 112);
+        assert_eq!(std::mem::size_of::<ProbeWorldCacheEntryCpu>(), 64);
+        assert_eq!(std::mem::size_of::<ProbeTraceParams>(), 576);
+        assert_eq!(std::mem::size_of::<ProbeTemporalParams>(), 64);
+        let (header_bytes, cache_offset, cache_bytes, cache_capacity) =
+            probe_storage_buffer_layout(64, true);
+        assert_eq!(header_bytes, 64 * 112);
+        assert_eq!(cache_offset % 256, 0);
+        assert_eq!(cache_bytes, 64 * 4 * 64);
+        assert_eq!(cache_capacity, 64 * 4);
+    }
+
+    #[test]
+    fn card_capture_projection_accounts_for_render_target_y_direction() {
+        let bmin = [-3.0, 2.0, 5.0];
+        let bmax = [7.0, 11.0, 19.0];
+        let point = [1.0, 8.0, 13.0];
+        let expected = [
+            [6.0 / 9.0, 1.0 - 8.0 / 14.0],
+            [1.0 - 6.0 / 9.0, 1.0 - 8.0 / 14.0],
+            [4.0 / 10.0, 1.0 - 8.0 / 14.0],
+            [1.0 - 4.0 / 10.0, 1.0 - 8.0 / 14.0],
+            [4.0 / 10.0, 1.0 - 6.0 / 9.0],
+            [1.0 - 4.0 / 10.0, 1.0 - 6.0 / 9.0],
+        ];
+
+        for axis in 0..CARD_AXES_PER_MESH {
+            let m = build_card_ortho_v2(axis, bmin, bmax);
+            let clip_x = m[0][0] * point[0] + m[1][0] * point[1] + m[2][0] * point[2] + m[3][0];
+            let clip_y = m[0][1] * point[0] + m[1][1] * point[1] + m[2][1] * point[2] + m[3][1];
+            let texture_uv = [clip_x * 0.5 + 0.5, 0.5 - clip_y * 0.5];
+            assert!((texture_uv[0] - expected[axis as usize][0]).abs() < 1e-6);
+            assert!((texture_uv[1] - expected[axis as usize][1]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn physical_uniform_carries_independent_texture_uv_selectors() {
+        let mut transmission = MaterialTransmission {
+            authored: true,
+            factor: 1.0,
+            texture: Some(binding(1)),
+            thickness_texture: Some(binding(0)),
+            thickness_factor: 0.25,
+            baked_thickness_scale: 2.0,
+            ..Default::default()
+        };
+        let uniforms = SceneTransmissionUniforms::new(transmission, true, true);
+        assert_eq!(uniforms.transmission[2], 0.5);
+        assert_eq!(uniforms.transmission_rotation[3], 1.0);
+        assert_eq!(uniforms.thickness_rotation[2], 0.0);
+        assert_eq!(uniforms.transmission[3], 1.0);
+        assert_eq!(uniforms.transmission_rotation[2], 1.0);
+
+        transmission.baked_thickness_scale = f32::NAN;
+        let defensive = SceneTransmissionUniforms::new(transmission, true, true);
+        assert_eq!(defensive.transmission[2], 0.25);
+    }
 }

@@ -60,19 +60,26 @@ pub struct ParticleConfig {
 impl Default for ParticleConfig {
     fn default() -> Self {
         Self {
-            life: 1.0, life_var: 0.0,
-            speed: 1.0, speed_var: 0.0,
+            life: 1.0,
+            life_var: 0.0,
+            speed: 1.0,
+            speed_var: 0.0,
             spread: 0.3,
             gravity: -9.81,
             drag: 0.0,
-            size0: 0.2, size1: 0.2, size_var: 0.0,
-            color0: [1.0; 4], color1: [1.0, 1.0, 1.0, 0.0],
-            spin: 0.0, spin_var: 0.0,
+            size0: 0.2,
+            size1: 0.2,
+            size_var: 0.0,
+            color0: [1.0; 4],
+            color1: [1.0, 1.0, 1.0, 0.0],
+            spin: 0.0,
+            spin_var: 0.0,
             pos_jitter: 0.0,
             stretch: 0.0,
             inherit: 0.0,
             frames: 1.0,
-            floor_y: 0.0, restitution: 0.0,
+            floor_y: 0.0,
+            restitution: 0.0,
         }
     }
 }
@@ -87,11 +94,18 @@ pub struct ParticleSystem {
     /// GPU instance buffer handle (dynamic, capacity-sized).
     pub instance_buffer: u32,
 
-    px: Vec<f32>, py: Vec<f32>, pz: Vec<f32>,
-    vx: Vec<f32>, vy: Vec<f32>, vz: Vec<f32>,
-    age: Vec<f32>, life: Vec<f32>,
-    rot: Vec<f32>, spin: Vec<f32>,
-    size: Vec<f32>, seed: Vec<f32>,
+    px: Vec<f32>,
+    py: Vec<f32>,
+    pz: Vec<f32>,
+    vx: Vec<f32>,
+    vy: Vec<f32>,
+    vz: Vec<f32>,
+    age: Vec<f32>,
+    life: Vec<f32>,
+    rot: Vec<f32>,
+    spin: Vec<f32>,
+    size: Vec<f32>,
+    seed: Vec<f32>,
 
     /// Packed 12-float-per-instance staging buffer, reused every frame.
     packed: Vec<f32>,
@@ -106,11 +120,18 @@ impl ParticleSystem {
             live: 0,
             cfg: ParticleConfig::default(),
             instance_buffer,
-            px: z(), py: z(), pz: z(),
-            vx: z(), vy: z(), vz: z(),
-            age: z(), life: z(),
-            rot: z(), spin: z(),
-            size: z(), seed: z(),
+            px: z(),
+            py: z(),
+            pz: z(),
+            vx: z(),
+            vy: z(),
+            vz: z(),
+            age: z(),
+            life: z(),
+            rot: z(),
+            spin: z(),
+            size: z(),
+            seed: z(),
             packed: vec![0.0; capacity * 12],
             rng: 0x9E3779B9,
         }
@@ -130,20 +151,27 @@ impl ParticleSystem {
 
     /// Symmetric ±1 noise.
     #[inline]
-    fn rand_s(&mut self) -> f32 { self.rand() * 2.0 - 1.0 }
+    fn rand_s(&mut self) -> f32 {
+        self.rand() * 2.0 - 1.0
+    }
 
     pub fn configure_from_slice(&mut self, p: &[f32]) {
         let g = |i: usize| -> f32 { p.get(i).copied().unwrap_or(0.0) };
         self.cfg = ParticleConfig {
-            life: g(0).max(0.01), life_var: g(1),
-            speed: g(2), speed_var: g(3),
+            life: g(0).max(0.01),
+            life_var: g(1),
+            speed: g(2),
+            speed_var: g(3),
             spread: g(4),
             gravity: g(5),
             drag: g(6),
-            size0: g(7), size1: g(8), size_var: g(9),
+            size0: g(7),
+            size1: g(8),
+            size_var: g(9),
             color0: [g(10), g(11), g(12), g(13)],
             color1: [g(14), g(15), g(16), g(17)],
-            spin: g(18), spin_var: g(19),
+            spin: g(18),
+            spin_var: g(19),
             pos_jitter: g(20),
             stretch: g(21),
             inherit: g(22),
@@ -166,11 +194,19 @@ impl ParticleSystem {
             [0.0, 1.0, 0.0]
         };
         // Basis around the emit direction, for the cone sample.
-        let up = if base[1].abs() > 0.99 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let up = if base[1].abs() > 0.99 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
         let right = normalize(cross(up, base));
         let realup = cross(base, right);
 
-        let spread = if dlen > 1e-5 { c.spread } else { std::f32::consts::PI };
+        let spread = if dlen > 1e-5 {
+            c.spread
+        } else {
+            std::f32::consts::PI
+        };
 
         for _ in 0..count {
             if self.live >= self.capacity {
@@ -218,11 +254,18 @@ impl ParticleSystem {
     fn kill(&mut self, i: usize) {
         let last = self.live - 1;
         if i != last {
-            self.px.swap(i, last); self.py.swap(i, last); self.pz.swap(i, last);
-            self.vx.swap(i, last); self.vy.swap(i, last); self.vz.swap(i, last);
-            self.age.swap(i, last); self.life.swap(i, last);
-            self.rot.swap(i, last); self.spin.swap(i, last);
-            self.size.swap(i, last); self.seed.swap(i, last);
+            self.px.swap(i, last);
+            self.py.swap(i, last);
+            self.pz.swap(i, last);
+            self.vx.swap(i, last);
+            self.vy.swap(i, last);
+            self.vz.swap(i, last);
+            self.age.swap(i, last);
+            self.life.swap(i, last);
+            self.rot.swap(i, last);
+            self.spin.swap(i, last);
+            self.size.swap(i, last);
+            self.seed.swap(i, last);
         }
         self.live = last;
     }
@@ -243,7 +286,9 @@ impl ParticleSystem {
             self.vy[i] += c.gravity * dt;
             if c.drag > 0.0 {
                 let k = (1.0 - c.drag * dt).max(0.0);
-                self.vx[i] *= k; self.vy[i] *= k; self.vz[i] *= k;
+                self.vx[i] *= k;
+                self.vy[i] *= k;
+                self.vz[i] *= k;
             }
             self.px[i] += self.vx[i] * dt;
             self.py[i] += self.vy[i] * dt;
@@ -255,7 +300,9 @@ impl ParticleSystem {
                 // Kill the horizontal skid too, or shells slide forever.
                 self.vx[i] *= 0.6;
                 self.vz[i] *= 0.6;
-                if self.vy[i].abs() < 0.4 { self.vy[i] = 0.0; }
+                if self.vy[i].abs() < 0.4 {
+                    self.vy[i] = 0.0;
+                }
             }
 
             self.rot[i] += self.spin[i] * dt;
@@ -275,43 +322,66 @@ impl ParticleSystem {
             ];
             let frame = if c.frames > 1.0 {
                 (t * c.frames).floor().min(c.frames - 1.0)
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             // Velocity-stretch length in metres — the shader elongates the
             // quad along the projected velocity by this much.
             let stretch = if c.stretch > 0.0 {
-                let v = (self.vx[i] * self.vx[i] + self.vy[i] * self.vy[i] + self.vz[i] * self.vz[i]).sqrt();
+                let v =
+                    (self.vx[i] * self.vx[i] + self.vy[i] * self.vy[i] + self.vz[i] * self.vz[i])
+                        .sqrt();
                 v * c.stretch
-            } else { 0.0 };
+            } else {
+                0.0
+            };
 
             let o = i * 12;
-            self.packed[o]      = self.px[i];
-            self.packed[o + 1]  = self.py[i];
-            self.packed[o + 2]  = self.pz[i];
-            self.packed[o + 3]  = self.rot[i];
-            self.packed[o + 4]  = size;
-            self.packed[o + 5]  = col[0];
-            self.packed[o + 6]  = col[1];
-            self.packed[o + 7]  = col[2];
-            self.packed[o + 8]  = col[3];
-            self.packed[o + 9]  = t;        // extra.x — normalized age
-            self.packed[o + 10] = frame;    // extra.y — atlas frame
-            self.packed[o + 11] = stretch;  // extra.z — stretch metres
+            self.packed[o] = self.px[i];
+            self.packed[o + 1] = self.py[i];
+            self.packed[o + 2] = self.pz[i];
+            self.packed[o + 3] = self.rot[i];
+            self.packed[o + 4] = size;
+            self.packed[o + 5] = col[0];
+            self.packed[o + 6] = col[1];
+            self.packed[o + 7] = col[2];
+            self.packed[o + 8] = col[3];
+            self.packed[o + 9] = t; // extra.x — normalized age
+            self.packed[o + 10] = frame; // extra.y — atlas frame
+            self.packed[o + 11] = stretch; // extra.z — stretch metres
         }
         self.live as u32
     }
 
-    pub fn packed(&self) -> &[f32] { &self.packed }
+    pub fn packed(&self) -> &[f32] {
+        &self.packed
+    }
 
-    pub fn clear(&mut self) { self.live = 0; }
+    pub fn clear(&mut self) {
+        self.live = 0;
+    }
 }
 
-#[inline] fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }
-#[inline] fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
+#[inline]
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
-#[inline] fn normalize(v: [f32; 3]) -> [f32; 3] {
-    let l = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt();
-    if l > 1e-6 { [v[0]/l, v[1]/l, v[2]/l] } else { [1.0, 0.0, 0.0] }
+#[inline]
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+#[inline]
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if l > 1e-6 {
+        [v[0] / l, v[1] / l, v[2] / l]
+    } else {
+        [1.0, 0.0, 0.0]
+    }
 }
 
 /// Registry of all systems. Handles are 1-based; 0 is "no system".
@@ -320,28 +390,39 @@ pub struct ParticleManager {
 }
 
 impl ParticleManager {
-    pub fn new() -> Self { Self { systems: Vec::new() } }
+    pub fn new() -> Self {
+        Self {
+            systems: Vec::new(),
+        }
+    }
 
     pub fn create(&mut self, capacity: usize, instance_buffer: u32) -> u32 {
-        self.systems.push(Some(ParticleSystem::new(capacity, instance_buffer)));
+        self.systems
+            .push(Some(ParticleSystem::new(capacity, instance_buffer)));
         self.systems.len() as u32
     }
 
     pub fn get_mut(&mut self, handle: u32) -> Option<&mut ParticleSystem> {
-        if handle == 0 { return None; }
+        if handle == 0 {
+            return None;
+        }
         self.systems.get_mut(handle as usize - 1)?.as_mut()
     }
 }
 
 impl Default for ParticleManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sys() -> ParticleSystem { ParticleSystem::new(64, 1) }
+    fn sys() -> ParticleSystem {
+        ParticleSystem::new(64, 1)
+    }
 
     #[test]
     fn emit_then_expire() {
@@ -352,7 +433,9 @@ mod tests {
         assert_eq!(s.update(0.1), 10);
         // Past the 0.5 s lifetime everything must be reclaimed — the swap-remove
         // loop has to re-test the swapped-in particle or it leaks half the pool.
-        for _ in 0..10 { s.update(0.1); }
+        for _ in 0..10 {
+            s.update(0.1);
+        }
         assert_eq!(s.live, 0);
     }
 
@@ -379,13 +462,19 @@ mod tests {
     fn floor_bounce_reverses_velocity() {
         let mut s = sys();
         let mut p = vec![0.0f32; 26];
-        p[0] = 10.0;   // life
-        p[5] = -10.0;  // gravity
-        p[24] = 0.0;   // floor_y
-        p[25] = 0.5;   // restitution
+        p[0] = 10.0; // life
+        p[5] = -10.0; // gravity
+        p[24] = 0.0; // floor_y
+        p[25] = 0.5; // restitution
         s.configure_from_slice(&p);
         s.emit([0.0, 0.1, 0.0], [0.0, -1.0, 0.0], 1);
-        for _ in 0..20 { s.update(0.016); }
-        assert!(s.py[0] >= 0.0, "particle sank through the floor: y={}", s.py[0]);
+        for _ in 0..20 {
+            s.update(0.016);
+        }
+        assert!(
+            s.py[0] >= 0.0,
+            "particle sank through the floor: y={}",
+            s.py[0]
+        );
     }
 }

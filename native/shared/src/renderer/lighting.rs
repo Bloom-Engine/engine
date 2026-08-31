@@ -18,6 +18,7 @@ use super::{froxel, Renderer};
 pub(super) fn create_lighting_layout(
     device: &wgpu::Device,
     clustered: bool,
+    virtual_shadows: bool,
 ) -> wgpu::BindGroupLayout {
     let tex_float = wgpu::BindingType::Texture {
         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -44,7 +45,12 @@ pub(super) fn create_lighting_layout(
             count: None,
         },
         // 1/2: env (IBL specular) texture + sampler
-        wgpu::BindGroupLayoutEntry { binding: 1, visibility: frag, ty: tex_float, count: None },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: frag,
+            ty: tex_float,
+            count: None,
+        },
         wgpu::BindGroupLayoutEntry {
             binding: 2,
             visibility: frag,
@@ -52,7 +58,12 @@ pub(super) fn create_lighting_layout(
             count: None,
         },
         // 3/4: BRDF LUT + sampler
-        wgpu::BindGroupLayoutEntry { binding: 3, visibility: frag, ty: tex_float, count: None },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: frag,
+            ty: tex_float,
+            count: None,
+        },
         wgpu::BindGroupLayoutEntry {
             binding: 4,
             visibility: frag,
@@ -60,9 +71,24 @@ pub(super) fn create_lighting_layout(
             count: None,
         },
         // 5-7: shadow cascades, 8: comparison sampler
-        wgpu::BindGroupLayoutEntry { binding: 5, visibility: frag, ty: tex_depth, count: None },
-        wgpu::BindGroupLayoutEntry { binding: 6, visibility: frag, ty: tex_depth, count: None },
-        wgpu::BindGroupLayoutEntry { binding: 7, visibility: frag, ty: tex_depth, count: None },
+        wgpu::BindGroupLayoutEntry {
+            binding: 5,
+            visibility: frag,
+            ty: tex_depth,
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: frag,
+            ty: tex_depth,
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: frag,
+            ty: tex_depth,
+            count: None,
+        },
         wgpu::BindGroupLayoutEntry {
             binding: 8,
             visibility: frag,
@@ -70,10 +96,51 @@ pub(super) fn create_lighting_layout(
             count: None,
         },
         // 9: env diffuse (IBL irradiance)
-        wgpu::BindGroupLayoutEntry { binding: 9, visibility: frag, ty: tex_float, count: None },
+        wgpu::BindGroupLayoutEntry {
+            binding: 9,
+            visibility: frag,
+            ty: tex_float,
+            count: None,
+        },
     ];
     if clustered {
         entries.extend(froxel::extra_lighting_layout_entries());
+    }
+    if virtual_shadows {
+        entries.extend([
+            wgpu::BindGroupLayoutEntry {
+                binding: 13,
+                visibility: frag,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 14,
+                visibility: frag,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 15,
+                visibility: frag,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(
+                        crate::virtual_shadows::VSM_SAMPLING_PARAMS_BYTES,
+                    ),
+                },
+                count: None,
+            },
+        ]);
     }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("lighting_layout"),
@@ -104,19 +171,80 @@ pub(super) fn create_lighting_bind_group(
     diffuse_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     let mut entries = vec![
-        wgpu::BindGroupEntry { binding: 0, resource: src.lighting_buffer.as_entire_binding() },
-        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(env_view) },
-        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(src.env_sampler) },
-        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(src.brdf_lut_view) },
-        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(src.brdf_lut_sampler) },
-        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_views[0]) },
-        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_views[1]) },
-        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_views[2]) },
-        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&src.shadow_map.sampler) },
-        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(diffuse_view) },
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: src.lighting_buffer.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::TextureView(env_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::Sampler(src.env_sampler),
+        },
+        wgpu::BindGroupEntry {
+            binding: 3,
+            resource: wgpu::BindingResource::TextureView(src.brdf_lut_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 4,
+            resource: wgpu::BindingResource::Sampler(src.brdf_lut_sampler),
+        },
+        wgpu::BindGroupEntry {
+            binding: 5,
+            resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_views[0]),
+        },
+        wgpu::BindGroupEntry {
+            binding: 6,
+            resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_views[1]),
+        },
+        wgpu::BindGroupEntry {
+            binding: 7,
+            resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_views[2]),
+        },
+        wgpu::BindGroupEntry {
+            binding: 8,
+            resource: wgpu::BindingResource::Sampler(&src.shadow_map.sampler),
+        },
+        wgpu::BindGroupEntry {
+            binding: 9,
+            resource: wgpu::BindingResource::TextureView(diffuse_view),
+        },
     ];
     if let Some(f) = src.froxel {
         entries.extend(f.extra_lighting_bind_entries());
+    }
+    if src.shadow_map.virtual_map.requested() {
+        entries.extend([
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: wgpu::BindingResource::TextureView(
+                    src.shadow_map
+                        .virtual_map
+                        .page_table_view()
+                        .expect("requested VSM requires a page table"),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: wgpu::BindingResource::TextureView(
+                    src.shadow_map
+                        .virtual_map
+                        .physical_array_view()
+                        .expect("requested VSM requires physical pages"),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 15,
+                resource: src
+                    .shadow_map
+                    .virtual_map
+                    .sampling_params_buffer()
+                    .expect("requested VSM requires sampling parameters")
+                    .as_entire_binding(),
+            },
+        ]);
     }
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),

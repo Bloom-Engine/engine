@@ -1,214 +1,6 @@
-//! Core pipeline shaders: batched 2D, legacy 3D, and the main scene shader (forward MRT).
+//! Core pipeline shaders: legacy 3D and the main scene shader (forward MRT).
 //! Split from renderer/shaders.rs.
-
-//! WGSL shader strings used by the renderer.
-//!
-//! Pure data — no behavior, no struct definitions. Each `const`
-//! is `pub(super)` so the surrounding `renderer` module (and only
-//! that module) can see it, via `use super::shaders::*;` in
-//! `mod.rs`. Split out so the ~11 500-line renderer file shrinks
-//! to the Rust logic it actually contains.
-
-pub(in crate::renderer) const SHADER_2D: &str = "
-struct Uniforms {
-    screen_size: vec2<f32>,
-    _pad: vec2<f32>,
-    view_proj: mat4x4<f32>,
-};
-
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) color: vec4<f32>,
-};
-
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) color: vec4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(1) @binding(0) var tex: texture_2d<f32>;
-@group(1) @binding(1) var tex_sampler: sampler;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    let world_pos = uniforms.view_proj * vec4<f32>(in.position, 0.0, 1.0);
-    let ndc_x = (world_pos.x / uniforms.screen_size.x) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (world_pos.y / uniforms.screen_size.y) * 2.0;
-    out.clip_position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
-    out.uv = in.uv;
-    out.color = in.color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let tex_color = textureSample(tex, tex_sampler, in.uv);
-    return tex_color * in.color;
-}
-";
-
-pub(in crate::renderer) const SHADER_3D: &str = "
-struct Uniforms3D {
-    mvp: mat4x4<f32>,
-    model: mat4x4<f32>,
-    prev_mvp: mat4x4<f32>,
-    model_tint: vec4<f32>,
-    // x = joint-buffer offset, y = skinned flag (cached skinned draws).
-    // Always zero on the immediate path — its verts arrive with joint
-    // indices pre-offset CPU-side, so vs_main_3d ignores this field.
-    misc: vec4<f32>,
-};
-
-struct DirLight {
-    direction: vec4<f32>,
-    color: vec4<f32>,
-};
-
-struct PointLight {
-    position: vec4<f32>,
-    color: vec4<f32>,
-};
-
-struct Lighting {
-    ambient: vec4<f32>,
-    light_dir: vec4<f32>,
-    light_color: vec4<f32>,
-    dir_light_count: vec4<f32>,
-    dir_lights: array<DirLight, 8>,
-    point_light_count: vec4<f32>,
-    point_lights: array<PointLight, 256>,
-};
-
-struct JointMatrices {
-    matrices: array<mat4x4<f32>, 1024>,
-};
-
-struct VertexInput3D {
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) color: vec4<f32>,
-    @location(3) uv: vec2<f32>,
-    @location(4) joints: vec4<f32>,
-    @location(5) weights: vec4<f32>,
-};
-
-struct VertexOutput3D {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) normal: vec3<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) uv: vec2<f32>,
-    @location(3) world_pos: vec3<f32>,
-    @location(4) curr_clip: vec4<f32>,
-    @location(5) prev_clip: vec4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> u: Uniforms3D;
-@group(1) @binding(0) var<uniform> lighting: Lighting;
-@group(2) @binding(0) var tex3d: texture_2d<f32>;
-@group(2) @binding(1) var tex3d_sampler: sampler;
-@group(3) @binding(0) var<uniform> joints: JointMatrices;
-
-@vertex
-fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
-    var out: VertexOutput3D;
-    let total_weight = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
-    var pos = vec4<f32>(in.position, 1.0);
-    var norm = vec4<f32>(in.normal, 0.0);
-    if (total_weight > 0.01) {
-        let j0 = u32(in.joints.x); let j1 = u32(in.joints.y);
-        let j2 = u32(in.joints.z); let j3 = u32(in.joints.w);
-        let skinned_pos = joints.matrices[j0] * pos * in.weights.x
-                        + joints.matrices[j1] * pos * in.weights.y
-                        + joints.matrices[j2] * pos * in.weights.z
-                        + joints.matrices[j3] * pos * in.weights.w;
-        let skinned_norm = joints.matrices[j0] * norm * in.weights.x
-                         + joints.matrices[j1] * norm * in.weights.y
-                         + joints.matrices[j2] * norm * in.weights.z
-                         + joints.matrices[j3] * norm * in.weights.w;
-        pos = skinned_pos;
-        norm = skinned_norm;
-    }
-    let curr = u.mvp * pos;
-    out.clip_position = curr;
-    out.curr_clip = curr;
-    out.prev_clip = u.prev_mvp * pos;
-    out.normal = normalize((u.model * norm).xyz);
-    out.world_pos = (u.model * pos).xyz;
-    out.color = in.color * u.model_tint;
-    out.uv = in.uv;
-    return out;
-}
-
-struct Fs3DOut {
-    @location(0) color: vec4<f32>,
-    @location(1) material: vec2<f32>,
-    @location(2) velocity: vec2<f32>,
-    @location(3) albedo: vec4<f32>,
-};
-
-@fragment
-fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
-    let n = normalize(in.normal);
-
-    // Ambient
-    var lit = lighting.ambient.rgb * lighting.ambient.a;
-
-    // Legacy directional light (backward compat)
-    let legacy_dir = normalize(lighting.light_dir.xyz);
-    let legacy_diffuse = max(dot(n, legacy_dir), 0.0);
-    lit += lighting.light_color.rgb * lighting.light_dir.w * legacy_diffuse;
-
-    // Additional directional lights
-    let dir_count = u32(lighting.dir_light_count.x);
-    for (var i = 0u; i < dir_count; i++) {
-        let dl = lighting.dir_lights[i];
-        let dir = normalize(dl.direction.xyz);
-        let diff = max(dot(n, dir), 0.0);
-        lit += dl.color.rgb * dl.direction.w * diff;
-    }
-
-    // Point lights
-    let pt_count = u32(lighting.point_light_count.x);
-    for (var i = 0u; i < pt_count; i++) {
-        let pl = lighting.point_lights[i];
-        let to_light = pl.position.xyz - in.world_pos;
-        let dist = length(to_light);
-        let range = pl.position.w;
-        if (dist < range) {
-            let dir = to_light / dist;
-            let diff = max(dot(n, dir), 0.0);
-            let atten = 1.0 - (dist / range);
-            let atten2 = atten * atten;
-            lit += pl.color.rgb * pl.color.w * diff * atten2;
-        }
-    }
-
-    let tex_color = textureSample(tex3d, tex3d_sampler, in.uv);
-    // Per-pixel velocity for motion blur / TAA reprojection.
-    let curr_ndc = in.curr_clip.xy / in.curr_clip.w;
-    let prev_ndc = in.prev_clip.xy / in.prev_clip.w;
-    let vel = (curr_ndc - prev_ndc) * 0.5;
-    // Immediate-mode 3D draws (drawCube etc.) aren't PBR — output
-    // 0 metallic / 1 roughness so SSR doesn't try to reflect them.
-    //
-    // Alpha comes from the TINT only. Game textures routinely carry a
-    // non-opacity alpha channel (Unvanquished armor packs a gloss mask
-    // there), and this batch also renders CPU-skinned characters — the
-    // player turned semi-transparent through its gloss mask when texture
-    // alpha fed the blend. Deliberate fades still work via tint alpha;
-    // untextured effect quads bind the white texture (alpha 1) anyway.
-    return Fs3DOut(
-        vec4<f32>(tex_color.rgb * in.color.rgb * lit, in.color.a),
-        vec2<f32>(0.0, 1.0),
-        vel,
-        vec4<f32>(0.0),
-    );
-}
-";
+//! Pure WGSL data, private to the surrounding renderer module.
 
 // The cloud deck (common/clouds.wgsl) is prepended verbatim: this shader is a
 // raw source const and does not run through the material preprocessor. Same
@@ -263,6 +55,7 @@ struct Lighting {
 struct MaterialFactors {
     metal_rough: vec4<f32>, // x=metallic, y=roughness
     emissive:    vec4<f32>, // rgb=emissive factor
+    spec_gloss:  vec4<f32>, // rgb=specular factor, a=glossiness factor
 };
 
 struct VertexInputScene {
@@ -358,6 +151,15 @@ fn env_sample(dir: vec3<f32>) -> vec3<f32> {
          * lighting.camera_pos.w;
 }
 
+fn safe_scene_tangent(tangent: vec3<f32>) -> vec3<f32> {
+    let length_squared = dot(tangent, tangent);
+    return select(
+        vec3<f32>(0.0),
+        tangent * inverseSqrt(max(length_squared, 1e-20)),
+        length_squared > 1e-8,
+    );
+}
+
 @vertex
 fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
     if (u.misc.y > 0.5) {
@@ -412,7 +214,7 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
         o.normal = normalize(nrm4.xyz);
         o.color = in.color * u.model_tint;
         o.uv = in.uv;
-        o.tangent = vec4<f32>(normalize(tan4.xyz), in.tangent.w);
+        o.tangent = vec4<f32>(safe_scene_tangent(tan4.xyz), in.tangent.w);
         return o;
     }
     var out: VertexOutputScene;
@@ -447,7 +249,10 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
     out.normal = normalize((u.model * vec4<f32>(in.normal, 0.0)).xyz);
     out.color = in.color * u.model_tint;
     out.uv = in.uv;
-    out.tangent = vec4<f32>(normalize((u.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz), in.tangent.w);
+    out.tangent = vec4<f32>(
+        safe_scene_tangent((u.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz),
+        in.tangent.w,
+    );
     return out;
 }
 
@@ -472,6 +277,77 @@ fn compute_tbn(dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>,
     return mat3x3<f32>(t * invmax, b * invmax, n);
 }
 
+// Stable 4x4 Bayer threshold anchored to the source texture. Bloom's scene
+// targets are single-sample, so hardware alpha-to-coverage is unavailable;
+// this is its deterministic spatial equivalent for subpixel MASK coverage.
+//
+// This must follow the material, not the render target. The former
+// screen-pixel phase stayed fixed while a leaf moved underneath it, so TAA
+// reprojected a different binary silhouette on every camera step. The shadow
+// pass had the same defect in light-map pixels, re-rolling foliage shadows
+// whenever a cascade refit. Authored-coordinate anchoring gives scene color,
+// depth, velocity and shadows one persistent material-space decision; its
+// frequency follows the sampled coverage mip so minification stays band-limited.
+fn mask_coverage_threshold(
+    uv: vec2<f32>,
+    dimensions: vec2<u32>,
+    lod: f32,
+) -> f32 {
+    let bayer = array<f32, 16>(
+         0.5 / 16.0,  8.5 / 16.0,  2.5 / 16.0, 10.5 / 16.0,
+        12.5 / 16.0,  4.5 / 16.0, 14.5 / 16.0,  6.5 / 16.0,
+         3.5 / 16.0, 11.5 / 16.0,  1.5 / 16.0,  9.5 / 16.0,
+        15.5 / 16.0,  7.5 / 16.0, 13.5 / 16.0,  5.5 / 16.0,
+    );
+    let wrapped_uv = uv - floor(uv);
+    // Lower alpha mips already describe the complete source footprint as one
+    // coverage probability. Repeating the threshold at level-zero texel
+    // frequency reintroduced all of the invisible source detail as a binary
+    // pattern: one screen pixel crossed many decisions while the camera moved,
+    // producing foliage sparkle. Anchor the pattern to the nearest owning mip
+    // instead. Quantising the phase LOD keeps it fixed between mip boundaries;
+    // TAA only has to absorb the occasional boundary transition, not a new
+    // decision on every subpixel camera step.
+    let phase_lod = max(floor(lod), 1.0);
+    let mip_scale = exp2(-phase_lod);
+    let mip_dimensions = max(
+        floor(vec2<f32>(dimensions) * mip_scale),
+        vec2<f32>(1.0),
+    );
+    let texel = vec2<u32>(floor(wrapped_uv * mip_dimensions));
+    let x = texel.x & 3u;
+    let y = texel.y & 3u;
+    return bayer[y * 4u + x];
+}
+
+fn mask_texture_lod(
+    uv: vec2<f32>,
+    dimensions: vec2<u32>,
+    lod_bias: f32,
+) -> f32 {
+    let extent = vec2<f32>(dimensions);
+    let dx = dpdx(uv) * extent;
+    let dy = dpdy(uv) * extent;
+    let footprint2 = max(dot(dx, dx), dot(dy, dy));
+    return max(0.5 * log2(max(footprint2, 1.0)) + lod_bias, 0.0);
+}
+
+fn mask_coverage_survives(
+    authored_alpha: f32,
+    lower_mip_coverage: f32,
+    cutoff: f32,
+    lod: f32,
+    uv: vec2<f32>,
+    dimensions: vec2<u32>,
+) -> bool {
+    let hard_coverage = select(0.0, 1.0, authored_alpha >= cutoff);
+    // Transition before LOD 1 avoids a pop while trilinear sampling moves
+    // from authored level-zero alpha to lower levels whose alpha is coverage.
+    let blend = smoothstep(0.5, 1.0, lod);
+    let probability = mix(hard_coverage, lower_mip_coverage, blend);
+    return probability >= mask_coverage_threshold(uv, dimensions, max(lod, 1.0));
+}
+
 // Exact piecewise sRGB → linear, matching bloom-reference's
 // `srgb_u8_to_linear`. The 2.2-gamma approximation we used before
 // drifts by ~0.005 in mid-tones, which adds up across base color +
@@ -482,6 +358,40 @@ fn srgb_to_linear_v(c: vec3<f32>) -> vec3<f32> {
     let lo = c / 12.92;
     let hi = pow(max((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(0.0)), vec3<f32>(2.4));
     return select(hi, lo, c <= cutoff);
+}
+
+// Khronos reference conversion for the legacy
+// KHR_materials_pbrSpecularGlossiness workflow. Keeping this per pixel is
+// essential: reducing a textured specular/glossiness map to scalar factors
+// erases the spatial material response authored by Bistro.
+// xyz = converted linear base color, w = metallic.
+fn specgloss_to_metalrough_pixel(
+    diffuse: vec3<f32>,
+    specular: vec3<f32>,
+) -> vec4<f32> {
+    let dielectric_specular = 0.04;
+    let epsilon = 1e-6;
+    let one_minus_dielectric = 1.0 - dielectric_specular;
+    let diffuse_max = max(diffuse.r, max(diffuse.g, diffuse.b));
+    let specular_max = max(specular.r, max(specular.g, specular.b));
+    let a = dielectric_specular;
+    let b = diffuse_max * one_minus_dielectric /
+        max(dielectric_specular, epsilon) + specular_max -
+        2.0 * dielectric_specular;
+    let c = dielectric_specular - specular_max;
+    let discriminant = max(b * b - 4.0 * a * c, 0.0);
+    var metallic = 0.0;
+    if (specular_max >= dielectric_specular) {
+        metallic = clamp((-b + sqrt(discriminant)) / (2.0 * a), 0.0, 1.0);
+    }
+    let diffuse_scale = one_minus_dielectric /
+        max(1.0 - metallic * dielectric_specular, epsilon);
+    let base_color = mix(
+        diffuse * diffuse_scale,
+        specular,
+        metallic * metallic,
+    );
+    return vec4<f32>(clamp(base_color, vec3<f32>(0.0), vec3<f32>(1.0)), metallic);
 }
 
 fn aces_tone(c: vec3<f32>) -> vec3<f32> {
@@ -577,28 +487,23 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
     if (lighting.dir_light_count.y < 0.5) {
         return 1.0;
     }
-    // Select cascade by world-space DISTANCE from camera (not
-    // view-space Z). Distance is rotation-independent — spinning
-    // the camera doesn't change which cascade a surface falls in.
-    let cam = lighting.camera_pos.xyz;
-    let dist = length(world_pos - cam);
+    // Match the positive view depth used to fit the camera-frustum slices.
+    // Spherical distance can select an undersized cascade for side receivers.
+    let view_pos = lighting.shadow_view_matrix * vec4<f32>(world_pos, 1.0);
+    let view_depth = max(-view_pos.z, 0.0);
 
     var cascade = 2;
-    if (dist <= lighting.shadow_cascade_splits.x) {
+    if (view_depth <= lighting.shadow_cascade_splits.x) {
         cascade = 0;
-    } else if (dist <= lighting.shadow_cascade_splits.y) {
+    } else if (view_depth <= lighting.shadow_cascade_splits.y) {
         cascade = 1;
     }
 
-    // Normal-offset receiver bias: push the receiver position off the
-    // surface along its geometric normal by ~1.5 shadow texels of the
-    // selected cascade before projecting. The fixed depth bias alone
-    // (0.001 ≈ 8 cm across cascade 2's depth range) is SMALLER than the
-    // per-texel depth slope of steep receivers — a vertical wall under a
-    // 40°-elevation sun changes ~12 cm of light-space depth per shadow
-    // texel — so entire sun-facing faces used to self-shadow into a
-    // uniform ~50% PCF dimming (measured 68 vs 127 luma on the shooter's
-    // stone house). Offsetting the receiver sidesteps the slope entirely;
+    // Push the receiver off its surface by ~1.5 shadow texels. The fixed
+    // depth bias is smaller than the per-texel depth slope of steep
+    // receivers, so sun-facing walls otherwise self-shadow uniformly
+    // (measured 68 vs 127 luma on the shooter's stone house). This offset
+    // sidesteps that slope;
     // the offset is texel-proportional (≈2 cm near, ≈23 cm at cascade 2),
     // far below visible peter-panning at each cascade's viewing distance.
     // The cascade fit radius ≈ its split distance (compute_cascade_vps
@@ -610,11 +515,64 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
     } else if (cascade == 1) {
         fit_r = lighting.shadow_cascade_splits.y;
     }
-    let recv_pos = world_pos + geo_n * (2.0 * fit_r / map_dim) * 1.5;
 
-    // Project through the selected cascade's VP
-    let light_clip = lighting.shadow_cascade_vps[cascade] * vec4<f32>(recv_pos, 1.0);
-    let light_ndc = light_clip.xyz / light_clip.w;
+    // A cascade transition must compare both maps at ONE receiver position.
+    // The former path offset the current sample by this cascade's texel size
+    // and the next sample by the next cascade's much coarser texel size. That
+    // produced two displaced shadow edges; their 10% blend band was a broad
+    // dark/light stroke that followed the camera across otherwise static
+    // streets and walls. Smooth the receiver offset across the blend region,
+    // then reuse that position for both depth comparisons. At either end it
+    // exactly matches the owning cascade, so crossing a split is continuous.
+    var offset_split_near = 0.0;
+    var offset_split_far = lighting.shadow_cascade_splits.x;
+    if (cascade == 1) {
+        offset_split_near = lighting.shadow_cascade_splits.x;
+        offset_split_far = lighting.shadow_cascade_splits.y;
+    } else if (cascade == 2) {
+        offset_split_near = lighting.shadow_cascade_splits.y;
+        offset_split_far = lighting.shadow_cascade_splits.z;
+    }
+    let offset_blend_zone = (offset_split_far - offset_split_near) * 0.1;
+    let offset_dist_to_edge = offset_split_far - view_depth;
+    if (cascade < 2 && offset_dist_to_edge < offset_blend_zone) {
+        var next_fit_r = lighting.shadow_cascade_splits.z;
+        if (cascade == 0) {
+            next_fit_r = lighting.shadow_cascade_splits.y;
+        }
+        let toward_next = clamp(1.0 - offset_dist_to_edge / offset_blend_zone, 0.0, 1.0);
+        fit_r = mix(fit_r, next_fit_r, toward_next);
+    }
+    var recv_pos = world_pos + geo_n * (2.0 * fit_r / map_dim) * 1.5;
+
+    // Project through the selected cascade's VP. A retained translation-slack
+    // fit can put a receiver (especially after its normal offset) just outside
+    // the selected cascade even though the next, wider cascade covers it. The
+    // old path returned fully lit here, cutting view-dependent holes into an
+    // otherwise continuous shadow as the camera moved or turned. Fall through
+    // to the next valid cascade; the normal in-fit path still performs exactly
+    // one depth sample.
+    var light_clip = lighting.shadow_cascade_vps[cascade] * vec4<f32>(recv_pos, 1.0);
+    var light_ndc = light_clip.xyz / light_clip.w;
+    for (var handoff = 0; handoff < 2; handoff = handoff + 1) {
+        let outside = light_ndc.x < -1.0 || light_ndc.x > 1.0 ||
+            light_ndc.y < -1.0 || light_ndc.y > 1.0 ||
+            light_ndc.z < 0.0 || light_ndc.z > 1.0;
+        if (!outside) {
+            break;
+        }
+        if (cascade >= 2) {
+            return 1.0;
+        }
+        cascade = cascade + 1;
+        fit_r = lighting.shadow_cascade_splits.z;
+        if (cascade == 1) {
+            fit_r = lighting.shadow_cascade_splits.y;
+        }
+        recv_pos = world_pos + geo_n * (2.0 * fit_r / map_dim) * 1.5;
+        light_clip = lighting.shadow_cascade_vps[cascade] * vec4<f32>(recv_pos, 1.0);
+        light_ndc = light_clip.xyz / light_clip.w;
+    }
     if (light_ndc.x < -1.0 || light_ndc.x > 1.0 ||
         light_ndc.y < -1.0 || light_ndc.y > 1.0 ||
         light_ndc.z < 0.0 || light_ndc.z > 1.0) {
@@ -637,20 +595,20 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
         split_far = lighting.shadow_cascade_splits.z;
     }
     let blend_zone = (split_far - split_near) * 0.1;
-    let dist_to_edge = split_far - dist;
+    let dist_to_edge = split_far - view_depth;
 
     if (dist_to_edge < blend_zone && cascade < 2) {
         // In the blend zone: sample the next cascade too and lerp.
-        // Same normal-offset receiver bias, scaled to the NEXT cascade's
-        // texel size (it is coarser, so the offset grows accordingly).
+        // `recv_pos` was smoothly sized for this transition above. Sampling
+        // both maps at that same world-space point prevents a double edge.
         let next_cascade = cascade + 1;
-        var next_fit = lighting.shadow_cascade_splits.z;
-        if (next_cascade == 1) {
-            next_fit = lighting.shadow_cascade_splits.y;
-        }
-        let next_pos = world_pos + geo_n * (2.0 * next_fit / map_dim) * 1.5;
-        let next_clip = lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(next_pos, 1.0);
+        let next_clip = lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(recv_pos, 1.0);
         let next_ndc = next_clip.xyz / next_clip.w;
+        // The next fitted slice may not cover the inner blend zone. Never
+        // turn its clamped edge texel into a moving, falsely-lit shadow gap.
+        if (any(abs(next_ndc.xy) > vec2<f32>(1.0)) || next_ndc.z < 0.0 || next_ndc.z > 1.0) {
+            return shadow_val;
+        }
         let next_uv = vec2<f32>(next_ndc.x * 0.5 + 0.5, 1.0 - (next_ndc.y * 0.5 + 0.5));
         let next_depth_ref = next_ndc.z - bias;
         let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);
@@ -705,35 +663,66 @@ fn shade_pbr(
 
     let specular_raw = d * vis * f;
 
-    // Dielectric direct-specular attenuation. A polished marble column
-    // lit by the sun produces a narrow GGX highlight peak that pathtracers
-    // average over hemisphere-sized light sources; our point sun spikes
-    // D_GGX to 1000+ at the peak and survives tonemap as a bright stripe
-    // even after Fresnel (Intel Sponza column vs Cycles was the test).
-    // Same smoothstep-by-roughness treatment as the IBL path, applied
-    // only to the specular lobe — diffuse stays physically correct.
-    let dielectric_direct_amp = smoothstep(0.0, 1.0, roughness);
-    let dielectric_factor = 1.0 - metallic;
-    let direct_spec_scale = mix(1.0, dielectric_direct_amp, dielectric_factor);
-    // Universal roughness damping on direct specular too — same
-    // reasoning as the IBL path; a smooth marble column lit by a
-    // point sun spikes D_GGX past any tonemap cap. Metals stay at
-    // full direct spec for roughness > ~0.75.
-    // Universal soft luma cap on direct specular. A smooth marble
-    // cylinder hit by the sun spikes D_GGX past any reasonable
-    // tonemap; Reinhard-compress the luma toward a 0.3 ceiling
-    // smoothly so adjacent pixels with slightly different GGX peaks
-    // scale by neighbouring cap values instead of ping-ponging
-    // across a hard min() discontinuity (the cause of the sparkle on
-    // Sponza's sunlit floor tiles).
+    // Preserve the authored direct Fresnel response. Keep only a high soft
+    // safety knee for pathological sub-pixel peaks: the previous 0.3 knee
+    // compressed ordinary highlights as well as outliers, flattening smooth
+    // paint and metal into broad, cartoon-like bands before the display
+    // tonemapper ever saw them. Normal-variance filtering supplies the real
+    // spatial integration; this bound is deliberately far above normal scene
+    // radiance and is not an artistic response curve.
     let direct_luma = dot(specular_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let direct_cap = 1.0 / (1.0 + direct_luma / 0.3);
-    let universal_damp = smoothstep(0.05, 0.75, roughness);
-    let specular = specular_raw * direct_spec_scale * universal_damp * direct_cap;
+    let direct_cap = 1.0 / (1.0 + direct_luma / 4.0);
+    let specular = specular_raw * direct_cap;
 
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     let diffuse = kd * base_color / PI;
 
+    return (diffuse + specular) * light_color * intensity * n_dot_l;
+}
+
+// Evaluate the legacy KHR_materials_pbrSpecularGlossiness workflow without
+// squeezing its independent diffuse and specular colours through the
+// metallic-roughness parameterization.  That conversion is necessarily
+// lossy: a painted dielectric with an authored F0 above 0.04 is interpreted
+// as partly metallic, tinting its reflection with the diffuse colour and
+// suppressing the diffuse lobe.  Bistro's blue scooter is the canonical
+// failure case.  Keeping the authored F0 here preserves both lobes while
+// sharing the established GGX distribution, visibility, energy bound, and
+// roughness policy with the ordinary material path.
+fn shade_specular_glossiness_pbr(
+    n: vec3<f32>,
+    v: vec3<f32>,
+    l_dir: vec3<f32>,
+    light_color: vec3<f32>,
+    intensity: f32,
+    diffuse_color: vec3<f32>,
+    authored_f0: vec3<f32>,
+    roughness: f32,
+) -> vec3<f32> {
+    let n_dot_l = max(dot(n, l_dir), 0.0);
+    if (n_dot_l <= 0.0 || intensity <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let n_dot_v = max(dot(n, v), 1e-4);
+    let h_raw = l_dir + v;
+    let h_len2 = dot(h_raw, h_raw);
+    if (h_len2 <= 1e-12) {
+        let kd0 = vec3<f32>(1.0) - authored_f0;
+        return kd0 * diffuse_color / PI * light_color * intensity * n_dot_l;
+    }
+    let h = h_raw * inverseSqrt(h_len2);
+    let n_dot_h = clamp(dot(n, h), 0.0, 1.0);
+    let v_dot_h = clamp(dot(v, h), 0.0, 1.0);
+    let alpha = max(roughness * roughness, 0.001);
+    let alpha2 = alpha * alpha;
+    let f = f_schlick(v_dot_h, authored_f0);
+    let d = d_ggx(n_dot_h, alpha2);
+    let vis = v_smith_ggx_correlated(n_dot_l, n_dot_v, alpha2);
+    let specular_raw = d * vis * f;
+    let direct_luma = dot(specular_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let direct_cap = 1.0 / (1.0 + direct_luma / 4.0);
+    let specular = specular_raw * direct_cap;
+    let diffuse = (vec3<f32>(1.0) - f) * diffuse_color / PI;
     return (diffuse + specular) * light_color * intensity * n_dot_l;
 }
 
@@ -762,14 +751,64 @@ struct SceneOut {
 fn fs_depth_prepass(in: VertexOutputScene) {
     let alpha_cutoff = material.metal_rough.w;
     if (alpha_cutoff > 0.0) {
-        let a = textureSample(base_color_tex, base_color_samp, in.uv).a * in.color.a;
-        if (a < alpha_cutoff) { discard; }
+        let lod_bias = lighting.shadow_cascade_splits.w;
+        var survives = true;
+        if (material.emissive.w > 0.5) {
+            let mask_lod = mask_texture_lod(
+                in.uv,
+                textureDimensions(base_color_tex),
+                lod_bias,
+            );
+            if (mask_lod <= 0.5) {
+                let authored_alpha =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    in.color.a;
+                survives = authored_alpha >= alpha_cutoff;
+            } else if (mask_lod >= 1.0) {
+                let coverage =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, mask_lod).a;
+                survives = coverage >= mask_coverage_threshold(
+                    in.uv,
+                    textureDimensions(base_color_tex),
+                    mask_lod,
+                );
+            } else {
+                let authored_alpha =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    in.color.a;
+                let coverage =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 1.0).a;
+                survives = mask_coverage_survives(
+                    authored_alpha,
+                    coverage,
+                    alpha_cutoff,
+                    mask_lod,
+                    in.uv,
+                    textureDimensions(base_color_tex),
+                );
+            }
+        } else {
+            let raw_alpha =
+                textureSampleBias(base_color_tex, base_color_samp, in.uv, lod_bias).a *
+                in.color.a;
+            survives = raw_alpha >= alpha_cutoff;
+        }
+        if (!survives) { discard; }
     }
 }
 
-@fragment
-fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
+fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     var n = normalize(in.normal);
+    // Keep the interpolated geometric normal separate from the normal-mapped
+    // shading normal.  The texture path already contributes both Toksvig
+    // shortening and LEADR-style baked mip variance below; differentiating
+    // the mapped normal as well counted that same texture variation a second
+    // time.  On compact glossy props (Bistro's painted scooter is the
+    // clearest case) the duplicate variance widened a 0.05 paint lobe toward
+    // matte and removed the environment response that gives the surface its
+    // shape.  Screen-space specular AA still integrates actual geometric
+    // curvature through this retained normal.
+    let geometric_n = n;
 
     // --- Normal mapping (tangent-space) ---
     // LEADR-lite normal map sample. The texture uploader bakes
@@ -782,15 +821,17 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // widening the lobe by exactly enough to integrate over sub-
     // pixel normal variance before it hits the BRDF as sparkle.
     //
-    // We still sample at +1 LOD bias so the hardware picks a mip
-    // with more accumulated variance than strictly minimal; the
-    // tradeoff is a hair of softness at near-perpendicular views
-    // in exchange for path-tracer-like integration at grazing.
+    // Sample one quarter level toward the next coarser mip. The baked LEADR variance
+    // already integrates the normal disagreement at the hardware-selected
+    // footprint, so a full +1 mip erased stable authored microdetail at native
+    // resolution (most visibly on Bistro's painted bottles and scooter). The
+    // quarter-mip guard retains extra grazing-angle stability without collapsing
+    // an entire level of normal response.
     // shadow_cascade_splits.w carries the global LOD bias (-1 when
     // TSR is on, 0 otherwise) — added so half-res rendering still
     // reads texture detail one mip finer than hardware would pick.
     let lod_bias = lighting.shadow_cascade_splits.w;
-    let nm_sample4 = textureSampleBias(normal_tex, normal_samp, in.uv, 1.0 + lod_bias);
+    let nm_sample4 = textureSampleBias(normal_tex, normal_samp, in.uv, 0.25 + lod_bias);
     let nm_raw = nm_sample4.xyz * 2.0 - 1.0;
     let baked_variance = nm_sample4.w;
     let toksvig_len2 = clamp(dot(nm_raw, nm_raw), 0.01, 1.0);
@@ -827,19 +868,59 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // was (1,1,1,1), and silently darkened every legitimate tint
     // (Bistro's spec-gloss diffuse factors land in the 0.5–0.9 range
     // where the double-conversion is visibly off).
-    let base_color = srgb_to_linear_v(base_tex.rgb) * in.color.rgb;
+    var base_color = srgb_to_linear_v(base_tex.rgb) * in.color.rgb;
     let base_alpha = base_tex.a * in.color.a;
 
-    // glTF MASK / BLEND alpha mode — discard fragments below the
-    // authored cutoff so alpha-cutout foliage, fences, chains, and
-    // fabric render as their actual shape instead of opaque billboards.
-    // OPAQUE materials carry cutoff = 0 so the branch collapses.
-    // BLEND is treated as MASK @ 0.5 (via the loader) pending a real
-    // sorted transparent pipeline.
+    // glTF alpha mode tag: MASK carries its positive authored cutoff,
+    // OPAQUE is zero, and BLEND is negative. Only MASK discards here;
+    // BLEND is routed through the sorted forward translucent pipeline.
     let alpha_cutoff = material.metal_rough.w;
-    if (alpha_cutoff > 0.0 && base_alpha < alpha_cutoff) {
-        discard;
+    //PREPASS_STRIP_BEGIN — SH-055: removed in the prepassed-pipeline variant.
+    // The prepassed main pass Equal-tests against prepass-exact depth, so a
+    // would-be-discarded pixel fails the depth test anyway; keeping `discard`
+    // in the shader disables Adreno LRZ/early-Z for the whole draw and made
+    // the canopy overdraw shade the full lighting shader per layer (~250 ms
+    // per frame on an Adreno 618). See mod.rs scene_shader_prepassed.
+    if (alpha_cutoff > 0.0) {
+        var survives = base_alpha >= alpha_cutoff;
+        if (material.emissive.w > 0.5) {
+            let mask_lod = mask_texture_lod(
+                in.uv,
+                textureDimensions(base_color_tex),
+                lod_bias,
+            );
+            if (mask_lod <= 0.5) {
+                let authored_alpha =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    in.color.a;
+                survives = authored_alpha >= alpha_cutoff;
+            } else if (mask_lod >= 1.0) {
+                let coverage =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, mask_lod).a;
+                survives = coverage >= mask_coverage_threshold(
+                    in.uv,
+                    textureDimensions(base_color_tex),
+                    mask_lod,
+                );
+            } else {
+                let authored_alpha =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    in.color.a;
+                let coverage =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 1.0).a;
+                survives = mask_coverage_survives(
+                    authored_alpha,
+                    coverage,
+                    alpha_cutoff,
+                    mask_lod,
+                    in.uv,
+                    textureDimensions(base_color_tex),
+                );
+            }
+        }
+        if (!survives) { discard; }
     }
+    //PREPASS_STRIP_END
 
     // Two-sided foliage normal. Alpha-cutout cards (leaves, grass blades)
     // are seen from both sides, but the geometric normal only faces one
@@ -850,15 +931,22 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     if (alpha_cutoff > 0.0 && dot(n, lighting.camera_pos.xyz - in.world_pos) < 0.0) {
         n = -n;
     }
+    if (alpha_cutoff < 0.0 && !front_facing) {
+        n = -n;
+    }
 
     // glTF metallicRoughnessTexture: G=roughness, B=metallic (linear).
-    // When the material has no MR texture (metal_rough.z == 0), the
+    // KHR specularGlossinessTexture: RGB=specular (sRGB), A=glossiness
+    // (linear). `metal_rough.z` selects the workflow so both imported
+    // material models share this existing texture binding and sample.
+    // When the material has no material-response texture (workflow 0), the
     // binding falls back to an arbitrary scene texture (whatever lives
     // at index 0) — multiplying its random R/G/B into our factors
     // produces incorrect material values. Use the factors directly in
     // that case.
     let mr_tex_sample = textureSample(mr_tex, mr_samp, in.uv);
-    let has_mr = material.metal_rough.z > 0.5;
+    let has_mr = material.metal_rough.z > 0.5 && material.metal_rough.z < 1.5;
+    let has_spec_gloss = material.metal_rough.z > 1.5;
     var roughness_raw = select(
         clamp(material.metal_rough.y, 0.045, 1.0),
         clamp(mr_tex_sample.g * material.metal_rough.y, 0.045, 1.0),
@@ -869,13 +957,34 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // them to 0.05, we get a mirror-like highlight strip on marble
     // columns that Cycles doesn't produce (Sponza column was the tell).
     // Metals keep the original low floor so chrome / gold stay sharp.
-    let metallic_raw = select(
+    var metallic_raw = select(
         clamp(material.metal_rough.x, 0.0, 1.0),
         clamp(mr_tex_sample.b * material.metal_rough.x, 0.0, 1.0),
         has_mr,
     );
+    var authored_specular = vec3<f32>(0.04);
+    var ssr_base_color = base_color;
+    if (has_spec_gloss) {
+        authored_specular = srgb_to_linear_v(mr_tex_sample.rgb) *
+            material.spec_gloss.rgb;
+        // Retain the old conversion only for the compact metallic/roughness
+        // and albedo buffers consumed by screen-space effects. Main-scene
+        // direct and environment lighting below use the authored diffuse and
+        // F0 independently, avoiding the false-metal appearance.
+        let converted = specgloss_to_metalrough_pixel(base_color, authored_specular);
+        ssr_base_color = converted.rgb;
+        metallic_raw = converted.a;
+        roughness_raw = clamp(
+            1.0 - mr_tex_sample.a * material.spec_gloss.a,
+            0.045,
+            1.0,
+        );
+    }
     let metallic = metallic_raw;
-    let dielectric_floor = 0.15;
+    // Preserve genuinely smooth authored spec-gloss surfaces. The standard
+    // MR path retains Bloom's conservative dielectric floor; specular AA
+    // below still controls highlight shimmer for this exact workflow.
+    let dielectric_floor = select(0.15, 0.045, has_spec_gloss);
     var roughness = max(roughness_raw,
                         dielectric_floor * (1.0 - metallic));
 
@@ -903,17 +1012,13 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let sigma2_baked = baked_variance / max(1.0 - baked_variance, 0.001);
     let sigma2 = sigma2_toksvig + sigma2_baked;
     var alpha2 = roughness * roughness + sigma2;
-    let nm_dx = dpdx(n);
-    let nm_dy = dpdy(n);
+    let nm_dx = dpdx(geometric_n);
+    let nm_dy = dpdy(geometric_n);
     let curvature_sq = dot(nm_dx, nm_dx) + dot(nm_dy, nm_dy);
-    // Kaplanyan 2016 screen-space kernel. Bumped aggressively: 2.0
-    // coefficient / cap 0.9 to kill sparkle on Intel Sponza's sunlit
-    // floor tiles where each tile edge has a high-frequency normal-
-    // map bump that D_GGX spikes on at a grazing view. Integrates
-    // normal variance across a larger screen-space footprint before
-    // the BRDF sees it. Tradeoff: subtly softer micro-specular on
-    // all surfaces, which matches the path-tracer's multi-ray
-    // average.
+    // Kaplanyan 2016 screen-space kernel. The aggressive coefficient/cap
+    // integrates unresolved geometric curvature. Texture-space variation is
+    // already represented by the two terms above and must not enter here a
+    // second time.
     let kernel_alpha = min(2.0 * curvature_sq, 0.9);
     alpha2 = min(alpha2 + kernel_alpha, 1.0);
     roughness = sqrt(alpha2);
@@ -969,9 +1074,16 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         lit += base_color / PI * lighting.light_color.rgb * lighting.light_dir.w
              * ndl_wrap * direct_shadow;
     } else {
-        lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
-                         lighting.light_dir.w, base_color, metallic, roughness)
-             * direct_shadow;
+        if (has_spec_gloss) {
+            lit += shade_specular_glossiness_pbr(
+                n, v, legacy_dir, lighting.light_color.rgb,
+                lighting.light_dir.w, base_color, authored_specular, roughness,
+            ) * direct_shadow;
+        } else {
+            lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
+                             lighting.light_dir.w, base_color, metallic, roughness)
+                 * direct_shadow;
+        }
     }
 
     // Foliage backlit transmission — sun bleeding THROUGH alpha-cut leaf cards
@@ -991,8 +1103,15 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     for (var i = 0u; i < dir_count; i++) {
         let dl = lighting.dir_lights[i];
         let l = normalize(dl.direction.xyz);
-        lit += shade_pbr(n, v, l, dl.color.rgb, dl.direction.w,
-                         base_color, metallic, roughness);
+        if (has_spec_gloss) {
+            lit += shade_specular_glossiness_pbr(
+                n, v, l, dl.color.rgb, dl.direction.w,
+                base_color, authored_specular, roughness,
+            );
+        } else {
+            lit += shade_pbr(n, v, l, dl.color.rgb, dl.direction.w,
+                             base_color, metallic, roughness);
+        }
     }
 
     // BEGIN-POINT-LIGHT-LOOP (replaced by the froxel-clustered variant
@@ -1009,8 +1128,15 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
             let l = to_light / dist;
             let atten = 1.0 - (dist / range);
             let atten2 = atten * atten;
-            lit += shade_pbr(n, v, l, pl.color.rgb, pl.color.w * atten2,
-                             base_color, metallic, roughness);
+            if (has_spec_gloss) {
+                lit += shade_specular_glossiness_pbr(
+                    n, v, l, pl.color.rgb, pl.color.w * atten2,
+                    base_color, authored_specular, roughness,
+                );
+            } else {
+                lit += shade_pbr(n, v, l, pl.color.rgb, pl.color.w * atten2,
+                                 base_color, metallic, roughness);
+            }
         }
     }
     // END-POINT-LIGHT-LOOP
@@ -1029,8 +1155,13 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // convolution — that's the next refinement — but together with
     // the BRDF LUT it captures the bulk of correct PBR appearance.
 
+    //IBL_STRIP_BEGIN — SH-055 probe: replaced by a flat-ambient fallback when
+    // BLOOM_SKIP contains "ibl" (see mod.rs), to measure the split-sum IBL
+    // chain's per-fragment cost on mobile GPUs. Only ibl_diffuse/ibl_spec
+    // escape this block.
     let n_dot_v_ibl = max(dot(n, v), 0.0);
-    let f0 = mix(vec3<f32>(0.04), base_color, metallic);
+    let mr_f0 = mix(vec3<f32>(0.04), base_color, metallic);
+    let f0 = select(mr_f0, authored_specular, has_spec_gloss);
 
     // Diffuse irradiance: dedicated cosine-convolved texture populated
     // at env load. Sampling it directly (mip 0) at the fragment normal
@@ -1045,7 +1176,8 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // (Lazarov 2013) handles the average kS factor at grazing angles.
     let fc_n = pow(1.0 - n_dot_v_ibl, 5.0);
     let f_ibl = f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * fc_n;
-    let kd = (vec3<f32>(1.0) - f_ibl) * (1.0 - metallic);
+    let diffuse_weight = select(1.0 - metallic, 1.0, has_spec_gloss);
+    let kd = (vec3<f32>(1.0) - f_ibl) * diffuse_weight;
     let ibl_diffuse = irradiance * base_color * kd * occlusion;
 
     // Pre-filtered specular sample at mip = roughness * (mips - 1).
@@ -1098,58 +1230,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let ibl_spec_raw = prefiltered_env
         * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
-    // Dielectric specular luma cap. Without a proper visibility-aware
-    // specular integral, smooth non-metals like marble / varnished wood
-    // end up reflecting the HDR's bright-sky region at full intensity
-    // even when occluded by intervening geometry (the Intel Sponza
-    // column stripe vs Cycles was the smoking gun — proven by a
-    // roughness=1 test render where the stripe disappeared).
-    // Path-tracers handle this via shadow rays; we approximate by
-    // (1) hard luma cap at 0.8 mid-grey — barely visible — and
-    // (2) scaling the dielectric spec amplitude by roughness so the
-    // polished end of the scale (roughness 0.15-0.35) loses almost all
-    // of its IBL specular response. Metals are left alone so chrome
-    // and gold keep their full dynamic range.
-    let spec_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let dielectric_factor = 1.0 - metallic;
-    let luma_cap = 0.5;
-    let cap_scale = select(1.0, luma_cap / max(spec_luma, 0.0001),
-                           spec_luma > luma_cap);
-    // Roughness attenuation curve for dielectrics: fully off on
-    // polished surfaces, on-ramp all the way to roughness 1.0 where
-    // the prefiltered blur covers a full hemisphere so a wrong sample
-    // is guaranteed to average with its occluded neighbours. This
-    // nearly wipes the column stripe without killing specular on
-    // rough natural stone — matter with roughness 0.7 still gets
-    // ~50% of the IBL spec contribution.
-    let dielectric_spec_amp = smoothstep(0.0, 1.0, roughness);
-    let dielectric_scale = mix(1.0, cap_scale * dielectric_spec_amp,
-                               dielectric_factor);
-    // Universal roughness-based spec attenuation. A smooth curved
-    // surface with ANY material (even metal) needs visibility-aware
-    // specular to avoid bright stripes where the reflection vector
-    // happens to sweep across a hot HDR sample. We don't have
-    // visibility, so we dial down specular for smooth surfaces
-    // regardless of metalness. Roughness 0.15 floor (applied upstream
-    // to dielectrics) plus this smoothstep leaves roughness 1.0
-    // surfaces untouched and mid-rough surfaces (0.3-0.5) at
-    // significant but reduced strength. Metals still get the
-    // dielectric_scale (via the metallic-weighted mix), so the
-    // combined effect is conservative for both.
-    // Universal luma cap: whatever the metallicity or the roughness,
-    // the IBL specular contribution for a single fragment can't exceed
-    // a hard luma ceiling. Marble / stone columns get their mirror-
-    // of-a-bright-sky-strip reflection clipped to something that
-    // couldn't survive a path-tracer's visibility integral,
-    // and brightly-polished metals lose a little punch (they compensate
-    // via direct specular which still uses Fresnel at full strength).
-    // Reinhard-style soft luma cap: same 0.3 ceiling as direct spec
-    // but smooth rolloff so adjacent pixels don't ping-pong across a
-    // hard discontinuity (speckle on sunlit floor tiles with
-    // per-pixel roughness / normal-map variation).
+    // Preserve the Fresnel response at every authored roughness. A high soft
+    // knee keeps pathological HDR environment samples finite and continuous,
+    // but leaves ordinary reflections to the display tonemapper. The former
+    // 0.3 knee changed almost every reflection in Bistro and was effectively
+    // a second, material-local tonemapper, erasing the contrast that makes
+    // paint, glass, and metal look photographic.
     let cap2_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let cap2 = 1.0 / (1.0 + cap2_luma / 0.3);
-    let roughness_amp = smoothstep(0.05, 0.75, roughness);
+    let cap2 = 1.0 / (1.0 + cap2_luma / 4.0);
     // EN-021 exclusive ownership: where SSR is active it owns specular —
     // hit (traced colour) or miss (env fallback inside the SSR shader).
     // Scale IBL specular by the complement of SSR's own roughness fade
@@ -1158,10 +1246,12 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // double-count on hits (round-2 audit F10) without darkening
     // off-screen reflections.
     let ssr_own = clamp(
-        lighting.dir_light_count.z * (1.0 - smoothstep(0.5, 0.85, roughness)),
+        // Match the SSR pass exactly: a quarter-resolution single-ray trace
+        // is reserved for lobes narrow enough to converge without shimmer.
+        lighting.dir_light_count.z * (1.0 - smoothstep(0.45, 0.70, roughness)),
         0.0, 1.0);
-    let ibl_spec = ibl_spec_raw
-        * dielectric_scale * spec_occ * roughness_amp * cap2 * (1.0 - ssr_own);
+    let ibl_spec = ibl_spec_raw * spec_occ * cap2 * (1.0 - ssr_own);
+    //IBL_STRIP_END
 
     // Indirect-shadow attenuation. 0.15 — deep enough that windows
     // Shadow darkening floor. Prior 0.15 matched Cycles path-
@@ -1218,9 +1308,12 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
 
     // glTF OPAQUE materials (alpha_cutoff == 0) ignore texture alpha by
     // spec — armor/gloss masks stored in .a must not make the mesh
-    // translucent. MASK materials keep the sampled alpha (post-discard)
-    // for soft edges. Tint alpha survives so games can fade models.
-    let out_alpha = select(in.color.a, base_alpha, alpha_cutoff > 0.0);
+    // translucent. A surviving MASK texel (positive cutoff) is fully opaque;
+    // retaining its sampled alpha would accidentally blend it with surfaces
+    // behind it and make output depend on submission order. BLEND uses a
+    // negative sentinel and keeps fractional alpha for forward compositing.
+    let non_opaque_alpha = select(base_alpha, 1.0, alpha_cutoff > 0.0);
+    let out_alpha = select(in.color.a, non_opaque_alpha, alpha_cutoff != 0.0);
 
     return SceneOut(
         vec4<f32>(hdr, out_alpha),
@@ -1236,8 +1329,648 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         //             correct behaviour for AO (occludes indirect
         //             only). 1.0 where fully shadowed, 0.0 where
         //             sunlit. Sky shader overrides with 0.0.
-        vec4<f32>(base_color, 1.0 - shadow_factor),
+        vec4<f32>(ssr_base_color, 1.0 - shadow_factor),
     );
 }
-"#);
 
+@fragment
+fn fs_main_scene(
+    in: VertexOutputScene,
+    @builtin(front_facing) front_facing: bool,
+) -> SceneOut {
+    return shade_main_scene(in, front_facing);
+}
+
+@fragment
+fn fs_transparent_scene(
+    in: VertexOutputScene,
+    @builtin(front_facing) front_facing: bool,
+) -> @location(0) vec4<f32> {
+    return shade_main_scene(in, front_facing).color;
+}
+"#
+);
+
+/// Build the dedicated imported-transmission scene shader without changing
+/// the shader compiled for ordinary scene materials.
+///
+/// Desktop/native backends add group 4 and sample the render-graph-owned
+/// pre-translucency color/depth snapshots. Four-bind-group targets
+/// (`fold_scene_inputs`: WebGPU/Android) compile the same physical lobe but
+/// source transmitted radiance from the environment map instead.
+pub(in crate::renderer) fn scene_refractive_shader_source(
+    base_scene_shader: &str,
+    folded_scene_inputs: bool,
+    screen_space_reflections: bool,
+    secondary_uv: bool,
+) -> String {
+    assert!(
+        !folded_scene_inputs || !screen_space_reflections,
+        "folded four-bind-group targets cannot add native reflection inputs"
+    );
+    const JOINT_DECLARATION: &str =
+        "@group(3) @binding(1) var<uniform> joints_prev: JointMatrices;";
+    let scene_inputs = if folded_scene_inputs {
+        ""
+    } else if screen_space_reflections {
+        r#"
+struct RefractiveReflectionParams {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    params: vec4<f32>,
+    planar_plane: vec4<f32>,
+};
+
+@group(4) @binding(0) var refractive_scene_color_tex: texture_2d<f32>;
+@group(4) @binding(1) var refractive_scene_color_samp: sampler;
+@group(4) @binding(2) var refractive_scene_depth_tex: texture_depth_2d;
+@group(4) @binding(3) var<uniform> refractive_reflection: RefractiveReflectionParams;
+@group(4) @binding(4) var refractive_planar_tex: texture_2d<f32>;
+"#
+    } else {
+        r#"
+@group(4) @binding(0) var refractive_scene_color_tex: texture_2d<f32>;
+@group(4) @binding(1) var refractive_scene_color_samp: sampler;
+@group(4) @binding(2) var refractive_scene_depth_tex: texture_depth_2d;
+"#
+    };
+    let physical_declarations = format!(
+        r#"{JOINT_DECLARATION}
+
+struct TransmissionFactors {{
+    transmission: vec4<f32>,
+    attenuation: vec4<f32>,
+    transmission_uv: vec4<f32>,
+    transmission_rotation: vec4<f32>,
+    thickness_uv: vec4<f32>,
+    thickness_rotation: vec4<f32>,
+}};
+
+@group(2) @binding(11) var transmission_tex: texture_2d<f32>;
+@group(2) @binding(12) var transmission_samp: sampler;
+@group(2) @binding(13) var thickness_tex: texture_2d<f32>;
+@group(2) @binding(14) var thickness_samp: sampler;
+@group(2) @binding(15) var<uniform> transmission_material: TransmissionFactors;
+{scene_inputs}"#
+    );
+    let mut source = base_scene_shader.replacen(JOINT_DECLARATION, &physical_declarations, 1);
+    assert_ne!(
+        source, base_scene_shader,
+        "scene shader joint declaration changed; refractive ABI injection must be updated"
+    );
+    let layered_secondary_uv =
+        secondary_uv && base_scene_shader.contains("fn layered_secondary_uv(in:");
+    let model_scale_location = if layered_secondary_uv { 8 } else { 7 };
+    // The ordinary per-draw group is vertex-visible only. Carry model scale as
+    // a refractive-variant-only interpolant instead of widening that established
+    // layout to the fragment stage for every scene material.
+    source = source.replacen(
+        "    @location(6) prev_clip: vec4<f32>,",
+        &format!(
+            "    @location(6) prev_clip: vec4<f32>,\n    @location({model_scale_location}) model_scale: f32,"
+        ),
+        1,
+    );
+    source = source.replacen(
+        "        o.prev_clip = u.prev_mvp * prev_world4;",
+        "        o.prev_clip = u.prev_mvp * prev_world4;\n\
+         o.model_scale = (length(u.model[0].xyz) + length(u.model[1].xyz) \
+         + length(u.model[2].xyz)) / 3.0;",
+        1,
+    );
+    source = source.replacen(
+        "    out.prev_clip = u.prev_mvp * vec4<f32>(prev_local, 1.0);",
+        "    out.prev_clip = u.prev_mvp * vec4<f32>(prev_local, 1.0);\n\
+         out.model_scale = (length(u.model[0].xyz) + length(u.model[1].xyz) \
+         + length(u.model[2].xyz)) / 3.0;",
+        1,
+    );
+    if secondary_uv && !layered_secondary_uv {
+        source = source.replacen(
+            "    @location(6) tangent: vec4<f32>,\n};",
+            "    @location(6) tangent: vec4<f32>,\n\
+             @location(7) secondary_uv: vec2<f32>,\n\
+             };",
+            1,
+        );
+        source = source.replacen(
+            "    @location(7) model_scale: f32,",
+            "    @location(7) model_scale: f32,\n\
+             @location(8) secondary_uv: vec2<f32>,",
+            1,
+        );
+        source = source.replacen(
+            "        o.uv = in.uv;",
+            "        o.uv = in.uv;\n        o.secondary_uv = in.secondary_uv;",
+            1,
+        );
+        source = source.replacen(
+            "    out.uv = in.uv;",
+            "    out.uv = in.uv;\n    out.secondary_uv = in.secondary_uv;",
+            1,
+        );
+        assert!(
+            source.contains("@location(8) secondary_uv"),
+            "scene vertex ABI changed; refractive UV1 injection must be updated"
+        );
+    } else if layered_secondary_uv {
+        assert!(
+            source.contains("@location(7) secondary_uv")
+                && source.contains("@location(8) model_scale"),
+            "layered refractive vertex ABI changed; specialization must be updated"
+        );
+    }
+
+    let transmitted_radiance = if folded_scene_inputs {
+        r#"
+    // Constrained four-bind-group fallback: preserve the refractive material
+    // type and its Fresnel/absorption response, but source off-screen
+    // transmitted radiance from the prefiltered environment.
+    let max_transmission_mip = max(f32(textureNumLevels(env_tex)) - 1.0, 0.0);
+    let transmitted_radiance = env_sample_lod(
+        refracted_direction,
+        roughness * max_transmission_mip,
+    );
+    let undistorted_radiance = env_sample_lod(-v, roughness * max_transmission_mip);
+"#
+    } else {
+        r#"
+    let scene_dimensions_u = textureDimensions(refractive_scene_color_tex, 0);
+    let scene_dimensions = vec2<f32>(scene_dimensions_u);
+    let current_ndc = in.curr_clip.xy / max(abs(in.curr_clip.w), 0.000001);
+    let current_uv = clamp(
+        vec2<f32>(current_ndc.x * 0.5 + 0.5, 0.5 - current_ndc.y * 0.5),
+        vec2<f32>(0.0001),
+        vec2<f32>(0.9999),
+    );
+
+    // Convert the refracted world-space direction into a stable screen-space
+    // travel distance using the fragment's world-position derivatives. The
+    // material factor already carries static glTF node scale baked by the
+    // importer; the interpolant adds the later draw/instance scale. A 64-pixel
+    // cap prevents pathological assets from sampling unrelated frame regions.
+    let world_dx = dpdx(in.world_pos);
+    let world_dy = dpdy(in.world_pos);
+    let world_dx_len = max(length(world_dx), 0.000001);
+    let world_dy_len = max(length(world_dy), 0.000001);
+    let screen_tangent_x = world_dx / world_dx_len;
+    let screen_tangent_y = world_dy / world_dy_len;
+    let ray_distance = thickness_world
+        / max(abs(dot(refracted_direction, n)), 0.15);
+    var offset_pixels = vec2<f32>(
+        dot(refracted_direction, screen_tangent_x) * ray_distance / world_dx_len,
+        dot(refracted_direction, screen_tangent_y) * ray_distance / world_dy_len,
+    );
+    offset_pixels = clamp(offset_pixels, vec2<f32>(-64.0), vec2<f32>(64.0));
+    var refracted_uv = clamp(
+        current_uv + offset_pixels / scene_dimensions,
+        vec2<f32>(0.0001),
+        vec2<f32>(0.9999),
+    );
+
+    // Reject offsets that cross in front of this glass surface. This keeps a
+    // nearby opaque silhouette from being pulled through the refractor.
+    let candidate_pixel = clamp(
+        vec2<i32>(refracted_uv * scene_dimensions),
+        vec2<i32>(0),
+        vec2<i32>(scene_dimensions_u) - vec2<i32>(1),
+    );
+    let candidate_depth = textureLoad(
+        refractive_scene_depth_tex,
+        candidate_pixel,
+        0,
+    );
+    if (candidate_depth + 0.0005 < in.clip_position.z) {
+        refracted_uv = current_uv;
+    }
+
+    var transmitted_radiance = textureSampleLevel(
+        refractive_scene_color_tex,
+        refractive_scene_color_samp,
+        refracted_uv,
+        0.0,
+    ).rgb;
+    // Deterministic five-tap rough transmission. Smooth glass stays at one
+    // fetch; rough glass integrates a bounded footprint without temporal noise.
+    if (roughness > 0.08) {
+        let blur_uv = vec2<f32>(8.0 * roughness * roughness) / scene_dimensions;
+        transmitted_radiance = (
+            transmitted_radiance * 4.0
+            + textureSampleLevel(
+                refractive_scene_color_tex,
+                refractive_scene_color_samp,
+                refracted_uv + vec2<f32>(blur_uv.x, 0.0),
+                0.0,
+            ).rgb
+            + textureSampleLevel(
+                refractive_scene_color_tex,
+                refractive_scene_color_samp,
+                refracted_uv - vec2<f32>(blur_uv.x, 0.0),
+                0.0,
+            ).rgb
+            + textureSampleLevel(
+                refractive_scene_color_tex,
+                refractive_scene_color_samp,
+                refracted_uv + vec2<f32>(0.0, blur_uv.y),
+                0.0,
+            ).rgb
+            + textureSampleLevel(
+                refractive_scene_color_tex,
+                refractive_scene_color_samp,
+                refracted_uv - vec2<f32>(0.0, blur_uv.y),
+                0.0,
+            ).rgb
+        ) * 0.125;
+    }
+    let undistorted_radiance = textureSampleLevel(
+        refractive_scene_color_tex,
+        refractive_scene_color_samp,
+        current_uv,
+        0.0,
+    ).rgb;
+"#
+    };
+
+    let reflection_helpers = if screen_space_reflections {
+        r#"
+fn refractive_screen_reflection(
+    in: VertexOutputScene,
+    reflected_direction: vec3<f32>,
+    roughness: f32,
+    environment_fallback: vec3<f32>,
+) -> vec3<f32> {
+    // The ordinary SSR target cannot be reused here: it was traced from the
+    // opaque surface behind this fragment and therefore owns a different
+    // normal/reflection ray. Launch one bounded ray from the glass fragment
+    // against the immutable opaque snapshots instead.
+    if (refractive_reflection.params.x < 0.5
+        || roughness >= refractive_reflection.params.w) {
+        return environment_fallback;
+    }
+
+    let dimensions_u = textureDimensions(refractive_scene_color_tex, 0);
+    let dimensions = vec2<f32>(dimensions_u);
+    let step_count = u32(refractive_reflection.params.z);
+    let max_distance = refractive_reflection.params.y;
+    let start_view = (
+        refractive_reflection.view * vec4<f32>(in.world_pos, 1.0)
+    ).xyz;
+    let reflected_view = normalize((
+        refractive_reflection.view * vec4<f32>(reflected_direction, 0.0)
+    ).xyz);
+    let start_clip = refractive_reflection.proj * vec4<f32>(start_view, 1.0);
+    var previous_ray_depth = start_clip.z / max(abs(start_clip.w), 0.000001);
+    var hit_uv = vec2<f32>(-1.0);
+    var hit_confidence = 0.0;
+
+    // Quadratic spacing keeps the nearest samples dense enough for window
+    // frames and props while still reaching the same architectural range as
+    // the established opaque SSR pass. The loop bound and every texture read
+    // are fixed by the lazy uniform (currently eight).
+    for (var step = 0u; step < step_count; step = step + 1u) {
+        let fraction = f32(step + 1u) / f32(step_count);
+        let distance = max_distance * fraction * fraction;
+        let ray_view = start_view + reflected_view * distance;
+        let ray_clip = refractive_reflection.proj * vec4<f32>(ray_view, 1.0);
+        if (ray_clip.w <= 0.000001) {
+            break;
+        }
+        let ray_ndc = ray_clip.xyz / ray_clip.w;
+        if (ray_ndc.x <= -1.0 || ray_ndc.x >= 1.0
+            || ray_ndc.y <= -1.0 || ray_ndc.y >= 1.0
+            || ray_ndc.z <= 0.0 || ray_ndc.z >= 1.0) {
+            break;
+        }
+        let ray_uv = vec2<f32>(
+            ray_ndc.x * 0.5 + 0.5,
+            0.5 - ray_ndc.y * 0.5,
+        );
+        let pixel = clamp(
+            vec2<i32>(ray_uv * dimensions),
+            vec2<i32>(0),
+            vec2<i32>(dimensions_u) - vec2<i32>(1),
+        );
+        let scene_depth = textureLoad(refractive_scene_depth_tex, pixel, 0);
+        let depth_delta = ray_ndc.z - scene_depth;
+        let depth_stride = abs(ray_ndc.z - previous_ray_depth);
+        let thickness = max(depth_stride * 2.0, 0.00075);
+        if (scene_depth < 0.9999
+            && depth_delta >= 0.0
+            && depth_delta <= thickness) {
+            hit_uv = ray_uv;
+            hit_confidence = 1.0 - smoothstep(
+                thickness * 0.25,
+                thickness,
+                depth_delta,
+            );
+            break;
+        }
+        previous_ray_depth = ray_ndc.z;
+    }
+
+    if (hit_uv.x < 0.0) {
+        return environment_fallback;
+    }
+    // Suppress the screen boundary before it can pop. Rough glass fades to
+    // the prefiltered environment rather than returning an incorrectly sharp
+    // scene-color tap (the snapshot deliberately has no mip chain).
+    let edge_pixels = min(
+        min(hit_uv.x, 1.0 - hit_uv.x) * dimensions.x,
+        min(hit_uv.y, 1.0 - hit_uv.y) * dimensions.y,
+    );
+    let edge_weight = smoothstep(0.0, 8.0, edge_pixels);
+    let roughness_weight = 1.0 - smoothstep(
+        refractive_reflection.params.w * 0.45,
+        refractive_reflection.params.w,
+        roughness,
+    );
+    let raw = textureSampleLevel(
+        refractive_scene_color_tex,
+        refractive_scene_color_samp,
+        hit_uv,
+        0.0,
+    ).rgb;
+    let screen_radiance = select(vec3<f32>(0.0), raw, raw == raw);
+    let source_weight = clamp(
+        edge_weight * roughness_weight * hit_confidence,
+        0.0,
+        1.0,
+    );
+    return mix(environment_fallback, screen_radiance, source_weight);
+}
+
+fn refractive_planar_sample(
+    in: VertexOutputScene,
+    roughness: f32,
+) -> vec4<f32> {
+    let plane = refractive_reflection.planar_plane;
+    if (dot(plane.xyz, plane.xyz) < 0.5) {
+        return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    }
+    // A plane crossing unrelated vertical glass must not make the global
+    // first-probe choice leak onto that surface. Use the unperturbed vertex
+    // normal so authored water waves can still perturb the sampled reflection.
+    if (abs(dot(normalize(plane.xyz), normalize(in.normal))) < 0.8) {
+        return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    }
+    let plane_distance = abs(dot(plane.xyz, in.world_pos) - plane.w);
+    if (plane_distance > 0.075) {
+        return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    }
+    let ndc = in.curr_clip.xy / max(abs(in.curr_clip.w), 0.000001);
+    let uv = clamp(
+        vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5),
+        vec2<f32>(0.0001),
+        vec2<f32>(0.9999),
+    );
+    let planar = textureSampleLevel(
+        refractive_planar_tex,
+        refractive_scene_color_samp,
+        uv,
+        0.0,
+    );
+    let planar_safe = select(vec3<f32>(0.0), planar.rgb, planar.rgb == planar.rgb);
+    // The existing planar capture has no mip chain. Fade its exact reflection
+    // into the lower tiers as roughness grows instead of returning an
+    // incorrectly sharp image. Alpha zero is the probe's explicit miss value.
+    let roughness_weight = 1.0 - smoothstep(0.18, 0.45, roughness);
+    let source_weight = clamp(planar.a * roughness_weight, 0.0, 1.0);
+    return vec4<f32>(planar_safe, source_weight);
+}
+"#
+    } else {
+        ""
+    };
+    let reflected_radiance = if screen_space_reflections {
+        r#"
+    let reflected_environment = env_sample_lod(
+        reflected_direction,
+        roughness * max(f32(textureNumLevels(env_tex)) - 1.0, 0.0),
+    );
+    let planar_reflected = refractive_planar_sample(in, roughness);
+    var reflected = mix(
+        reflected_environment,
+        planar_reflected.rgb,
+        max(planar_reflected.a, 0.0),
+    );
+    // A matching explicit probe is authoritative for its plane: alpha zero is
+    // its documented geometry miss and therefore reveals the environment sky.
+    // Only glass without an applicable probe pays for the bounded screen march.
+    if (planar_reflected.a < 0.0) {
+        reflected = refractive_screen_reflection(
+            in,
+            reflected_direction,
+            roughness,
+            reflected_environment,
+        );
+    }
+"#
+    } else {
+        r#"
+    let reflected = env_sample_lod(
+        reflected_direction,
+        roughness * max(f32(textureNumLevels(env_tex)) - 1.0, 0.0),
+    );
+"#
+    };
+
+    let transmission_source_uv = if secondary_uv {
+        "select(\n            in.uv,\n            in.secondary_uv,\n            transmission_material.transmission_rotation.w > 0.5,\n        )"
+    } else {
+        "in.uv"
+    };
+    let thickness_source_uv = if secondary_uv {
+        "select(\n            in.uv,\n            in.secondary_uv,\n            transmission_material.thickness_rotation.z > 0.5,\n        )"
+    } else {
+        "in.uv"
+    };
+    source.push_str(&format!(
+        r#"
+
+{reflection_helpers}
+
+fn physical_texture_uv(
+    uv: vec2<f32>,
+    offset_scale: vec4<f32>,
+    rotation: vec2<f32>,
+) -> vec2<f32> {{
+    let scaled = uv * offset_scale.zw;
+    let rotated = vec2<f32>(
+        rotation.x * scaled.x - rotation.y * scaled.y,
+        rotation.y * scaled.x + rotation.x * scaled.y,
+    );
+    return offset_scale.xy + rotated;
+}}
+
+fn refractive_scene_normal(in: VertexOutputScene, front_facing: bool) -> vec3<f32> {{
+    var n = normalize(in.normal);
+    let normal_sample = textureSampleBias(
+        normal_tex,
+        normal_samp,
+        in.uv,
+        1.0 + lighting.shadow_cascade_splits.w,
+    ).xyz * 2.0 - 1.0;
+    let mapped = normal_sample / max(length(normal_sample), 0.000001);
+    let tangent_len2 = dot(in.tangent.xyz, in.tangent.xyz);
+    if (tangent_len2 > 0.0001) {{
+        let tangent = normalize(in.tangent.xyz);
+        let tangent_ortho = normalize(tangent - n * dot(n, tangent));
+        let bitangent = cross(n, tangent_ortho) * in.tangent.w;
+        n = normalize(
+            tangent_ortho * mapped.x + bitangent * mapped.y + n * mapped.z,
+        );
+    }} else {{
+        let tbn = compute_tbn(
+            dpdx(in.world_pos),
+            dpdy(in.world_pos),
+            dpdx(in.uv),
+            dpdy(in.uv),
+            n,
+        );
+        n = normalize(tbn * mapped);
+    }}
+    if (!front_facing) {{
+        n = -n;
+    }}
+    return n;
+}}
+
+struct RefractiveSceneOut {{
+    @location(0) color: vec4<f32>,
+    @location(1) velocity: vec2<f32>,
+}};
+
+@fragment
+fn fs_refractive_scene(
+    in: VertexOutputScene,
+    @builtin(front_facing) front_facing: bool,
+) -> RefractiveSceneOut {{
+    // Reuse the established direct/IBL PBR evaluation for the non-transmitted
+    // energy, then split the dielectric lobe below. This also preserves MASK
+    // discard semantics for the unusual but legal MASK+transmission case.
+    let surface = shade_main_scene(in, front_facing);
+    let n = refractive_scene_normal(in, front_facing);
+    let v = normalize(lighting.camera_pos.xyz - in.world_pos);
+
+    let base_texel = textureSample(base_color_tex, base_color_samp, in.uv);
+    var base_color = srgb_to_linear_v(base_texel.rgb) * in.color.rgb;
+    let base_alpha = base_texel.a * in.color.a;
+    let mr_texel = textureSample(mr_tex, mr_samp, in.uv);
+    let has_mr = material.metal_rough.z > 0.5 && material.metal_rough.z < 1.5;
+    let has_spec_gloss = material.metal_rough.z > 1.5;
+    var metallic = select(
+        clamp(material.metal_rough.x, 0.0, 1.0),
+        clamp(mr_texel.b * material.metal_rough.x, 0.0, 1.0),
+        has_mr,
+    );
+    var roughness = select(
+        clamp(material.metal_rough.y, 0.045, 1.0),
+        clamp(mr_texel.g * material.metal_rough.y, 0.045, 1.0),
+        has_mr,
+    );
+    if (has_spec_gloss) {{
+        let authored_specular = srgb_to_linear_v(mr_texel.rgb) *
+            material.spec_gloss.rgb;
+        let converted = specgloss_to_metalrough_pixel(base_color, authored_specular);
+        base_color = converted.rgb;
+        metallic = converted.a;
+        roughness = clamp(
+            1.0 - mr_texel.a * material.spec_gloss.a,
+            0.045,
+            1.0,
+        );
+    }}
+
+    let transmission_uv = physical_texture_uv(
+        {transmission_source_uv},
+        transmission_material.transmission_uv,
+        transmission_material.transmission_rotation.xy,
+    );
+    let texture_transmission = select(
+        1.0,
+        textureSample(
+            transmission_tex,
+            transmission_samp,
+            transmission_uv,
+        ).r,
+        transmission_material.transmission.w > 0.5,
+    );
+    let dielectric_weight = 1.0 - metallic;
+    let transmission_weight = clamp(
+        transmission_material.transmission.x
+            * texture_transmission
+            * dielectric_weight,
+        0.0,
+        1.0,
+    );
+
+    let thickness_uv = physical_texture_uv(
+        {thickness_source_uv},
+        transmission_material.thickness_uv,
+        transmission_material.thickness_rotation.xy,
+    );
+    let texture_thickness = select(
+        1.0,
+        textureSample(
+            thickness_tex,
+            thickness_samp,
+            thickness_uv,
+        ).g,
+        transmission_material.transmission_rotation.z > 0.5,
+    );
+    let mean_model_scale = max(in.model_scale, 0.0);
+    let thickness_world = max(
+        transmission_material.transmission.z
+            * texture_thickness
+            * mean_model_scale,
+        0.0,
+    );
+
+    let ior = max(transmission_material.transmission.y, 1.0);
+    let eta = 1.0 / ior;
+    var refracted_direction = refract(-v, n, eta);
+    if (dot(refracted_direction, refracted_direction) < 0.000001) {{
+        refracted_direction = reflect(-v, n);
+    }}
+    refracted_direction = normalize(refracted_direction);
+
+{transmitted_radiance}
+
+    var absorption = vec3<f32>(1.0);
+    if (transmission_material.attenuation.w > 0.0 && thickness_world > 0.0) {{
+        let optical_distance = thickness_world
+            / transmission_material.attenuation.w;
+        absorption = pow(
+            max(transmission_material.attenuation.rgb, vec3<f32>(0.000001)),
+            vec3<f32>(optical_distance),
+        );
+    }}
+    let transmitted = transmitted_radiance * base_color * absorption;
+
+    let f0_scalar = pow((ior - 1.0) / (ior + 1.0), 2.0);
+    let n_dot_v = clamp(dot(n, v), 0.0, 1.0);
+    let fresnel = f0_scalar
+        + (1.0 - f0_scalar) * pow(1.0 - n_dot_v, 5.0);
+    let reflected_direction = reflect(-v, n);
+{reflected_radiance}
+
+    // Energy partition: the ordinary PBR surface owns the opaque fraction;
+    // the transmission fraction is split exactly between Fresnel reflection
+    // and absorbed transmitted radiance.
+    let dielectric_transmission = mix(transmitted, reflected, fresnel);
+    var hdr = surface.color.rgb * (1.0 - transmission_weight)
+        + dielectric_transmission * transmission_weight;
+
+    // glTF BLEND+transmission additionally applies base-color alpha. Because
+    // this fragment already composites against the snapshot, write alpha=1
+    // to avoid applying the background a second time in fixed-function blend.
+    if (material.metal_rough.w < 0.0) {{
+        hdr = mix(undistorted_radiance, hdr, clamp(base_alpha, 0.0, 1.0));
+    }}
+    hdr = select(vec3<f32>(0.0), hdr, hdr == hdr);
+    return RefractiveSceneOut(vec4<f32>(hdr, 1.0), surface.velocity);
+}}
+"#
+    ));
+    source
+}

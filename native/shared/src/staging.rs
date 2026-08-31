@@ -1,7 +1,7 @@
-use std::sync::{Mutex, OnceLock};
+use crate::audio::SoundData;
 #[cfg(feature = "models3d")]
 use crate::models::ModelData;
-use crate::audio::SoundData;
+use std::sync::{Mutex, OnceLock};
 
 pub struct StagedTexture {
     pub data: Vec<u8>,
@@ -12,6 +12,13 @@ pub struct StagedTexture {
     /// flattens the shading. Set by `load_gltf_staged` from the material's
     /// `normal_texture` references, mirroring `load_gltf_with_textures`.
     pub is_normal: bool,
+    /// Whether RGB is display-encoded colour (albedo/emissive/specular
+    /// colour) rather than linear material data. This controls mip filtering;
+    /// level zero remains unchanged.
+    pub is_srgb: bool,
+    /// MASK-only texture-space cutoff used to build lower mips whose alpha
+    /// stores surviving texel coverage. None preserves ordinary color mips.
+    pub alpha_coverage_reference: Option<f32>,
 }
 
 #[cfg(feature = "models3d")]
@@ -54,9 +61,13 @@ fn stage_into<T>(store: &Mutex<Vec<Option<T>>>, item: T) -> f64 {
 
 fn take_from<T>(store: &Mutex<Vec<Option<T>>>, handle: f64) -> Option<T> {
     let idx = handle as usize;
-    if idx == 0 { return None; }
+    if idx == 0 {
+        return None;
+    }
     let mut vec = store.lock().unwrap();
-    if idx > vec.len() { return None; }
+    if idx > vec.len() {
+        return None;
+    }
     vec[idx - 1].take()
 }
 
@@ -72,7 +83,14 @@ pub fn decode_and_stage_texture(file_data: &[u8]) -> f64 {
     let height = img.height();
     // Standalone staged textures are albedo-class; nothing routes a normal
     // map through this path (models carry theirs inside StagedModel).
-    stage_texture(StagedTexture { data: img.into_raw(), width, height, is_normal: false })
+    stage_texture(StagedTexture {
+        data: img.into_raw(),
+        width,
+        height,
+        is_normal: false,
+        is_srgb: true,
+        alpha_coverage_reference: None,
+    })
 }
 
 pub fn stage_texture(tex: StagedTexture) -> f64 {

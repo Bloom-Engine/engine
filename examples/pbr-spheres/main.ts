@@ -15,12 +15,13 @@
 //                  (matches renderer-test's headless interface).
 
 import {
-  initWindow, beginDrawing, endDrawing, takeScreenshot,
+  initWindow, closeWindow, beginDrawing, endDrawing, takeScreenshot,
   setEnvClearFromHdr,
-  setTargetFPS,
+  setTargetFPS, getCommandLineArgs, resize,
   windowShouldClose,
   beginMode3D, endMode3D,
 } from "bloom/core";
+import { parseQualityRun, QualityRun } from "bloom/quality";
 import { genMeshCube, createMeshExplicit } from "bloom/models";
 import {
   createSceneNode, setSceneNodeTransform,
@@ -44,7 +45,7 @@ let headlessOutPath = "";
 let headlessMode = false;
 let headlessCamX = 0.0;
 let headlessCamY = 0.0;
-let headlessCamZ = 6.0;
+let headlessCamZ = 7.0;
 let headlessTargetX = 0.0;
 let headlessTargetY = 0.0;
 let headlessTargetZ = 0.0;
@@ -52,9 +53,9 @@ let headlessFov = 45.0;
 let headlessResW = 512;
 let headlessResH = 512;
 
-declare const process: { argv: string[] };
-const argv: string[] = process.argv;
-for (let i = 2; i < argv.length; i = i + 1) {
+const argv: string[] = getCommandLineArgs();
+const qualityConfig = parseQualityRun(argv);
+for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--out" && i + 1 < argv.length) {
     headlessOutPath = argv[i + 1];
     headlessMode = true;
@@ -76,8 +77,16 @@ for (let i = 2; i < argv.length; i = i + 1) {
 
 // ---- Init ----
 initWindow(headlessResW, headlessResH, "Bloom PBR Spheres", 0);
+if (qualityConfig !== null) {
+  // Pin both the swapchain and logical viewport to the manifest resolution;
+  // otherwise Retina hosts silently capture and benchmark 2x in each axis.
+  resize(headlessResW, headlessResH, headlessResW, headlessResH);
+}
 setTargetFPS(60);
-setEnvClearFromHdr("assets/outdoor.hdr");
+// This example has no private assets directory; use the checked-in canonical
+// environment shared with renderer-test.
+setEnvClearFromHdr("../renderer-test/assets/outdoor.hdr");
+let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qualityConfig) : null;
 
 // Mirror renderer-test's pattern exactly: declare let-binding for
 // the handle, populate inside a function (function-local scope
@@ -170,7 +179,9 @@ function makeSphere(segs: number, rings: number): {
 }
 
 function initSharedMeshes(): void {
-  const sphere = makeSphere(24, 16);
+  // Shared mesh: higher tessellation has no draw-call cost and prevents the
+  // silhouette faceting that would otherwise dominate the edge metric.
+  const sphere = makeSphere(64, 48);
   sphereHandle = createMeshExplicit(
     sphere.vertices, sphere.vertexCount,
     sphere.indices,  sphere.indexCount,
@@ -214,6 +225,7 @@ let headlessFrame = 0;
 const HEADLESS_WARMUP_FRAMES = 30;
 
 while (!windowShouldClose()) {
+  const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
   beginDrawing();
 
   beginMode3D({
@@ -225,14 +237,26 @@ while (!windowShouldClose()) {
   });
   endMode3D();
 
+  if (qualityCapture && qualityRun !== null) {
+    qualityRun.requestCapture();
+  } else if (
+    qualityRun === null && headlessMode && headlessOutPath.length > 0
+    && headlessFrame + 1 === HEADLESS_WARMUP_FRAMES
+  ) {
+    // Screenshot requests must precede endDrawing() so this frame owns the
+    // readback. The old post-present request captured the following frame.
+    takeScreenshot(headlessOutPath);
+  }
   endDrawing();
 
-  if (headlessMode) {
+  if (qualityRun !== null) {
+    if (qualityRun.endFrame()) break;
+  } else if (headlessMode) {
     headlessFrame = headlessFrame + 1;
-    if (headlessFrame === HEADLESS_WARMUP_FRAMES) {
-      takeScreenshot(headlessOutPath);
-    } else if (headlessFrame > HEADLESS_WARMUP_FRAMES) {
+    if (headlessFrame >= HEADLESS_WARMUP_FRAMES) {
       break;
     }
   }
 }
+
+closeWindow();

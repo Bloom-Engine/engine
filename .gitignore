@@ -12,6 +12,10 @@ node_modules/
 *_ts.o
 package-lock.json
 
+# Python tooling cache
+__pycache__/
+*.py[cod]
+
 # macOS junk
 .DS_Store
 
@@ -36,6 +40,10 @@ examples/pbr-spheres/*.png
 tools/bloom-reference/*.png
 tools/bloom-diff/diff-*.png
 tools/validate-out/
+
+# Local cooked-asset stores (CI should cache or publish these explicitly)
+/.cache/bloom/
+/out/assets/
 
 # Throwaway probe scripts
 /test_*.ts
@@ -84,6 +92,7 @@ examples/**/*.exe
 examples/**/*.pdb
 examples/**/main
 examples/**/main.app
+examples/bistro/.generated/
 
 # DXC runtime DLLs (local, for the PT golden tests on Windows)
 native/shared/dxcompiler.dll

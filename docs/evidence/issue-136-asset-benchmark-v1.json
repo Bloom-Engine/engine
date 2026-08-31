@@ -1,0 +1,152 @@
+{
+  "schema": "bloom-asset-benchmark-evidence-v1",
+  "issue": 136,
+  "qualified_revision": "07e748bd2e0df508f358cf6b4712b1dcb20160c6",
+  "host": {
+    "architecture": "arm64",
+    "cpu": "Apple M1 Max",
+    "os": "macOS 26.5 (25F71)"
+  },
+  "methodology": {
+    "cache": "warm-os-cache",
+    "gpu_creation_included": false,
+    "gpu_upload_included": false,
+    "dds_direct_upload_measurement": "container-parse-only",
+    "texture_schema": "bloom-asset-benchmark-v1",
+    "texture_recipe_version": 2
+  },
+  "thresholds": {
+    "color_bc7": {
+      "minimum_memory_reduction_percent": 70.0,
+      "minimum_luminance_ssim": 0.99,
+      "minimum_rgb_psnr_db": 40.0,
+      "minimum_source_decode_to_dds_parse_speedup": 10.0
+    },
+    "normal_rgba8": {
+      "maximum_rgb_rmse": 0.0,
+      "maximum_mean_angular_error_degrees": 0.01,
+      "maximum_alpha_error": 0.0,
+      "minimum_source_decode_to_dds_parse_speedup": 10.0
+    },
+    "geometry": {
+      "maximum_cooked_to_source_ratio": 1.0,
+      "minimum_source_import_to_cooked_validation_speedup": 2.0
+    }
+  },
+  "texture_color": {
+    "input": "examples/intel-sponza/assets/textures/curtain_fabric_red_BaseColor.png",
+    "format": "bc7-rgba-unorm-srgb",
+    "width": 4096,
+    "height": 4096,
+    "mip_levels": 13,
+    "iterations": 15,
+    "disk": {
+      "source_bytes": 18157344,
+      "cooked_dds_bytes": 22369796,
+      "cooked_to_source_ratio": 1.2319971467192559
+    },
+    "gpu_memory": {
+      "raw_rgba8_bytes": 89478484,
+      "cooked_bytes": 22369648,
+      "reduction_percent": 74.99996982514814
+    },
+    "quality": {
+      "luminance_ssim": 0.9990340705295675,
+      "rgb_psnr_db": 52.22537187086792,
+      "rgb_rmse": 0.002447549063720606,
+      "rgb_linear_rmse": 0.0017576556908051313,
+      "rgb_mean_abs_byte": 0.26445748408635456,
+      "rgb_max_abs_byte": 14,
+      "alpha_mean_abs_byte": 0.2852889895439148,
+      "alpha_max_abs_byte": 4
+    },
+    "timing_ms": {
+      "source_decode_mean": 156.79514713333336,
+      "cooked_dds_parse_mean": 0.4588888666666667,
+      "cooked_cpu_fallback_decode_mean": 61.4309332,
+      "offline_encode": 10848.771833,
+      "source_decode_to_cooked_parse_speedup": 341.684356546458
+    },
+    "acceptance": "pass"
+  },
+  "texture_normal": {
+    "input": "examples/intel-sponza/assets/textures/curtain_fabric_Normal.png",
+    "format": "rgba8-unorm-normal-variance",
+    "width": 4096,
+    "height": 4096,
+    "mip_levels": 13,
+    "iterations": 5,
+    "disk": {
+      "source_bytes": 45198462,
+      "cooked_dds_bytes": 89478632,
+      "cooked_to_source_ratio": 1.979683113996224
+    },
+    "gpu_memory": {
+      "raw_rgba8_bytes": 89478484,
+      "cooked_bytes": 89478484,
+      "reduction_percent": 0.0,
+      "quality_preserving_exception": true
+    },
+    "quality": {
+      "luminance_ssim": 1.0,
+      "rgb_rmse": 0.0,
+      "rgb_linear_rmse": 0.0,
+      "rgb_mean_abs_byte": 0.0,
+      "rgb_max_abs_byte": 0,
+      "alpha_mean_abs_byte": 0.0,
+      "alpha_max_abs_byte": 0,
+      "normal_mean_angular_error_degrees": 0.0000003312438181041371,
+      "normal_max_angular_error_degrees": 0.0000019090959104164224
+    },
+    "timing_ms": {
+      "source_decode_mean": 191.35343319999998,
+      "cooked_dds_parse_mean": 1.9399918,
+      "cooked_cpu_fallback_decode_mean": 21.3539168,
+      "offline_encode": 320.56545800000004,
+      "source_decode_to_cooked_parse_speedup": 98.63620722520578
+    },
+    "acceptance": "pass"
+  },
+  "geometry": {
+    "input": "examples/renderer-test/assets/DamagedHelmet.glb",
+    "settings": {
+      "hierarchy_levels": 8,
+      "vertex_format": "quantized32"
+    },
+    "iterations": 25,
+    "source_bytes": 3773916,
+    "cooked_bytes": 1446496,
+    "cooked_to_source_ratio": 0.38328781032752185,
+    "artifact": {
+      "format_version": 2,
+      "clusters": 632,
+      "pages": 23,
+      "triangles": 33706,
+      "payload_bytes": 1363968
+    },
+    "timing_ms": {
+      "source_gltf_import_mean": 97.24805516,
+      "cooked_full_read_and_validation_mean": 8.64054008,
+      "source_import_to_cooked_validation_speedup": 11.25485840695273
+    },
+    "acceptance": "pass"
+  },
+  "qualification": {
+    "cooker_release_tests_passed": 43,
+    "native_release_tests_passed": 474,
+    "native_release_tests_ignored": 1,
+    "strict_clippy": "pass",
+    "format": "pass",
+    "diff_check": "pass",
+    "file_line_gate": {
+      "status": "pre-existing-failures",
+      "unrelated_failures": 5,
+      "changed_files_over_limit": 0,
+      "largest_changed_file_lines": 879
+    }
+  },
+  "remaining_issue_acceptance": [
+    "full-shipping-scene-cook",
+    "automatic-adapter-platform-variant-selection"
+  ]
+}

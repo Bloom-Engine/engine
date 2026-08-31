@@ -20,11 +20,7 @@ pub struct GeometryData {
 ///
 /// Returns vertices and indices. The geometry extends from Y=0 to Y=depth.
 /// Normals and UVs are computed automatically.
-pub fn extrude_polygon(
-    polygon: &[f64],
-    holes: &[Vec<f64>],
-    depth: f64,
-) -> GeometryData {
+pub fn extrude_polygon(polygon: &[f64], holes: &[Vec<f64>], depth: f64) -> GeometryData {
     let depth = depth as f32;
 
     // Build earcutr input: flatten polygon + holes, track hole starts
@@ -38,8 +34,7 @@ pub fn extrude_polygon(
     }
 
     // Triangulate the 2D polygon
-    let triangles = earcutr::earcut(&flat_coords, &hole_indices, 2)
-        .unwrap_or_default();
+    let triangles = earcutr::earcut(&flat_coords, &hole_indices, 2).unwrap_or_default();
 
     let n_points = flat_coords.len() / 2;
     let mut vertices = Vec::new();
@@ -119,7 +114,9 @@ pub fn extrude_polygon(
             let dx = x1 - x0;
             let dz = z1 - z0;
             let len = (dx * dx + dz * dz).sqrt();
-            if len < 1e-6 { continue; }
+            if len < 1e-6 {
+                continue;
+            }
             let nx = -dz / len;
             let nz = dx / len;
 
@@ -186,17 +183,15 @@ pub fn extrude_polygon(
 ///
 /// - `min`: box minimum corner [x, y, z]
 /// - `max`: box maximum corner [x, y, z]
-pub fn subtract_box(
-    geo: &GeometryData,
-    min: [f32; 3],
-    max: [f32; 3],
-) -> GeometryData {
+pub fn subtract_box(geo: &GeometryData, min: [f32; 3], max: [f32; 3]) -> GeometryData {
     let mut out_vertices = Vec::new();
     let mut out_indices = Vec::new();
 
     // Process each triangle
     for tri in geo.indices.chunks(3) {
-        if tri.len() < 3 { continue; }
+        if tri.len() < 3 {
+            continue;
+        }
         let v0 = &geo.vertices[tri[0] as usize];
         let v1 = &geo.vertices[tri[1] as usize];
         let v2 = &geo.vertices[tri[2] as usize];
@@ -230,7 +225,10 @@ pub fn subtract_box(
 }
 
 fn point_in_box(p: &[f32; 3], min: &[f32; 3], max: &[f32; 3]) -> bool {
-    p[0] >= min[0] && p[0] <= max[0]
-    && p[1] >= min[1] && p[1] <= max[1]
-    && p[2] >= min[2] && p[2] <= max[2]
+    p[0] >= min[0]
+        && p[0] <= max[0]
+        && p[1] >= min[1]
+        && p[1] <= max[1]
+        && p[2] >= min[2]
+        && p[2] <= max[2]
 }

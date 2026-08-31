@@ -24,7 +24,14 @@ pub const SHADOW_FAR: f32 = 100.0;
 /// be >= sizeof(ShadowUniforms) (144B) and a multiple of the device's
 /// min_uniform_buffer_offset_alignment. 256 is safe on every platform.
 pub const SHADOW_UNIFORM_STRIDE: u32 = 256;
-pub const SHADOW_MAX_NODES: u32 = 1024;
+/// Per-cascade shadow-uniform slots. The complete Bistro reference contains
+/// 1,175 static casters in its far cascade. The former 1,024-slot arena also
+/// reserved 256 slots for dynamics, silently truncating static casters at 768;
+/// which buildings cast shadows then changed as camera-driven cascade culling
+/// changed. 2,048 retains the full reference scene plus the dynamic reserve.
+/// At a 256-byte aligned stride this costs 1.5 MiB across all three cascades
+/// (0.75 MiB more than the old arena) and does not add work on cache-hit frames.
+pub const SHADOW_MAX_NODES: u32 = 2048;
 /// Slots at the TAIL of each cascade's uniform region reserved for
 /// dynamic casters, which re-render every frame while static casters keep their
 /// cached depth. Disjoint slot ranges keep the every-frame dynamic writes from
@@ -69,7 +76,8 @@ fn vs_shadow(in: ShadowVertexInput) -> @builtin(position) vec4<f32> {
     let world_pos = shadow_u.model * vec4<f32>(p, 1.0);
     return shadow_u.light_vp * world_pos;
 }
-"#);
+"#
+);
 
 /// Alpha-tested shadow shader for cutout foliage (trees, grass, leaves). Same
 /// depth-only output as SHADOW_SHADER but samples the caster's base-colour
@@ -87,7 +95,9 @@ struct ShadowUniforms {
 };
 @group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
 
-struct CutoutUniforms { cutoff: vec4<f32> };   // x = alpha cutoff
+struct CutoutUniforms {
+    cutoff: vec4<f32>, // x = alpha cutoff, y = lower mips store coverage
+};
 @group(1) @binding(0) var base_tex: texture_2d<f32>;
 @group(1) @binding(1) var base_samp: sampler;
 @group(1) @binding(2) var<uniform> cut: CutoutUniforms;
@@ -103,8 +113,45 @@ struct ShadowVertexInput {
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) alpha: f32,
 };
 
+// Match the scene pass's authored-space coverage phase. A shadow-map pixel
+// phase changes whenever a cascade refits, which made stationary foliage cast
+// a visibly different dappled shadow as the camera moved.
+fn mask_coverage_threshold(
+    uv: vec2<f32>,
+    dimensions: vec2<u32>,
+    lod: f32,
+) -> f32 {
+    let bayer = array<f32, 16>(
+         0.5 / 16.0,  8.5 / 16.0,  2.5 / 16.0, 10.5 / 16.0,
+        12.5 / 16.0,  4.5 / 16.0, 14.5 / 16.0,  6.5 / 16.0,
+         3.5 / 16.0, 11.5 / 16.0,  1.5 / 16.0,  9.5 / 16.0,
+        15.5 / 16.0,  7.5 / 16.0, 13.5 / 16.0,  5.5 / 16.0,
+    );
+    let wrapped_uv = uv - floor(uv);
+    // Match the scene pass's sampled-mip footprint. A level-zero phase at
+    // distance makes one shadow texel cross many binary leaf decisions during
+    // even a sub-texel cascade translation, which appears as bright sparkle.
+    let phase_lod = max(floor(lod), 1.0);
+    let mip_scale = exp2(-phase_lod);
+    let mip_dimensions = max(
+        floor(vec2<f32>(dimensions) * mip_scale),
+        vec2<f32>(1.0),
+    );
+    let texel = vec2<u32>(floor(wrapped_uv * mip_dimensions));
+    let x = texel.x & 3u;
+    let y = texel.y & 3u;
+    return bayer[y * 4u + x];
+}
+
+fn mask_texture_lod(uv: vec2<f32>, dimensions: vec2<u32>) -> f32 {
+    let extent = vec2<f32>(dimensions);
+    let dx = dpdx(uv) * extent;
+    let dy = dpdy(uv) * extent;
+    return max(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0)), 0.0);
+}
 
 @vertex
 fn vs_shadow_cutout(in: ShadowVertexInput) -> VsOut {
@@ -115,15 +162,49 @@ fn vs_shadow_cutout(in: ShadowVertexInput) -> VsOut {
     let world_pos = shadow_u.model * vec4<f32>(p, 1.0);
     o.pos = shadow_u.light_vp * world_pos;
     o.uv = in.uv;
+    o.alpha = in.color.a;
     return o;
 }
 
 @fragment
 fn fs_shadow_cutout(in: VsOut) {
-    let a = textureSample(base_tex, base_samp, in.uv).a;
-    if (a < cut.cutoff.x) { discard; }
+    var survives = true;
+    if (cut.cutoff.y > 0.5) {
+        let lod = mask_texture_lod(in.uv, textureDimensions(base_tex));
+        if (lod <= 0.5) {
+            let authored_alpha =
+                textureSampleLevel(base_tex, base_samp, in.uv, 0.0).a * in.alpha;
+            survives = authored_alpha >= cut.cutoff.x;
+        } else if (lod >= 1.0) {
+            let coverage = textureSampleLevel(base_tex, base_samp, in.uv, lod).a;
+            survives = coverage >= mask_coverage_threshold(
+                in.uv,
+                textureDimensions(base_tex),
+                lod,
+            );
+        } else {
+            let authored_alpha =
+                textureSampleLevel(base_tex, base_samp, in.uv, 0.0).a * in.alpha;
+            let coverage = textureSampleLevel(base_tex, base_samp, in.uv, 1.0).a;
+            let probability = mix(
+                select(0.0, 1.0, authored_alpha >= cut.cutoff.x),
+                coverage,
+                smoothstep(0.5, 1.0, lod),
+            );
+            survives = probability >= mask_coverage_threshold(
+                in.uv,
+                textureDimensions(base_tex),
+                max(lod, 1.0),
+            );
+        }
+    } else {
+        let raw_alpha = textureSample(base_tex, base_samp, in.uv).a * in.alpha;
+        survives = raw_alpha >= cut.cutoff.x;
+    }
+    if (!survives) { discard; }
 }
-"#);
+"#
+);
 
 /// Skinned shadow shader for animated characters (player, enemies). Their
 /// vertices are *rest-pose* (cached model VBs with raw joint indices, or the
@@ -280,6 +361,10 @@ pub struct ShadowMap {
     /// casters. A cascade whose dynamics all left still needs one
     /// refresh copy to clear their stale shadows.
     pub had_dynamic: [bool; NUM_CASCADES],
+    /// Monotonic per-cascade version of the *live* opaque depth. Lazy
+    /// secondary visibility representations use this instead of guessing
+    /// whether a static-cache copy or dynamic overlay changed their blocker.
+    pub(crate) live_cascade_generation: [u64; NUM_CASCADES],
     /// Monotonic counter folded into animated casters' signatures so
     /// any cascade containing one re-renders every frame.
     pub frame_nonce: u64,
@@ -293,6 +378,9 @@ pub struct ShadowMap {
     /// near cascade is exempt and stays exact-fit).
     accepted_fit: [Option<AcceptedFit>; NUM_CASCADES],
     accepted_light_dir: Option<[f32; 3]>,
+    /// Issue #132 — bounded virtual-page residency and invalidation.
+    /// Sampling remains on CSM until the physical page renderer is qualified.
+    pub(crate) virtual_map: crate::virtual_shadows::DirectionalVirtualShadowMap,
 }
 
 /// Accepted (slack-inflated) ortho fit for one cascade. `ls_x`/`ls_y`
@@ -361,8 +449,7 @@ impl ShadowMap {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             let sview = stex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -371,14 +458,18 @@ impl ShadowMap {
         }
 
         // Convert Vecs to fixed-size arrays
-        let depth_textures: [wgpu::Texture; NUM_CASCADES] =
-            depth_textures_vec.try_into().unwrap_or_else(|_| panic!("cascade texture count mismatch"));
-        let depth_views: [wgpu::TextureView; NUM_CASCADES] =
-            depth_views_vec.try_into().unwrap_or_else(|_| panic!("cascade view count mismatch"));
-        let static_depth_textures: [wgpu::Texture; NUM_CASCADES] =
-            static_textures_vec.try_into().unwrap_or_else(|_| panic!("static cascade texture count mismatch"));
-        let static_depth_views: [wgpu::TextureView; NUM_CASCADES] =
-            static_views_vec.try_into().unwrap_or_else(|_| panic!("static cascade view count mismatch"));
+        let depth_textures: [wgpu::Texture; NUM_CASCADES] = depth_textures_vec
+            .try_into()
+            .unwrap_or_else(|_| panic!("cascade texture count mismatch"));
+        let depth_views: [wgpu::TextureView; NUM_CASCADES] = depth_views_vec
+            .try_into()
+            .unwrap_or_else(|_| panic!("cascade view count mismatch"));
+        let static_depth_textures: [wgpu::Texture; NUM_CASCADES] = static_textures_vec
+            .try_into()
+            .unwrap_or_else(|_| panic!("static cascade texture count mismatch"));
+        let static_depth_views: [wgpu::TextureView; NUM_CASCADES] = static_views_vec
+            .try_into()
+            .unwrap_or_else(|_| panic!("static cascade view count mismatch"));
 
         // Comparison sampler for PCF
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -495,9 +586,7 @@ impl ShadowMap {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &uniform_buffer,
                     offset: 0,
-                    size: std::num::NonZeroU64::new(
-                        std::mem::size_of::<ShadowUniforms>() as u64,
-                    ),
+                    size: std::num::NonZeroU64::new(std::mem::size_of::<ShadowUniforms>() as u64),
                 }),
             }],
         });
@@ -558,23 +647,28 @@ impl ShadowMap {
             label: Some("shadow_cutout_tex_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false, min_binding_size: None,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -597,7 +691,7 @@ impl ShadowMap {
             fragment: Some(wgpu::FragmentState {
                 module: &cutout_shader,
                 entry_point: Some("fs_shadow_cutout"),
-                targets: &[],   // depth only
+                targets: &[], // depth only
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -611,7 +705,11 @@ impl ShadowMap {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: Default::default(),
-                bias: wgpu::DepthBiasState { constant: 1, slope_scale: 1.0, clamp: 0.0 },
+                bias: wgpu::DepthBiasState {
+                    constant: 1,
+                    slope_scale: 1.0,
+                    clamp: 0.0,
+                },
             }),
             multisample: Default::default(),
             multiview_mask: None,
@@ -651,12 +749,18 @@ impl ShadowMap {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: Default::default(),
-                bias: wgpu::DepthBiasState { constant: 1, slope_scale: 1.0, clamp: 0.0 },
+                bias: wgpu::DepthBiasState {
+                    constant: 1,
+                    slope_scale: 1.0,
+                    clamp: 0.0,
+                },
             }),
             multisample: Default::default(),
             multiview_mask: None,
             cache: None,
         });
+        let virtual_map =
+            crate::virtual_shadows::DirectionalVirtualShadowMap::new(device, &uniform_layout);
 
         Self {
             depth_textures,
@@ -684,9 +788,11 @@ impl ShadowMap {
             pancake_hysteresis: [[0.0; 2]; NUM_CASCADES],
             rendered_cascade_sig: [0; NUM_CASCADES],
             had_dynamic: [false; NUM_CASCADES],
+            live_cascade_generation: [0; NUM_CASCADES],
             frame_nonce: 0,
             accepted_fit: [None; NUM_CASCADES],
             accepted_light_dir: None,
+            virtual_map,
         }
     }
 
@@ -700,6 +806,7 @@ impl ShadowMap {
         self.rendered_cascade_sig = [0; NUM_CASCADES];
         self.had_dynamic = [false; NUM_CASCADES];
         self.accepted_fit = [None; NUM_CASCADES];
+        self.virtual_map.invalidate();
     }
 
     /// Compute cascade view-projection matrices by splitting the camera
@@ -718,6 +825,15 @@ impl ShadowMap {
         far: f32,
         scene_bounds: Option<([f32; 3], [f32; 3])>,
     ) {
+        // The diagnostic "always fresh" mode must isolate the complete
+        // shadow state, not just depth-texture reuse.  Recomputing an exact
+        // fit here lets visual A/B captures distinguish accepted-fit history
+        // from cached shadow contents without changing the default path.
+        if self.always_fresh {
+            self.accepted_fit = [None; NUM_CASCADES];
+            self.pancake_hysteresis = [[0.0; 2]; NUM_CASCADES];
+        }
+
         let len = (light_dir[0] * light_dir[0]
             + light_dir[1] * light_dir[1]
             + light_dir[2] * light_dir[2])
@@ -827,8 +943,10 @@ impl ShadowMap {
                 let dx = world_corners[i][0] - center[0];
                 let dy = world_corners[i][1] - center[1];
                 let dz = world_corners[i][2] - center[2];
-                let r2 = dx*dx + dy*dy + dz*dz;
-                if r2 > radius { radius = r2; }
+                let r2 = dx * dx + dy * dy + dz * dz;
+                if r2 > radius {
+                    radius = r2;
+                }
             }
             radius = radius.sqrt();
 
@@ -883,8 +1001,12 @@ impl ShadowMap {
                                 ],
                                 d,
                             );
-                            if a > req_back { req_back = a; }
-                            if -a > req_far { req_far = -a; }
+                            if a > req_back {
+                                req_back = a;
+                            }
+                            if -a > req_far {
+                                req_far = -a;
+                            }
                         }
                     }
                     if fits_xy && req_back <= acc.back && req_far <= acc.far {
@@ -918,7 +1040,7 @@ impl ShadowMap {
             // into it. This is "pancaking" — cascade XY is tight to the
             // frustum sphere, but Z reaches back to the full scene.
             let mut pancake_back: f32 = radius; // +d distance (toward light)
-            let mut pancake_far:  f32 = radius; // -d distance (away from light)
+            let mut pancake_far: f32 = radius; // -d distance (away from light)
             if let Some((bmin, bmax)) = scene_bounds {
                 let corners = [
                     [bmin[0], bmin[1], bmin[2]],
@@ -937,8 +1059,12 @@ impl ShadowMap {
                         p[2] - snapped_center[2],
                     ];
                     let along_d = dot3(rel, d);
-                    if along_d      > pancake_back { pancake_back = along_d; }
-                    if -along_d     > pancake_far  { pancake_far  = -along_d; }
+                    if along_d > pancake_back {
+                        pancake_back = along_d;
+                    }
+                    if -along_d > pancake_far {
+                        pancake_far = -along_d;
+                    }
                 }
             }
             // Quantize Z range so scene-bounds drift doesn't shift depths.
@@ -956,15 +1082,13 @@ impl ShadowMap {
             const PANCAKE_STEP: f32 = 2.0;
             let quantize = |v: f32| (v / PANCAKE_STEP).ceil() * PANCAKE_STEP;
             let prev = self.pancake_hysteresis[c];
-            let pancake_back = if pancake_back > prev[0]
-                || pancake_back < prev[0] - 2.0 * PANCAKE_STEP
-            {
-                quantize(pancake_back)
-            } else {
-                prev[0]
-            };
-            let pancake_far = if pancake_far > prev[1]
-                || pancake_far < prev[1] - 2.0 * PANCAKE_STEP
+            let pancake_back =
+                if pancake_back > prev[0] || pancake_back < prev[0] - 2.0 * PANCAKE_STEP {
+                    quantize(pancake_back)
+                } else {
+                    prev[0]
+                };
+            let pancake_far = if pancake_far > prev[1] || pancake_far < prev[1] - 2.0 * PANCAKE_STEP
             {
                 quantize(pancake_far)
             } else {
@@ -983,8 +1107,10 @@ impl ShadowMap {
 
             let snapped_view = crate::renderer::mat4_look_at(light_pos, snapped_center, up_hint);
             let light_proj = crate::renderer::mat4_ortho(
-                -radius, radius,
-                -radius, radius,
+                -radius,
+                radius,
+                -radius,
+                radius,
                 0.0,
                 eye_offset + pancake_far,
             );
@@ -1019,6 +1145,36 @@ impl ShadowMap {
     /// Disable shadow mapping.
     pub fn disable(&mut self) {
         self.enabled = false;
+    }
+}
+
+#[cfg(test)]
+mod shader_tests {
+    use super::{SHADOW_MAX_DYNAMIC, SHADOW_MAX_NODES, SHADOW_SHADER_CUTOUT};
+
+    #[test]
+    fn shadow_uniform_arena_retains_bistro_class_static_caster_counts() {
+        // Measured from the complete Bistro reference's far cascade. Keep this
+        // as a hard regression guard: dropping a caster here does not fail a
+        // draw; it silently makes shadows appear or disappear with culling.
+        const BISTRO_REFERENCE_STATIC_CASTERS: u32 = 1_175;
+        assert!(
+            SHADOW_MAX_NODES - SHADOW_MAX_DYNAMIC >= BISTRO_REFERENCE_STATIC_CASTERS,
+            "static shadow arena would truncate the complete Bistro reference",
+        );
+    }
+
+    #[test]
+    fn coverage_preserving_cutout_shadow_shader_parses() {
+        wgpu::naga::front::wgsl::parse_str(SHADOW_SHADER_CUTOUT)
+            .unwrap_or_else(|error| panic!("cutout shadow WGSL failed to parse: {error:?}"));
+    }
+
+    #[test]
+    fn cutout_shadow_coverage_phase_follows_authored_texture_coordinates() {
+        assert!(SHADOW_SHADER_CUTOUT.contains("let phase_lod = max(floor(lod), 1.0);"));
+        assert!(SHADOW_SHADER_CUTOUT.contains("wrapped_uv * mip_dimensions"));
+        assert!(!SHADOW_SHADER_CUTOUT.contains("mask_coverage_threshold(in.pos.xy"));
     }
 }
 

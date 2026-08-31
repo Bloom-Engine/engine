@@ -1,12 +1,21 @@
 //! Retained scene graph for Bloom Engine.
 //!
-//! Unlike immediate-mode drawing (drawCube, drawModel), the scene graph holds
-//! persistent meshes that survive across frames. Systems update geometry and
-//! transforms; the renderer draws all visible nodes each frame automatically.
+//! Unlike immediate-mode drawing, the scene graph holds persistent meshes.
+//! Systems update geometry and transforms; the renderer draws visible nodes automatically.
 
-use wgpu::util::DeviceExt;
 use crate::handles::HandleRegistry;
-use crate::renderer::Vertex3D;
+use crate::models::{MaterialAlphaMode, MaterialLayeredPbr, MaterialTransmission, MeshData};
+use crate::renderer::{
+    gpu_driven::{self, GeometrySlice, GpuDrawRecord},
+    material_indirection::MaterialId,
+    ImportedIridescenceDrawRef, ImportedRefractiveDrawRef, ImportedTransparentDrawRef, MeshDrawRef,
+    Uniforms3D, Vertex3D,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+use wgpu::util::DeviceExt;
 
 // ============================================================
 // PBR Material
@@ -20,10 +29,16 @@ pub struct PbrMaterial {
     pub opacity: f32,
     pub emissive: [f32; 3],
     pub double_sided: bool,
+    pub alpha_mode: MaterialAlphaMode,
+    pub transmission: MaterialTransmission,
+    pub layered_pbr: MaterialLayeredPbr,
     /// glTF MASK alpha cutoff. 0.0 = OPAQUE. Non-zero routes the node
     /// through the scene shader's alpha-cutout path (discard below the
     /// cutoff, two-sided foliage shading, wind sway).
     pub alpha_cutoff: f32,
+    /// Lower base-color mips store MASK survival coverage rather than raw
+    /// opacity. The shader uses this only during minification.
+    pub alpha_coverage_mips: bool,
     pub texture_idx: u32,
     /// Normal-map texture. 0 means "no normal map" — scene shader falls
     /// back to the geometric normal. Stored as a texture index rather
@@ -31,6 +46,9 @@ pub struct PbrMaterial {
     /// groups lazily without SceneGraph holding GPU references.
     pub normal_texture_idx: u32,
     pub metallic_roughness_texture_idx: u32,
+    /// Some means the texture in `metallic_roughness_texture_idx` uses the
+    /// KHR specular-glossiness RGBA encoding rather than glTF metal-rough GB.
+    pub specular_glossiness_factor: Option<[f32; 4]>,
     pub emissive_texture_idx: u32,
     pub occlusion_texture_idx: u32,
 }
@@ -44,13 +62,32 @@ impl Default for PbrMaterial {
             opacity: 1.0,
             emissive: [0.0, 0.0, 0.0],
             double_sided: false,
+            alpha_mode: MaterialAlphaMode::Opaque,
+            transmission: MaterialTransmission::default(),
+            layered_pbr: MaterialLayeredPbr::default(),
             alpha_cutoff: 0.0,
+            alpha_coverage_mips: false,
             texture_idx: 0,
             normal_texture_idx: 0,
             metallic_roughness_texture_idx: 0,
+            specular_glossiness_factor: None,
             emissive_texture_idx: 0,
             occlusion_texture_idx: 0,
         }
+    }
+}
+
+impl PbrMaterial {
+    /// True only when the dielectric transmission lobe retains non-zero
+    /// energy after metallic suppression. Camera refraction still keeps an
+    /// authored all-metal material in its established material bucket, but GI
+    /// must treat it as opaque so an opaque-only continuation cannot skip it.
+    pub(crate) fn has_gi_transmission(&self) -> bool {
+        if !self.transmission.is_active() {
+            return false;
+        }
+        let dielectric_weight = 1.0 - self.metalness.clamp(0.0, 1.0);
+        dielectric_weight.is_finite() && dielectric_weight > 0.0
     }
 }
 
@@ -60,7 +97,7 @@ impl Default for PbrMaterial {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct NodeUniforms {
+pub(crate) struct NodeUniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
     prev_mvp: [[f32; 4]; 4],
@@ -79,11 +116,19 @@ struct NodeUniforms {
 pub struct SceneNode {
     // Geometry (CPU-side, updated by systems)
     pub vertices: Vec<Vertex3D>,
+    pub(crate) secondary_tex_coords: Option<Vec<[f32; 2]>>,
     pub indices: Vec<u32>,
+    /// Immutable imported primitive shared by every glTF placement. Owned /
+    /// procedural nodes leave this empty and continue using the Vec fields.
+    shared_model_mesh: Option<Arc<MeshData>>,
     // Material
     pub material: PbrMaterial,
     // Transform
     pub transform: [[f32; 4]; 4],
+    /// Authored primitive-local → model transform. Public node transforms are
+    /// composed on top, preserving attach-then-move simplicity without baking
+    /// or duplicating imported vertices.
+    source_transform: [[f32; 4]; 4],
     /// Previous frame's world transform — used to compute per-mesh
     /// screen-space velocity for motion blur and TAA reprojection.
     pub prev_transform: [[f32; 4]; 4],
@@ -119,7 +164,20 @@ pub struct SceneNode {
     pub world_bounds_max: [f32; 3],
     // GPU resources (lazily created)
     pub gpu_vb: Option<wgpu::Buffer>,
+    pub(crate) gpu_secondary_uv_vb: Option<wgpu::Buffer>,
     pub gpu_ib: Option<wgpu::Buffer>,
+    /// Deduplicated geometry used only by the GPU-driven main/depth path.
+    /// Compatibility consumers retain `gpu_vb`/`gpu_ib`, so shadows,
+    /// reflections, GI, LODs and ray tracing remain byte-for-byte unchanged.
+    pub(crate) gpu_geometry: Option<GeometrySlice>,
+    gpu_geometry_key: Option<SceneGeometryKey>,
+    /// Shared compatibility resources (VB/IB, BLAS, local SDF). Separate from
+    /// the GPU-driven arena key because fallback passes need these on every
+    /// backend, including adapters where GPU-driven submission is disabled.
+    gpu_resource_key: Option<SceneGeometryKey>,
+    /// Stable global material-table entry used by GPU-driven draws.
+    pub(crate) gpu_material_id: MaterialId,
+    gpu_material_key: Option<SceneMaterialKey>,
     pub gpu_index_count: u32,
     /// Vertex count, cached at VB upload so the ray-tracing BLAS build
     /// can reference it without re-reading the full `vertices` Vec.
@@ -130,6 +188,10 @@ pub struct SceneNode {
     /// by `prepare()`, committed to the GPU by the renderer's main
     /// encoder in `build_acceleration_structures`.
     pub blas: Option<wgpu::Blas>,
+    /// True only after the BLAS has been encoded in a submitted build batch.
+    /// Large imports create handles eagerly but amortize builds so raster
+    /// output starts without one unbounded acceleration-structure job.
+    pub(crate) blas_ready: bool,
     /// Ticket 013 — first of 6 consecutive card-atlas slots assigned
     /// at BLAS creation. Slots are laid out per axis:
     ///   first_slot + 0 → +X, +1 → -X, +2 → +Y,
@@ -185,6 +247,14 @@ pub struct SceneNode {
     /// changes (tracked via `mat_dirty`).
     pub gpu_material_bg: Option<wgpu::BindGroup>,
     pub gpu_material_uniform_buf: Option<wgpu::Buffer>,
+    pub(crate) gpu_refractive_material_bg: Option<wgpu::BindGroup>,
+    gpu_refractive_uniform_buf: Option<wgpu::Buffer>,
+    gpu_refractive_layered_uniform_buf: Option<wgpu::Buffer>,
+    pub(crate) gpu_refractive_layered: bool,
+    pub(crate) gpu_refractive_uses_uv1: bool,
+    pub(crate) gpu_layered_material_bg: Option<wgpu::BindGroup>,
+    gpu_layered_uniform_buf: Option<wgpu::Buffer>,
+    pub(crate) gpu_layered_uses_uv1: bool,
     /// Alpha-tested shadow-caster bind group for MASK materials (base
     /// colour + sampler + cutoff). None for opaque casters. Built with
     /// the material bind group; consumed by the shadow pass's cutout
@@ -206,11 +276,13 @@ pub struct SceneNode {
 /// One reduced-detail variant for a SceneNode.
 pub struct LodLevel {
     pub vertices: Vec<Vertex3D>,
+    secondary_tex_coords: Option<Vec<[f32; 2]>>,
     pub indices: Vec<u32>,
     /// Use this level when the node's projected screen coverage (longest
     /// NDC extent of its world AABB, 0..1) drops below this value.
     pub max_coverage: f32,
     gpu_vb: Option<wgpu::Buffer>,
+    gpu_secondary_uv_vb: Option<wgpu::Buffer>,
     gpu_ib: Option<wgpu::Buffer>,
     gpu_index_count: u32,
     dirty: bool,
@@ -220,9 +292,12 @@ impl SceneNode {
     fn new() -> Self {
         Self {
             vertices: Vec::new(),
+            secondary_tex_coords: None,
             indices: Vec::new(),
+            shared_model_mesh: None,
             material: PbrMaterial::default(),
             transform: crate::renderer::IDENTITY_MAT4,
+            source_transform: crate::renderer::IDENTITY_MAT4,
             prev_transform: crate::renderer::IDENTITY_MAT4,
             visible: true,
             cast_shadow: true,
@@ -235,10 +310,17 @@ impl SceneNode {
             world_bounds_min: [f32::MAX; 3],
             world_bounds_max: [f32::MIN; 3],
             gpu_vb: None,
+            gpu_secondary_uv_vb: None,
             gpu_ib: None,
+            gpu_geometry: None,
+            gpu_geometry_key: None,
+            gpu_resource_key: None,
+            gpu_material_id: MaterialId::FALLBACK,
+            gpu_material_key: None,
             gpu_index_count: 0,
             gpu_vertex_count: 0,
             blas: None,
+            blas_ready: false,
             card_first_slot: None,
             card_dynamic: false,
             mesh_sdf: None,
@@ -252,12 +334,61 @@ impl SceneNode {
             occluded: false,
             gpu_material_bg: None,
             gpu_material_uniform_buf: None,
+            gpu_refractive_material_bg: None,
+            gpu_refractive_uniform_buf: None,
+            gpu_refractive_layered_uniform_buf: None,
+            gpu_refractive_layered: false,
+            gpu_refractive_uses_uv1: false,
+            gpu_layered_material_bg: None,
+            gpu_layered_uniform_buf: None,
+            gpu_layered_uses_uv1: false,
             gpu_shadow_cutout_bg: None,
             mat_dirty: true,
             geo_dirty: true,
             lods: Vec::new(),
             active_lod: -1,
         }
+    }
+
+    /// Read the node's effective local vertex payload. Imported geometry may
+    /// be backed by an immutable shared model primitive.
+    pub fn vertices(&self) -> &[Vertex3D] {
+        self.shared_model_mesh
+            .as_ref()
+            .map_or(self.vertices.as_slice(), |mesh| mesh.vertices.as_slice())
+    }
+
+    /// Read the node's effective local index payload. Imported geometry may
+    /// be backed by an immutable shared model primitive.
+    pub fn indices(&self) -> &[u32] {
+        self.shared_model_mesh
+            .as_ref()
+            .map_or(self.indices.as_slice(), |mesh| mesh.indices.as_slice())
+    }
+
+    pub(crate) fn secondary_tex_coords(&self) -> Option<&[[f32; 2]]> {
+        self.shared_model_mesh
+            .as_ref()
+            .and_then(|mesh| mesh.secondary_tex_coords.as_deref())
+            .or(self.secondary_tex_coords.as_deref())
+    }
+
+    pub(crate) fn shared_geometry_identity(&self) -> Option<usize> {
+        self.shared_model_mesh
+            .as_ref()
+            .map(|mesh| Arc::as_ptr(mesh) as usize)
+    }
+
+    pub(crate) fn blas_geometry_key(&self) -> Option<SceneGeometryKey> {
+        self.gpu_resource_key
+    }
+
+    pub(crate) fn world_transform(&self) -> [[f32; 4]; 4] {
+        mat4_mul(&self.transform, &self.source_transform)
+    }
+
+    pub(crate) fn previous_world_transform(&self) -> [[f32; 4]; 4] {
+        mat4_mul(&self.prev_transform, &self.source_transform)
     }
 }
 
@@ -269,6 +400,46 @@ impl SceneNode {
 /// Must be >= sizeof(NodeUniforms) (224B) and a multiple of the device's
 /// `min_uniform_buffer_offset_alignment`. 256 is safe on every platform.
 const NODE_UNIFORM_STRIDE: u64 = 256;
+
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SceneGeometryKey {
+    hash_a: u64,
+    hash_b: u64,
+    vertex_count: u32,
+    index_count: u32,
+}
+
+#[derive(Copy, Clone)]
+struct SharedSceneGeometry {
+    slice: GeometrySlice,
+    references: u32,
+}
+
+#[derive(Clone)]
+struct SharedSceneGpuResources {
+    vertex: wgpu::Buffer,
+    index: wgpu::Buffer,
+    blas: Option<wgpu::Blas>,
+    blas_ready: bool,
+    mesh_sdf: Option<wgpu::Texture>,
+    mesh_sdf_view: Option<wgpu::TextureView>,
+    mesh_hash: Option<crate::sdf_cache::MeshHash>,
+    references: u32,
+}
+
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+struct SceneMaterialKey {
+    metal_rough: [u32; 4],
+    emissive: [u32; 4],
+    spec_gloss: [u32; 4],
+    textures: [u32; 5],
+}
+
+#[derive(Copy, Clone)]
+struct SharedSceneMaterial {
+    id: MaterialId,
+    references: u32,
+}
 
 pub struct SceneGraph {
     pub nodes: HandleRegistry<SceneNode>,
@@ -332,6 +503,25 @@ pub struct SceneGraph {
     /// in a per-frame budget via a compute pass. Static meshes
     /// never re-bake once their SDF lands.
     pub pending_sdf_bakes: Vec<f64>,
+    shared_gpu_resources: HashMap<SceneGeometryKey, SharedSceneGpuResources>,
+    shared_gpu_geometry: HashMap<SceneGeometryKey, SharedSceneGeometry>,
+    retired_gpu_geometry: Vec<GeometrySlice>,
+    shared_gpu_materials: HashMap<SceneMaterialKey, SharedSceneMaterial>,
+    retired_gpu_materials: Vec<MaterialId>,
+    /// True only when the retained scene's opaque subset is both order-safe
+    /// and large enough to amortize compute culling plus indirect submission.
+    /// Dedicated BLEND nodes are submitted later by the translucent pass and
+    /// therefore do not disable acceleration for the opaque subset.
+    gpu_driven_scene_active: bool,
+    /// Updated while `prepare()` already visits visible nodes, so the
+    /// translucent-pass gate remains O(1) on opaque-only scenes.
+    has_transparent_nodes: bool,
+    has_layered_transparent_nodes: bool,
+    has_refractive_nodes: bool,
+    /// Visible physical transmission including GI-only proxy nodes. Kept
+    /// separate from `has_refractive_nodes`, which gates camera composition.
+    has_transmission_gi_nodes: bool,
+    imported_refraction_enabled: bool,
 }
 
 impl SceneGraph {
@@ -352,20 +542,52 @@ impl SceneGraph {
             next_card_slot: 0,
             free_card_blocks: Vec::new(),
             pending_sdf_bakes: Vec::new(),
+            shared_gpu_resources: HashMap::new(),
+            shared_gpu_geometry: HashMap::new(),
+            retired_gpu_geometry: Vec::new(),
+            shared_gpu_materials: HashMap::new(),
+            retired_gpu_materials: Vec::new(),
+            gpu_driven_scene_active: false,
+            has_transparent_nodes: false,
+            has_layered_transparent_nodes: false,
+            has_refractive_nodes: false,
+            has_transmission_gi_nodes: false,
+            imported_refraction_enabled: false,
+        }
+    }
+
+    pub(crate) fn reset_motion_history(&mut self) {
+        self.nodes
+            .iter_mut()
+            .for_each(|(_, n)| n.prev_transform = n.transform);
+    }
+
+    /// Publish one completed BLAS batch to every instance sharing those
+    /// compatibility resources. GPU queue ordering makes the matching TLAS
+    /// build in the same submission safe before the next frame observes this.
+    pub(crate) fn mark_blas_ready(&mut self, keys: &HashSet<SceneGeometryKey>) {
+        for key in keys {
+            if let Some(resources) = self.shared_gpu_resources.get_mut(key) {
+                resources.blas_ready = true;
+            }
+        }
+        for (_, node) in self.nodes.iter_mut() {
+            if node.gpu_resource_key.is_some_and(|key| keys.contains(&key)) {
+                node.blas_ready = true;
+            }
         }
     }
 
     pub fn create_node(&mut self) -> f64 {
-        // New nodes default to `cast_shadow = true`, so the first
-        // `set_transform` + `update_geometry` will dirty shadows
-        // anyway. Bumping here too costs nothing and keeps the
-        // invalidation story simple.
         self.shadow_version = self.shadow_version.wrapping_add(1);
         self.tlas_version = self.tlas_version.wrapping_add(1);
         self.nodes.alloc(SceneNode::new())
     }
 
     pub fn destroy_node(&mut self, handle: f64) {
+        let mut geometry_key = None;
+        let mut resource_key = None;
+        let mut material_key = None;
         if let Some(node) = self.nodes.get(handle) {
             if node.visible && node.cast_shadow {
                 self.shadow_version = self.shadow_version.wrapping_add(1);
@@ -373,12 +595,30 @@ impl SceneGraph {
             if node.visible {
                 self.tlas_version = self.tlas_version.wrapping_add(1);
             }
-            // Recycle the node's 6-slot card block. The freed node's GPU
-            // buffers/BLAS/SDF drop with the SceneNode itself (wgpu
-            // releases them once in-flight work completes).
+            // Recycle its card block; owned GPU resources drop with the node.
             if let Some(first) = node.card_first_slot {
                 self.free_card_blocks.push(first);
             }
+            geometry_key = node.gpu_geometry_key;
+            resource_key = node.gpu_resource_key;
+            material_key = node.gpu_material_key;
+        }
+        if let Some(key) = geometry_key {
+            release_scene_geometry(
+                &mut self.shared_gpu_geometry,
+                &mut self.retired_gpu_geometry,
+                key,
+            );
+        }
+        if let Some(key) = resource_key {
+            release_scene_gpu_resources(&mut self.shared_gpu_resources, key);
+        }
+        if let Some(key) = material_key {
+            release_scene_material(
+                &mut self.shared_gpu_materials,
+                &mut self.retired_gpu_materials,
+                key,
+            );
         }
         self.nodes.free(handle);
     }
@@ -474,6 +714,17 @@ impl SceneGraph {
     /// meaningful for the UDF (normals/colour/UV are left zero).
     /// Returns (vertex_buf, index_buf, total_triangle_count).
     pub fn build_world_triangles(&self) -> (Vec<f32>, Vec<u32>, u32) {
+        self.build_world_triangles_for_gi(false)
+    }
+
+    /// World-space triangle soup for the scene SDF. Physical transmission is
+    /// optionally omitted because the transparent-GI specialization traces the
+    /// opaque field and represents one glass layer separately in instance
+    /// metadata. The legacy wrapper above deliberately includes every surface.
+    pub(crate) fn build_world_triangles_for_gi(
+        &self,
+        exclude_physical_transmission: bool,
+    ) -> (Vec<f32>, Vec<u32>, u32) {
         // 12 floats per vertex to match `Vertex3D` stride the bake
         // shader indexes with. position + zero-padding.
         const STRIDE: usize = 12;
@@ -481,26 +732,31 @@ impl SceneGraph {
         let mut ibuf: Vec<u32> = Vec::new();
         let mut tri_count: u32 = 0;
         for (_, node) in self.nodes.iter() {
-            if !node.visible || node.vertices.is_empty() || node.indices.is_empty() {
+            if !node.visible
+                || node.vertices().is_empty()
+                || node.indices().is_empty()
+                || (exclude_physical_transmission && node.material.has_gi_transmission())
+            {
                 continue;
             }
             let base = (vbuf.len() / STRIDE) as u32;
-            let t = &node.transform;
-            for v in &node.vertices {
+            let world_transform = node.world_transform();
+            let t = &world_transform;
+            for v in node.vertices() {
                 let px = v.position[0];
                 let py = v.position[1];
                 let pz = v.position[2];
-                let wx = t[0][0]*px + t[1][0]*py + t[2][0]*pz + t[3][0];
-                let wy = t[0][1]*px + t[1][1]*py + t[2][1]*pz + t[3][1];
-                let wz = t[0][2]*px + t[1][2]*py + t[2][2]*pz + t[3][2];
+                let wx = t[0][0] * px + t[1][0] * py + t[2][0] * pz + t[3][0];
+                let wy = t[0][1] * px + t[1][1] * py + t[2][1] * pz + t[3][1];
+                let wz = t[0][2] * px + t[1][2] * py + t[2][2] * pz + t[3][2];
                 // Zero-pad the remaining 9 floats — only position is
                 // read by `SDF_BAKE_WGSL`.
                 vbuf.extend_from_slice(&[wx, wy, wz, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
             }
-            for &idx in &node.indices {
+            for &idx in node.indices() {
                 ibuf.push(base + idx);
             }
-            tri_count += (node.indices.len() / 3) as u32;
+            tri_count += (node.indices().len() / 3) as u32;
         }
         (vbuf, ibuf, tri_count)
     }
@@ -524,7 +780,28 @@ impl SceneGraph {
         indices: Vec<u32>,
         max_coverage: f32,
     ) {
-        let Some(node) = self.nodes.get_mut(handle) else { return };
+        self.set_lod_geometry_with_secondary_uv(
+            handle,
+            lod_index,
+            vertices,
+            None,
+            indices,
+            max_coverage,
+        );
+    }
+
+    pub fn set_lod_geometry_with_secondary_uv(
+        &mut self,
+        handle: f64,
+        lod_index: usize,
+        vertices: Vec<Vertex3D>,
+        secondary_tex_coords: Option<Vec<[f32; 2]>>,
+        indices: Vec<u32>,
+        max_coverage: f32,
+    ) {
+        let Some(node) = self.nodes.get_mut(handle) else {
+            return;
+        };
         if vertices.is_empty() {
             if lod_index < node.lods.len() {
                 node.lods.remove(lod_index);
@@ -534,30 +811,51 @@ impl SceneGraph {
         while node.lods.len() <= lod_index {
             node.lods.push(LodLevel {
                 vertices: Vec::new(),
+                secondary_tex_coords: None,
                 indices: Vec::new(),
                 max_coverage: 0.0,
                 gpu_vb: None,
+                gpu_secondary_uv_vb: None,
                 gpu_ib: None,
                 gpu_index_count: 0,
                 dirty: true,
             });
         }
         let lod = &mut node.lods[lod_index];
+        let secondary_tex_coords =
+            secondary_tex_coords.filter(|coords| coords.len() == vertices.len());
         lod.vertices = vertices;
+        lod.secondary_tex_coords = secondary_tex_coords;
         lod.indices = indices;
         lod.max_coverage = max_coverage;
         lod.dirty = true;
     }
 
     pub fn update_geometry(&mut self, handle: f64, vertices: Vec<Vertex3D>, indices: Vec<u32>) {
+        self.update_geometry_with_secondary_uv(handle, vertices, None, indices);
+    }
+
+    pub fn update_geometry_with_secondary_uv(
+        &mut self,
+        handle: f64,
+        vertices: Vec<Vertex3D>,
+        secondary_tex_coords: Option<Vec<[f32; 2]>>,
+        indices: Vec<u32>,
+    ) {
         if let Some(node) = self.nodes.get_mut(handle) {
+            let secondary_tex_coords =
+                secondary_tex_coords.filter(|coords| coords.len() == vertices.len());
             // Recompute bounds from vertex positions (Q5).
             let mut bmin = [f32::MAX; 3];
             let mut bmax = [f32::MIN; 3];
             for v in &vertices {
                 for k in 0..3 {
-                    if v.position[k] < bmin[k] { bmin[k] = v.position[k]; }
-                    if v.position[k] > bmax[k] { bmax[k] = v.position[k]; }
+                    if v.position[k] < bmin[k] {
+                        bmin[k] = v.position[k];
+                    }
+                    if v.position[k] > bmax[k] {
+                        bmax[k] = v.position[k];
+                    }
                 }
             }
             if vertices.is_empty() {
@@ -566,8 +864,22 @@ impl SceneGraph {
             }
             node.bounds_min = bmin;
             node.bounds_max = bmax;
+            if node.secondary_tex_coords.is_some() != secondary_tex_coords.is_some() {
+                node.mat_dirty = true;
+                node.gpu_refractive_material_bg = None;
+                node.gpu_refractive_uniform_buf = None;
+                node.gpu_refractive_layered_uniform_buf = None;
+                node.gpu_refractive_layered = false;
+                node.gpu_refractive_uses_uv1 = false;
+                node.gpu_layered_material_bg = None;
+                node.gpu_layered_uniform_buf = None;
+                node.gpu_layered_uses_uv1 = false;
+            }
             node.vertices = vertices;
+            node.secondary_tex_coords = secondary_tex_coords;
             node.indices = indices;
+            node.shared_model_mesh = None;
+            node.source_transform = crate::renderer::IDENTITY_MAT4;
             node.geo_dirty = true;
             if node.cast_shadow && node.visible {
                 self.shadow_version = self.shadow_version.wrapping_add(1);
@@ -575,6 +887,60 @@ impl SceneGraph {
             if node.visible {
                 self.tlas_version = self.tlas_version.wrapping_add(1);
             }
+        }
+    }
+
+    /// Attach immutable imported geometry without copying its vertex/index
+    /// payload. The source transform remains separate from the public node
+    /// transform, so subsequent `set_transform` calls place the complete
+    /// imported primitive while retaining the source-authored placement.
+    pub fn update_shared_model_geometry(
+        &mut self,
+        handle: f64,
+        mesh: Arc<MeshData>,
+        source_transform: [[f32; 4]; 4],
+    ) {
+        let Some(node) = self.nodes.get_mut(handle) else {
+            return;
+        };
+        let mut bmin = [f32::MAX; 3];
+        let mut bmax = [f32::MIN; 3];
+        for vertex in &mesh.vertices {
+            for axis in 0..3 {
+                bmin[axis] = bmin[axis].min(vertex.position[axis]);
+                bmax[axis] = bmax[axis].max(vertex.position[axis]);
+            }
+        }
+        if mesh.vertices.is_empty() {
+            bmin = [0.0; 3];
+            bmax = [0.0; 3];
+        }
+        let had_secondary = node.secondary_tex_coords().is_some();
+        let has_secondary = mesh.secondary_tex_coords.is_some();
+        if had_secondary != has_secondary {
+            node.mat_dirty = true;
+            node.gpu_refractive_material_bg = None;
+            node.gpu_refractive_uniform_buf = None;
+            node.gpu_refractive_layered_uniform_buf = None;
+            node.gpu_refractive_layered = false;
+            node.gpu_refractive_uses_uv1 = false;
+            node.gpu_layered_material_bg = None;
+            node.gpu_layered_uniform_buf = None;
+            node.gpu_layered_uses_uv1 = false;
+        }
+        node.vertices.clear();
+        node.indices.clear();
+        node.secondary_tex_coords = None;
+        node.shared_model_mesh = Some(mesh);
+        node.source_transform = source_transform;
+        node.bounds_min = bmin;
+        node.bounds_max = bmax;
+        node.geo_dirty = true;
+        if node.cast_shadow && node.visible {
+            self.shadow_version = self.shadow_version.wrapping_add(1);
+        }
+        if node.visible {
+            self.tlas_version = self.tlas_version.wrapping_add(1);
         }
     }
 
@@ -606,6 +972,13 @@ impl SceneGraph {
     /// Returns `None` if the scene is empty (caller should fall back
     /// to a safe default).
     pub fn compute_shadow_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        self.compute_shadow_bounds_with_refraction(false)
+    }
+
+    pub(crate) fn compute_shadow_bounds_with_refraction(
+        &self,
+        imported_refraction_enabled: bool,
+    ) -> Option<([f32; 3], [f32; 3])> {
         let mut bmin = [f32::MAX; 3];
         let mut bmax = [f32::MIN; 3];
         let mut any = false;
@@ -622,34 +995,72 @@ impl SceneGraph {
             if !node.gi_only && !node.cast_shadow {
                 continue;
             }
+            if !node.gi_only && node.material.alpha_mode == MaterialAlphaMode::Blend {
+                continue;
+            }
+            if !node.gi_only
+                && imported_refraction_enabled
+                && node.material.transmission.is_active()
+            {
+                continue;
+            }
             if node.bounds_min[0] > node.bounds_max[0] {
                 continue; // empty bounds
             }
             // Transform the 8 local-AABB corners by the node's world matrix
             // and union into the running bounds.
-            let t = &node.transform;
+            let world_transform = node.world_transform();
+            let t = &world_transform;
             for ix in 0..2 {
                 for iy in 0..2 {
                     for iz in 0..2 {
-                        let lx = if ix == 0 { node.bounds_min[0] } else { node.bounds_max[0] };
-                        let ly = if iy == 0 { node.bounds_min[1] } else { node.bounds_max[1] };
-                        let lz = if iz == 0 { node.bounds_min[2] } else { node.bounds_max[2] };
+                        let lx = if ix == 0 {
+                            node.bounds_min[0]
+                        } else {
+                            node.bounds_max[0]
+                        };
+                        let ly = if iy == 0 {
+                            node.bounds_min[1]
+                        } else {
+                            node.bounds_max[1]
+                        };
+                        let lz = if iz == 0 {
+                            node.bounds_min[2]
+                        } else {
+                            node.bounds_max[2]
+                        };
                         // column-major mat4 * vec4(x,y,z,1)
-                        let wx = t[0][0]*lx + t[1][0]*ly + t[2][0]*lz + t[3][0];
-                        let wy = t[0][1]*lx + t[1][1]*ly + t[2][1]*lz + t[3][1];
-                        let wz = t[0][2]*lx + t[1][2]*ly + t[2][2]*lz + t[3][2];
-                        if wx < bmin[0] { bmin[0] = wx; }
-                        if wy < bmin[1] { bmin[1] = wy; }
-                        if wz < bmin[2] { bmin[2] = wz; }
-                        if wx > bmax[0] { bmax[0] = wx; }
-                        if wy > bmax[1] { bmax[1] = wy; }
-                        if wz > bmax[2] { bmax[2] = wz; }
+                        let wx = t[0][0] * lx + t[1][0] * ly + t[2][0] * lz + t[3][0];
+                        let wy = t[0][1] * lx + t[1][1] * ly + t[2][1] * lz + t[3][1];
+                        let wz = t[0][2] * lx + t[1][2] * ly + t[2][2] * lz + t[3][2];
+                        if wx < bmin[0] {
+                            bmin[0] = wx;
+                        }
+                        if wy < bmin[1] {
+                            bmin[1] = wy;
+                        }
+                        if wz < bmin[2] {
+                            bmin[2] = wz;
+                        }
+                        if wx > bmax[0] {
+                            bmax[0] = wx;
+                        }
+                        if wy > bmax[1] {
+                            bmax[1] = wy;
+                        }
+                        if wz > bmax[2] {
+                            bmax[2] = wz;
+                        }
                         any = true;
                     }
                 }
             }
         }
-        if any { Some((bmin, bmax)) } else { None }
+        if any {
+            Some((bmin, bmax))
+        } else {
+            None
+        }
     }
 
     // ---- Q7: user data -----------------------------------------------------
@@ -675,13 +1086,25 @@ impl SceneGraph {
     }
 
     pub fn set_material_pbr(&mut self, handle: f64, roughness: f32, metalness: f32) {
+        let mut changed_visible_transmission = false;
         if let Some(node) = self.nodes.get_mut(handle) {
+            if node.material.roughness == roughness && node.material.metalness == metalness {
+                return;
+            }
+            changed_visible_transmission = node.visible
+                && node.material.transmission.is_active()
+                && node.material.metalness != metalness;
             node.material.roughness = roughness;
             node.material.metalness = metalness;
             // Factors live in the material uniform, which is only rebuilt
             // together with the bind group — without dirtying, factor
             // changes after the first render never applied.
             node.mat_dirty = true;
+        }
+        if changed_visible_transmission {
+            // Metallic suppression changes transparent-GI transport and can
+            // move the instance between the glass and opaque TLAS/SDF masks.
+            self.tlas_version = self.tlas_version.wrapping_add(1);
         }
     }
 
@@ -690,6 +1113,63 @@ impl SceneGraph {
     pub fn set_material_alpha_cutoff(&mut self, handle: f64, cutoff: f32) {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.material.alpha_cutoff = cutoff;
+            node.material.alpha_mode = if cutoff > 0.0 {
+                MaterialAlphaMode::Mask
+            } else {
+                MaterialAlphaMode::Opaque
+            };
+            node.mat_dirty = true;
+        }
+    }
+
+    pub fn set_material_gltf_alpha(
+        &mut self,
+        handle: f64,
+        alpha_mode: MaterialAlphaMode,
+        cutoff: f32,
+        double_sided: bool,
+    ) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.material.alpha_mode = alpha_mode;
+            node.material.alpha_cutoff = cutoff;
+            node.material.double_sided = double_sided;
+            node.mat_dirty = true;
+        }
+    }
+
+    pub fn set_material_alpha_coverage_mips(&mut self, handle: f64, enabled: bool) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            if node.material.alpha_coverage_mips == enabled {
+                return;
+            }
+            node.material.alpha_coverage_mips = enabled;
+            node.mat_dirty = true;
+        }
+    }
+
+    pub fn set_material_transmission(&mut self, handle: f64, transmission: MaterialTransmission) {
+        let mut changed_visible = false;
+        if let Some(node) = self.nodes.get_mut(handle) {
+            if node.material.transmission == transmission {
+                return;
+            }
+            node.material.transmission = transmission;
+            node.mat_dirty = true;
+            changed_visible = node.visible;
+        }
+        if changed_visible {
+            // Transmission changes the TLAS instance mask/transport metadata
+            // and whether this mesh belongs in the opaque SDF clipmap.
+            self.tlas_version = self.tlas_version.wrapping_add(1);
+        }
+    }
+
+    pub fn set_material_layered_pbr(&mut self, handle: f64, layered_pbr: MaterialLayeredPbr) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            if node.material.layered_pbr == layered_pbr {
+                return;
+            }
+            node.material.layered_pbr = layered_pbr;
             node.mat_dirty = true;
         }
     }
@@ -697,7 +1177,16 @@ impl SceneGraph {
     /// Q8: Set a water-like material on a scene node. The actual animated
     /// wave shader requires a dedicated WGSL pipeline pass (deferred).
     /// For now, this sets a translucent tinted material that approximates water.
-    pub fn set_material_water(&mut self, handle: f64, _wave_amp: f32, _wave_speed: f32, r: f32, g: f32, b: f32, a: f32) {
+    pub fn set_material_water(
+        &mut self,
+        handle: f64,
+        _wave_amp: f32,
+        _wave_speed: f32,
+        r: f32,
+        g: f32,
+        b: f32,
+        a: f32,
+    ) {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.material.color = [r, g, b];
             node.material.opacity = a;
@@ -708,6 +1197,9 @@ impl SceneGraph {
 
     pub fn set_material_texture(&mut self, handle: f64, texture_idx: u32) {
         if let Some(node) = self.nodes.get_mut(handle) {
+            if node.material.texture_idx == texture_idx {
+                return;
+            }
             node.material.texture_idx = texture_idx;
             node.mat_dirty = true;
         }
@@ -727,6 +1219,20 @@ impl SceneGraph {
         }
     }
 
+    pub fn set_material_specular_glossiness_factor(
+        &mut self,
+        handle: f64,
+        factor: Option<[f32; 4]>,
+    ) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            if node.material.specular_glossiness_factor == factor {
+                return;
+            }
+            node.material.specular_glossiness_factor = factor;
+            node.mat_dirty = true;
+        }
+    }
+
     pub fn set_material_emissive_texture(&mut self, handle: f64, texture_idx: u32) {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.material.emissive_texture_idx = texture_idx;
@@ -736,7 +1242,11 @@ impl SceneGraph {
 
     pub fn set_material_emissive_factor(&mut self, handle: f64, r: f32, g: f32, b: f32) {
         if let Some(node) = self.nodes.get_mut(handle) {
-            node.material.emissive = [r, g, b];
+            let emissive = [r, g, b];
+            if node.material.emissive == emissive {
+                return;
+            }
+            node.material.emissive = emissive;
             node.mat_dirty = true;
         }
     }
@@ -754,8 +1264,52 @@ impl SceneGraph {
         prev_vp_matrix: &[[f32; 4]; 4],
         uniform_layout: &wgpu::BindGroupLayout,
         occlusion: Option<&crate::renderer::OcclusionCuller>,
+        gpu_driven: &mut crate::renderer::gpu_driven::GpuDrivenRenderer,
     ) {
+        self.prepare_with_refraction(
+            device,
+            queue,
+            vp_matrix,
+            prev_vp_matrix,
+            uniform_layout,
+            occlusion,
+            gpu_driven,
+            false,
+        );
+    }
+
+    pub(crate) fn prepare_with_refraction(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vp_matrix: &[[f32; 4]; 4],
+        prev_vp_matrix: &[[f32; 4]; 4],
+        uniform_layout: &wgpu::BindGroupLayout,
+        occlusion: Option<&crate::renderer::OcclusionCuller>,
+        gpu_driven: &mut crate::renderer::gpu_driven::GpuDrivenRenderer,
+        imported_refraction_enabled: bool,
+    ) {
+        self.imported_refraction_enabled = imported_refraction_enabled;
         let frustum = extract_frustum_planes(vp_matrix);
+        let order_safe =
+            retained_order_is_gpu_safe(&self.nodes, gpu_driven.visibility_routing_enabled());
+        let candidate_count = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| {
+                node.visible
+                    && !node.gi_only
+                    && !node.indices().is_empty()
+                    && node.material.alpha_cutoff <= 0.0
+                    && node.material.alpha_mode != MaterialAlphaMode::Blend
+                    && !(imported_refraction_enabled && node.material.transmission.is_active())
+                    && !node.material.layered_pbr.is_active()
+                    && (!node.material.opacity.is_finite() || node.material.opacity >= 1.0)
+            })
+            .count();
+        self.gpu_driven_scene_active =
+            order_safe && candidate_count >= crate::renderer::gpu_driven::GPU_DRIVEN_MIN_DRAWS;
+        gpu_driven.retire_shared(queue, self.retired_gpu_geometry.drain(..));
 
         // Phase 1: upload geometry for any freshly-added or dirty nodes,
         // assign uniform slots, and count how many nodes we'll draw.
@@ -767,33 +1321,90 @@ impl SceneGraph {
         let pending_sdf = &mut self.pending_sdf_bakes;
         let next_card_slot = &mut self.next_card_slot;
         let free_card_blocks = &mut self.free_card_blocks;
+        let shared_gpu_resources = &mut self.shared_gpu_resources;
+        let shared_gpu_geometry = &mut self.shared_gpu_geometry;
+        let retired_gpu_geometry = &mut self.retired_gpu_geometry;
+        let gpu_driven_scene_active = self.gpu_driven_scene_active;
         let mut visible_count: u32 = 0;
+        self.has_transparent_nodes = false;
+        self.has_layered_transparent_nodes = false;
+        self.has_refractive_nodes = false;
+        self.has_transmission_gi_nodes = false;
         for (handle, node) in self.nodes.iter_mut() {
-            if !node.visible || node.indices.is_empty() {
+            if !gpu_driven_scene_active {
+                if let Some(old_key) = node.gpu_geometry_key.take() {
+                    release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
+                }
+                node.gpu_geometry = None;
+            }
+            if node.indices().is_empty() {
+                if let Some(old_key) = node.gpu_geometry_key.take() {
+                    release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
+                }
+                node.gpu_geometry = None;
+            }
+            if !node.visible || node.indices().is_empty() {
                 continue;
+            }
+            if !node.gi_only && node.material.alpha_mode == MaterialAlphaMode::Blend {
+                self.has_transparent_nodes = true;
+                self.has_layered_transparent_nodes |= node.material.layered_pbr.is_active();
+            }
+            if node.material.transmission.is_active() {
+                if node.material.has_gi_transmission() {
+                    self.has_transmission_gi_nodes = true;
+                }
+                if !node.gi_only {
+                    self.has_refractive_nodes = true;
+                }
             }
             // Frustum cull against world-space AABB. Transform the local
             // bounds into world space by applying the node's transform
             // to the 8 corners; use the min/max of the result.
             if node.bounds_min[0] <= node.bounds_max[0] {
-                let t = &node.transform;
+                let world_transform = node.world_transform();
+                let t = &world_transform;
                 let mut wmin = [f32::MAX; 3];
                 let mut wmax = [f32::MIN; 3];
                 for ix in 0..2 {
                     for iy in 0..2 {
                         for iz in 0..2 {
-                            let lx = if ix == 0 { node.bounds_min[0] } else { node.bounds_max[0] };
-                            let ly = if iy == 0 { node.bounds_min[1] } else { node.bounds_max[1] };
-                            let lz = if iz == 0 { node.bounds_min[2] } else { node.bounds_max[2] };
-                            let wx = t[0][0]*lx + t[1][0]*ly + t[2][0]*lz + t[3][0];
-                            let wy = t[0][1]*lx + t[1][1]*ly + t[2][1]*lz + t[3][1];
-                            let wz = t[0][2]*lx + t[1][2]*ly + t[2][2]*lz + t[3][2];
-                            if wx < wmin[0] { wmin[0] = wx; }
-                            if wy < wmin[1] { wmin[1] = wy; }
-                            if wz < wmin[2] { wmin[2] = wz; }
-                            if wx > wmax[0] { wmax[0] = wx; }
-                            if wy > wmax[1] { wmax[1] = wy; }
-                            if wz > wmax[2] { wmax[2] = wz; }
+                            let lx = if ix == 0 {
+                                node.bounds_min[0]
+                            } else {
+                                node.bounds_max[0]
+                            };
+                            let ly = if iy == 0 {
+                                node.bounds_min[1]
+                            } else {
+                                node.bounds_max[1]
+                            };
+                            let lz = if iz == 0 {
+                                node.bounds_min[2]
+                            } else {
+                                node.bounds_max[2]
+                            };
+                            let wx = t[0][0] * lx + t[1][0] * ly + t[2][0] * lz + t[3][0];
+                            let wy = t[0][1] * lx + t[1][1] * ly + t[2][1] * lz + t[3][1];
+                            let wz = t[0][2] * lx + t[1][2] * ly + t[2][2] * lz + t[3][2];
+                            if wx < wmin[0] {
+                                wmin[0] = wx;
+                            }
+                            if wy < wmin[1] {
+                                wmin[1] = wy;
+                            }
+                            if wz < wmin[2] {
+                                wmin[2] = wz;
+                            }
+                            if wx > wmax[0] {
+                                wmax[0] = wx;
+                            }
+                            if wy > wmax[1] {
+                                wmax[1] = wy;
+                            }
+                            if wz > wmax[2] {
+                                wmax[2] = wz;
+                            }
                         }
                     }
                 }
@@ -804,7 +1415,7 @@ impl SceneGraph {
                 // frustum; every uncertain case inside test_aabb
                 // resolves to visible.
                 node.occluded = node.in_view_frustum
-                    && occlusion.is_some_and(|o| !o.test_aabb(wmin, wmax));
+                    && occlusion.is_some_and(|o| !o.test_aabb(wmin, wmax, vp_matrix));
 
                 // LOD selection by projected screen coverage: longest
                 // NDC extent of the world AABB. Corners at/behind the
@@ -839,22 +1450,79 @@ impl SceneGraph {
             }
             // Upload any dirty LOD variants (plain vertex/index buffers —
             // LODs never feed BLAS/SDF, those read the base geometry).
-            for lod in node.lods.iter_mut().filter(|l| l.dirty) {
-                lod.gpu_vb = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("scene_node_lod_vb"),
-                    contents: bytemuck::cast_slice(&lod.vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                }));
-                lod.gpu_ib = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("scene_node_lod_ib"),
-                    contents: bytemuck::cast_slice(&lod.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                }));
-                lod.gpu_index_count = lod.indices.len() as u32;
-                lod.dirty = false;
+            let needs_secondary_uv = node.material.transmission.has_resolved_tex_coord(1)
+                || node.material.layered_pbr.has_resolved_tex_coord(1);
+            for lod in &mut node.lods {
+                if lod.dirty {
+                    lod.gpu_vb = Some(device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_node_lod_vb"),
+                            contents: bytemuck::cast_slice(&lod.vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        },
+                    ));
+                    lod.gpu_ib = Some(device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_node_lod_ib"),
+                            contents: bytemuck::cast_slice(&lod.indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        },
+                    ));
+                    lod.gpu_index_count = lod.indices.len() as u32;
+                    lod.dirty = false;
+                }
+                if needs_secondary_uv && lod.gpu_secondary_uv_vb.is_none() {
+                    lod.gpu_secondary_uv_vb = lod.secondary_tex_coords.as_ref().map(|coords| {
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_node_lod_refractive_uv1_vb"),
+                            contents: bytemuck::cast_slice(coords),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        })
+                    });
+                } else if !needs_secondary_uv {
+                    lod.gpu_secondary_uv_vb = None;
+                }
             }
 
-            if node.geo_dirty || node.gpu_vb.is_none() {
+            let geometry_changed = node.geo_dirty;
+            if geometry_changed || node.gpu_vb.is_none() {
+                let resource_key = (!node.vertices().is_empty() && !node.indices().is_empty())
+                    .then(|| scene_geometry_key(node.vertices(), node.indices()));
+                if node.gpu_resource_key != resource_key {
+                    if let Some(old_key) = node.gpu_resource_key.take() {
+                        release_scene_gpu_resources(shared_gpu_resources, old_key);
+                    }
+                    // A queued BLAS belongs to the exact geometry key that
+                    // created it. Never expose it after geometry replacement,
+                    // and make empty geometry release its compatibility
+                    // buffers instead of retaining a stale draw/build input.
+                    node.blas = None;
+                    node.blas_ready = false;
+                    node.mesh_sdf = None;
+                    node.mesh_sdf_view = None;
+                    node.mesh_hash = None;
+                    if resource_key.is_none() {
+                        node.gpu_vb = None;
+                        node.gpu_ib = None;
+                    }
+                }
+                let mut reused_resources = false;
+                if let Some(key) = resource_key {
+                    if let Some(cached) = shared_gpu_resources.get_mut(&key) {
+                        if node.gpu_resource_key != Some(key) {
+                            cached.references = cached.references.saturating_add(1);
+                        }
+                        node.gpu_vb = Some(cached.vertex.clone());
+                        node.gpu_ib = Some(cached.index.clone());
+                        node.blas = cached.blas.clone();
+                        node.blas_ready = cached.blas_ready;
+                        node.mesh_sdf = cached.mesh_sdf.clone();
+                        node.mesh_sdf_view = cached.mesh_sdf_view.clone();
+                        node.mesh_hash = cached.mesh_hash;
+                        node.gpu_resource_key = Some(key);
+                        reused_resources = true;
+                    }
+                }
                 // Ticket 007b: widen buffer usage when HW RT is on so
                 // the same buffer can back both the raster draw and
                 // the BLAS build. Cheap — no measurable cost when RT
@@ -880,18 +1548,24 @@ impl SceneGraph {
                 } else {
                     wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE
                 };
-                node.gpu_vb = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("scene_node_vb"),
-                    contents: bytemuck::cast_slice(&node.vertices),
-                    usage: vb_usage,
-                }));
-                node.gpu_ib = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("scene_node_ib"),
-                    contents: bytemuck::cast_slice(&node.indices),
-                    usage: ib_usage,
-                }));
-                node.gpu_index_count = node.indices.len() as u32;
-                node.gpu_vertex_count = node.vertices.len() as u32;
+                if !reused_resources && resource_key.is_some() {
+                    node.gpu_vb = Some(device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_shared_vb"),
+                            contents: bytemuck::cast_slice(node.vertices()),
+                            usage: vb_usage,
+                        },
+                    ));
+                    node.gpu_ib = Some(device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_shared_ib"),
+                            contents: bytemuck::cast_slice(node.indices()),
+                            usage: ib_usage,
+                        },
+                    ));
+                }
+                node.gpu_index_count = node.indices().len() as u32;
+                node.gpu_vertex_count = node.vertices().len() as u32;
                 node.geo_dirty = false;
 
                 // Ticket 014 V4 — flat normal/albedo + card-slot
@@ -902,18 +1576,19 @@ impl SceneGraph {
                 // BLAS / TLAS is built. BLAS + per-mesh SDF bake
                 // remain hw-rt-gated because only the HW trace reads
                 // those (and the per-mesh SDFs are currently dormant).
-                if !node.indices.is_empty() {
+                if !node.indices().is_empty() {
                     let mut n_sum = [0.0_f32; 3];
-                    for v in &node.vertices {
+                    for v in node.vertices() {
                         n_sum[0] += v.normal[0];
                         n_sum[1] += v.normal[1];
                         n_sum[2] += v.normal[2];
                     }
-                    let t = &node.transform;
-                    let nx = t[0][0]*n_sum[0] + t[1][0]*n_sum[1] + t[2][0]*n_sum[2];
-                    let ny = t[0][1]*n_sum[0] + t[1][1]*n_sum[1] + t[2][1]*n_sum[2];
-                    let nz = t[0][2]*n_sum[0] + t[1][2]*n_sum[1] + t[2][2]*n_sum[2];
-                    let len = (nx*nx + ny*ny + nz*nz).sqrt();
+                    let world_transform = node.world_transform();
+                    let t = &world_transform;
+                    let nx = t[0][0] * n_sum[0] + t[1][0] * n_sum[1] + t[2][0] * n_sum[2];
+                    let ny = t[0][1] * n_sum[0] + t[1][1] * n_sum[1] + t[2][1] * n_sum[2];
+                    let nz = t[0][2] * n_sum[0] + t[1][2] * n_sum[1] + t[2][2] * n_sum[2];
+                    let len = (nx * nx + ny * ny + nz * nz).sqrt();
                     if len > 1e-4 {
                         node.flat_normal_ws = [nx / len, ny / len, nz / len];
                     } else {
@@ -931,15 +1606,19 @@ impl SceneGraph {
                             Some(reused) => reused,
                             None => {
                                 let fresh = *next_card_slot;
-                                *next_card_slot += 6;
+                                *next_card_slot += crate::renderer::CARD_AXES_PER_MESH;
                                 fresh
                             }
                         };
-                        node.card_first_slot = Some(first);
-                        pending_cards.push(handle);
+                        if first + crate::renderer::CARD_AXES_PER_MESH
+                            <= crate::renderer::CARD_MAX_SLOTS
+                        {
+                            node.card_first_slot = Some(first);
+                            pending_cards.push(handle);
+                        }
                     }
 
-                    if hw_rt {
+                    if hw_rt && !reused_resources {
                         // BLAS creation only on HW-RT adapters.
                         let size_desc = wgpu::BlasTriangleGeometrySizeDescriptor {
                             vertex_format: wgpu::VertexFormat::Float32x3,
@@ -958,20 +1637,25 @@ impl SceneGraph {
                                 descriptors: vec![size_desc],
                             },
                         ));
+                        node.blas_ready = false;
                         pending_blas.push(handle);
 
-                        // Per-mesh SDF texture — currently dormant (V4
-                        // dynamic-scene merge will consume it), but
-                        // cheap to allocate alongside the BLAS.
-                        if node.mesh_sdf.is_none()
+                        // Per-mesh SDF textures are not sampled by any
+                        // shipping trace path. Keep the implementation for
+                        // the future dynamic-scene merge, but do not allocate
+                        // and brute-force bake hundreds of dormant volumes.
+                        let mesh_sdf_consumed = false;
+                        if mesh_sdf_consumed
+                            && node.mesh_sdf.is_none()
                             && node.bounds_min[0] < node.bounds_max[0]
                             && node.bounds_min[1] < node.bounds_max[1]
                             && node.bounds_min[2] < node.bounds_max[2]
                         {
-                            let (sdf_tex, sdf_view) = crate::renderer::create_mesh_sdf_texture_public(
-                                device,
-                                "scene_node_sdf",
-                            );
+                            let (sdf_tex, sdf_view) =
+                                crate::renderer::create_mesh_sdf_texture_public(
+                                    device,
+                                    "scene_node_sdf",
+                                );
 
                             // Ticket 022 — content-hash the geometry and
                             // try the on-disk SDF cache before scheduling
@@ -980,10 +1664,9 @@ impl SceneGraph {
                             // [[f32; 3]] slice so the hash only sees
                             // geometry-relevant bytes.
                             let positions: Vec<[f32; 3]> =
-                                node.vertices.iter().map(|v| v.position).collect();
-                            let hash = crate::sdf_cache::compute_mesh_hash(
-                                &positions, &node.indices,
-                            );
+                                node.vertices().iter().map(|v| v.position).collect();
+                            let hash =
+                                crate::sdf_cache::compute_mesh_hash(&positions, node.indices());
                             node.mesh_hash = Some(hash);
 
                             if let Some(bytes) = crate::sdf_cache::load(hash) {
@@ -998,10 +1681,11 @@ impl SceneGraph {
                                 const RES: u32 = crate::sdf_cache::VOXEL_RES;
                                 let row_tight = (RES * 4) as usize;
                                 let row_padded = ((row_tight + 255) & !255) as u32;
-                                let mut padded = vec![
-                                    0u8;
-                                    (row_padded as usize) * (RES as usize) * (RES as usize)
-                                ];
+                                let mut padded =
+                                    vec![
+                                        0u8;
+                                        (row_padded as usize) * (RES as usize) * (RES as usize)
+                                    ];
                                 for z in 0..RES as usize {
                                     for y in 0..RES as usize {
                                         let src_off = (z * RES as usize + y) * row_tight;
@@ -1037,6 +1721,80 @@ impl SceneGraph {
                             node.mesh_sdf_view = Some(sdf_view);
                         }
                     }
+                }
+                if !reused_resources {
+                    if let (Some(key), Some(vertex), Some(index)) =
+                        (resource_key, node.gpu_vb.as_ref(), node.gpu_ib.as_ref())
+                    {
+                        shared_gpu_resources.insert(
+                            key,
+                            SharedSceneGpuResources {
+                                vertex: vertex.clone(),
+                                index: index.clone(),
+                                blas: node.blas.clone(),
+                                blas_ready: node.blas_ready,
+                                mesh_sdf: node.mesh_sdf.clone(),
+                                mesh_sdf_view: node.mesh_sdf_view.clone(),
+                                mesh_hash: node.mesh_hash,
+                                references: 1,
+                            },
+                        );
+                        node.gpu_resource_key = Some(key);
+                    }
+                }
+            }
+            if needs_secondary_uv && node.gpu_secondary_uv_vb.is_none() {
+                node.gpu_secondary_uv_vb = node.secondary_tex_coords().map(|coords| {
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("scene_node_refractive_uv1_vb"),
+                        contents: bytemuck::cast_slice(coords),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+                });
+            } else if !needs_secondary_uv {
+                node.gpu_secondary_uv_vb = None;
+            }
+            // Main/depth GPU submission uses one deduplicated arena slice.
+            // The legacy buffers above deliberately stay alive for secondary
+            // passes, which makes this an additive and reversible fast path.
+            if geometry_changed && (node.vertices().is_empty() || node.indices().is_empty()) {
+                if let Some(old_key) = node.gpu_geometry_key.take() {
+                    release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
+                }
+                node.gpu_geometry = None;
+            }
+            if gpu_driven.enabled()
+                && gpu_driven_scene_active
+                && (geometry_changed || node.gpu_geometry.is_none())
+                && !node.vertices().is_empty()
+                && !node.indices().is_empty()
+            {
+                let key = scene_geometry_key(node.vertices(), node.indices());
+                if node.gpu_geometry_key != Some(key) {
+                    if let Some(old_key) = node.gpu_geometry_key.take() {
+                        release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
+                    }
+                    let slice = if let Some(cached) = shared_gpu_geometry.get_mut(&key) {
+                        cached.references = cached.references.saturating_add(1);
+                        cached.slice
+                    } else {
+                        let slice = gpu_driven.upload_static(
+                            device,
+                            queue,
+                            node.vertices(),
+                            node.indices(),
+                        );
+                        shared_gpu_geometry.insert(
+                            key,
+                            SharedSceneGeometry {
+                                slice,
+                                references: 1,
+                            },
+                        );
+                        slice
+                    };
+                    node.gpu_geometry = Some(slice);
+                    node.gpu_geometry_key = Some(key);
                 }
             }
             if node.uniform_slot.is_none() {
@@ -1076,7 +1834,9 @@ impl SceneGraph {
             }
         }
 
-        let Some(pool_buf) = self.uniform_pool.as_ref() else { return };
+        let Some(pool_buf) = self.uniform_pool.as_ref() else {
+            return;
+        };
         let uniform_size = std::mem::size_of::<NodeUniforms>();
         let stride = NODE_UNIFORM_STRIDE as usize;
 
@@ -1086,13 +1846,17 @@ impl SceneGraph {
         // the memcpy into scratch.
         let mut max_byte_offset: usize = 0;
         for (_handle, node) in self.nodes.iter_mut() {
-            if !node.visible || node.indices.is_empty() {
+            if !node.visible || node.indices().is_empty() {
                 continue;
             }
-            let Some(slot) = node.uniform_slot else { continue };
+            let Some(slot) = node.uniform_slot else {
+                continue;
+            };
 
-            let mvp = mat4_mul(vp_matrix, &node.transform);
-            let prev_mvp = mat4_mul(prev_vp_matrix, &node.prev_transform);
+            let world_transform = node.world_transform();
+            let previous_world_transform = node.previous_world_transform();
+            let mvp = mat4_mul(vp_matrix, &world_transform);
+            let prev_mvp = mat4_mul(prev_vp_matrix, &previous_world_transform);
             // Guard against NaN/Inf opacity (Perry TS passes NaN
             // when a default-arg alpha isn't provided) — a single
             // NaN in model_tint.w propagates through every shader
@@ -1108,7 +1872,13 @@ impl SceneGraph {
                 node.material.color[2],
                 opacity,
             ];
-            let uniforms = NodeUniforms { mvp, model: node.transform, prev_mvp, model_tint: tint, misc: [0.0; 4] };
+            let uniforms = NodeUniforms {
+                mvp,
+                model: world_transform,
+                prev_mvp,
+                model_tint: tint,
+                misc: [0.0; 4],
+            };
             node.prev_transform = node.transform;
 
             let off = (slot as usize) * stride;
@@ -1137,17 +1907,30 @@ impl SceneGraph {
         if visible_count > 0 && max_byte_offset > 0 {
             queue.write_buffer(pool_buf, 0, &self.scratch[..max_byte_offset]);
         }
+        gpu_driven.retire_shared(queue, self.retired_gpu_geometry.drain(..));
     }
 
     /// Build / refresh per-node material bind groups for the scene
     /// pipeline. Must be called every frame after `prepare` and before
     /// `render`. Only rebuilds when a material changed (mat_dirty).
-    pub fn prepare_materials(&mut self, renderer: &crate::renderer::Renderer) {
+    pub fn prepare_materials(&mut self, renderer: &mut crate::renderer::Renderer) {
+        renderer.retire_scene_gpu_materials(self.retired_gpu_materials.drain(..));
+        let shared_gpu_materials = &mut self.shared_gpu_materials;
+        let retired_gpu_materials = &mut self.retired_gpu_materials;
         for (_handle, node) in self.nodes.iter_mut() {
-            if !node.visible || node.indices.is_empty() {
+            if !node.visible || node.indices().is_empty() {
                 continue;
             }
-            if node.mat_dirty || node.gpu_material_bg.is_none() {
+            let material_changed = node.mat_dirty;
+            let needs_refractive =
+                renderer.imported_refraction_enabled() && node.material.transmission.is_active();
+            let needs_layered = node.material.layered_pbr.is_active();
+            let needs_layered_scene = needs_layered && !needs_refractive;
+            if material_changed
+                || node.gpu_material_bg.is_none()
+                || (needs_refractive && node.gpu_refractive_material_bg.is_none())
+                || (needs_layered_scene && node.gpu_layered_material_bg.is_none())
+            {
                 // Allocate or reuse the per-material uniform buffer.
                 // (Could be updated in place when factors change, but
                 // the current path always rebuilds together with the
@@ -1157,11 +1940,15 @@ impl SceneGraph {
                     node.material.roughness,
                     node.material.emissive,
                     node.material.metallic_roughness_texture_idx != 0,
+                    node.material.specular_glossiness_factor,
                     // MASK cutoff from the node material (0 = opaque).
                     // attach_model carries it over from the glTF mesh so
                     // foliage cards keep their cutout + two-sided shading
                     // + wind sway on the scene-graph path.
-                    node.material.alpha_cutoff,
+                    node.material
+                        .alpha_mode
+                        .shader_alpha_value(node.material.alpha_cutoff),
+                    node.material.alpha_coverage_mips,
                 );
                 let bg = renderer.create_scene_material_bg(
                     node.material.texture_idx,
@@ -1171,8 +1958,79 @@ impl SceneGraph {
                     node.material.occlusion_texture_idx,
                     &uniform,
                 );
+                let combined_refractive = renderer.create_scene_layered_refractive_material_bg(
+                    node.material.texture_idx,
+                    node.material.normal_texture_idx,
+                    node.material.metallic_roughness_texture_idx,
+                    node.material.emissive_texture_idx,
+                    node.material.occlusion_texture_idx,
+                    &uniform,
+                    node.material.transmission,
+                    node.material.layered_pbr,
+                    node.secondary_tex_coords().is_some(),
+                );
+                let refractive = combined_refractive.is_none().then(|| {
+                    renderer.create_scene_refractive_material_bg(
+                        node.material.texture_idx,
+                        node.material.normal_texture_idx,
+                        node.material.metallic_roughness_texture_idx,
+                        node.material.emissive_texture_idx,
+                        node.material.occlusion_texture_idx,
+                        &uniform,
+                        node.material.transmission,
+                        node.secondary_tex_coords().is_some(),
+                    )
+                });
+                let layered = needs_layered_scene.then(|| {
+                    renderer.create_scene_layered_pbr_material_bg(
+                        node.material.texture_idx,
+                        node.material.normal_texture_idx,
+                        node.material.metallic_roughness_texture_idx,
+                        node.material.emissive_texture_idx,
+                        node.material.occlusion_texture_idx,
+                        &uniform,
+                        node.material.layered_pbr,
+                        node.secondary_tex_coords().is_some(),
+                    )
+                });
                 node.gpu_material_bg = Some(bg);
                 node.gpu_material_uniform_buf = Some(uniform);
+                let (
+                    physical_uniform,
+                    refractive_layered_uniform,
+                    physical_bg,
+                    refractive_uses_uv1,
+                    refractive_layered,
+                ) = if let Some((physical, layered, bind_group, uses_uv1)) = combined_refractive {
+                    (
+                        Some(physical),
+                        Some(layered),
+                        Some(bind_group),
+                        uses_uv1,
+                        true,
+                    )
+                } else {
+                    refractive
+                        .flatten()
+                        .map(|(uniform, bind_group, uses_uv1)| {
+                            (Some(uniform), None, Some(bind_group), uses_uv1, false)
+                        })
+                        .unwrap_or((None, None, None, false, false))
+                };
+                node.gpu_refractive_uniform_buf = physical_uniform;
+                node.gpu_refractive_layered_uniform_buf = refractive_layered_uniform;
+                node.gpu_refractive_material_bg = physical_bg;
+                node.gpu_refractive_uses_uv1 = refractive_uses_uv1;
+                node.gpu_refractive_layered = refractive_layered;
+                let (layered_uniform, layered_bg, layered_uses_uv1) = layered
+                    .flatten()
+                    .map(|(uniform, bind_group, uses_uv1)| {
+                        (Some(uniform), Some(bind_group), uses_uv1)
+                    })
+                    .unwrap_or((None, None, false));
+                node.gpu_layered_uniform_buf = layered_uniform;
+                node.gpu_layered_material_bg = layered_bg;
+                node.gpu_layered_uses_uv1 = layered_uses_uv1;
                 // MASK materials also get an alpha-tested shadow-caster
                 // bind group so foliage casts dappled shadows on the
                 // scene-graph path (mirrors the cached-model path).
@@ -1180,48 +2038,668 @@ impl SceneGraph {
                     Some(renderer.create_shadow_cutout_bg(
                         node.material.texture_idx,
                         node.material.alpha_cutoff,
+                        node.material.alpha_coverage_mips,
                     ))
                 } else {
                     None
                 };
-                node.mat_dirty = false;
             }
+            if !self.gpu_driven_scene_active || needs_refractive || needs_layered {
+                if let Some(old_key) = node.gpu_material_key.take() {
+                    release_scene_material(shared_gpu_materials, retired_gpu_materials, old_key);
+                }
+                node.gpu_material_id = MaterialId::FALLBACK;
+            } else if renderer.gpu_driven_enabled()
+                && (material_changed || node.gpu_material_id == MaterialId::FALLBACK)
+            {
+                let key = scene_material_key(&node.material);
+                if node.gpu_material_key != Some(key) {
+                    if let Some(old_key) = node.gpu_material_key.take() {
+                        release_scene_material(
+                            shared_gpu_materials,
+                            retired_gpu_materials,
+                            old_key,
+                        );
+                    }
+                    let id = if let Some(cached) = shared_gpu_materials.get_mut(&key) {
+                        cached.references = cached.references.saturating_add(1);
+                        cached.id
+                    } else {
+                        let id = renderer.allocate_scene_gpu_material(&node.material);
+                        if id != MaterialId::FALLBACK {
+                            shared_gpu_materials
+                                .insert(key, SharedSceneMaterial { id, references: 1 });
+                        }
+                        id
+                    };
+                    node.gpu_material_id = id;
+                    node.gpu_material_key = (id != MaterialId::FALLBACK).then_some(key);
+                }
+            }
+            node.mat_dirty = false;
         }
+        renderer.retire_scene_gpu_materials(self.retired_gpu_materials.drain(..));
     }
 
     /// Render all visible scene nodes into the given render pass.
     /// Must be called after prepare() and after the pipeline/lighting/joints are set.
-    pub fn render<'a>(
+    pub fn render<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, gpu_driven_enabled: bool) {
+        self.render_with_refraction(pass, gpu_driven_enabled, false);
+    }
+
+    pub(crate) fn render_with_refraction<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
+        gpu_driven_enabled: bool,
+        imported_refraction_enabled: bool,
     ) {
+        self.render_with_material_pipeline_selection(
+            pass,
+            gpu_driven_enabled,
+            imported_refraction_enabled,
+            None,
+            None,
+        );
+    }
+
+    pub(crate) fn render_with_material_specializations<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        gpu_driven_enabled: bool,
+        imported_refraction_enabled: bool,
+        base_pipeline: &'a wgpu::RenderPipeline,
+        layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
+    ) {
+        self.render_with_material_pipeline_selection(
+            pass,
+            gpu_driven_enabled,
+            imported_refraction_enabled,
+            Some(base_pipeline),
+            layered,
+        );
+    }
+
+    fn render_with_material_pipeline_selection<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        gpu_driven_enabled: bool,
+        imported_refraction_enabled: bool,
+        base_pipeline: Option<&'a wgpu::RenderPipeline>,
+        layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
+    ) {
+        // The renderer enters with the ordinary scene pipeline already bound.
+        // Public callers that do not opt into specialization retain the old
+        // contract and incur no per-node pipeline selection.
+        let mut current_pipeline = base_pipeline.map(|_| (false, false));
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.gi_only || node.indices.is_empty() || !node.in_view_frustum || node.occluded {
+            if !node.visible
+                || node.gi_only
+                || node.indices().is_empty()
+                || !node.in_view_frustum
+                || node.occluded
+            {
+                continue;
+            }
+            if gpu_driven_enabled
+                && self.gpu_driven_scene_active
+                && scene_node_gpu_driven_ready(node, imported_refraction_enabled)
+            {
+                continue;
+            }
+            if node.material.alpha_mode == MaterialAlphaMode::Blend {
+                continue;
+            }
+            if imported_refraction_enabled && node.material.transmission.is_active() {
                 continue;
             }
             // Active LOD overrides the base buffers for the camera pass
             // (shadows/picking/BLAS keep using the base geometry).
-            let (vb, ib, index_count) = match node
+            let active_lod = node
                 .lods
                 .get(node.active_lod.max(0) as usize)
-                .filter(|_| node.active_lod >= 0)
-                .and_then(|l| Some((l.gpu_vb.as_ref()?, l.gpu_ib.as_ref()?, l.gpu_index_count)))
-            {
-                Some(lod) => lod,
+                .filter(|_| node.active_lod >= 0);
+            let (vb, ib, index_count) = match active_lod {
+                Some(lod) => {
+                    let (Some(vb), Some(ib)) = (lod.gpu_vb.as_ref(), lod.gpu_ib.as_ref()) else {
+                        continue;
+                    };
+                    (vb, ib, lod.gpu_index_count)
+                }
                 None => {
                     let Some(vb) = &node.gpu_vb else { continue };
                     let Some(ib) = &node.gpu_ib else { continue };
                     (vb, ib, node.gpu_index_count)
                 }
             };
-            let Some(bg) = &node.gpu_uniform_bg else { continue };
-            let Some(mat_bg) = &node.gpu_material_bg else { continue };
+            let Some(bg) = &node.gpu_uniform_bg else {
+                continue;
+            };
+            let Some(base_material) = &node.gpu_material_bg else {
+                continue;
+            };
+            let layered_material = layered.and_then(|_| node.gpu_layered_material_bg.as_ref());
+            let uses_uv1 = layered_material.is_some() && node.gpu_layered_uses_uv1;
+            let secondary_uv = if uses_uv1 {
+                active_lod
+                    .and_then(|lod| lod.gpu_secondary_uv_vb.as_ref())
+                    .or(node.gpu_secondary_uv_vb.as_ref())
+            } else {
+                None
+            };
+            if uses_uv1 && secondary_uv.is_none() {
+                continue;
+            }
+            if let Some(base_pipeline) = base_pipeline {
+                let key = (layered_material.is_some(), uses_uv1);
+                if current_pipeline != Some(key) {
+                    if let (Some(layered), Some(_)) = (layered, layered_material) {
+                        pass.set_pipeline(layered.opaque_pipeline(uses_uv1, false));
+                    } else {
+                        pass.set_pipeline(base_pipeline);
+                    }
+                    current_pipeline = Some(key);
+                }
+            }
             pass.set_bind_group(0, bg, &[]);
-            pass.set_bind_group(2, mat_bg, &[]);
+            pass.set_bind_group(2, layered_material.unwrap_or(base_material), &[]);
             pass.set_vertex_buffer(0, vb.slice(..));
+            if let Some(secondary_uv) = secondary_uv {
+                pass.set_vertex_buffer(1, secondary_uv.slice(..));
+            }
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..index_count, 0, 0..1);
         }
+    }
+
+    pub fn has_transparent_nodes(&self) -> bool {
+        self.has_transparent_nodes
+    }
+
+    pub(crate) fn has_layered_transparent_nodes(&self) -> bool {
+        self.has_layered_transparent_nodes
+    }
+
+    pub fn has_refractive_nodes(&self) -> bool {
+        self.has_refractive_nodes
+    }
+
+    /// Constant-time guard for renderer paths that only need to inspect
+    /// physical-transmission metadata when at least one retained GI instance
+    /// can contribute it.
+    pub(crate) fn has_transmission_gi_nodes(&self) -> bool {
+        self.has_transmission_gi_nodes
+    }
+
+    pub(crate) fn transparent_gi_instance_count(&self) -> u32 {
+        if !self.has_transmission_gi_nodes {
+            return 0;
+        }
+        self.nodes
+            .iter()
+            .filter(|(_handle, node)| {
+                node.visible
+                    && node.card_first_slot.is_some()
+                    && !node.indices().is_empty()
+                    && node.material.has_gi_transmission()
+            })
+            .count()
+            .min(u32::MAX as usize) as u32
+    }
+
+    /// O(n) only after the O(1) refractive gate succeeds. Shadow visibility is
+    /// deliberately independent of the camera frustum: off-screen glass may
+    /// project into a visible receiver.
+    pub(crate) fn has_transmitted_shadow_casters(&self) -> bool {
+        self.has_refractive_nodes
+            && self.nodes.iter().any(|(_handle, node)| {
+                node.visible
+                    && !node.gi_only
+                    && node.cast_shadow
+                    && !node.indices().is_empty()
+                    && node.material.transmission.is_active()
+                    && node.gpu_refractive_material_bg.is_some()
+            })
+    }
+
+    pub(crate) fn has_visible_opaque_iridescence(&self, imported_refraction_enabled: bool) -> bool {
+        self.nodes.iter().any(|(_handle, node)| {
+            node.visible
+                && !node.gi_only
+                && !node.indices().is_empty()
+                && node.in_view_frustum
+                && !node.occluded
+                && node.material.alpha_mode != MaterialAlphaMode::Blend
+                && !(imported_refraction_enabled && node.material.transmission.is_active())
+                && node.material.layered_pbr.has_iridescence()
+                && node.gpu_layered_material_bg.is_some()
+        })
+    }
+
+    pub(crate) fn append_opaque_iridescence_draws<'a>(
+        &'a self,
+        out: &mut Vec<ImportedIridescenceDrawRef<'a>>,
+    ) {
+        for (_handle, node) in self.nodes.iter() {
+            if !node.visible
+                || node.gi_only
+                || node.indices().is_empty()
+                || !node.in_view_frustum
+                || node.occluded
+                || node.material.alpha_mode == MaterialAlphaMode::Blend
+                || (self.imported_refraction_enabled && node.material.transmission.is_active())
+                || !node.material.layered_pbr.has_iridescence()
+            {
+                continue;
+            }
+            let Some(uniforms) = node.gpu_uniform_bg.as_ref() else {
+                continue;
+            };
+            let Some(material) = node.gpu_layered_material_bg.as_ref() else {
+                continue;
+            };
+            let uses_uv1 = node.gpu_layered_uses_uv1;
+            let (vertex, index, index_count, secondary_uv) = match node
+                .lods
+                .get(node.active_lod.max(0) as usize)
+                .filter(|_| node.active_lod >= 0)
+                .filter(|lod| !uses_uv1 || lod.gpu_secondary_uv_vb.is_some())
+                .and_then(|lod| {
+                    Some((
+                        lod.gpu_vb.as_ref()?,
+                        lod.gpu_ib.as_ref()?,
+                        lod.gpu_index_count,
+                        if uses_uv1 {
+                            Some(lod.gpu_secondary_uv_vb.as_ref()?)
+                        } else {
+                            None
+                        },
+                    ))
+                }) {
+                Some(lod) => lod,
+                None => {
+                    let Some(vertex) = node.gpu_vb.as_ref() else {
+                        continue;
+                    };
+                    let Some(index) = node.gpu_ib.as_ref() else {
+                        continue;
+                    };
+                    let secondary_uv = if uses_uv1 {
+                        let Some(buffer) = node.gpu_secondary_uv_vb.as_ref() else {
+                            continue;
+                        };
+                        Some(buffer)
+                    } else {
+                        None
+                    };
+                    (vertex, index, node.gpu_index_count, secondary_uv)
+                }
+            };
+            out.push(ImportedIridescenceDrawRef {
+                uniforms,
+                material,
+                mesh: MeshDrawRef {
+                    vertex,
+                    index,
+                    first_index: 0,
+                    index_count,
+                    base_vertex: 0,
+                },
+                secondary_uv,
+                vertex_byte_offset: 0,
+                index_byte_offset: 0,
+            });
+        }
+    }
+
+    pub(crate) fn visible_transparent_node_count(
+        &self,
+        imported_refraction_enabled: bool,
+    ) -> usize {
+        if !self.has_transparent_nodes {
+            return 0;
+        }
+        self.nodes
+            .iter()
+            .filter(|(_handle, node)| {
+                node.visible
+                    && !node.gi_only
+                    && !node.indices().is_empty()
+                    && node.in_view_frustum
+                    && !node.occluded
+                    && node.material.alpha_mode == MaterialAlphaMode::Blend
+                    && !(imported_refraction_enabled && node.material.transmission.is_active())
+            })
+            .count()
+    }
+
+    pub(crate) fn visible_refractive_node_count(&self) -> usize {
+        if !self.has_refractive_nodes {
+            return 0;
+        }
+        self.nodes
+            .iter()
+            .filter(|(_handle, node)| {
+                node.visible
+                    && !node.gi_only
+                    && !node.indices().is_empty()
+                    && node.in_view_frustum
+                    && !node.occluded
+                    && node.material.transmission.is_active()
+            })
+            .count()
+    }
+
+    pub(crate) fn append_refractive_draws<'a>(
+        &'a self,
+        out: &mut Vec<ImportedRefractiveDrawRef<'a>>,
+        view_projection: &[[f32; 4]; 4],
+        stable_id_base: usize,
+    ) {
+        for (node_index, (_handle, node)) in self.nodes.iter().enumerate() {
+            if !node.visible
+                || node.gi_only
+                || node.indices().is_empty()
+                || !node.in_view_frustum
+                || node.occluded
+                || !node.material.transmission.is_active()
+            {
+                continue;
+            }
+            let uses_uv1 = node.gpu_refractive_uses_uv1;
+            let (vertex, index, index_count, secondary_uv) = match node
+                .lods
+                .get(node.active_lod.max(0) as usize)
+                .filter(|_| node.active_lod >= 0)
+                .filter(|lod| !uses_uv1 || lod.gpu_secondary_uv_vb.is_some())
+                .and_then(|lod| {
+                    Some((
+                        lod.gpu_vb.as_ref()?,
+                        lod.gpu_ib.as_ref()?,
+                        lod.gpu_index_count,
+                        if uses_uv1 {
+                            Some(lod.gpu_secondary_uv_vb.as_ref()?)
+                        } else {
+                            None
+                        },
+                    ))
+                }) {
+                Some(lod) => lod,
+                None => {
+                    let Some(vertex) = &node.gpu_vb else {
+                        continue;
+                    };
+                    let Some(index) = &node.gpu_ib else {
+                        continue;
+                    };
+                    let secondary_uv = if uses_uv1 {
+                        let Some(buffer) = node.gpu_secondary_uv_vb.as_ref() else {
+                            continue;
+                        };
+                        Some(buffer)
+                    } else {
+                        None
+                    };
+                    (vertex, index, node.gpu_index_count, secondary_uv)
+                }
+            };
+            let Some(uniforms) = &node.gpu_uniform_bg else {
+                continue;
+            };
+            let Some(material) = &node.gpu_refractive_material_bg else {
+                continue;
+            };
+            let center = if node.world_bounds_min[0] <= node.world_bounds_max[0] {
+                [
+                    (node.world_bounds_min[0] + node.world_bounds_max[0]) * 0.5,
+                    (node.world_bounds_min[1] + node.world_bounds_max[1]) * 0.5,
+                    (node.world_bounds_min[2] + node.world_bounds_max[2]) * 0.5,
+                ]
+            } else {
+                let transform = node.world_transform();
+                [transform[3][0], transform[3][1], transform[3][2]]
+            };
+            let pivot = crate::renderer::mat4_mul_vec4(
+                view_projection,
+                &[center[0], center[1], center[2], 1.0],
+            );
+            out.push(ImportedRefractiveDrawRef {
+                view_depth: pivot[3],
+                stable_id: stable_id_base + node_index,
+                double_sided: node.material.double_sided,
+                layered: node.gpu_refractive_layered,
+                uniforms,
+                material,
+                mesh: MeshDrawRef {
+                    vertex,
+                    index,
+                    first_index: 0,
+                    index_count,
+                    base_vertex: 0,
+                },
+                secondary_uv,
+                vertex_byte_offset: 0,
+                index_byte_offset: 0,
+            });
+        }
+    }
+
+    /// Render glTF BLEND nodes back-to-front into the forward translucent pass.
+    /// Opaque depth remains read-only; these nodes never enter the depth prepass.
+    pub fn render_transparent<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        single_sided_pipeline: &'a wgpu::RenderPipeline,
+        double_sided_pipeline: &'a wgpu::RenderPipeline,
+        view_projection: &[[f32; 4]; 4],
+    ) {
+        self.render_transparent_with_refraction(
+            pass,
+            single_sided_pipeline,
+            double_sided_pipeline,
+            view_projection,
+            false,
+        );
+    }
+
+    pub(crate) fn render_transparent_with_refraction<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        single_sided_pipeline: &'a wgpu::RenderPipeline,
+        double_sided_pipeline: &'a wgpu::RenderPipeline,
+        view_projection: &[[f32; 4]; 4],
+        imported_refraction_enabled: bool,
+    ) {
+        let mut draws = Vec::new();
+        self.append_transparent_draws(&mut draws, view_projection, 0, imported_refraction_enabled);
+        draws.sort_by(|left, right| {
+            right
+                .view_depth
+                .total_cmp(&left.view_depth)
+                .then_with(|| left.stable_id.cmp(&right.stable_id))
+        });
+        let mut current_double_sided = None;
+        for draw in draws {
+            if current_double_sided != Some(draw.double_sided) {
+                pass.set_pipeline(if draw.double_sided {
+                    double_sided_pipeline
+                } else {
+                    single_sided_pipeline
+                });
+                current_double_sided = Some(draw.double_sided);
+            }
+            pass.set_bind_group(0, draw.uniforms, &[]);
+            pass.set_bind_group(2, draw.material, &[]);
+            pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+            pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(draw.mesh.index_range(), draw.mesh.base_vertex, 0..1);
+        }
+    }
+
+    pub(crate) fn append_transparent_draws<'a>(
+        &'a self,
+        out: &mut Vec<ImportedTransparentDrawRef<'a>>,
+        view_projection: &[[f32; 4]; 4],
+        stable_id_base: usize,
+        imported_refraction_enabled: bool,
+    ) {
+        for (node_index, (_handle, node)) in self.nodes.iter().enumerate() {
+            if !node.visible
+                || node.gi_only
+                || node.indices().is_empty()
+                || !node.in_view_frustum
+                || node.occluded
+                || node.material.alpha_mode != MaterialAlphaMode::Blend
+                || (imported_refraction_enabled && node.material.transmission.is_active())
+            {
+                continue;
+            }
+            let Some(uniforms) = &node.gpu_uniform_bg else {
+                continue;
+            };
+            let Some(base_material) = &node.gpu_material_bg else {
+                continue;
+            };
+            let layered_material = node.gpu_layered_material_bg.as_ref();
+            let uses_uv1 = layered_material.is_some() && node.gpu_layered_uses_uv1;
+            let (vb, ib, index_count, secondary_uv) = match node
+                .lods
+                .get(node.active_lod.max(0) as usize)
+                .filter(|_| node.active_lod >= 0)
+                .filter(|lod| !uses_uv1 || lod.gpu_secondary_uv_vb.is_some())
+                .and_then(|lod| {
+                    Some((
+                        lod.gpu_vb.as_ref()?,
+                        lod.gpu_ib.as_ref()?,
+                        lod.gpu_index_count,
+                        if uses_uv1 {
+                            Some(lod.gpu_secondary_uv_vb.as_ref()?)
+                        } else {
+                            None
+                        },
+                    ))
+                }) {
+                Some(lod) => lod,
+                None => {
+                    let Some(vb) = &node.gpu_vb else { continue };
+                    let Some(ib) = &node.gpu_ib else { continue };
+                    let secondary_uv = if uses_uv1 {
+                        let Some(buffer) = node.gpu_secondary_uv_vb.as_ref() else {
+                            continue;
+                        };
+                        Some(buffer)
+                    } else {
+                        None
+                    };
+                    (vb, ib, node.gpu_index_count, secondary_uv)
+                }
+            };
+            let center = if node.world_bounds_min[0] <= node.world_bounds_max[0] {
+                [
+                    (node.world_bounds_min[0] + node.world_bounds_max[0]) * 0.5,
+                    (node.world_bounds_min[1] + node.world_bounds_max[1]) * 0.5,
+                    (node.world_bounds_min[2] + node.world_bounds_max[2]) * 0.5,
+                ]
+            } else {
+                let transform = node.world_transform();
+                [transform[3][0], transform[3][1], transform[3][2]]
+            };
+            let pivot = crate::renderer::mat4_mul_vec4(
+                view_projection,
+                &[center[0], center[1], center[2], 1.0],
+            );
+            out.push(ImportedTransparentDrawRef {
+                view_depth: pivot[3],
+                stable_id: stable_id_base + node_index,
+                double_sided: node.material.double_sided,
+                layered: layered_material.is_some(),
+                uniforms,
+                material: layered_material.unwrap_or(base_material),
+                mesh: MeshDrawRef {
+                    vertex: vb,
+                    index: ib,
+                    first_index: 0,
+                    index_count,
+                    base_vertex: 0,
+                },
+                secondary_uv,
+                vertex_byte_offset: 0,
+                index_byte_offset: 0,
+            });
+        }
+    }
+
+    /// Append retained-node records directly into the renderer's reused
+    /// draw scratch. Off-frustum nodes remain in the list so the compute
+    /// culler, rather than the CPU submission loop, owns visibility.
+    pub(crate) fn append_gpu_driven_draws(&self, out: &mut Vec<GpuDrawRecord>) -> [u32; 3] {
+        let mut compatibility = 0u32;
+        let mut visible = 0u32;
+        let mut culled = 0u32;
+        if !self.gpu_driven_scene_active {
+            compatibility = self
+                .nodes
+                .iter()
+                .filter(|(_, node)| {
+                    node.visible
+                        && !node.gi_only
+                        && !node.indices().is_empty()
+                        && node.in_view_frustum
+                        && !node.occluded
+                })
+                .count() as u32;
+            return [compatibility, visible, culled];
+        }
+        for (_handle, node) in self.nodes.iter() {
+            if !node.visible || node.gi_only || node.indices().is_empty() || node.occluded {
+                continue;
+            }
+            if !scene_node_gpu_driven_ready(node, self.imported_refraction_enabled) {
+                compatibility += u32::from(node.in_view_frustum);
+                continue;
+            }
+            let Some(slice) = node.gpu_geometry else {
+                compatibility += u32::from(node.in_view_frustum);
+                continue;
+            };
+            let Some(slot) = node.uniform_slot else {
+                compatibility += u32::from(node.in_view_frustum);
+                continue;
+            };
+            let offset = slot as usize * NODE_UNIFORM_STRIDE as usize;
+            let end = offset + std::mem::size_of::<NodeUniforms>();
+            let Some(bytes) = self.scratch.get(offset..end) else {
+                compatibility += u32::from(node.in_view_frustum);
+                continue;
+            };
+            let uniforms = bytemuck::pod_read_unaligned::<Uniforms3D>(bytes);
+            out.push(GpuDrawRecord {
+                uniforms,
+                bounds_min: [
+                    node.world_bounds_min[0],
+                    node.world_bounds_min[1],
+                    node.world_bounds_min[2],
+                    f32::from_bits(gpu_driven::draw_flags(node.material.double_sided, true)),
+                ],
+                bounds_max: [
+                    node.world_bounds_max[0],
+                    node.world_bounds_max[1],
+                    node.world_bounds_max[2],
+                    0.0,
+                ],
+                draw: [
+                    node.gpu_index_count,
+                    slice.first_index,
+                    slice.base_vertex as u32,
+                    node.gpu_material_id.raw(),
+                ],
+            });
+            if node.in_view_frustum {
+                visible += 1;
+            } else {
+                culled += 1;
+            }
+        }
+        [compatibility, visible, culled]
     }
 
     pub fn node_count(&self) -> usize {
@@ -1235,128 +2713,66 @@ impl SceneGraph {
     /// different set. Base geometry only (no LOD swap): the probe is
     /// half-res and consumed through a perturbed water lookup, where a
     /// LOD pop would be more visible than the detail it saves.
-    /// (Treats node.transform as world — flat hierarchies.)
-    pub fn reflect_draw_list(&self)
-        -> Vec<(&wgpu::Buffer, &wgpu::Buffer, u32, &wgpu::BindGroup, [[f32; 4]; 4], [f32; 3], [f32; 3])>
-    {
+    /// (Treats the composed public × imported transform as world.)
+    pub fn reflect_draw_list(
+        &self,
+    ) -> Vec<(
+        &wgpu::Buffer,
+        &wgpu::Buffer,
+        u32,
+        &wgpu::BindGroup,
+        [[f32; 4]; 4],
+        [f32; 3],
+        [f32; 3],
+    )> {
+        self.reflect_draw_list_with_refraction(false)
+    }
+
+    pub(crate) fn reflect_draw_list_with_refraction(
+        &self,
+        imported_refraction_enabled: bool,
+    ) -> Vec<(
+        &wgpu::Buffer,
+        &wgpu::Buffer,
+        u32,
+        &wgpu::BindGroup,
+        [[f32; 4]; 4],
+        [f32; 3],
+        [f32; 3],
+    )> {
         let mut out = Vec::new();
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.gi_only || node.indices.is_empty() { continue; }
+            if !node.visible
+                || node.gi_only
+                || node.material.alpha_mode == MaterialAlphaMode::Blend
+                || (imported_refraction_enabled && node.material.transmission.is_active())
+                || node.indices().is_empty()
+            {
+                continue;
+            }
             let Some(vb) = &node.gpu_vb else { continue };
             let Some(ib) = &node.gpu_ib else { continue };
-            let Some(mat_bg) = &node.gpu_material_bg else { continue };
+            let Some(mat_bg) = &node.gpu_material_bg else {
+                continue;
+            };
             // World bounds ride along so the probe pass can frustum-cull
             // against the MIRRORED camera (main-camera cull flags don't
             // apply there). Sentinel (min > max) = not yet computed →
             // never culled.
             out.push((
-                vb, ib, node.gpu_index_count, mat_bg, node.transform,
-                node.world_bounds_min, node.world_bounds_max,
+                vb,
+                ib,
+                node.gpu_index_count,
+                mat_bg,
+                node.world_transform(),
+                node.world_bounds_min,
+                node.world_bounds_max,
             ));
         }
         out
     }
 }
 
-// ============================================================
-// Matrix math (4x4, column-major)
-// ============================================================
-
-// ============================================================
-// Frustum culling
-// ============================================================
-// Gribb-Hartmann plane extraction: for a column-major clip matrix M,
-// each plane = ±row_i + row_3. We build 6 planes (left/right/bottom/
-// top/near/far) in world space directly from the VP matrix, so every
-// plane-test below is a world-space dot product.
-//
-// A node's world-space AABB is outside the frustum if ALL 8 of its
-// corners are on the negative side of ANY single plane. The standard
-// "positive-vertex-only" optimization is skipped here — testing 8
-// corners is still a few dozen multiplies per node, trivial compared
-// to the per-node GPU cost we skip on a cull hit.
-//
-// Plane format: [nx, ny, nz, d] where `nx*x + ny*y + nz*z + d >= 0`
-// means the point is inside that plane's half-space. No normalization
-// — we only care about the sign.
-
-/// Longest NDC-extent of a world AABB under `vp` — the "screen coverage"
-/// that drives LOD selection (1.0 = spans the full viewport). Corners at
-/// or behind the near plane return 1.0 (force the finest level).
-fn aabb_screen_coverage(vp: &[[f32; 4]; 4], wmin: [f32; 3], wmax: [f32; 3]) -> f32 {
-    let mut lo = [f32::MAX, f32::MAX];
-    let mut hi = [f32::MIN, f32::MIN];
-    for ix in 0..2 {
-        for iy in 0..2 {
-            for iz in 0..2 {
-                let x = if ix == 0 { wmin[0] } else { wmax[0] };
-                let y = if iy == 0 { wmin[1] } else { wmax[1] };
-                let z = if iz == 0 { wmin[2] } else { wmax[2] };
-                let cw = vp[0][3] * x + vp[1][3] * y + vp[2][3] * z + vp[3][3];
-                if cw <= 1e-3 {
-                    return 1.0;
-                }
-                let cx = (vp[0][0] * x + vp[1][0] * y + vp[2][0] * z + vp[3][0]) / cw;
-                let cy = (vp[0][1] * x + vp[1][1] * y + vp[2][1] * z + vp[3][1]) / cw;
-                lo[0] = lo[0].min(cx);
-                lo[1] = lo[1].min(cy);
-                hi[0] = hi[0].max(cx);
-                hi[1] = hi[1].max(cy);
-            }
-        }
-    }
-    // NDC spans -1..1, so extent/2 = fraction of the viewport.
-    (((hi[0] - lo[0]).max(hi[1] - lo[1])) * 0.5).clamp(0.0, 1.0)
-}
-
-pub(crate) fn extract_frustum_planes(vp: &[[f32; 4]; 4]) -> [[f32; 4]; 6] {
-    // Row vectors of the column-major matrix: row_i[col] = vp[col][i].
-    let row = |i: usize| [vp[0][i], vp[1][i], vp[2][i], vp[3][i]];
-    let r0 = row(0); let r1 = row(1); let r2 = row(2); let r3 = row(3);
-    let add = |a: [f32;4], b: [f32;4]| [a[0]+b[0], a[1]+b[1], a[2]+b[2], a[3]+b[3]];
-    let sub = |a: [f32;4], b: [f32;4]| [a[0]-b[0], a[1]-b[1], a[2]-b[2], a[3]-b[3]];
-    [
-        add(r3, r0), // left
-        sub(r3, r0), // right
-        add(r3, r1), // bottom
-        sub(r3, r1), // top
-        r2,          // near (wgpu uses 0..1 depth → near = row_2)
-        sub(r3, r2), // far
-    ]
-}
-
-pub(crate) fn aabb_outside_frustum(planes: &[[f32; 4]; 6], bmin: [f32; 3], bmax: [f32; 3]) -> bool {
-    for p in planes.iter() {
-        let mut all_outside = true;
-        for ix in 0..2 {
-            let x = if ix == 0 { bmin[0] } else { bmax[0] };
-            for iy in 0..2 {
-                let y = if iy == 0 { bmin[1] } else { bmax[1] };
-                for iz in 0..2 {
-                    let z = if iz == 0 { bmin[2] } else { bmax[2] };
-                    if p[0]*x + p[1]*y + p[2]*z + p[3] >= 0.0 {
-                        all_outside = false;
-                        break;
-                    }
-                }
-                if !all_outside { break; }
-            }
-            if !all_outside { break; }
-        }
-        if all_outside { return true; }
-    }
-    false
-}
-
-fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut result = [[0.0f32; 4]; 4];
-    for col in 0..4 {
-        for row in 0..4 {
-            result[col][row] = a[0][row] * b[col][0]
-                             + a[1][row] * b[col][1]
-                             + a[2][row] * b[col][2]
-                             + a[3][row] * b[col][3];
-        }
-    }
-    result
-}
+mod helpers;
+use helpers::*;
+pub(crate) use helpers::{aabb_outside_frustum, extract_frustum_planes};

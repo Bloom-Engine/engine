@@ -86,6 +86,23 @@ fn alloc_perry_string(s: &str) -> i64 {
     }
 }
 
+/// watchOS currently ships the explicit SceneKit proof-of-life renderer, not
+/// the shared wgpu renderer. Capability queries must say so instead of
+/// returning a null string or pretending a setter succeeded.
+#[no_mangle]
+pub extern "C" fn bloom_get_renderer_capabilities() -> i64 {
+    alloc_perry_string(
+        r#"{"version":1,"availability":"unavailable","reason":"watchOS uses the proof-of-life SceneKit renderer; shared wgpu rendering is unavailable","adapter":null,"material_binding":null,"runtime_support":{"hardware_ray_query":false,"path_tracing":false,"gpu_driven":{"enabled":false,"indirect_count_supported":false,"submitted":0,"compatibility":0,"indirect_calls":0,"frustum_visible_oracle":0,"frustum_culled_oracle":0,"frustum_culled_ratio":0.0,"classification_source":"unavailable"},"imported_refraction":"disabled-legacy","transparency_modes":[]}}"#,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_material_binding_capabilities() -> i64 {
+    alloc_perry_string(
+        r#"{"version":1,"detected_tier":"C","selected_tier":"C","override_tier":null,"features":{"texture_binding_array":false,"non_uniform_indexing":false},"limits":{"max_binding_array_elements":0,"max_binding_array_samplers":0,"max_texture_array_layers":0,"max_sampled_textures":0,"max_samplers":0,"max_material_records":0},"capacities":{"tier_a_textures":0,"tier_a_samplers":0,"tier_b_page_layers":0},"diagnostic":"watchOS shared wgpu renderer unavailable","residency":{"materials":0,"textures":0,"samplers":0,"meshes":0,"buffer_views":0,"stale_fallbacks":0,"limit_fallbacks":0},"dispatch":{"tier_a_per_material_bind_group_switches":0,"tier_b_last_page_count":0,"tier_b_last_page_switches":0,"tier_b_last_fallback_materials":0}}"#,
+    )
+}
+
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -397,6 +414,7 @@ pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
 }
 
 #[no_mangle] pub extern "C" fn bloom_is_key_pressed(_k: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_is_key_repeated(_k: f64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_is_key_down(_k: f64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_is_key_released(_k: f64) -> f64 { 0.0 }
 
@@ -819,27 +837,33 @@ pub extern "C" fn bloom_load_music(path: i64) -> f64 {
 
 #[no_mangle] pub extern "C" fn bloom_scene_create_node() -> f64 { scene::create() as f64 }
 #[no_mangle] pub extern "C" fn bloom_scene_destroy_node(h: f64) { scene::destroy(h as u32); }
-#[no_mangle] pub extern "C" fn bloom_scene_set_visible(h: f64, v: f64) {
+#[no_mangle] pub extern "C" fn bloom_scene_set_visible(h: f64, v: f64) -> f64 {
     scene::set_visible(h as u32, v > 0.5);
+    1.0
 }
-#[no_mangle] pub extern "C" fn bloom_scene_set_cast_shadow(_h: f64, _v: f64) {
+#[no_mangle] pub extern "C" fn bloom_scene_set_cast_shadow(_h: f64, _v: f64) -> f64 {
     // SceneKit manages shadow casting via per-node + light config; deferred.
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_scene_set_receive_shadow(_h: f64, _v: f64) {}
-#[no_mangle] pub extern "C" fn bloom_scene_set_parent(h: f64, parent: f64) {
+#[no_mangle] pub extern "C" fn bloom_scene_set_receive_shadow(_h: f64, _v: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_parent(h: f64, parent: f64) -> f64 {
     scene::set_parent(h as u32, parent as u32);
+    1.0
 }
 
 /// Transform is a raw pointer to 16 column-major f64s (128 bytes). No
 /// StringHeader wrapping — bloom's TS side passes a `number[]` which Perry
 /// forwards as a pointer to the Float64 data.
 #[no_mangle]
-pub extern "C" fn bloom_scene_set_transform(handle: f64, matrix_ptr: i64) {
-    if matrix_ptr == 0 { return; }
+pub extern "C" fn bloom_scene_set_transform(handle: f64, matrix_ptr: i64) -> f64 {
+    if matrix_ptr == 0 { return 0.0; }
     let src = unsafe { std::slice::from_raw_parts(matrix_ptr as *const f64, 16) };
     let mut arr = [0.0f32; 16];
     for i in 0..16 { arr[i] = src[i] as f32; }
     scene::set_transform(handle as u32, arr);
+    1.0
 }
 
 /// Geometry: vert_ptr points to `vertex_count * 12` f64s (12 floats per
@@ -859,16 +883,19 @@ pub extern "C" fn bloom_scene_update_geometry(
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_scene_set_material_color(h: f64, r: f64, g: f64, b: f64, a: f64) {
-    scene::set_color(h as u32, [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]);
+pub extern "C" fn bloom_scene_set_material_color(h: f64, r: f64, g: f64, b: f64, a: f64) -> f64 {
+    scene::set_color(h as u32, [r as f32, g as f32, b as f32, a as f32]);
+    1.0
 }
 #[no_mangle]
-pub extern "C" fn bloom_scene_set_material_pbr(h: f64, roughness: f64, metalness: f64) {
+pub extern "C" fn bloom_scene_set_material_pbr(h: f64, roughness: f64, metalness: f64) -> f64 {
     scene::set_pbr(h as u32, roughness as f32, metalness as f32);
+    1.0
 }
 #[no_mangle]
-pub extern "C" fn bloom_scene_set_material_texture(h: f64, tex: f64) {
+pub extern "C" fn bloom_scene_set_material_texture(h: f64, tex: f64) -> f64 {
     scene::set_texture(h as u32, tex as u32);
+    1.0
 }
 #[no_mangle] pub extern "C" fn bloom_scene_node_count() -> f64 { scene::node_count() as f64 }
 
@@ -1033,23 +1060,31 @@ fn apply_primitive(handle: u32, prim: &models::Primitive) {
 
 #[no_mangle] pub extern "C" fn bloom_enable_postfx() { postfx::set_enabled(true); }
 #[no_mangle] pub extern "C" fn bloom_disable_postfx() { postfx::set_enabled(false); }
-#[no_mangle] pub extern "C" fn bloom_set_vignette(strength: f64, softness: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_vignette(strength: f64, softness: f64) -> f64 {
     postfx::set_vignette(strength, softness);
+    1.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) -> f64 {
     postfx::set_chromatic_aberration(strength);
+    1.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_film_grain(strength: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_film_grain(strength: f64) -> f64 {
     postfx::set_film_grain(strength);
+    1.0
 }
-#[no_mangle] pub extern "C" fn bloom_set_manual_exposure(v: f64) { postfx::set_exposure(v); }
-#[no_mangle] pub extern "C" fn bloom_set_auto_exposure(on: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_manual_exposure(v: f64) -> f64 {
+    postfx::set_exposure(v);
+    1.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_auto_exposure(on: f64) -> f64 {
     postfx::set_auto_exposure(on > 0.5);
+    1.0
 }
 #[no_mangle] pub extern "C" fn bloom_set_sun_shafts(
     strength: f64, decay: f64, r: f64, g: f64, b: f64,
-) {
+) -> f64 {
     postfx::set_sun_shafts(strength, decay, r, g, b);
+    1.0
 }
 
 #[no_mangle]

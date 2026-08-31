@@ -1,0 +1,161 @@
+{
+  "schema": "bloom-vsm-local-lights-evidence-v1",
+  "issue": 132,
+  "qualified_head": "6a70ca7d8fe044f042035fe7ad61b3be012e44c7",
+  "hardware_capture_revision": "a01cf8a",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end",
+    "width": 2560,
+    "height": 1440
+  },
+  "runtime_contract": {
+    "api": "addShadowedPointLight",
+    "submission_limit": 256,
+    "admission_limit": 5,
+    "faces_per_light": 6,
+    "maximum_local_pages": 30,
+    "shared_render_budget_pages": 8,
+    "fallback": "suppress-direct-contribution",
+    "pending_intensity": 0,
+    "activation": "all-six-faces-resident-and-clean",
+    "admission_order": [
+      "nearest-influence",
+      "emitted-energy",
+      "stable-submission-index"
+    ],
+    "unsupported": [
+      "lower-tier",
+      "web",
+      "path-tracing",
+      "shadows-disabled",
+      "invalid-input",
+      "submission-overflow"
+    ],
+    "no_request_shader_path": "uniform-early-out-before-local-metadata",
+    "sampling_uniform_bytes": 6384,
+    "sampling_uniform_bytes_added": 6176
+  },
+  "fixture": {
+    "example": "examples/quality-stress/main.ts",
+    "candidate_flag": "--vsm-local-lights",
+    "reference_flag": "--vsm-local-reference",
+    "submitted": 128,
+    "visible": 128,
+    "admitted": 5,
+    "budget_suppressed": 123,
+    "admitted_submission_indices": [0, 1, 2, 3, 4]
+  },
+  "cold_cache": {
+    "local": {
+      "active_shaded": 1,
+      "requested_pages": 30,
+      "resident_pages": 30,
+      "dirty_pages": 22,
+      "rendered_pages": 8
+    },
+    "shared": {
+      "physical_capacity": 256,
+      "resident_pages": 254,
+      "dirty_pages": 246,
+      "requested_pages": 254,
+      "cache_hits": 0,
+      "cache_misses": 254,
+      "denied_pages": 0,
+      "rendered_pages": 8,
+      "render_budget": 8,
+      "gpu_total_bytes": 19958000
+    },
+    "directional": {
+      "requested_pages": 224,
+      "resident_pages": 224,
+      "dirty_pages": 224,
+      "rendered_pages": 0,
+      "fallback": "csm"
+    },
+    "frame_sha256": "2ac7c645ec5bcb51b193308bf610275ef907fe58c6b073ee04343c601d19eee2",
+    "telemetry_sha256": "064e25cb45418835bf01992ff4eda4a4c798ad9a47b2d77e3bce329f7af59c4f",
+    "validator": "pass"
+  },
+  "warm_cache": {
+    "local": {
+      "active_shaded": 5,
+      "requested_pages": 30,
+      "resident_pages": 30,
+      "dirty_pages": 0,
+      "rendered_pages": 0
+    },
+    "shared": {
+      "physical_capacity": 256,
+      "resident_pages": 254,
+      "dirty_pages": 0,
+      "requested_pages": 254,
+      "cache_hits": 254,
+      "cache_misses": 0,
+      "denied_pages": 0,
+      "rendered_pages": 0,
+      "render_budget": 8,
+      "gpu_total_bytes": 19958000
+    },
+    "directional": {
+      "requested_pages": 224,
+      "resident_pages": 224,
+      "dirty_pages": 0,
+      "rendered_pages": 0
+    },
+    "frame_sha256": "f6226c53cdb82d91552c5ab7a8b04fa84f9427ca617d0a52a10fea013822ac63",
+    "telemetry_sha256": "27eae425df1800cfa446a302334babd3b7f79b17317c7bb22fc11d6a023581a5",
+    "validator": "pass"
+  },
+  "controlled_image_oracle": {
+    "reference": "same-scene-five-unshadowed-point-lights",
+    "reference_sha256": "a134f3d0742741f9ac7066c80d2476b490c4991eb64372e982074b5c116f00d7",
+    "candidate_sha256": "f6226c53cdb82d91552c5ab7a8b04fa84f9427ca617d0a52a10fea013822ac63",
+    "selected_pixels": 3686400,
+    "rmse_luminance": 0.010086859,
+    "rmse_r": 0.010025156,
+    "rmse_g": 0.010437236,
+    "rmse_b": 0.007599535,
+    "max_abs_error": 0.588235319,
+    "percent_above_0_02": 0.857964396,
+    "ssim_luminance": 0.994366527,
+    "mean_oklab_delta": 0.000701895,
+    "mean_edge_delta": 0.000410529,
+    "visual_review": "pass-localized-occlusion-no-page-or-cube-seam-artifacts"
+  },
+  "post_capture_changes": [
+    {
+      "revision": "630cb23",
+      "scope": "uniform no-local-request shader early-out"
+    },
+    {
+      "revision": "93ebdc3",
+      "scope": "move tests out of runtime source file"
+    },
+    {
+      "revision": "6a70ca7",
+      "scope": "format extracted test file"
+    }
+  ],
+  "qualification": {
+    "quick_lane": "pass",
+    "ffi_schema_parity": "pass",
+    "format": "pass",
+    "strict_clippy": "pass",
+    "file_size_ratchet": "pass",
+    "wasm32_web_feature_check": "pass",
+    "shared_unit_tests_passed": 355,
+    "shared_unit_tests_ignored": 1,
+    "headless_device_tests_passed": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "quality_oracle_tests_passed": 39,
+    "visual_metric_tests_passed": 3,
+    "asset_cooker_tests_passed": 17,
+    "canonical_examples": 20
+  },
+  "passed": true
+}

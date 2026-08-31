@@ -1,5 +1,9 @@
 # Migrating to Bloom 0.5
 
+> **Preview:** this guide describes the next public API/ABI. The npm package is
+> still on the 0.4 release line; use this document when testing the 0.5 branch or
+> preparing an upgrade.
+
 0.5 makes the API consistent in three places where conventions silently
 diverged. Each change is breaking on purpose — the old inconsistencies
 caused invisible bugs (colors that rendered white, rotations that were

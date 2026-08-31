@@ -1,0 +1,192 @@
+{
+  "schema": "bloom-layered-pbr-qualification-v1",
+  "issue": 134,
+  "qualified_revision": "2b996932fcdaedf0f0604fd6de2f7f314e1ac433",
+  "commits": {
+    "clearcoat_normal_motion": "eca754ee28ff9cdef04277398b33e867f55e603e",
+    "angular_reference": "ad97e77fc3558c86d5774d63d16e28b76a0a15ac",
+    "renderer_parity": "21356b8541b52155d2136044b39a927ab3373949",
+    "visibility_parity": "2b996932fcdaedf0f0604fd6de2f7f314e1ac433"
+  },
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "ray_query": true
+  },
+  "angular_reference": {
+    "path": "tools/bloom-reference/reference/layered-pbr-angular-v1.json",
+    "sha256": "110142a66bc22acaf0e7f6664a86f135b194fc62d203f1a92b685fbf2487f309",
+    "corpus_version": 1,
+    "material_contract_version": 4,
+    "rows": 63,
+    "scenarios": 7,
+    "view_directions_per_scenario": 3,
+    "light_directions_per_view": 3,
+    "serialized_decimal_places": 6,
+    "regeneration": "byte exact",
+    "cpu_component_absolute_tolerance": 0.00003,
+    "reciprocity_max_absolute_tolerance": 0.00003,
+    "measured_maximum_reciprocity_error": 0.0,
+    "known_model_differences_recorded": 5
+  },
+  "renderer_parity": {
+    "path_tracing_frames": 64,
+    "sample_region": [32, 32],
+    "base_forward_mean_rgb": [90.0, 51.0, 9.0],
+    "base_path_traced_mean_rgb": [77.52734375, 43.26953125, 6.0],
+    "thresholds": {
+      "forward_path_mean_rgb_mae_max": 24.0,
+      "final_rgb_cosine_min": 0.96,
+      "relative_display_luminance_max": 0.3,
+      "significant_reference_response_length_min": 0.01,
+      "path_reference_response_cosine_min": 0.85,
+      "small_reference_display_response_max": 12.0
+    },
+    "lobes": {
+      "specular_ior": {
+        "reference_response": [0.007436, -0.000063, -0.00079],
+        "forward_display_response": [-1.9345703125, -3.951171875, -3.0],
+        "path_traced_display_response": [5.4453125, -0.259765625, -2.0],
+        "mean_rgb_mae": 3.7106,
+        "final_rgb_cosine": 0.999774,
+        "relative_display_luminance": 0.0779,
+        "path_reference_response_cosine": 0.969229
+      },
+      "clearcoat": {
+        "reference_response": [-0.005981, -0.002855, -0.000934],
+        "forward_display_response": [-3.5361328125, -5.1328125, -3.3291015625],
+        "path_traced_display_response": [-4.3955078125, -3.03125, -1.1025390625],
+        "mean_rgb_mae": 6.5781,
+        "final_rgb_cosine": 0.999883,
+        "relative_display_luminance": 0.134,
+        "path_reference_response_cosine": 0.985841
+      },
+      "sheen": {
+        "reference_response": [-0.002722, 0.012178, 0.021441],
+        "forward_display_response": [-4.798828125, 7.388671875, 31.435546875],
+        "path_traced_display_response": [-4.404296875, 12.037109375, 35.904296875],
+        "mean_rgb_mae": 5.543,
+        "final_rgb_cosine": 0.997531,
+        "relative_display_luminance": 0.0743,
+        "path_reference_response_cosine": 0.98164
+      },
+      "anisotropy": {
+        "reference_response": [0.07438, 0.038742, 0.023386],
+        "forward_display_response": [6.533203125, 4.552734375, 7.3076171875],
+        "path_traced_display_response": [35.2548828125, 31.4404296875, 36.201171875],
+        "mean_rgb_mae": 20.4333,
+        "final_rgb_cosine": 0.985835,
+        "relative_display_luminance": 0.2365,
+        "path_reference_response_cosine": 0.904537
+      },
+      "iridescence": {
+        "reference_response": [0.010727, 0.000695, -0.000338],
+        "forward_display_response": [0.3837890625, -2.263671875, -2.64453125],
+        "path_traced_display_response": [7.42578125, 0.7099609375, -1.0],
+        "mean_rgb_mae": 3.8477,
+        "final_rgb_cosine": 0.999813,
+        "relative_display_luminance": 0.0854,
+        "path_reference_response_cosine": 0.994356
+      },
+      "combined": {
+        "reference_response": [0.005716, 0.024878, 0.021724],
+        "forward_display_response": [-9.62109375, 1.978515625, 21.970703125],
+        "path_traced_display_response": [0.814453125, 22.419921875, 35.2548828125],
+        "mean_rgb_mae": 8.3441,
+        "final_rgb_cosine": 0.991555,
+        "relative_display_luminance": 0.1411,
+        "path_reference_response_cosine": 0.948319
+      }
+    },
+    "status": "pass"
+  },
+  "clearcoat_normal_motion": {
+    "camera_motion_mean_rgb": 2.432037,
+    "visible_filtered_response_mean_rgb": 0.205539,
+    "maximum_texture_specific_adjacent_frame_residual_mean_rgb": 0.532235,
+    "coherent_outlier_channel_fraction": 0.0,
+    "thresholds": {
+      "maximum_residual_mean_rgb": 1.5,
+      "maximum_coherent_outlier_channel_fraction": 0.02
+    },
+    "status": "pass"
+  },
+  "visibility_parity": {
+    "architecture": "visibility-eligible geometry plus authoritative forward compatibility for layered materials",
+    "layered_materials": [
+      "specular_ior",
+      "clearcoat",
+      "sheen",
+      "anisotropy",
+      "iridescence",
+      "combined"
+    ],
+    "moving_layered_draws": 6,
+    "specialization_available": true,
+    "specialization_initialized": true,
+    "sheen_lut_initialized": true,
+    "final_output": {
+      "components": 81920,
+      "changed_components": 150,
+      "maximum_code_delta": 1,
+      "mean_code_delta": 0.00183105
+    },
+    "hdr_scene_rgba16float": {
+      "components": 81920,
+      "changed_components": 1838,
+      "maximum_absolute_delta": 0.000854492,
+      "mean_absolute_delta": 0.000003760681
+    },
+    "material_properties_rg8unorm": {
+      "components": 40960,
+      "changed_components": 19,
+      "maximum_code_delta": 1,
+      "mean_code_delta": 0.000463867
+    },
+    "motion_vectors_rg16float": {
+      "components": 40960,
+      "changed_components": 55,
+      "maximum_absolute_delta": 0.000003815,
+      "mean_absolute_delta": 0.000000005122
+    },
+    "albedo_rgba8unorm": {
+      "components": 81920,
+      "changed_components": 80,
+      "maximum_code_delta": 1,
+      "mean_code_delta": 0.000976562
+    },
+    "status": "pass"
+  },
+  "regression_qualification": {
+    "lane": "quick",
+    "status": "pass",
+    "duration_seconds": 25,
+    "unit_tests_passed": 328,
+    "unit_tests_ignored": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "reference_release_tests_passed": 19,
+    "strict_lint": "pass",
+    "ffi_schema_parity": "pass",
+    "wasm32_web_check": "pass",
+    "quality_governance": "pass",
+    "visual_fault_controls": "pass",
+    "canonical_examples_passed": 20
+  },
+  "shipping_runtime_delta": {
+    "render_graph_passes": 0,
+    "images": 0,
+    "shader_branches": 0,
+    "gpu_allocations": 0,
+    "bindings": 0,
+    "per_frame_work": 0
+  },
+  "resolved_dependency": {
+    "issue": 27,
+    "component": "visibility-buffer renderer",
+    "implemented": true,
+    "layered_material_route": "forward compatibility",
+    "issue_134_cross_path_acceptance_complete": true
+  }
+}
