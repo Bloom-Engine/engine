@@ -411,6 +411,27 @@ Defined classes:
 - `nvidia-rtx4080-vulkan`: Vulkan discrete high-end baseline, including VRAM;
 - `apple-m1-metal-constrained`: constrained preset/render-scale gate.
 
+Hard-budget runs also protect their CPU measurements with a host-load gate.
+Before building or capturing, the runner requires three consecutive samples
+below the machine class's aggregate and single-process CPU limits. If the host
+does not settle within 120 seconds, the command exits with code 3 and writes
+`host-preflight.json`; this means **retry when idle**, not a renderer failure.
+Every completed case also writes `host-postflight.json`. If unrelated work
+starts during a capture, its performance numbers are invalidated instead of
+being compared with the hard budgets.
+
+On a shared workstation, let the runner wait longer rather than weakening a
+budget:
+
+```sh
+python3 tools/quality/run.py run full \
+  --machine-class apple-m1-max-metal \
+  --host-idle-timeout 1800
+```
+
+The wait changes only when measurement begins. It does not change scene
+quality, warm-up frames, measured frames, or any CPU/GPU limit.
+
 The high-end hardware jobs also prove that temporal reconstruction retains a
 real throughput advantage rather than assuming one from pixel count:
 

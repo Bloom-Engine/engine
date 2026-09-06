@@ -394,11 +394,13 @@ run_component() {
           --case "$BLOOM_QUALITY_CASE" \
           --machine-class "$BLOOM_QUALITY_MACHINE_CLASS" \
           --out "$quality_out" \
+          --host-idle-timeout "${BLOOM_QUALITY_HOST_IDLE_TIMEOUT:-120}" \
           --timeout "${BLOOM_QUALITY_TIMEOUT:-1800}"
       else
         python3 tools/quality/run.py run "$quality_suite" \
           --machine-class "$BLOOM_QUALITY_MACHINE_CLASS" \
           --out "$quality_out" \
+          --host-idle-timeout "${BLOOM_QUALITY_HOST_IDLE_TIMEOUT:-120}" \
           --timeout "${BLOOM_QUALITY_TIMEOUT:-1800}"
       fi
       ;;

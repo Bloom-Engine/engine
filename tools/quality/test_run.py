@@ -168,12 +168,66 @@ class BaselineGovernanceTests(unittest.TestCase):
             quality.baseline_review(args)
 
 
+class HostLoadPreflightTests(unittest.TestCase):
+    def snapshot(self, fraction: float, top_cpu: float) -> dict[str, object]:
+        return {
+            "available": True,
+            "logical_cpus": 10,
+            "cpu_fraction": fraction,
+            "total_cpu_percent": fraction * 1000.0,
+            "top_processes": [
+                {"pid": 123, "cpu_percent": top_cpu, "command": "test-worker"}
+            ],
+        }
+
+    def test_classifier_rejects_aggregate_and_single_process_pressure(self) -> None:
+        accepted, reason = quality.classify_host_snapshot(
+            self.snapshot(0.21, 40.0), 0.20, 75.0
+        )
+        self.assertFalse(accepted)
+        self.assertIn("21.0% > 20.0%", str(reason))
+
+        accepted, reason = quality.classify_host_snapshot(
+            self.snapshot(0.10, 80.0), 0.20, 75.0
+        )
+        self.assertFalse(accepted)
+        self.assertIn("80.0% > 75.0%", str(reason))
+
+    def test_wait_requires_consecutive_idle_samples(self) -> None:
+        samples = [
+            self.snapshot(0.40, 100.0),
+            self.snapshot(0.10, 30.0),
+            self.snapshot(0.12, 35.0),
+        ]
+        with (
+            mock.patch.object(quality, "host_load_snapshot", side_effect=samples),
+            mock.patch.object(quality.time, "sleep"),
+        ):
+            result = quality.wait_for_idle_host(10.0, 1.0, 2, 0.20, 75.0)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["accepted_consecutive_samples"], 2)
+        self.assertEqual(len(result["samples"]), 3)
+
+    def test_zero_timeout_records_busy_host_without_waiting(self) -> None:
+        with mock.patch.object(
+            quality, "host_load_snapshot", return_value=self.snapshot(0.50, 200.0)
+        ):
+            result = quality.wait_for_idle_host(0.0, 1.0, 3, 0.20, 75.0)
+        self.assertFalse(result["passed"])
+        self.assertEqual(len(result["samples"]), 1)
+        self.assertIn("host CPU utilization", result["samples"][0]["reason"])
+
+
 class ReproducibilityTests(unittest.TestCase):
     def test_checked_in_manifest_satisfies_contract(self) -> None:
         manifest, digest = quality.load_manifest(MODULE_PATH.with_name("scenes.toml"))
         self.assertEqual(manifest["schema_version"], 1)
         self.assertEqual(len(manifest["case"]), 9)
         self.assertEqual(len(digest), 64)
+        for machine in manifest["machine_class"]:
+            self.assertGreater(float(machine["max_host_cpu_fraction"]), 0.0)
+            self.assertLess(float(machine["max_host_cpu_fraction"]), 1.0)
+            self.assertGreater(float(machine["max_host_process_cpu_percent"]), 0.0)
         temporal_evidence = {
             "ssr",
             "ssr-raw",

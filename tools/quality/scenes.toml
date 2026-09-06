@@ -43,6 +43,8 @@ hard_metrics = ["cpu", "gpu"]
 os = "macos"
 backend = "metal"
 gpu = "Apple M1 Max"
+max_host_cpu_fraction = 0.20
+max_host_process_cpu_percent = 75.0
 
 [[machine_class]]
 id = "nvidia-rtx4080-vulkan"
@@ -52,6 +54,8 @@ hard_metrics = ["cpu", "gpu", "vram"]
 os = "linux"
 backend = "vulkan"
 gpu = "NVIDIA GeForce RTX 4080"
+max_host_cpu_fraction = 0.20
+max_host_process_cpu_percent = 75.0
 
 [[machine_class]]
 id = "apple-m1-metal-constrained"
@@ -61,6 +65,8 @@ hard_metrics = ["cpu", "gpu"]
 os = "macos"
 backend = "metal"
 gpu = "Apple M1"
+max_host_cpu_fraction = 0.20
+max_host_process_cpu_percent = 75.0
 
 [[case]]
 id = "pbr-spheres-high"
