@@ -301,6 +301,13 @@ pub extern "C" fn bloom_init_window(
         app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
     } else {
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        // Bloom is commonly launched as a raw Perry executable rather than an
+        // .app bundle. AppKit does not finish its normal launch sequence for
+        // that shape automatically, and a key/visible NSWindow can then keep a
+        // CAMetalLayer whose nextDrawable reports `Occluded` forever. Complete
+        // launch before creating the standalone surface so Core Animation can
+        // register and service the layer normally.
+        app.finishLaunching();
     }
 
     // Far-off-screen origin keeps the window out of every display
@@ -356,8 +363,21 @@ pub extern "C" fn bloom_init_window(
             let _: () = msg_send![&window, orderOut: std::ptr::null::<objc2::runtime::AnyObject>()];
         }
     } else {
-        window.center();
+        // Keep the explicit (100, 100) origin above. `center()` selects the
+        // screen macOS currently considers active, which can be a sleeping or
+        // negatively-positioned secondary display for command-line launches;
+        // Metal then reports the otherwise visible surface as occluded.
         window.makeKeyAndOrderFront(None);
+        // `makeKeyAndOrderFront` is sufficient for bundled applications. For
+        // command-line executables it can leave the window ordered but without
+        // a committed backing layer until the next full AppKit run-loop turn;
+        // Perry drives that loop manually. Ordering and displaying explicitly
+        // makes the first Metal drawable available even after a long,
+        // synchronous Three.js scene import.
+        unsafe {
+            let _: () = msg_send![&window, orderFrontRegardless];
+            let _: () = msg_send![&window, displayIfNeeded];
+        }
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
     }

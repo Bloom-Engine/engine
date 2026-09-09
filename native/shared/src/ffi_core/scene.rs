@@ -33,6 +33,18 @@ macro_rules! __bloom_ffi_scene {
             })
         }
 
+        // bloom_scene_set_render_layer — world (0) or camera-space overlay
+        // layer (1+). Overlay nodes use an independent depth buffer and never
+        // enter world GI/GPU-driven submission.
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_set_render_layer(handle: f64, layer: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_render_layer", move || {
+                engine()
+                    .scene
+                    .set_render_layer(handle, layer.max(0.0).min(u32::MAX as f64) as u32);
+            })
+        }
+
         // bloom_scene_set_trs — position + Y-rotation + uniform scale as six
         // f64 scalars. The full-matrix bloom_scene_set_transform passes a JS
         // array into an i64 pointer param, which Perry 0.5.x rejects; this
@@ -429,6 +441,91 @@ macro_rules! __bloom_ffi_scene {
             })
         }
 
+        // Set all standard PBR texture slots from public Texture handles.
+        // The scene stores renderer bind-group indices internally, so resolve
+        // handles here instead of leaking that implementation detail to TS.
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_set_material_texture_handles(
+            handle: f64,
+            base_color: f64,
+            normal: f64,
+            metallic_roughness: f64,
+            emissive: f64,
+            occlusion: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_material_texture_handles", move || {
+                let eng = engine();
+                let resolve = |texture_handle: f64| -> u32 {
+                    if texture_handle <= 0.0 {
+                        0
+                    } else {
+                        eng.textures
+                            .get(texture_handle)
+                            .map(|texture| texture.bind_group_idx)
+                            .unwrap_or(0)
+                    }
+                };
+                let base_color = resolve(base_color);
+                let normal = resolve(normal);
+                let metallic_roughness = resolve(metallic_roughness);
+                let emissive = resolve(emissive);
+                let occlusion = resolve(occlusion);
+                eng.scene.set_material_texture(handle, base_color);
+                eng.scene.set_material_normal_texture(handle, normal);
+                eng.scene
+                    .set_material_metallic_roughness_texture(handle, metallic_roughness);
+                eng.scene.set_material_emissive_texture(handle, emissive);
+                eng.scene.set_material_occlusion_texture(handle, occlusion);
+            })
+        }
+
+        // Set one standard PBR texture's already-composed affine UV matrix.
+        // Slots: 0 base, 1 normal, 2 metallic-roughness, 3 emissive, 4 AO.
+        #[no_mangle]
+        #[allow(clippy::too_many_arguments)]
+        pub extern "C" fn bloom_scene_set_material_texture_transform(
+            handle: f64,
+            slot: f64,
+            m00: f64,
+            m01: f64,
+            m02: f64,
+            m10: f64,
+            m11: f64,
+            m12: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_scene_set_material_texture_transform", move || {
+                let Some(slot) =
+                    $crate::models::StandardMaterialTextureSlot::from_u32(slot.max(0.0) as u32)
+                else {
+                    return 0.0;
+                };
+                let transform = $crate::models::MaterialTextureAffineTransform::from_rows(
+                    [m00 as f32, m01 as f32, m02 as f32],
+                    [m10 as f32, m11 as f32, m12 as f32],
+                );
+                engine()
+                    .scene
+                    .set_material_texture_transform(handle, slot, transform);
+                1.0
+            })
+        }
+
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_set_material_texture_strengths(
+            handle: f64,
+            normal_scale_x: f64,
+            normal_scale_y: f64,
+            occlusion_strength: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_material_texture_strengths", move || {
+                engine().scene.set_material_texture_strengths(
+                    handle,
+                    [normal_scale_x as f32, normal_scale_y as f32],
+                    occlusion_strength as f32,
+                );
+            })
+        }
+
         // bloom_scene_node_count  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_scene_node_count() -> f64 {
@@ -695,77 +792,12 @@ macro_rules! __bloom_ffi_scene {
                 let mesh = std::sync::Arc::clone(&model_data.meshes[mi]);
                 let source_transform = model_data.mesh_transform(mi);
                 let source_cast_shadow = model_data.mesh_cast_shadow(mi);
-                let base_color_tex = mesh.texture_idx;
-                let normal_tex = mesh.normal_texture_idx;
-                let mr_tex = mesh.metallic_roughness_texture_idx;
-                let specular_glossiness_factor = mesh.specular_glossiness_factor;
-                let emissive_tex = mesh.emissive_texture_idx;
-                let emissive_factor = mesh.emissive_factor;
-                let roughness_factor = mesh.roughness_factor;
-                let metallic_factor = mesh.metallic_factor;
-                let alpha_mode = mesh.alpha_mode;
-                let alpha_cutoff = mesh.alpha_cutoff;
-                let alpha_coverage_mips = mesh.alpha_coverage_mips;
-                let double_sided = mesh.double_sided;
-                let mut transmission = mesh.transmission;
-                let layered_pbr = mesh.layered_pbr;
-                // KHR_materials_volume thickness is authored in primitive
-                // space. Static glTF node scale now lives in the placement
-                // transform instead of baked vertices, so carry the same
-                // mean-scale conversion into the per-node material copy.
-                let axis_length = |column: usize| {
-                    let x = source_transform[column][0];
-                    let y = source_transform[column][1];
-                    let z = source_transform[column][2];
-                    (x * x + y * y + z * z).sqrt()
-                };
-                transmission.baked_thickness_scale *=
-                    (axis_length(0) + axis_length(1) + axis_length(2)) / 3.0;
-                eng.scene
-                    .update_shared_model_geometry(node_handle, mesh, source_transform);
-                eng.scene.set_cast_shadow(node_handle, source_cast_shadow);
-
-                if let Some(tex_idx) = base_color_tex {
-                    eng.scene.set_material_texture(node_handle, tex_idx);
-                }
-                if let Some(tex_idx) = normal_tex {
-                    eng.scene.set_material_normal_texture(node_handle, tex_idx);
-                }
-                if let Some(tex_idx) = mr_tex {
-                    eng.scene
-                        .set_material_metallic_roughness_texture(node_handle, tex_idx);
-                }
-                eng.scene.set_material_specular_glossiness_factor(
+                eng.scene.attach_model_mesh(
                     node_handle,
-                    specular_glossiness_factor,
+                    mesh,
+                    source_transform,
+                    source_cast_shadow,
                 );
-                if let Some(tex_idx) = emissive_tex {
-                    eng.scene
-                        .set_material_emissive_texture(node_handle, tex_idx);
-                }
-                eng.scene.set_material_emissive_factor(
-                    node_handle,
-                    emissive_factor[0],
-                    emissive_factor[1],
-                    emissive_factor[2],
-                );
-                // Carry the glTF material factors + MASK cutoff too —
-                // previously dropped, which left attached foliage opaque
-                // (solid cards) and every attached mesh at the default
-                // roughness 0.8 regardless of its authored material.
-                eng.scene
-                    .set_material_pbr(node_handle, roughness_factor, metallic_factor);
-                eng.scene.set_material_gltf_alpha(
-                    node_handle,
-                    alpha_mode,
-                    alpha_cutoff,
-                    double_sided,
-                );
-                eng.scene
-                    .set_material_alpha_coverage_mips(node_handle, alpha_coverage_mips);
-                eng.scene
-                    .set_material_transmission(node_handle, transmission);
-                eng.scene.set_material_layered_pbr(node_handle, layered_pbr);
             })
         }
         #[cfg(not(feature = "models3d"))]

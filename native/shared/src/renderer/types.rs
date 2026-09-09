@@ -62,6 +62,9 @@ pub struct SceneMaterialUniforms {
     /// rgb = KHR specularFactor, a = glossinessFactor. Only consumed when
     /// metal_rough.z selects the specular-glossiness texture workflow.
     pub spec_gloss: [f32; 4],
+    /// Two affine rows per standard texture slot, ordered base-color,
+    /// normal, metallic-roughness, emissive, occlusion.
+    pub uv_transforms: [[f32; 4]; 10],
 }
 
 impl SceneMaterialUniforms {
@@ -73,7 +76,19 @@ impl SceneMaterialUniforms {
         specular_glossiness_factor: Option<[f32; 4]>,
         alpha_cutoff: f32,
         alpha_coverage_mips: bool,
+        texture_transforms: [crate::models::MaterialTextureAffineTransform;
+            crate::models::StandardMaterialTextureSlot::COUNT],
+        normal_scale: [f32; 2],
+        occlusion_strength: f32,
     ) -> Self {
+        let mut uv_transforms = [[0.0; 4]; 10];
+        for (slot, transform) in texture_transforms.iter().enumerate() {
+            uv_transforms[slot * 2] = transform.row_0;
+            uv_transforms[slot * 2 + 1] = transform.row_1;
+        }
+        uv_transforms[2][3] = normal_scale[0];
+        uv_transforms[3][3] = normal_scale[1];
+        uv_transforms[8][3] = occlusion_strength;
         Self {
             metal_rough: [
                 metallic,
@@ -94,6 +109,7 @@ impl SceneMaterialUniforms {
                 if alpha_coverage_mips { 1.0 } else { 0.0 },
             ],
             spec_gloss: specular_glossiness_factor.unwrap_or([1.0; 4]),
+            uv_transforms,
         }
     }
 }
@@ -1303,14 +1319,40 @@ mod physical_uv_tests {
 
     #[test]
     fn scene_material_uniform_selects_specular_glossiness_without_an_extra_sample() {
-        assert_eq!(std::mem::size_of::<SceneMaterialUniforms>(), 48);
+        assert_eq!(std::mem::size_of::<SceneMaterialUniforms>(), 208);
+        let transforms = [crate::models::MaterialTextureAffineTransform::default();
+            crate::models::StandardMaterialTextureSlot::COUNT];
         let factors = [0.2, 0.4, 0.8, 0.65];
-        let uniform =
-            SceneMaterialUniforms::new(0.0, 1.0, [0.0; 3], true, Some(factors), 0.0, false);
+        let uniform = SceneMaterialUniforms::new(
+            0.0,
+            1.0,
+            [0.0; 3],
+            true,
+            Some(factors),
+            0.0,
+            false,
+            transforms,
+            [1.0, 1.0],
+            1.0,
+        );
         assert_eq!(uniform.metal_rough[2], 2.0);
         assert_eq!(uniform.spec_gloss, factors);
-        let ordinary = SceneMaterialUniforms::new(0.3, 0.7, [0.0; 3], true, None, 0.0, false);
+        let ordinary = SceneMaterialUniforms::new(
+            0.3,
+            0.7,
+            [0.0; 3],
+            true,
+            None,
+            0.0,
+            false,
+            transforms,
+            [0.5, 0.75],
+            0.4,
+        );
         assert_eq!(ordinary.metal_rough[2], 1.0);
+        assert_eq!(ordinary.uv_transforms[2][3], 0.5);
+        assert_eq!(ordinary.uv_transforms[3][3], 0.75);
+        assert_eq!(ordinary.uv_transforms[8][3], 0.4);
     }
 
     #[test]

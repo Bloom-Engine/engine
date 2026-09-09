@@ -97,6 +97,8 @@ struct ShadowUniforms {
 
 struct CutoutUniforms {
     cutoff: vec4<f32>, // x = alpha cutoff, y = lower mips store coverage
+    uv_row_0: vec4<f32>,
+    uv_row_1: vec4<f32>,
 };
 @group(1) @binding(0) var base_tex: texture_2d<f32>;
 @group(1) @binding(1) var base_samp: sampler;
@@ -168,37 +170,41 @@ fn vs_shadow_cutout(in: ShadowVertexInput) -> VsOut {
 
 @fragment
 fn fs_shadow_cutout(in: VsOut) {
+    let uv = vec2<f32>(
+        dot(cut.uv_row_0.xyz, vec3<f32>(in.uv, 1.0)),
+        dot(cut.uv_row_1.xyz, vec3<f32>(in.uv, 1.0)),
+    );
     var survives = true;
     if (cut.cutoff.y > 0.5) {
-        let lod = mask_texture_lod(in.uv, textureDimensions(base_tex));
+        let lod = mask_texture_lod(uv, textureDimensions(base_tex));
         if (lod <= 0.5) {
             let authored_alpha =
-                textureSampleLevel(base_tex, base_samp, in.uv, 0.0).a * in.alpha;
+                textureSampleLevel(base_tex, base_samp, uv, 0.0).a * in.alpha;
             survives = authored_alpha >= cut.cutoff.x;
         } else if (lod >= 1.0) {
-            let coverage = textureSampleLevel(base_tex, base_samp, in.uv, lod).a;
+            let coverage = textureSampleLevel(base_tex, base_samp, uv, lod).a;
             survives = coverage >= mask_coverage_threshold(
-                in.uv,
+                uv,
                 textureDimensions(base_tex),
                 lod,
             );
         } else {
             let authored_alpha =
-                textureSampleLevel(base_tex, base_samp, in.uv, 0.0).a * in.alpha;
-            let coverage = textureSampleLevel(base_tex, base_samp, in.uv, 1.0).a;
+                textureSampleLevel(base_tex, base_samp, uv, 0.0).a * in.alpha;
+            let coverage = textureSampleLevel(base_tex, base_samp, uv, 1.0).a;
             let probability = mix(
                 select(0.0, 1.0, authored_alpha >= cut.cutoff.x),
                 coverage,
                 smoothstep(0.5, 1.0, lod),
             );
             survives = probability >= mask_coverage_threshold(
-                in.uv,
+                uv,
                 textureDimensions(base_tex),
                 max(lod, 1.0),
             );
         }
     } else {
-        let raw_alpha = textureSample(base_tex, base_samp, in.uv).a * in.alpha;
+        let raw_alpha = textureSample(base_tex, base_samp, uv).a * in.alpha;
         survives = raw_alpha >= cut.cutoff.x;
     }
     if (!survives) { discard; }

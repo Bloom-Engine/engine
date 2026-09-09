@@ -48,6 +48,7 @@ cmake = "0.1"
 bloom-geometry-format = { path = "../../crates/bloom-geometry-format", optional = true }
 bloom-scene-format = { path = "../../crates/bloom-scene-format", optional = true }
 wgpu = "29"
+naga = { version = "29", features = ["glsl-in", "wgsl-out"] }
 log = "0.4"
 raw-window-handle = "0.6"
 fontdue = "0.9"

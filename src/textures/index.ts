@@ -3,6 +3,9 @@ import { Color, Rect, Texture } from '../core/types';
 
 // FFI declarations
 declare function bloom_load_texture(path: number): number;
+declare function bloom_load_texture_rgba8_scratch(width: number, height: number, kind: number): number;
+declare function bloom_mesh_scratch_reset(): void;
+declare function bloom_mesh_scratch_push_u32(value: number): void;
 declare function bloom_unload_texture(handle: number): void;
 declare function bloom_draw_texture(handle: number, x: number, y: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_texture_rec(handle: number, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, r: number, g: number, b: number, a: number): void;
@@ -21,6 +24,13 @@ declare function bloom_set_texture_filter(handle: number, mode: number): void;
 export const FILTER_LINEAR = 0;
 export const FILTER_NEAREST = 1;
 
+/** sRGB base-colour/emissive texels. */
+export const TEXTURE_KIND_COLOR = 0;
+/** Linear tangent-space normal texels with normal-aware mip filtering. */
+export const TEXTURE_KIND_NORMAL = 1;
+/** Linear numeric texels such as roughness, metalness, and occlusion. */
+export const TEXTURE_KIND_DATA = 2;
+
 export function setTextureFilter(texture: Texture, mode: number): void {
   bloom_set_texture_filter(texture.handle, mode);
 }
@@ -37,6 +47,34 @@ export function loadTexture(path: string): Texture {
   const id = bloom_load_texture(path as any);
   const width = bloom_get_texture_width(id);
   const height = bloom_get_texture_height(id);
+  return { handle: id, width, height };
+}
+
+/**
+ * Upload decoded RGBA8 pixels directly into Bloom's material texture store.
+ *
+ * This is a load-time path for procedural and compatibility-layer textures.
+ * It packs one RGBA pixel into each scalar scratch call because Perry cannot
+ * pass a `number[]` or typed-array backing pointer through an i64 FFI slot.
+ */
+export function createTextureRgba8(
+  rgba: any,
+  width: number,
+  height: number,
+  kind: number = TEXTURE_KIND_COLOR,
+): Texture {
+  const texelCount = Math.max(0, Math.floor(width) * Math.floor(height));
+  bloom_mesh_scratch_reset();
+  for (let i = 0; i < texelCount; i++) {
+    const offset = i * 4;
+    bloom_mesh_scratch_push_u32(
+      (rgba[offset] & 255)
+      | ((rgba[offset + 1] & 255) << 8)
+      | ((rgba[offset + 2] & 255) << 16)
+      | ((rgba[offset + 3] & 255) << 24),
+    );
+  }
+  const id = bloom_load_texture_rgba8_scratch(width, height, kind);
   return { handle: id, width, height };
 }
 
@@ -121,6 +159,9 @@ export function genTextureMipmaps(texture: Texture): void {
 declare function bloom_stage_texture(path: number): number;
 declare function bloom_commit_texture(handle: number): number;
 declare function bloom_load_render_texture(width: number, height: number): number;
+declare function bloom_load_render_texture_kind(width: number, height: number, kind: number): number;
+declare function bloom_render_texture_glsl(handle: number, source: number): number;
+declare function bloom_render_texture_sobel(handle: number, sourceTexture: number, strength: number): number;
 declare function bloom_unload_render_texture(handle: number): void;
 declare function bloom_begin_texture_mode(handle: number): void;
 declare function bloom_end_texture_mode(): void;
@@ -161,6 +202,19 @@ export function commitTexture(stagingHandle: number): Texture {
  */
 export function loadRenderTexture(width: number, height: number): number {
   return bloom_load_render_texture(width, height);
+}
+
+/** 0=sRGB RGBA8, 1=linear RGBA8, 2=linear RGBA16F. */
+export function loadRenderTextureKind(width: number, height: number, kind: number): number {
+  return bloom_load_render_texture_kind(width, height, kind);
+}
+
+export function renderTextureGlsl(handle: number, source: string): boolean {
+  return bloom_render_texture_glsl(handle, source as any) !== 0;
+}
+
+export function renderTextureSobel(handle: number, sourceTexture: number, strength: number): boolean {
+  return bloom_render_texture_sobel(handle, sourceTexture, strength) !== 0;
 }
 
 export function unloadRenderTexture(handle: number): void {

@@ -664,6 +664,104 @@ impl Renderer {
                 }
             }
         }
+
+        // Camera-space 3D overlay (viewmodels, cockpit geometry, held tools).
+        // It shares the native PBR pipeline and HDR targets with the world but
+        // uses an independent freshly-cleared depth buffer. The world depth is
+        // therefore left intact for every subsequent screen-space effect.
+        if !self.dbg_skip("hdr_pass") && scene.has_visible_opaque_nodes_in_layer(1) {
+            #[cfg(lean_mrt)]
+            let overlay_color_attachments: &[Option<
+                wgpu::RenderPassColorAttachment<'_>,
+            >] = &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                None,
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.velocity_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                None,
+            ];
+            #[cfg(not(lean_mrt))]
+            let overlay_color_attachments: &[Option<
+                wgpu::RenderPassColorAttachment<'_>,
+            >] = &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.material_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.velocity_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.albedo_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+            ];
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom_hdr_overlay_pass"),
+                color_attachments: overlay_color_attachments,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.overlay_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.scene_pipeline);
+            pass.set_bind_group(1, &self.lighting_bind_group, &[]);
+            pass.set_bind_group(3, &self.joint_bind_group, &[]);
+            scene.render_layer_with_material_specializations(
+                &mut pass,
+                1,
+                self.imported_refraction_enabled,
+                &self.scene_pipeline,
+                self.scene_layered_pbr_resources.as_ref(),
+            );
+        }
         profiler.end("main_hdr_pass");
 
         // EN-011 — render every registered planar reflection probe

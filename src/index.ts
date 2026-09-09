@@ -75,12 +75,15 @@ export {
 } from './audio/index';
 
 export {
-  loadTexture, unloadTexture, drawTexture, drawTexturePro, drawTextureRec,
+  loadTexture, createTextureRgba8, unloadTexture, drawTexture, drawTexturePro, drawTextureRec,
   getTextureWidth, getTextureHeight, loadImage,
   imageResize, imageCrop, imageFlipH, imageFlipV, loadTextureFromImage,
   genTextureMipmaps, setTextureFilter, FILTER_LINEAR, FILTER_NEAREST,
+  TEXTURE_KIND_COLOR, TEXTURE_KIND_NORMAL, TEXTURE_KIND_DATA,
   loadTextureAsync, stageTextures, commitTexture,
-  loadRenderTexture, unloadRenderTexture, beginTextureMode, endTextureMode, getRenderTextureTexture,
+  loadRenderTexture, loadRenderTextureKind, unloadRenderTexture,
+  renderTextureGlsl, renderTextureSobel,
+  beginTextureMode, endTextureMode, getRenderTextureTexture,
 } from './textures/index';
 
 export {
@@ -136,9 +139,15 @@ export {
   createSceneNode, destroySceneNode,
   setSceneNodeVisible, setSceneNodeCastShadow, setSceneNodeReceiveShadow,
   setSceneNodeGiOnly,
+  setSceneNodeRenderLayer,
   setSceneNodeParent, setSceneNodeTransform,
   updateSceneNodeGeometry,
   setSceneNodeColor, setSceneNodePbr, setSceneNodeMaterial, setSceneNodeTexture,
+  setSceneNodeMaterialTextureHandles,
+  setSceneNodeMaterialTextureTransform, setSceneNodeMaterialTextureStrengths,
+  MATERIAL_TEXTURE_SLOT_BASE_COLOR, MATERIAL_TEXTURE_SLOT_NORMAL,
+  MATERIAL_TEXTURE_SLOT_METALLIC_ROUGHNESS, MATERIAL_TEXTURE_SLOT_EMISSIVE,
+  MATERIAL_TEXTURE_SLOT_OCCLUSION,
   setSceneNodeWaterMaterial, pickSceneAll,
   getSceneNodeTransform, getSceneNodeBounds,
   setSceneNodeUserData, getSceneNodeUserData,

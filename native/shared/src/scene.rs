@@ -4,7 +4,10 @@
 //! Systems update geometry and transforms; the renderer draws visible nodes automatically.
 
 use crate::handles::HandleRegistry;
-use crate::models::{MaterialAlphaMode, MaterialLayeredPbr, MaterialTransmission, MeshData};
+use crate::models::{
+    MaterialAlphaMode, MaterialLayeredPbr, MaterialTextureAffineTransform, MaterialTransmission,
+    MeshData, StandardMaterialTextureSlot,
+};
 use crate::renderer::{
     gpu_driven::{self, GeometrySlice, GpuDrawRecord},
     material_indirection::MaterialId,
@@ -51,6 +54,13 @@ pub struct PbrMaterial {
     pub specular_glossiness_factor: Option<[f32; 4]>,
     pub emissive_texture_idx: u32,
     pub occlusion_texture_idx: u32,
+    /// Independent affine UV transforms for base-color, normal,
+    /// metallic-roughness, emissive, and occlusion textures, in that order.
+    pub texture_transforms: [MaterialTextureAffineTransform; StandardMaterialTextureSlot::COUNT],
+    /// Tangent-space normal intensity, matching Three.js `normalScale`.
+    pub normal_scale: [f32; 2],
+    /// Strength mixed onto the sampled occlusion channel.
+    pub occlusion_strength: f32,
 }
 
 impl Default for PbrMaterial {
@@ -73,6 +83,10 @@ impl Default for PbrMaterial {
             specular_glossiness_factor: None,
             emissive_texture_idx: 0,
             occlusion_texture_idx: 0,
+            texture_transforms: [MaterialTextureAffineTransform::default();
+                StandardMaterialTextureSlot::COUNT],
+            normal_scale: [1.0, 1.0],
+            occlusion_strength: 1.0,
         }
     }
 }
@@ -136,6 +150,12 @@ pub struct SceneNode {
     pub visible: bool,
     pub cast_shadow: bool,
     pub receive_shadow: bool,
+    /// Raster layer. Layer 0 is the ordinary world scene. Non-zero layers are
+    /// compatibility-rendered after the world into the HDR targets with an
+    /// independent depth buffer. They are intended for first-person
+    /// viewmodels and other camera-space 3D overlays, and are deliberately
+    /// excluded from world GI/GPU-driven submission.
+    pub render_layer: u32,
     /// GI-proxy flag: the node feeds every global-illumination input
     /// (BLAS/TLAS, mesh cards, SDF clipmap, world triangles) but is
     /// skipped by the raster consumers — main scene render, planar
@@ -302,6 +322,7 @@ impl SceneNode {
             visible: true,
             cast_shadow: true,
             receive_shadow: true,
+            render_layer: 0,
             gi_only: false,
             parent: 0.0,
             user_data: 0,
@@ -433,6 +454,8 @@ struct SceneMaterialKey {
     emissive: [u32; 4],
     spec_gloss: [u32; 4],
     textures: [u32; 5],
+    texture_transforms: [u32; StandardMaterialTextureSlot::COUNT * 8],
+    texture_strengths: [u32; 3],
 }
 
 #[derive(Copy, Clone)]
@@ -623,6 +646,72 @@ impl SceneGraph {
         self.nodes.free(handle);
     }
 
+    /// Attach one immutable model primitive and copy its authored material
+    /// contract onto a retained node. Both the scalar-node FFI and native
+    /// instance-batch ingestion use this path so their results stay identical.
+    pub fn attach_model_mesh(
+        &mut self,
+        node_handle: f64,
+        mesh: Arc<MeshData>,
+        source_transform: [[f32; 4]; 4],
+        source_cast_shadow: bool,
+    ) {
+        let mut transmission = mesh.transmission;
+        let axis_length = |column: usize| {
+            let x = source_transform[column][0];
+            let y = source_transform[column][1];
+            let z = source_transform[column][2];
+            (x * x + y * y + z * z).sqrt()
+        };
+        transmission.baked_thickness_scale *=
+            (axis_length(0) + axis_length(1) + axis_length(2)) / 3.0;
+
+        let base_color_tex = mesh.texture_idx;
+        let normal_tex = mesh.normal_texture_idx;
+        let mr_tex = mesh.metallic_roughness_texture_idx;
+        let emissive_tex = mesh.emissive_texture_idx;
+        let occlusion_tex = mesh.occlusion_texture_idx;
+        let specular_glossiness_factor = mesh.specular_glossiness_factor;
+        let emissive_factor = mesh.emissive_factor;
+        let roughness_factor = mesh.roughness_factor;
+        let metallic_factor = mesh.metallic_factor;
+        let alpha_mode = mesh.alpha_mode;
+        let alpha_cutoff = mesh.alpha_cutoff;
+        let alpha_coverage_mips = mesh.alpha_coverage_mips;
+        let double_sided = mesh.double_sided;
+        let layered_pbr = mesh.layered_pbr;
+
+        self.update_shared_model_geometry(node_handle, mesh, source_transform);
+        self.set_cast_shadow(node_handle, source_cast_shadow);
+        if let Some(tex_idx) = base_color_tex {
+            self.set_material_texture(node_handle, tex_idx);
+        }
+        if let Some(tex_idx) = normal_tex {
+            self.set_material_normal_texture(node_handle, tex_idx);
+        }
+        if let Some(tex_idx) = mr_tex {
+            self.set_material_metallic_roughness_texture(node_handle, tex_idx);
+        }
+        if let Some(tex_idx) = emissive_tex {
+            self.set_material_emissive_texture(node_handle, tex_idx);
+        }
+        if let Some(tex_idx) = occlusion_tex {
+            self.set_material_occlusion_texture(node_handle, tex_idx);
+        }
+        self.set_material_specular_glossiness_factor(node_handle, specular_glossiness_factor);
+        self.set_material_emissive_factor(
+            node_handle,
+            emissive_factor[0],
+            emissive_factor[1],
+            emissive_factor[2],
+        );
+        self.set_material_pbr(node_handle, roughness_factor, metallic_factor);
+        self.set_material_gltf_alpha(node_handle, alpha_mode, alpha_cutoff, double_sided);
+        self.set_material_alpha_coverage_mips(node_handle, alpha_coverage_mips);
+        self.set_material_transmission(node_handle, transmission);
+        self.set_material_layered_pbr(node_handle, layered_pbr);
+    }
+
     /// Position + Y-rotation + uniform-scale convenience setter. Exists
     /// because the full-matrix `set_transform` crosses the FFI as an
     /// i64 pointer parameter, which Perry 0.5.x rejects for JS arrays;
@@ -694,6 +783,18 @@ impl SceneGraph {
     pub fn set_receive_shadow(&mut self, handle: f64, receive: bool) {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.receive_shadow = receive;
+        }
+    }
+
+    pub fn set_render_layer(&mut self, handle: f64, layer: u32) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            if node.render_layer != layer {
+                if node.cast_shadow && node.visible {
+                    self.shadow_version = self.shadow_version.wrapping_add(1);
+                }
+                self.tlas_version = self.tlas_version.wrapping_add(1);
+                node.render_layer = layer;
+            }
         }
     }
 
@@ -1240,6 +1341,59 @@ impl SceneGraph {
         }
     }
 
+    pub fn set_material_occlusion_texture(&mut self, handle: f64, texture_idx: u32) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.material.occlusion_texture_idx = texture_idx;
+            node.mat_dirty = true;
+        }
+    }
+
+    pub fn set_material_texture_transform(
+        &mut self,
+        handle: f64,
+        slot: StandardMaterialTextureSlot,
+        transform: MaterialTextureAffineTransform,
+    ) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            let target = &mut node.material.texture_transforms[slot.index()];
+            if *target == transform {
+                return;
+            }
+            *target = transform;
+            node.mat_dirty = true;
+        }
+    }
+
+    pub fn set_material_texture_strengths(
+        &mut self,
+        handle: f64,
+        normal_scale: [f32; 2],
+        occlusion_strength: f32,
+    ) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            let finite_or = |value: f32, fallback: f32| {
+                if value.is_finite() {
+                    value
+                } else {
+                    fallback
+                }
+            };
+            let normal_scale = [
+                finite_or(normal_scale[0], 1.0),
+                finite_or(normal_scale[1], 1.0),
+            ];
+            let occlusion_strength = finite_or(occlusion_strength, 1.0).max(0.0);
+            if node.material.normal_scale == normal_scale
+                && node.material.occlusion_strength == occlusion_strength
+            {
+                return;
+            }
+            node.material.normal_scale = normal_scale;
+            node.material.occlusion_strength = occlusion_strength;
+            node.mat_dirty = true;
+        }
+    }
+
     pub fn set_material_emissive_factor(&mut self, handle: f64, r: f32, g: f32, b: f32) {
         if let Some(node) = self.nodes.get_mut(handle) {
             let emissive = [r, g, b];
@@ -1299,6 +1453,7 @@ impl SceneGraph {
             .filter(|(_, node)| {
                 node.visible
                     && !node.gi_only
+                    && node.render_layer == 0
                     && !node.indices().is_empty()
                     && node.material.alpha_cutoff <= 0.0
                     && node.material.alpha_mode != MaterialAlphaMode::Blend
@@ -1601,7 +1756,7 @@ impl SceneGraph {
                     // signed AABB axis and schedule the capture pass.
                     // Runs on both HW and SW paths so the SDF trace's
                     // broad-phase hit can sample textured radiance.
-                    if node.card_first_slot.is_none() {
+                    if node.render_layer == 0 && node.card_first_slot.is_none() {
                         let first = match free_card_blocks.pop() {
                             Some(reused) => reused,
                             None => {
@@ -1618,7 +1773,7 @@ impl SceneGraph {
                         }
                     }
 
-                    if hw_rt && !reused_resources {
+                    if node.render_layer == 0 && hw_rt && !reused_resources {
                         // BLAS creation only on HW-RT adapters.
                         let size_desc = wgpu::BlasTriangleGeometrySizeDescriptor {
                             vertex_format: wgpu::VertexFormat::Float32x3,
@@ -1806,7 +1961,7 @@ impl SceneGraph {
             // their card atlas slots get re-captured to track
             // animated geometry. Static meshes (default) stay out of
             // the queue after their one-shot first-frame capture.
-            if node.card_dynamic && node.card_first_slot.is_some() {
+            if node.render_layer == 0 && node.card_dynamic && node.card_first_slot.is_some() {
                 pending_cards.push(handle);
             }
 
@@ -1949,6 +2104,9 @@ impl SceneGraph {
                         .alpha_mode
                         .shader_alpha_value(node.material.alpha_cutoff),
                     node.material.alpha_coverage_mips,
+                    node.material.texture_transforms,
+                    node.material.normal_scale,
+                    node.material.occlusion_strength,
                 );
                 let bg = renderer.create_scene_material_bg(
                     node.material.texture_idx,
@@ -2039,6 +2197,8 @@ impl SceneGraph {
                         node.material.texture_idx,
                         node.material.alpha_cutoff,
                         node.material.alpha_coverage_mips,
+                        node.material.texture_transforms
+                            [StandardMaterialTextureSlot::BaseColor.index()],
                     ))
                 } else {
                     None
@@ -2099,6 +2259,7 @@ impl SceneGraph {
             imported_refraction_enabled,
             None,
             None,
+            0,
         );
     }
 
@@ -2116,6 +2277,25 @@ impl SceneGraph {
             imported_refraction_enabled,
             Some(base_pipeline),
             layered,
+            0,
+        );
+    }
+
+    pub(crate) fn render_layer_with_material_specializations<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        render_layer: u32,
+        imported_refraction_enabled: bool,
+        base_pipeline: &'a wgpu::RenderPipeline,
+        layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
+    ) {
+        self.render_with_material_pipeline_selection(
+            pass,
+            false,
+            imported_refraction_enabled,
+            Some(base_pipeline),
+            layered,
+            render_layer,
         );
     }
 
@@ -2126,6 +2306,7 @@ impl SceneGraph {
         imported_refraction_enabled: bool,
         base_pipeline: Option<&'a wgpu::RenderPipeline>,
         layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
+        render_layer: u32,
     ) {
         // The renderer enters with the ordinary scene pipeline already bound.
         // Public callers that do not opt into specialization retain the old
@@ -2133,10 +2314,13 @@ impl SceneGraph {
         let mut current_pipeline = base_pipeline.map(|_| (false, false));
         for (_handle, node) in self.nodes.iter() {
             if !node.visible
+                || node.render_layer != render_layer
                 || node.gi_only
                 || node.indices().is_empty()
-                || !node.in_view_frustum
-                || node.occluded
+                // Retained culling is prepared from the world depth/Hi-Z
+                // history. Camera-space overlays use an independent depth
+                // attachment and must not inherit those world-only results.
+                || (render_layer == 0 && (!node.in_view_frustum || node.occluded))
             {
                 continue;
             }
@@ -2238,6 +2422,7 @@ impl SceneGraph {
             .iter()
             .filter(|(_handle, node)| {
                 node.visible
+                    && node.render_layer == 0
                     && node.card_first_slot.is_some()
                     && !node.indices().is_empty()
                     && node.material.has_gi_transmission()
@@ -2642,6 +2827,7 @@ impl SceneGraph {
                 .filter(|(_, node)| {
                     node.visible
                         && !node.gi_only
+                        && node.render_layer == 0
                         && !node.indices().is_empty()
                         && node.in_view_frustum
                         && !node.occluded
@@ -2650,7 +2836,12 @@ impl SceneGraph {
             return [compatibility, visible, culled];
         }
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.gi_only || node.indices().is_empty() || node.occluded {
+            if !node.visible
+                || node.gi_only
+                || node.render_layer != 0
+                || node.indices().is_empty()
+                || node.occluded
+            {
                 continue;
             }
             if !scene_node_gpu_driven_ready(node, self.imported_refraction_enabled) {
@@ -2704,6 +2895,17 @@ impl SceneGraph {
 
     pub fn node_count(&self) -> usize {
         self.nodes.iter().count()
+    }
+
+    pub(crate) fn has_visible_opaque_nodes_in_layer(&self, render_layer: u32) -> bool {
+        self.nodes.iter().any(|(_, node)| {
+            node.visible
+                && !node.gi_only
+                && node.render_layer == render_layer
+                && !node.indices().is_empty()
+                && node.material.alpha_mode != MaterialAlphaMode::Blend
+                && !(self.imported_refraction_enabled && node.material.transmission.is_active())
+        })
     }
 
     /// Draw list for the planar-reflection probe: every visible node with

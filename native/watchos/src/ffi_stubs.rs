@@ -60,6 +60,9 @@
 }
 #[no_mangle] pub extern "C" fn bloom_voice_set_lowpass(_p0: f64, _p1: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_load_texture_rgba8_scratch(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_load_image(_p0: i64) -> f64 {
     0.0
 }
@@ -546,6 +549,9 @@
 #[no_mangle] pub extern "C" fn bloom_add_shadowed_spot_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_scene_set_render_layer(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_scene_set_gi_only(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
@@ -567,6 +573,15 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_scene_set_material_layered_pbr(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64, _p18: f64, _p19: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_texture_handles(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_texture_transform(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_texture_strengths(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_scene_node_vertex_count(_p0: f64) -> f64 {
@@ -607,6 +622,15 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_load_render_texture(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_load_render_texture_kind(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_render_texture_glsl(_p0: f64, _p1: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_render_texture_sobel(_p0: f64, _p1: f64, _p2: f64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_unload_render_texture(_p0: f64) {

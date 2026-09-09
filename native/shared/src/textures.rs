@@ -48,6 +48,10 @@ impl TextureManager {
         })
     }
 
+    pub fn load_render_texture_kind(&mut self, width: u32, height: u32) -> f64 {
+        self.load_render_texture(width, height)
+    }
+
     /// Set the texture handle for a render texture (called after GPU creation).
     pub fn set_render_texture_handle(&mut self, rt_handle: f64, tex_handle: f64) {
         if let Some(rt) = self.render_textures.get_mut(rt_handle) {
@@ -99,6 +103,52 @@ impl TextureManager {
         let data = img.into_raw();
 
         let bind_group_idx = renderer.register_texture(width, height, &data);
+        self.textures.alloc(TextureData {
+            bind_group_idx,
+            width,
+            height,
+        })
+    }
+
+    /// Upload caller-owned RGBA8 texels without routing through an image file.
+    ///
+    /// `kind` selects the filtering/color treatment used by Bloom's material
+    /// texture store: 0 = sRGB colour, 1 = tangent-space normal, 2 = linear
+    /// material data (metal/roughness/occlusion). This is the native boundary
+    /// used by compatibility renderers that already own decoded texels.
+    pub fn load_texture_rgba8(
+        &mut self,
+        renderer: &mut Renderer,
+        width: u32,
+        height: u32,
+        data: &[u8],
+        kind: u32,
+    ) -> f64 {
+        let Some(byte_len) = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .map(|bytes| bytes as usize)
+        else {
+            return 0.0;
+        };
+        if width == 0 || height == 0 || data.len() < byte_len {
+            return 0.0;
+        }
+
+        let (normal_map, srgb_rgb) = match kind {
+            0 => (false, true),
+            1 => (true, false),
+            2 => (false, false),
+            _ => return 0.0,
+        };
+        let bind_group_idx = renderer.register_texture_kind_with_color_space(
+            width,
+            height,
+            &data[..byte_len],
+            normal_map,
+            srgb_rgb,
+            None,
+        );
         self.textures.alloc(TextureData {
             bind_group_idx,
             width,

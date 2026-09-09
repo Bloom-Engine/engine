@@ -49,6 +49,84 @@ impl Default for MaterialTextureTransform {
     }
 }
 
+/// General 2D affine transform for standard material texture coordinates.
+///
+/// The two rows map an authored UV `(u, v)` to the sampled coordinate:
+/// `u' = row_0.x*u + row_0.y*v + row_0.z` and likewise for `v'`.
+/// Keeping the already-composed affine matrix is important for compatibility
+/// APIs such as Three.js, whose texture matrix also folds `center` into the
+/// translation and whose non-uniform scale/rotation order cannot be recovered
+/// losslessly from a glTF-style offset/rotation/scale triple.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct MaterialTextureAffineTransform {
+    pub row_0: [f32; 4],
+    pub row_1: [f32; 4],
+}
+
+impl Default for MaterialTextureAffineTransform {
+    fn default() -> Self {
+        Self {
+            row_0: [1.0, 0.0, 0.0, 0.0],
+            row_1: [0.0, 1.0, 0.0, 0.0],
+        }
+    }
+}
+
+impl MaterialTextureAffineTransform {
+    pub fn from_rows(row_0: [f32; 3], row_1: [f32; 3]) -> Self {
+        let finite_or = |value: f32, fallback: f32| {
+            if value.is_finite() {
+                value
+            } else {
+                fallback
+            }
+        };
+        Self {
+            row_0: [
+                finite_or(row_0[0], 1.0),
+                finite_or(row_0[1], 0.0),
+                finite_or(row_0[2], 0.0),
+                0.0,
+            ],
+            row_1: [
+                finite_or(row_1[0], 0.0),
+                finite_or(row_1[1], 1.0),
+                finite_or(row_1[2], 0.0),
+                0.0,
+            ],
+        }
+    }
+}
+
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum StandardMaterialTextureSlot {
+    BaseColor = 0,
+    Normal = 1,
+    MetallicRoughness = 2,
+    Emissive = 3,
+    Occlusion = 4,
+}
+
+impl StandardMaterialTextureSlot {
+    pub const COUNT: usize = 5;
+
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::BaseColor),
+            1 => Some(Self::Normal),
+            2 => Some(Self::MetallicRoughness),
+            3 => Some(Self::Emissive),
+            4 => Some(Self::Occlusion),
+            _ => None,
+        }
+    }
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Lossless source metadata plus the optional renderer texture resolved by a
 /// particular loading path. Plain CPU-only model loading preserves the source
 /// reference while leaving `runtime_texture_idx` empty.
@@ -699,6 +777,12 @@ impl ModelManager {
     /// own data out in it (the spline ribbon packs positions then widths).
     pub fn scratch_floats(&self) -> &[f32] {
         &self.scratch_f32
+    }
+
+    /// Read-only packed-u32 scratch view. Texture upload adapters use one
+    /// little-endian u32 per RGBA8 texel to avoid Perry's pointer-array ABI.
+    pub fn scratch_u32s(&self) -> &[u32] {
+        &self.scratch_u32
     }
 
     /// Take the scratch buffers as raw vertex floats + indices, for callers

@@ -606,6 +606,15 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_load_texture_rgba8_scratch",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_unload_texture",
           "params": [
             "f64"
@@ -2548,6 +2557,14 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_scene_set_render_layer",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_scene_set_cast_shadow",
           "params": [
             "f64",
@@ -2731,6 +2748,42 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_scene_set_material_texture_handles",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_scene_set_material_texture_transform",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_scene_set_material_texture_strengths",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_scene_node_count",
           "params": [],
           "returns": "f64"
@@ -2844,6 +2897,21 @@
             "f64",
             "f64"
           ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_load_render_texture_kind",
+          "params": ["f64", "f64", "f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_render_texture_glsl",
+          "params": ["f64", "string"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_render_texture_sobel",
+          "params": ["f64", "f64", "f64"],
           "returns": "f64"
         },
         {

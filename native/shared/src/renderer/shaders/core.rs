@@ -56,7 +56,20 @@ struct MaterialFactors {
     metal_rough: vec4<f32>, // x=metallic, y=roughness
     emissive:    vec4<f32>, // rgb=emissive factor
     spec_gloss:  vec4<f32>, // rgb=specular factor, a=glossiness factor
+    // Two affine rows per texture: base, normal, MR, emissive, occlusion.
+    uv_transforms: array<vec4<f32>, 10>,
 };
+
+fn material_uv(uv: vec2<f32>, row_0: vec4<f32>, row_1: vec4<f32>) -> vec2<f32> {
+    return vec2<f32>(
+        dot(row_0.xyz, vec3<f32>(uv, 1.0)),
+        dot(row_1.xyz, vec3<f32>(uv, 1.0)),
+    );
+}
+
+fn material_uv_delta(delta: vec2<f32>, row_0: vec4<f32>, row_1: vec4<f32>) -> vec2<f32> {
+    return vec2<f32>(dot(row_0.xy, delta), dot(row_1.xy, delta));
+}
 
 struct VertexInputScene {
     @location(0) position: vec3<f32>,
@@ -749,47 +762,50 @@ struct SceneOut {
 // fragments before the shader ever runs.
 @fragment
 fn fs_depth_prepass(in: VertexOutputScene) {
+    let base_uv = material_uv(
+        in.uv, material.uv_transforms[0], material.uv_transforms[1],
+    );
     let alpha_cutoff = material.metal_rough.w;
     if (alpha_cutoff > 0.0) {
         let lod_bias = lighting.shadow_cascade_splits.w;
         var survives = true;
         if (material.emissive.w > 0.5) {
             let mask_lod = mask_texture_lod(
-                in.uv,
+                base_uv,
                 textureDimensions(base_color_tex),
                 lod_bias,
             );
             if (mask_lod <= 0.5) {
                 let authored_alpha =
-                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    textureSampleLevel(base_color_tex, base_color_samp, base_uv, 0.0).a *
                     in.color.a;
                 survives = authored_alpha >= alpha_cutoff;
             } else if (mask_lod >= 1.0) {
                 let coverage =
-                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, mask_lod).a;
+                    textureSampleLevel(base_color_tex, base_color_samp, base_uv, mask_lod).a;
                 survives = coverage >= mask_coverage_threshold(
-                    in.uv,
+                    base_uv,
                     textureDimensions(base_color_tex),
                     mask_lod,
                 );
             } else {
                 let authored_alpha =
-                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    textureSampleLevel(base_color_tex, base_color_samp, base_uv, 0.0).a *
                     in.color.a;
                 let coverage =
-                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 1.0).a;
+                    textureSampleLevel(base_color_tex, base_color_samp, base_uv, 1.0).a;
                 survives = mask_coverage_survives(
                     authored_alpha,
                     coverage,
                     alpha_cutoff,
                     mask_lod,
-                    in.uv,
+                    base_uv,
                     textureDimensions(base_color_tex),
                 );
             }
         } else {
             let raw_alpha =
-                textureSampleBias(base_color_tex, base_color_samp, in.uv, lod_bias).a *
+                textureSampleBias(base_color_tex, base_color_samp, base_uv, lod_bias).a *
                 in.color.a;
             survives = raw_alpha >= alpha_cutoff;
         }
@@ -799,6 +815,21 @@ fn fs_depth_prepass(in: VertexOutputScene) {
 
 fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     var n = normalize(in.normal);
+    let base_uv = material_uv(
+        in.uv, material.uv_transforms[0], material.uv_transforms[1],
+    );
+    let normal_uv = material_uv(
+        in.uv, material.uv_transforms[2], material.uv_transforms[3],
+    );
+    let mr_uv = material_uv(
+        in.uv, material.uv_transforms[4], material.uv_transforms[5],
+    );
+    let emissive_uv = material_uv(
+        in.uv, material.uv_transforms[6], material.uv_transforms[7],
+    );
+    let occlusion_uv = material_uv(
+        in.uv, material.uv_transforms[8], material.uv_transforms[9],
+    );
     // Keep the interpolated geometric normal separate from the normal-mapped
     // shading normal.  The texture path already contributes both Toksvig
     // shortening and LEADR-style baked mip variance below; differentiating
@@ -831,8 +862,12 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // TSR is on, 0 otherwise) — added so half-res rendering still
     // reads texture detail one mip finer than hardware would pick.
     let lod_bias = lighting.shadow_cascade_splits.w;
-    let nm_sample4 = textureSampleBias(normal_tex, normal_samp, in.uv, 0.25 + lod_bias);
-    let nm_raw = nm_sample4.xyz * 2.0 - 1.0;
+    let nm_sample4 = textureSampleBias(normal_tex, normal_samp, normal_uv, 0.25 + lod_bias);
+    let nm_raw = (nm_sample4.xyz * 2.0 - 1.0) * vec3<f32>(
+        material.uv_transforms[2].w,
+        material.uv_transforms[3].w,
+        1.0,
+    );
     let baked_variance = nm_sample4.w;
     let toksvig_len2 = clamp(dot(nm_raw, nm_raw), 0.01, 1.0);
     let nm_sample = nm_raw * inverseSqrt(toksvig_len2);
@@ -841,8 +876,8 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // analysis on WebGPU).
     let tbn_dp1 = dpdx(in.world_pos);
     let tbn_dp2 = dpdy(in.world_pos);
-    let tbn_duv1 = dpdx(in.uv);
-    let tbn_duv2 = dpdy(in.uv);
+    let tbn_duv1 = dpdx(normal_uv);
+    let tbn_duv2 = dpdy(normal_uv);
     let tlen2 = dot(in.tangent.xyz, in.tangent.xyz);
     if (tlen2 > 0.0001) {
         let t = normalize(in.tangent.xyz);
@@ -860,7 +895,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // hardware decode). We decode manually via the 2.2 approximation —
     // matches bloom-reference's convention so the PBR lighting math
     // operates in linear space throughout.
-    let base_tex = textureSampleBias(base_color_tex, base_color_samp, in.uv, lod_bias);
+    let base_tex = textureSampleBias(base_color_tex, base_color_samp, base_uv, lod_bias);
     // Vertex color carries the glTF baseColorFactor (linear per spec)
     // when no per-vertex COLOR_0 stream exists, or the linear color
     // attribute when it does. Do NOT srgb-decode it — that gave
@@ -885,35 +920,35 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         var survives = base_alpha >= alpha_cutoff;
         if (material.emissive.w > 0.5) {
             let mask_lod = mask_texture_lod(
-                in.uv,
+                base_uv,
                 textureDimensions(base_color_tex),
                 lod_bias,
             );
             if (mask_lod <= 0.5) {
                 let authored_alpha =
-                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    textureSampleLevel(base_color_tex, base_color_samp, base_uv, 0.0).a *
                     in.color.a;
                 survives = authored_alpha >= alpha_cutoff;
             } else if (mask_lod >= 1.0) {
                 let coverage =
-                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, mask_lod).a;
+                    textureSampleLevel(base_color_tex, base_color_samp, base_uv, mask_lod).a;
                 survives = coverage >= mask_coverage_threshold(
-                    in.uv,
+                    base_uv,
                     textureDimensions(base_color_tex),
                     mask_lod,
                 );
             } else {
                 let authored_alpha =
-                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    textureSampleLevel(base_color_tex, base_color_samp, base_uv, 0.0).a *
                     in.color.a;
                 let coverage =
-                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 1.0).a;
+                    textureSampleLevel(base_color_tex, base_color_samp, base_uv, 1.0).a;
                 survives = mask_coverage_survives(
                     authored_alpha,
                     coverage,
                     alpha_cutoff,
                     mask_lod,
-                    in.uv,
+                    base_uv,
                     textureDimensions(base_color_tex),
                 );
             }
@@ -944,7 +979,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // at index 0) — multiplying its random R/G/B into our factors
     // produces incorrect material values. Use the factors directly in
     // that case.
-    let mr_tex_sample = textureSample(mr_tex, mr_samp, in.uv);
+    let mr_tex_sample = textureSample(mr_tex, mr_samp, mr_uv);
     let has_mr = material.metal_rough.z > 0.5 && material.metal_rough.z < 1.5;
     let has_spec_gloss = material.metal_rough.z > 1.5;
     var roughness_raw = select(
@@ -1023,14 +1058,15 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     alpha2 = min(alpha2 + kernel_alpha, 1.0);
     roughness = sqrt(alpha2);
 
-    let em_tex_sample = textureSample(em_tex, em_samp, in.uv);
+    let em_tex_sample = textureSample(em_tex, em_samp, emissive_uv);
     let emissive = srgb_to_linear_v(em_tex_sample.rgb) * material.emissive.rgb;
 
     // glTF occlusion: R channel, attenuates indirect lighting (IBL
     // diffuse + ambient) only — direct lights and specular IBL are
     // unchanged per spec. Default texture is white (idx 0) so the
     // sample is 1.0 for materials without an occlusion map.
-    let occlusion = textureSample(occ_tex, occ_samp, in.uv).r;
+    let sampled_occlusion = textureSample(occ_tex, occ_samp, occlusion_uv).r;
+    let occlusion = mix(1.0, sampled_occlusion, material.uv_transforms[8].w);
 
     // --- PBR direct lighting ---
     let v = normalize(lighting.camera_pos.xyz - in.world_pos);
@@ -1804,13 +1840,23 @@ fn physical_texture_uv(
 
 fn refractive_scene_normal(in: VertexOutputScene, front_facing: bool) -> vec3<f32> {{
     var n = normalize(in.normal);
+    let normal_uv = material_uv(
+        in.uv, material.uv_transforms[2], material.uv_transforms[3],
+    );
     let normal_sample = textureSampleBias(
         normal_tex,
         normal_samp,
-        in.uv,
+        normal_uv,
         1.0 + lighting.shadow_cascade_splits.w,
     ).xyz * 2.0 - 1.0;
-    let mapped = normal_sample / max(length(normal_sample), 0.000001);
+    let scaled_normal_sample = vec3<f32>(
+        normal_sample.xy * vec2<f32>(
+            material.uv_transforms[2].w,
+            material.uv_transforms[3].w,
+        ),
+        normal_sample.z,
+    );
+    let mapped = scaled_normal_sample / max(length(scaled_normal_sample), 0.000001);
     let tangent_len2 = dot(in.tangent.xyz, in.tangent.xyz);
     if (tangent_len2 > 0.0001) {{
         let tangent = normalize(in.tangent.xyz);
@@ -1823,8 +1869,8 @@ fn refractive_scene_normal(in: VertexOutputScene, front_facing: bool) -> vec3<f3
         let tbn = compute_tbn(
             dpdx(in.world_pos),
             dpdy(in.world_pos),
-            dpdx(in.uv),
-            dpdy(in.uv),
+            dpdx(normal_uv),
+            dpdy(normal_uv),
             n,
         );
         n = normalize(tbn * mapped);
@@ -1852,10 +1898,16 @@ fn fs_refractive_scene(
     let n = refractive_scene_normal(in, front_facing);
     let v = normalize(lighting.camera_pos.xyz - in.world_pos);
 
-    let base_texel = textureSample(base_color_tex, base_color_samp, in.uv);
+    let base_uv = material_uv(
+        in.uv, material.uv_transforms[0], material.uv_transforms[1],
+    );
+    let mr_uv = material_uv(
+        in.uv, material.uv_transforms[4], material.uv_transforms[5],
+    );
+    let base_texel = textureSample(base_color_tex, base_color_samp, base_uv);
     var base_color = srgb_to_linear_v(base_texel.rgb) * in.color.rgb;
     let base_alpha = base_texel.a * in.color.a;
-    let mr_texel = textureSample(mr_tex, mr_samp, in.uv);
+    let mr_texel = textureSample(mr_tex, mr_samp, mr_uv);
     let has_mr = material.metal_rough.z > 0.5 && material.metal_rough.z < 1.5;
     let has_spec_gloss = material.metal_rough.z > 1.5;
     var metallic = select(
