@@ -23,6 +23,13 @@ python3 tools/quality/run.py run quick
 python3 tools/quality/run.py run full \
   --machine-class apple-m1-max-metal
 
+# Windows PowerShell, on an NVIDIA RTX 4080 using Vulkan. The longer idle
+# allowance keeps unrelated builds out of the hard performance window.
+python tools/quality/run.py run full `
+  --machine-class nvidia-rtx4080-windows-vulkan `
+  --host-idle-timeout 600 `
+  --out tools/quality/out/windows-rtx4080-vulkan
+
 # Explore on an unqualified machine without changing the process exit code.
 python3 tools/quality/run.py run full \
   --report-only \
@@ -34,6 +41,13 @@ capture error, missing intermediate, visual threshold failure, or applicable
 hard performance budget. `--report-only` records those same failures in
 `result.json`; it only makes the process exit zero for local investigation.
 It never turns a failure into a recorded pass.
+
+Before the Windows run, use `python tools/quality/run.py check` from a clean
+checkout and confirm that Python, Rust/Cargo, Node/npm, Perry, Vulkan, and the
+pinned Bistro assets are available. The runner records `windows` as the host
+OS, rejects the Linux RTX-4080 identity on Windows, waits for three consecutive
+idle samples, and writes the complete evidence bundle under the selected
+output directory.
 
 Useful focused commands:
 

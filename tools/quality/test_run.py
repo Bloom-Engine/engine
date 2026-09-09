@@ -228,6 +228,7 @@ class ReproducibilityTests(unittest.TestCase):
             self.assertGreater(float(machine["max_host_cpu_fraction"]), 0.0)
             self.assertLess(float(machine["max_host_cpu_fraction"]), 1.0)
             self.assertGreater(float(machine["max_host_process_cpu_percent"]), 0.0)
+
         temporal_evidence = {
             "ssr",
             "ssr-raw",
@@ -255,6 +256,46 @@ class ReproducibilityTests(unittest.TestCase):
                     temporal_evidence.isdisjoint(required),
                     f"{case['id']} cannot require disabled temporal systems",
                 )
+
+    def test_machine_class_rejects_cross_os_measurements(self) -> None:
+        machine = {"id": "windows-vulkan", "os": "windows"}
+        self.assertIsNone(quality.machine_host_failure(machine, "windows"))
+        self.assertIn(
+            "requires OS 'windows'",
+            str(quality.machine_host_failure(machine, "linux")),
+        )
+
+    def test_machine_budget_alias_applies_governed_gpu_limits(self) -> None:
+        case = {
+            "budgets": {
+                "machine_class": "nvidia-rtx4080-vulkan",
+                "max_gpu_frame_p95_ms": 10.0,
+            }
+        }
+        machine = {
+            "id": "nvidia-rtx4080-windows-vulkan",
+            "budget_class": "nvidia-rtx4080-vulkan",
+            "hard_gate": True,
+            "hard_metrics": ["gpu"],
+            "backend": "vulkan",
+            "gpu": "NVIDIA GeForce RTX 4080",
+        }
+        telemetry = {
+            "adapter": {
+                "availability": "reported",
+                "backend": "vulkan",
+                "name": "NVIDIA GeForce RTX 4080",
+            },
+            "gpu_frame_p95_ms": 12.0,
+            "uncapped": True,
+            "warmup_excluded": True,
+            "shader_compilation_excluded": True,
+            "gpu_timestamps_available": True,
+        }
+        self.assertIn(
+            "gpu_frame_p95_ms 12.0000 > 10.0000",
+            quality.performance_failures(case, telemetry, machine),
+        )
 
     def test_stable_metadata_ignores_commands_and_duration(self) -> None:
         common = {

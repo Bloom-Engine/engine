@@ -1078,6 +1078,23 @@ def selected_machine_class(
     raise QualityError(f"unknown machine class: {machine_id}")
 
 
+def machine_host_failure(
+    machine: Mapping[str, Any] | None, actual_os: str | None = None
+) -> str | None:
+    if machine is None:
+        return None
+    expected_os = str(machine.get("os", "")).strip().lower()
+    if not expected_os:
+        return None
+    host_os = (actual_os or platform.system()).strip().lower()
+    if host_os != expected_os:
+        return (
+            f"machine class {machine.get('id')!r} requires OS {expected_os!r}, "
+            f"but this host reports {host_os!r}"
+        )
+    return None
+
+
 def effective_features(adapter: Mapping[str, Any] | None) -> set[str]:
     from_env = {
         feature.strip()
@@ -1145,7 +1162,8 @@ def performance_failures(
         return []
     budgets = case.get("budgets", {})
     required_class = budgets.get("machine_class")
-    if required_class and required_class != machine.get("id"):
+    budget_class = machine.get("budget_class", machine.get("id"))
+    if required_class and required_class != budget_class:
         return []
     if telemetry is None:
         return ["hard-gated machine produced no telemetry.json"]
@@ -1892,6 +1910,8 @@ def execute_suite(args: argparse.Namespace) -> int:
     manifest, manifest_hash = load_manifest(manifest_path)
     adapter = load_adapter(Path(args.adapter_json).resolve() if args.adapter_json else None)
     machine = selected_machine_class(manifest, args.machine_class)
+    if host_failure := machine_host_failure(machine):
+        raise QualityError(host_failure)
     selected_ids = list(manifest["workflow"][args.suite])
     if args.case:
         requested = set(args.case)

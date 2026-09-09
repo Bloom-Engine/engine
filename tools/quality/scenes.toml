@@ -58,6 +58,20 @@ max_host_cpu_fraction = 0.20
 max_host_process_cpu_percent = 75.0
 
 [[machine_class]]
+id = "nvidia-rtx4080-windows-vulkan"
+description = "High-end discrete Windows desktop baseline, Vulkan"
+# Reuse the governed RTX 4080 Vulkan budgets while keeping the operating
+# system identity explicit in result.json.
+budget_class = "nvidia-rtx4080-vulkan"
+hard_gate = true
+hard_metrics = ["cpu", "gpu", "vram"]
+os = "windows"
+backend = "vulkan"
+gpu = "NVIDIA GeForce RTX 4080"
+max_host_cpu_fraction = 0.20
+max_host_process_cpu_percent = 75.0
+
+[[machine_class]]
 id = "apple-m1-metal-constrained"
 description = "Constrained quality tier executed on Apple M1-class Metal"
 hard_gate = true
