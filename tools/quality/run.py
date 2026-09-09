@@ -793,6 +793,7 @@ def placeholders(case: Mapping[str, Any], case_dir: Path) -> dict[str, str]:
     target = camera["target"]
     return {
         "repo": str(REPO_ROOT),
+        "python": sys.executable,
         "case_dir": str(case_dir),
         "candidate": str(case_dir / "final.png"),
         "telemetry": str(case_dir / "telemetry.json"),

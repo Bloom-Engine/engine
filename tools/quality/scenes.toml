@@ -128,7 +128,7 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/pbr-spheres"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
 command = [
   "./main",
   "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
@@ -196,7 +196,7 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/pbr-spheres"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
 command = [
   "./main",
   "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
@@ -277,7 +277,7 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/renderer-test"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/renderer-test"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/renderer-test"]
 command = [
   "./main",
   "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
@@ -370,7 +370,7 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/sponza"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/sponza"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/sponza"]
 command = [
   "./main", "--yaw", "0", "--taa", "1",
   "--quality-preset", "3", "--render-scale", "{render_scale}",
@@ -461,13 +461,13 @@ present_mode = "auto-no-vsync"
 [case.capture]
 working_dir = "examples/bistro"
 prepare = [
-  "python3", "{repo}/tools/quality/prepare_bistro.py",
+  "{python}", "{repo}/tools/quality/prepare_bistro.py",
   "{repo}/examples/bistro/assets/bistro.gltf",
   "{case_dir}/bistro-quality.gltf",
   "--metadata", "{case_dir}/bistro-quality.json",
   "--revision", "7c9f9f9ac0915024ccf3dddbccd8bfc643a42607",
 ]
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/bistro"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/bistro"]
 command = [
   "./main", "--scene", "{case_dir}/bistro-quality.gltf",
   "--yaw", "-1.8608027466", "--taa", "1",
@@ -559,7 +559,7 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/quality-motion"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-motion"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-motion"]
 command = [
   "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
@@ -649,7 +649,7 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/quality-stress"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-stress"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-stress"]
 command = [
   "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
@@ -729,7 +729,7 @@ present_mode = "auto-no-vsync"
 [case.capture]
 working_dir = "examples/quality-transparency"
 build = [
-  "python3",
+  "{python}",
   "{repo}/tools/quality/build_example.py",
   "{repo}/examples/quality-transparency",
 ]
@@ -815,7 +815,7 @@ present_mode = "auto-no-vsync"
 [case.capture]
 working_dir = "examples/quality-masked"
 build = [
-  "python3",
+  "{python}",
   "{repo}/tools/quality/build_example.py",
   "{repo}/examples/quality-masked",
 ]

@@ -229,6 +229,19 @@ class ReproducibilityTests(unittest.TestCase):
             self.assertLess(float(machine["max_host_cpu_fraction"]), 1.0)
             self.assertGreater(float(machine["max_host_process_cpu_percent"]), 0.0)
 
+        for case in manifest["case"]:
+            values = quality.placeholders(case, Path("case-output"))
+            self.assertEqual(values["python"], sys.executable)
+            capture = case["capture"]
+            for key in ("prepare", "build"):
+                argv = capture.get(key)
+                if argv:
+                    self.assertEqual(
+                        argv[0],
+                        "{python}",
+                        f"{case['id']}.{key} must use the active interpreter",
+                    )
+
         temporal_evidence = {
             "ssr",
             "ssr-raw",
