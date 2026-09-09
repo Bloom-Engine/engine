@@ -46,8 +46,9 @@ Before the Windows run, use `python tools/quality/run.py check` from a clean
 checkout and confirm that Python, Rust/Cargo, Node/npm, Perry, Vulkan, and the
 pinned Bistro assets are available. The runner records `windows` as the host
 OS, rejects the Linux RTX-4080 identity on Windows, waits for three consecutive
-idle samples, uses the active Python interpreter for helper scripts, and writes
-the complete evidence bundle under the selected output directory.
+idle samples, explicitly selects Vulkan, uses the active Python interpreter for
+helper scripts, and writes the complete evidence bundle under the selected
+output directory.
 
 Useful focused commands:
 

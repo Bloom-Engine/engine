@@ -14,6 +14,24 @@ static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 #[cfg(windows)]
 static mut EMBEDDED: bool = false;
 
+#[cfg(windows)]
+fn configured_backends() -> wgpu::Backends {
+    match std::env::var("BLOOM_WGPU_BACKEND")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "vulkan" => wgpu::Backends::VULKAN,
+        "dx12" | "d3d12" => wgpu::Backends::DX12,
+        "" | "auto" => wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+        other => {
+            eprintln!("bloom: unsupported BLOOM_WGPU_BACKEND={other:?}; using DX12 and Vulkan");
+            wgpu::Backends::DX12 | wgpu::Backends::VULKAN
+        }
+    }
+}
+
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
 }
@@ -682,8 +700,9 @@ unsafe fn init_engine_for_hwnd(
         dxc_path: String::from("dxcompiler.dll"),
     };
 
+    let backends = configured_backends();
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+        backends,
         backend_options,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
@@ -721,9 +740,7 @@ unsafe fn init_engine_for_hwnd(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    let candidates = pollster_block_on(
-        instance.enumerate_adapters(wgpu::Backends::DX12 | wgpu::Backends::VULKAN),
-    );
+    let candidates = pollster_block_on(instance.enumerate_adapters(backends));
     let mut rt_adapter: Option<wgpu::Adapter> = None;
     for cand in candidates {
         let info = cand.get_info();
@@ -872,7 +889,7 @@ pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f
             bloom_shared::attach::attach_engine(
                 target,
                 bloom_shared::attach::AttachParams {
-                    backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+                    backends: configured_backends(),
                     logical_w: (width as u32).max(1),
                     logical_h: (height as u32).max(1),
                     physical_w: (width as u32).max(1),

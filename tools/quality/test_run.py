@@ -288,6 +288,16 @@ class ReproducibilityTests(unittest.TestCase):
             "requires OS 'windows'",
             str(quality.machine_host_failure(machine, "linux")),
         )
+        self.assertIsNone(
+            quality.machine_host_failure({"id": "metal", "os": "macos"}, "Darwin")
+        )
+        self.assertEqual(
+            quality.machine_capture_environment(
+                {"backend": " Vulkan ", "hardware_gi": True}
+            ),
+            {"BLOOM_WGPU_BACKEND": "vulkan", "BLOOM_HW_GI": "1"},
+        )
+        self.assertEqual(quality.machine_capture_environment(None), {})
 
     def test_machine_budget_alias_applies_governed_gpu_limits(self) -> None:
         case = {

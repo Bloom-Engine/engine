@@ -54,6 +54,7 @@ hard_metrics = ["cpu", "gpu", "vram"]
 os = "linux"
 backend = "vulkan"
 gpu = "NVIDIA GeForce RTX 4080"
+hardware_gi = true
 max_host_cpu_fraction = 0.20
 max_host_process_cpu_percent = 75.0
 
@@ -68,6 +69,7 @@ hard_metrics = ["cpu", "gpu", "vram"]
 os = "windows"
 backend = "vulkan"
 gpu = "NVIDIA GeForce RTX 4080"
+hardware_gi = true
 max_host_cpu_fraction = 0.20
 max_host_process_cpu_percent = 75.0
 

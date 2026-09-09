@@ -652,6 +652,10 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
             raise QualityError(
                 f"machine class {item['id']}.max_host_process_cpu_percent must be positive"
             )
+        if "hardware_gi" in item and not isinstance(item["hardware_gi"], bool):
+            raise QualityError(
+                f"machine class {item['id']}.hardware_gi must be a boolean"
+            )
     for case in cases:
         machine_id = case["budgets"]["machine_class"]
         if machine_id not in machine_ids:
@@ -1084,21 +1088,42 @@ def selected_machine_class(
     raise QualityError(f"unknown machine class: {machine_id}")
 
 
+def canonical_host_os(value: str) -> str:
+    normalized = value.strip().lower()
+    return {
+        "darwin": "macos",
+        "win32": "windows",
+        "nt": "windows",
+    }.get(normalized, normalized)
+
+
 def machine_host_failure(
     machine: Mapping[str, Any] | None, actual_os: str | None = None
 ) -> str | None:
     if machine is None:
         return None
-    expected_os = str(machine.get("os", "")).strip().lower()
+    expected_os = canonical_host_os(str(machine.get("os", "")))
     if not expected_os:
         return None
-    host_os = (actual_os or platform.system()).strip().lower()
+    host_os = canonical_host_os(actual_os or platform.system())
     if host_os != expected_os:
         return (
             f"machine class {machine.get('id')!r} requires OS {expected_os!r}, "
             f"but this host reports {host_os!r}"
         )
     return None
+
+
+def machine_capture_environment(
+    machine: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    if machine is None:
+        return {}
+    backend = str(machine.get("backend", "")).strip().lower()
+    environment = {"BLOOM_WGPU_BACKEND": backend} if backend else {}
+    if machine.get("hardware_gi", False):
+        environment["BLOOM_HW_GI"] = "1"
+    return environment
 
 
 def effective_features(adapter: Mapping[str, Any] | None) -> set[str]:
@@ -1393,6 +1418,7 @@ def run_case(
         "BLOOM_QUALITY_INTERMEDIATES": str(intermediates),
         "RUST_BACKTRACE": "1",
     }
+    env.update(machine_capture_environment(machine))
     capture_result = run_command(capture_argv, cwd, timeout_seconds, env)
     record["commands"].append({"kind": "capture", **command_record(capture_result)})
     if capture_result.returncode != 0:
