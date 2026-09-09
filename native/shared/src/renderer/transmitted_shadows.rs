@@ -69,6 +69,7 @@ struct MaterialFactors {
     metal_rough: vec4<f32>,
     emissive: vec4<f32>,
     spec_gloss: vec4<f32>,
+    uv_transforms: array<vec4<f32>, 10>,
 };
 
 struct TransmissionFactors {
@@ -126,6 +127,13 @@ fn physical_uv(
     );
 }
 
+fn material_uv(uv: vec2<f32>, row_0: vec4<f32>, row_1: vec4<f32>) -> vec2<f32> {
+    return vec2<f32>(
+        dot(row_0.xyz, vec3<f32>(uv, 1.0)),
+        dot(row_1.xyz, vec3<f32>(uv, 1.0)),
+    );
+}
+
 @vertex
 fn vs_main(v: VertexIn) -> VertexOut {
     var local = vec4<f32>(v.position, 1.0);
@@ -178,7 +186,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let base_texel = textureSample(base_color_tex, base_color_samp, in.uv);
+    let base_uv = material_uv(
+        in.uv, material.uv_transforms[0], material.uv_transforms[1],
+    );
+    let mr_uv = material_uv(
+        in.uv, material.uv_transforms[4], material.uv_transforms[5],
+    );
+    let base_texel = textureSample(base_color_tex, base_color_samp, base_uv);
     let base_color = base_texel.rgb * in.color.rgb;
     let base_alpha = clamp(base_texel.a * in.color.a, 0.0, 1.0);
     let alpha_mode = material.metal_rough.w;
@@ -186,7 +200,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let mr = textureSample(mr_tex, mr_samp, in.uv);
+    let mr = textureSample(mr_tex, mr_samp, mr_uv);
     let metallic = select(
         clamp(material.metal_rough.x, 0.0, 1.0),
         clamp(material.metal_rough.x * mr.b, 0.0, 1.0),

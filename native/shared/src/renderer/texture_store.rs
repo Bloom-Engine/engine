@@ -614,6 +614,34 @@ impl Renderer {
     }
     /// Returns (bind_group_index, texture_vec_index).
     pub fn create_render_texture(&mut self, width: u32, height: u32) -> (u32, usize) {
+        // Preserve the established render-target override contract: the
+        // ordinary target must match the surface/composite pipeline format.
+        self.create_render_texture_with_format(width, height, self.surface_config.format)
+    }
+
+    /// Create a sampleable render attachment with explicit color treatment.
+    /// kind 0 = sRGB color, 1 = linear RGBA8 data, 2 = linear RGBA16F.
+    pub fn create_render_texture_kind(
+        &mut self,
+        width: u32,
+        height: u32,
+        kind: u32,
+    ) -> (u32, usize) {
+        let format = match kind {
+            0 => wgpu::TextureFormat::Rgba8UnormSrgb,
+            1 => wgpu::TextureFormat::Rgba8Unorm,
+            2 => wgpu::TextureFormat::Rgba16Float,
+            _ => wgpu::TextureFormat::Rgba8Unorm,
+        };
+        self.create_render_texture_with_format(width, height, format)
+    }
+
+    fn create_render_texture_with_format(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> (u32, usize) {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("render_texture"),
             size: wgpu::Extent3d {
@@ -624,7 +652,7 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: self.surface_config.format,
+            format,
             // COPY_SRC so render-target contents are readable (tests,
             // screenshots of offscreen renders).
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -649,7 +677,7 @@ impl Renderer {
         });
         let idx = self.texture_bind_groups.len() as u32;
         let tex_idx = self.textures.len();
-        let hardware_srgb_decode = self.surface_config.format.is_srgb();
+        let hardware_srgb_decode = format.is_srgb();
         let global_id = self.register_global_texture(
             &tex_view,
             width,

@@ -157,6 +157,40 @@ macro_rules! __bloom_ffi_assets {
             })
         }
 
+        // Upload RGBA8 supplied through the all-f64 mesh scratch. Each u32 is
+        // one little-endian texel: r | g<<8 | b<<16 | a<<24. This keeps raw
+        // texture uploads callable from Perry without an unsafe array pointer.
+        #[no_mangle]
+        pub extern "C" fn bloom_load_texture_rgba8_scratch(
+            width: f64,
+            height: f64,
+            kind: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_load_texture_rgba8_scratch", move || {
+                let width = width as u32;
+                let height = height as u32;
+                let Some(texel_count) = width.checked_mul(height).map(|count| count as usize)
+                else {
+                    return 0.0;
+                };
+                let eng = engine();
+                if width == 0 || height == 0 || eng.models.scratch_u32s().len() < texel_count {
+                    return 0.0;
+                }
+                let mut bytes = Vec::with_capacity(texel_count * 4);
+                for &texel in &eng.models.scratch_u32s()[..texel_count] {
+                    bytes.extend_from_slice(&texel.to_le_bytes());
+                }
+                eng.models.mesh_scratch_reset();
+                let $crate::engine::EngineState {
+                    ref mut textures,
+                    ref mut renderer,
+                    ..
+                } = *eng;
+                textures.load_texture_rgba8(renderer, width, height, &bytes, kind as u32)
+            })
+        }
+
         // bloom_unload_texture  [source: curated]
         #[no_mangle]
         pub extern "C" fn bloom_unload_texture(handle: f64) {
@@ -439,6 +473,90 @@ macro_rules! __bloom_ffi_assets {
                     .set_render_texture_handle(rt_handle, tex_handle);
 
                 rt_handle
+            })
+        }
+
+        // Explicit render-target color treatment for compatibility renderers:
+        // 0=sRGB RGBA8, 1=linear RGBA8, 2=linear RGBA16F.
+        #[no_mangle]
+        pub extern "C" fn bloom_load_render_texture_kind(
+            width: f64,
+            height: f64,
+            kind: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_load_render_texture_kind", move || {
+                let w = (width as u32).max(1);
+                let h = (height as u32).max(1);
+                let kind = (kind as u32).min(2);
+                let eng = engine();
+                let rt_handle = eng.textures.load_render_texture_kind(w, h);
+                let (bind_group_idx, _) = eng.renderer.create_render_texture_kind(w, h, kind);
+                let tex_handle = eng.textures.textures.alloc($crate::textures::TextureData {
+                    bind_group_idx,
+                    width: w,
+                    height: h,
+                });
+                eng.textures
+                    .set_render_texture_handle(rt_handle, tex_handle);
+                rt_handle
+            })
+        }
+
+        #[no_mangle]
+        pub extern "C" fn bloom_render_texture_glsl(
+            render_texture: f64,
+            source_ptr: *const u8,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_render_texture_glsl", move || {
+                let source = $crate::string_header::str_from_header(source_ptr);
+                let eng = engine();
+                let Some(rt) = eng.textures.render_textures.get(render_texture) else {
+                    return 0.0;
+                };
+                let Some(texture) = eng.textures.textures.get(rt.texture_handle) else {
+                    return 0.0;
+                };
+                match eng
+                    .renderer
+                    .render_glsl_fragment_to_texture(texture.bind_group_idx as usize, source)
+                {
+                    Ok(()) => 1.0,
+                    Err(error) => {
+                        eprintln!("[compat-glsl] {error}");
+                        0.0
+                    }
+                }
+            })
+        }
+
+        #[no_mangle]
+        pub extern "C" fn bloom_render_texture_sobel(
+            render_texture: f64,
+            source_texture: f64,
+            strength: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_render_texture_sobel", move || {
+                let eng = engine();
+                let Some(rt) = eng.textures.render_textures.get(render_texture) else {
+                    return 0.0;
+                };
+                let Some(target) = eng.textures.textures.get(rt.texture_handle) else {
+                    return 0.0;
+                };
+                let Some(source) = eng.textures.textures.get(source_texture) else {
+                    return 0.0;
+                };
+                match eng.renderer.render_sobel_to_texture(
+                    target.bind_group_idx as usize,
+                    source.bind_group_idx as usize,
+                    strength as f32,
+                ) {
+                    Ok(()) => 1.0,
+                    Err(error) => {
+                        eprintln!("[compat-sobel] {error}");
+                        0.0
+                    }
+                }
             })
         }
 

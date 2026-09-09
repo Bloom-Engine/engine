@@ -67,6 +67,7 @@ mod frame_graph_runtime;
 mod frame_resource_stats;
 mod froxel;
 mod gi_bake;
+mod glsl_render_target;
 pub mod gpu_driven;
 mod hiz;
 mod immediate_draw3d;
@@ -563,6 +564,11 @@ pub struct Renderer {
     // Depth buffer
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// Independent depth for camera-space 3D overlay layers. Keeping this
+    /// separate preserves the world depth consumed by SSAO/SSR/fog while
+    /// still allowing a viewmodel to depth-test against itself.
+    overlay_depth_texture: wgpu::Texture,
+    overlay_depth_view: wgpu::TextureView,
     /// Linear HDR offscreen render target the scene + sky + 3D
     /// pipelines write into. A composite-tonemap pass reads it and
     /// writes the final image to the sRGB surface. Sized to surface
@@ -2476,6 +2482,8 @@ impl Renderer {
 
         // --- Depth texture ---
         let (depth_texture, depth_view) =
+            create_depth_texture(&device, surface_config.width, surface_config.height);
+        let (overlay_depth_texture, overlay_depth_view) =
             create_depth_texture(&device, surface_config.width, surface_config.height);
         let (hdr_rt_texture, hdr_rt_view) =
             create_hdr_rt(&device, surface_config.width, surface_config.height);
@@ -7975,6 +7983,8 @@ impl Renderer {
             global_nearest_sampler_id,
             depth_texture,
             depth_view,
+            overlay_depth_texture,
+            overlay_depth_view,
             hdr_rt_texture,
             hdr_rt_view,
             material_rt_texture,
@@ -8770,6 +8780,9 @@ impl Renderer {
             let (dt, dv) = create_depth_texture(&self.device, rw, rh);
             self.depth_texture = dt;
             self.depth_view = dv;
+            let (overlay_dt, overlay_dv) = create_depth_texture(&self.device, rw, rh);
+            self.overlay_depth_texture = overlay_dt;
+            self.overlay_depth_view = overlay_dv;
             let (hdr_t, hdr_v) = create_hdr_rt(&self.device, rw, rh);
             self.hdr_rt_texture = hdr_t;
             self.hdr_rt_view = hdr_v;
@@ -10184,6 +10197,7 @@ impl Renderer {
         let mut instance_handles: Vec<f64> = Vec::new();
         for (h, n) in scene.nodes.iter() {
             if n.visible
+                && n.render_layer == 0
                 && if self.hw_rt_enabled {
                     n.blas.is_some()
                         && (n.blas_ready
@@ -12073,6 +12087,10 @@ impl Renderer {
         specular_glossiness_factor: Option<[f32; 4]>,
         alpha_cutoff: f32,
         alpha_coverage_mips: bool,
+        texture_transforms: [crate::models::MaterialTextureAffineTransform;
+            crate::models::StandardMaterialTextureSlot::COUNT],
+        normal_scale: [f32; 2],
+        occlusion_strength: f32,
     ) -> wgpu::Buffer {
         use wgpu::util::DeviceExt;
         let uniforms = SceneMaterialUniforms::new(
@@ -12083,6 +12101,9 @@ impl Renderer {
             specular_glossiness_factor,
             alpha_cutoff,
             alpha_coverage_mips,
+            texture_transforms,
+            normal_scale,
+            occlusion_strength,
         );
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -12102,6 +12123,7 @@ impl Renderer {
         base_color_idx: u32,
         cutoff: f32,
         alpha_coverage_mips: bool,
+        uv_transform: crate::models::MaterialTextureAffineTransform,
     ) -> wgpu::BindGroup {
         use wgpu::util::DeviceExt;
         let cutoff_buf = self
@@ -12109,10 +12131,14 @@ impl Renderer {
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("shadow_cutout_cutoff"),
                 contents: bytemuck::cast_slice(&[
-                    cutoff,
-                    if alpha_coverage_mips { 1.0 } else { 0.0 },
-                    0.0,
-                    0.0,
+                    [
+                        cutoff,
+                        if alpha_coverage_mips { 1.0 } else { 0.0 },
+                        0.0,
+                        0.0,
+                    ],
+                    uv_transform.row_0,
+                    uv_transform.row_1,
                 ]),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
@@ -14093,6 +14119,10 @@ impl Renderer {
                     mesh.specular_glossiness_factor,
                     shader_alpha,
                     mesh.alpha_coverage_mips,
+                    [crate::models::MaterialTextureAffineTransform::default();
+                        crate::models::StandardMaterialTextureSlot::COUNT],
+                    [1.0, 1.0],
+                    1.0,
                 );
                 let material_bg = self.create_scene_material_bg(
                     base_color_idx,
@@ -14205,10 +14235,14 @@ impl Renderer {
                             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                                 label: Some("shadow_cutout_cutoff"),
                                 contents: bytemuck::cast_slice(&[
-                                    mesh.alpha_cutoff,
-                                    if mesh.alpha_coverage_mips { 1.0 } else { 0.0 },
-                                    0.0,
-                                    0.0,
+                                    [
+                                        mesh.alpha_cutoff,
+                                        if mesh.alpha_coverage_mips { 1.0 } else { 0.0 },
+                                        0.0,
+                                        0.0,
+                                    ],
+                                    [1.0, 0.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0, 0.0],
                                 ]),
                                 usage: wgpu::BufferUsages::UNIFORM,
                             });

@@ -1,4 +1,4 @@
-// Bloom global material indirection ABI — version 1.
+// Bloom global material indirection ABI — version 2.
 //
 // This header is consumed by GPU-driven opaque passes. The legacy/custom
 // material ABI remains version 3 and unchanged: Tier C therefore stays a
@@ -6,7 +6,7 @@
 
 const BLOOM_RESOURCE_SLOT_MASK: u32 = 0x000fffffu;
 const BLOOM_RESOURCE_GENERATION_SHIFT: u32 = 20u;
-const BLOOM_GLOBAL_MATERIAL_RECORD_VERSION: u32 = 1u;
+const BLOOM_GLOBAL_MATERIAL_RECORD_VERSION: u32 = 2u;
 const BLOOM_GLOBAL_MATERIAL_VERSION_SHIFT: u32 = 24u;
 const BLOOM_GLOBAL_MATERIAL_LOBE_MASK: u32 = 0x00ffffffu;
 
@@ -25,6 +25,7 @@ struct GlobalMaterialRecord {
   texture_ids_2:   vec4<u32>,
   sampler_ids_0:   vec4<u32>,
   sampler_ids_1:   vec4<u32>,
+  uv_transforms:   array<vec4<f32>, 10>,
 };
 
 struct GlobalMaterialTable {

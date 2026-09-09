@@ -23,6 +23,7 @@
 declare function bloom_scene_create_node(): number;
 declare function bloom_scene_destroy_node(handle: number): void;
 declare function bloom_scene_set_visible(handle: number, visible: number): number;
+declare function bloom_scene_set_render_layer(handle: number, layer: number): number;
 declare function bloom_scene_set_gi_only(handle: number, gi_only: number): number;
 declare function bloom_scene_set_cast_shadow(handle: number, cast: number): number;
 declare function bloom_scene_set_receive_shadow(handle: number, receive: number): number;
@@ -96,6 +97,26 @@ declare function bloom_scene_set_material_layered_pbr(
   iridescenceThicknessMaximum: number,
 ): number;
 declare function bloom_scene_set_material_texture(handle: number, textureIdx: number): number;
+declare function bloom_scene_set_material_texture_handles(
+  handle: number,
+  baseColor: number,
+  normal: number,
+  metallicRoughness: number,
+  emissive: number,
+  occlusion: number,
+): number;
+declare function bloom_scene_set_material_texture_transform(
+  handle: number,
+  slot: number,
+  m00: number, m01: number, m02: number,
+  m10: number, m11: number, m12: number,
+): number;
+declare function bloom_scene_set_material_texture_strengths(
+  handle: number,
+  normalScaleX: number,
+  normalScaleY: number,
+  occlusionStrength: number,
+): number;
 declare function bloom_scene_node_count(): number;
 
 // Frame callbacks
@@ -249,6 +270,21 @@ export interface PbrMaterial {
   layered?: LayeredPbrMaterial;
 }
 
+/** Public Bloom Texture handles for the standard retained PBR slots. */
+export interface PbrTextureHandles {
+  baseColor?: number;
+  normal?: number;
+  metallicRoughness?: number;
+  emissive?: number;
+  occlusion?: number;
+}
+
+export const MATERIAL_TEXTURE_SLOT_BASE_COLOR = 0;
+export const MATERIAL_TEXTURE_SLOT_NORMAL = 1;
+export const MATERIAL_TEXTURE_SLOT_METALLIC_ROUGHNESS = 2;
+export const MATERIAL_TEXTURE_SLOT_EMISSIVE = 3;
+export const MATERIAL_TEXTURE_SLOT_OCCLUSION = 4;
+
 function finiteOr(value: number, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
@@ -281,6 +317,14 @@ export function destroySceneNode(handle: SceneNodeHandle): void {
  */
 export function setSceneNodeVisible(handle: SceneNodeHandle, visible: boolean): boolean {
   return bloom_scene_set_visible(handle, visible ? 1 : 0) !== 0;
+}
+
+/**
+ * Select a native 3D render layer. Layer 0 is the world; layers above zero
+ * render over it with independent depth and are excluded from world GI.
+ */
+export function setSceneNodeRenderLayer(handle: SceneNodeHandle, layer: number): boolean {
+  return bloom_scene_set_render_layer(handle, Math.max(0, Math.floor(layer))) !== 0;
 }
 
 /**
@@ -530,6 +574,59 @@ export function setSceneNodeMaterial(
  */
 export function setSceneNodeTexture(handle: SceneNodeHandle, textureIdx: number): boolean {
   return bloom_scene_set_material_texture(handle, textureIdx) !== 0;
+}
+
+/**
+ * Bind standard PBR textures using public Texture handles. Missing/zero
+ * handles select Bloom's neutral fallback for that slot.
+ */
+export function setSceneNodeMaterialTextureHandles(
+  handle: SceneNodeHandle,
+  textures: PbrTextureHandles,
+): boolean {
+  return bloom_scene_set_material_texture_handles(
+    handle,
+    textures.baseColor ?? 0,
+    textures.normal ?? 0,
+    textures.metallicRoughness ?? 0,
+    textures.emissive ?? 0,
+    textures.occlusion ?? 0,
+  ) !== 0;
+}
+
+/**
+ * Set the composed 2D affine UV transform for one standard PBR texture.
+ * The six values are two row-major rows: `[m00,m01,m02,m10,m11,m12]`.
+ */
+export function setSceneNodeMaterialTextureTransform(
+  handle: SceneNodeHandle,
+  slot: number,
+  matrix: readonly [number, number, number, number, number, number],
+): boolean {
+  return bloom_scene_set_material_texture_transform(
+    handle,
+    Math.floor(slot),
+    finiteOr(matrix[0], 1),
+    finiteOr(matrix[1], 0),
+    finiteOr(matrix[2], 0),
+    finiteOr(matrix[3], 0),
+    finiteOr(matrix[4], 1),
+    finiteOr(matrix[5], 0),
+  ) !== 0;
+}
+
+/** Set Three/glTF-style normal-map and AO sampling strengths. */
+export function setSceneNodeMaterialTextureStrengths(
+  handle: SceneNodeHandle,
+  normalScale: readonly [number, number] = [1, 1],
+  occlusionStrength: number = 1,
+): boolean {
+  return bloom_scene_set_material_texture_strengths(
+    handle,
+    finiteOr(normalScale[0], 1),
+    finiteOr(normalScale[1], 1),
+    Math.max(0, finiteOr(occlusionStrength, 1)),
+  ) !== 0;
 }
 
 /**

@@ -1181,6 +1181,13 @@ impl Renderer {
         record.texture_ids_1[0] = texture_id(material.occlusion_texture_idx).raw();
         record.sampler_ids_0 = [self.global_linear_sampler_id.raw(); 4];
         record.sampler_ids_1[0] = self.global_linear_sampler_id.raw();
+        for (slot, transform) in material.texture_transforms.iter().enumerate() {
+            record.uv_transforms[slot * 2] = transform.row_0;
+            record.uv_transforms[slot * 2 + 1] = transform.row_1;
+        }
+        record.uv_transforms[2][3] = material.normal_scale[0];
+        record.uv_transforms[3][3] = material.normal_scale[1];
+        record.uv_transforms[8][3] = material.occlusion_strength;
         self.material_system
             .indirection
             .allocate_material(&self.device, record)
@@ -1537,44 +1544,44 @@ struct GpuDrawTable { records: array<GpuDrawRecord>, };
         );
     out = out
         .replace(
-            "textureSample(base_color_tex, base_color_samp, in.uv).a",
-            "bloom_sample_raw(material.texture_ids_0.x, material.sampler_ids_0.x, in.uv).a",
+            "textureSample(base_color_tex, base_color_samp, base_uv).a",
+            "bloom_sample_raw(material.texture_ids_0.x, material.sampler_ids_0.x, base_uv).a",
         )
         .replace(
-            "textureSampleBias(normal_tex, normal_samp, in.uv, 0.25 + lod_bias)",
-            "bloom_sample_normal_raw_bias(material, in.uv, 0.25 + lod_bias)",
+            "textureSampleBias(normal_tex, normal_samp, normal_uv, 0.25 + lod_bias)",
+            "bloom_sample_normal_raw_bias(material, normal_uv, 0.25 + lod_bias)",
         )
         .replace(
-            "textureSampleBias(base_color_tex, base_color_samp, in.uv, lod_bias)",
-            "bloom_sample_raw_bias(material.texture_ids_0.x, material.sampler_ids_0.x, in.uv, lod_bias)",
+            "textureSampleBias(base_color_tex, base_color_samp, base_uv, lod_bias)",
+            "bloom_sample_raw_bias(material.texture_ids_0.x, material.sampler_ids_0.x, base_uv, lod_bias)",
         )
         .replace(
-            "textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0)",
-            "bloom_sample_raw_level(material.texture_ids_0.x, material.sampler_ids_0.x, in.uv, 0.0)",
+            "textureSampleLevel(base_color_tex, base_color_samp, base_uv, 0.0)",
+            "bloom_sample_raw_level(material.texture_ids_0.x, material.sampler_ids_0.x, base_uv, 0.0)",
         )
         .replace(
-            "textureSampleLevel(base_color_tex, base_color_samp, in.uv, mask_lod)",
-            "bloom_sample_raw_level(material.texture_ids_0.x, material.sampler_ids_0.x, in.uv, mask_lod)",
+            "textureSampleLevel(base_color_tex, base_color_samp, base_uv, mask_lod)",
+            "bloom_sample_raw_level(material.texture_ids_0.x, material.sampler_ids_0.x, base_uv, mask_lod)",
         )
         .replace(
-            "textureSampleLevel(base_color_tex, base_color_samp, in.uv, 1.0)",
-            "bloom_sample_raw_level(material.texture_ids_0.x, material.sampler_ids_0.x, in.uv, 1.0)",
+            "textureSampleLevel(base_color_tex, base_color_samp, base_uv, 1.0)",
+            "bloom_sample_raw_level(material.texture_ids_0.x, material.sampler_ids_0.x, base_uv, 1.0)",
         )
         .replace(
             "textureDimensions(base_color_tex)",
             "bloom_base_color_dimensions(material)",
         )
         .replace(
-            "textureSample(mr_tex, mr_samp, in.uv)",
-            "bloom_sample_raw(material.texture_ids_0.z, material.sampler_ids_0.z, in.uv)",
+            "textureSample(mr_tex, mr_samp, mr_uv)",
+            "bloom_sample_raw(material.texture_ids_0.z, material.sampler_ids_0.z, mr_uv)",
         )
         .replace(
-            "textureSample(em_tex, em_samp, in.uv)",
-            "bloom_sample_raw_bias(material.texture_ids_0.w, material.sampler_ids_0.w, in.uv, 0.0)",
+            "textureSample(em_tex, em_samp, emissive_uv)",
+            "bloom_sample_raw_bias(material.texture_ids_0.w, material.sampler_ids_0.w, emissive_uv, 0.0)",
         )
         .replace(
-            "textureSample(occ_tex, occ_samp, in.uv)",
-            "bloom_sample_raw(material.texture_ids_1.x, material.sampler_ids_1.x, in.uv)",
+            "textureSample(occ_tex, occ_samp, occlusion_uv)",
+            "bloom_sample_raw(material.texture_ids_1.x, material.sampler_ids_1.x, occlusion_uv)",
         );
     assert!(
         out.contains("var<storage, read> gpu_draws"),

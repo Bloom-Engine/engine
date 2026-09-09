@@ -38,7 +38,7 @@ fn iridescence_metadata_shader_source(base_scene_shader: &str, secondary_uv: boo
     )
     .into_owned();
     let tail_begin = source
-        .find("    let em_tex_sample = textureSample(em_tex, em_samp, in.uv);")
+        .find("    let em_tex_sample = textureSample(em_tex, em_samp, emissive_uv);")
         .expect("layered scene shader keeps the post-material tail anchor");
     let tail_end = source[tail_begin..]
         .find("\n}\n\n@fragment\nfn fs_main_scene(")

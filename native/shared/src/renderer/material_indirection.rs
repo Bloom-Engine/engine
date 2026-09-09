@@ -572,10 +572,22 @@ pub struct GpuMaterialRecord {
     pub sampler_ids_0: [u32; 4],
     /// occlusion, reflection, array/page, reserved sampler IDs.
     pub sampler_ids_1: [u32; 4],
+    /// Two affine UV rows per standard texture slot. The normal rows' W lanes
+    /// carry XY normal scale; the occlusion row-0 W lane carries AO strength.
+    pub uv_transforms: [[f32; 4]; 10],
 }
 
 impl Default for GpuMaterialRecord {
     fn default() -> Self {
+        let identity_rows = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
+        let mut uv_transforms = [[0.0; 4]; 10];
+        for slot in 0..5 {
+            uv_transforms[slot * 2] = identity_rows[0];
+            uv_transforms[slot * 2 + 1] = identity_rows[1];
+        }
+        uv_transforms[2][3] = 1.0;
+        uv_transforms[3][3] = 1.0;
+        uv_transforms[8][3] = 1.0;
         Self {
             header: [
                 0,
@@ -594,6 +606,7 @@ impl Default for GpuMaterialRecord {
             texture_ids_2: [0; 4],
             sampler_ids_0: [0; 4],
             sampler_ids_1: [0; 4],
+            uv_transforms,
         }
     }
 }
@@ -1508,7 +1521,7 @@ mod tests {
     #[test]
     fn gpu_record_layout_is_storage_buffer_safe() {
         assert_eq!(std::mem::align_of::<GpuMaterialRecord>(), 16);
-        assert_eq!(std::mem::size_of::<GpuMaterialRecord>(), 192);
+        assert_eq!(std::mem::size_of::<GpuMaterialRecord>(), 352);
         let record = GpuMaterialRecord::default();
         assert_eq!(record.base_color, [1.0; 4]);
         assert_eq!(

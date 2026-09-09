@@ -42,6 +42,39 @@ pub fn bloom_mesh_scratch_push_u32(v: f64) {
     engine().models.mesh_scratch_push_u32(v as u32);
 }
 
+/// Upload one packed little-endian RGBA8 texel per scratch entry. This is the
+/// Web mirror of the native compatibility-texture path; the scalar scratch
+/// ABI avoids passing a typed-array pointer between two WASM modules.
+#[wasm_bindgen]
+pub fn bloom_load_texture_rgba8_scratch(width: f64, height: f64, kind: f64) -> f64 {
+    let width = width as u32;
+    let height = height as u32;
+    let Some(texel_count) = width.checked_mul(height).map(|count| count as usize) else {
+        return 0.0;
+    };
+    let bytes = {
+        let eng = engine();
+        if width == 0 || height == 0 || eng.models.scratch_u32s().len() < texel_count {
+            return 0.0;
+        }
+        let bytes = eng.models.scratch_u32s()[..texel_count]
+            .iter()
+            .flat_map(|texel| texel.to_le_bytes())
+            .collect::<Vec<_>>();
+        eng.models.mesh_scratch_reset();
+        bytes
+    };
+    let eng = engine();
+    let renderer_ptr = &mut eng.renderer as *mut bloom_shared::renderer::Renderer;
+    eng.textures.load_texture_rgba8(
+        unsafe { &mut *renderer_ptr },
+        width,
+        height,
+        &bytes,
+        kind as u32,
+    )
+}
+
 #[wasm_bindgen]
 pub fn bloom_create_mesh_scratch(vertex_count: f64, index_count: f64) -> f64 {
     engine()
@@ -95,6 +128,177 @@ pub fn bloom_set_material_params_scratch(handle: f64, param_count: f64) -> f64 {
         p
     };
     crate::material_ffi::bloom_set_material_params_floats(handle, &params)
+}
+
+// ============================================================
+// Three/glTF retained-material parity
+// ============================================================
+
+#[wasm_bindgen]
+pub fn bloom_scene_set_render_layer(handle: f64, layer: f64) -> f64 {
+    engine()
+        .scene
+        .set_render_layer(handle, layer.max(0.0).min(u32::MAX as f64) as u32);
+    1.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_scene_set_material_texture_handles(
+    handle: f64,
+    base_color: f64,
+    normal: f64,
+    metallic_roughness: f64,
+    emissive: f64,
+    occlusion: f64,
+) -> f64 {
+    let eng = engine();
+    let resolve = |texture_handle: f64| -> u32 {
+        if texture_handle <= 0.0 {
+            0
+        } else {
+            eng.textures
+                .get(texture_handle)
+                .map(|texture| texture.bind_group_idx)
+                .unwrap_or(0)
+        }
+    };
+    let resolved = [
+        resolve(base_color),
+        resolve(normal),
+        resolve(metallic_roughness),
+        resolve(emissive),
+        resolve(occlusion),
+    ];
+    eng.scene.set_material_texture(handle, resolved[0]);
+    eng.scene.set_material_normal_texture(handle, resolved[1]);
+    eng.scene
+        .set_material_metallic_roughness_texture(handle, resolved[2]);
+    eng.scene.set_material_emissive_texture(handle, resolved[3]);
+    eng.scene
+        .set_material_occlusion_texture(handle, resolved[4]);
+    1.0
+}
+
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_scene_set_material_texture_transform(
+    handle: f64,
+    slot: f64,
+    m00: f64,
+    m01: f64,
+    m02: f64,
+    m10: f64,
+    m11: f64,
+    m12: f64,
+) -> f64 {
+    let Some(slot) =
+        bloom_shared::models::StandardMaterialTextureSlot::from_u32(slot.max(0.0) as u32)
+    else {
+        return 0.0;
+    };
+    let transform = bloom_shared::models::MaterialTextureAffineTransform::from_rows(
+        [m00 as f32, m01 as f32, m02 as f32],
+        [m10 as f32, m11 as f32, m12 as f32],
+    );
+    engine()
+        .scene
+        .set_material_texture_transform(handle, slot, transform);
+    1.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_scene_set_material_texture_strengths(
+    handle: f64,
+    normal_scale_x: f64,
+    normal_scale_y: f64,
+    occlusion_strength: f64,
+) -> f64 {
+    engine().scene.set_material_texture_strengths(
+        handle,
+        [normal_scale_x as f32, normal_scale_y as f32],
+        occlusion_strength as f32,
+    );
+    1.0
+}
+
+// ============================================================
+// Compatibility render targets
+// ============================================================
+
+#[wasm_bindgen]
+pub fn bloom_load_render_texture_kind(width: f64, height: f64, kind: f64) -> f64 {
+    let width = (width as u32).max(1);
+    let height = (height as u32).max(1);
+    let kind = (kind as u32).min(2);
+    let eng = engine();
+    let render_texture = eng.textures.load_render_texture_kind(width, height);
+    let (bind_group_idx, _) = eng.renderer.create_render_texture_kind(width, height, kind);
+    let texture = eng
+        .textures
+        .textures
+        .alloc(bloom_shared::textures::TextureData {
+            bind_group_idx,
+            width,
+            height,
+        });
+    eng.textures
+        .set_render_texture_handle(render_texture, texture);
+    render_texture
+}
+
+#[wasm_bindgen]
+pub fn bloom_render_texture_glsl(render_texture: f64, source: &str) -> f64 {
+    let eng = engine();
+    let Some(target_index) = eng
+        .textures
+        .render_textures
+        .get(render_texture)
+        .and_then(|target| eng.textures.textures.get(target.texture_handle))
+        .map(|texture| texture.bind_group_idx as usize)
+    else {
+        return 0.0;
+    };
+    match eng
+        .renderer
+        .render_glsl_fragment_to_texture(target_index, source)
+    {
+        Ok(()) => 1.0,
+        Err(error) => {
+            crate::console_warn(&format!("[compat-glsl] {error}"));
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_render_texture_sobel(render_texture: f64, source_texture: f64, strength: f64) -> f64 {
+    let eng = engine();
+    let Some(target_index) = eng
+        .textures
+        .render_textures
+        .get(render_texture)
+        .and_then(|target| eng.textures.textures.get(target.texture_handle))
+        .map(|texture| texture.bind_group_idx as usize)
+    else {
+        return 0.0;
+    };
+    let Some(source_index) = eng
+        .textures
+        .get(source_texture)
+        .map(|texture| texture.bind_group_idx as usize)
+    else {
+        return 0.0;
+    };
+    match eng
+        .renderer
+        .render_sobel_to_texture(target_index, source_index, strength as f32)
+    {
+        Ok(()) => 1.0,
+        Err(error) => {
+            crate::console_warn(&format!("[compat-sobel] {error}"));
+            0.0
+        }
+    }
 }
 
 // ============================================================

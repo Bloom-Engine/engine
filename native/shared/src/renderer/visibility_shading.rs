@@ -216,8 +216,8 @@ fn specialize_visibility_derivatives(source: &str) -> String {
     );
     replace_once(
         &mut body,
-        "bloom_sample_normal_raw_bias(material, in.uv, 0.25 + lod_bias)",
-        "bloom_visibility_sample_normal_raw_grad_bias(\n        material, in.uv, visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n        0.25 + lod_bias,\n    )",
+        "bloom_sample_normal_raw_bias(material, normal_uv, 0.25 + lod_bias)",
+        "bloom_visibility_sample_normal_raw_grad_bias(\n        material, normal_uv,\n        material_uv_delta(visibility_gradients.uv_dx, material.uv_transforms[2], material.uv_transforms[3]),\n        material_uv_delta(visibility_gradients.uv_dy, material.uv_transforms[2], material.uv_transforms[3]),\n        0.25 + lod_bias,\n    )",
     );
     replace_once(
         &mut body,
@@ -231,23 +231,23 @@ fn specialize_visibility_derivatives(source: &str) -> String {
     );
     replace_once(
         &mut body,
-        "let tbn_duv1 = dpdx(in.uv);",
-        "let tbn_duv1 = visibility_gradients.uv_dx;",
+        "let tbn_duv1 = dpdx(normal_uv);",
+        "let tbn_duv1 = material_uv_delta(\n        visibility_gradients.uv_dx, material.uv_transforms[2], material.uv_transforms[3],\n    );",
     );
     replace_once(
         &mut body,
-        "let tbn_duv2 = dpdy(in.uv);",
-        "let tbn_duv2 = visibility_gradients.uv_dy;",
+        "let tbn_duv2 = dpdy(normal_uv);",
+        "let tbn_duv2 = material_uv_delta(\n        visibility_gradients.uv_dy, material.uv_transforms[2], material.uv_transforms[3],\n    );",
     );
     replace_once(
         &mut body,
-        "bloom_sample_raw_bias(material.texture_ids_0.x, material.sampler_ids_0.x, in.uv, lod_bias)",
-        "bloom_visibility_sample_raw_grad_bias(\n        material.texture_ids_0.x, material.sampler_ids_0.x, in.uv,\n        visibility_gradients.uv_dx, visibility_gradients.uv_dy, lod_bias,\n    )",
+        "bloom_sample_raw_bias(material.texture_ids_0.x, material.sampler_ids_0.x, base_uv, lod_bias)",
+        "bloom_visibility_sample_raw_grad_bias(\n        material.texture_ids_0.x, material.sampler_ids_0.x, base_uv,\n        material_uv_delta(visibility_gradients.uv_dx, material.uv_transforms[0], material.uv_transforms[1]),\n        material_uv_delta(visibility_gradients.uv_dy, material.uv_transforms[0], material.uv_transforms[1]),\n        lod_bias,\n    )",
     );
     replace_once(
         &mut body,
-        "bloom_sample_raw(material.texture_ids_0.z, material.sampler_ids_0.z, in.uv)",
-        "bloom_visibility_sample_raw_grad(\n        material.texture_ids_0.z, material.sampler_ids_0.z, in.uv,\n        visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n    )",
+        "bloom_sample_raw(material.texture_ids_0.z, material.sampler_ids_0.z, mr_uv)",
+        "bloom_visibility_sample_raw_grad(\n        material.texture_ids_0.z, material.sampler_ids_0.z, mr_uv,\n        material_uv_delta(visibility_gradients.uv_dx, material.uv_transforms[4], material.uv_transforms[5]),\n        material_uv_delta(visibility_gradients.uv_dy, material.uv_transforms[4], material.uv_transforms[5]),\n    )",
     );
     replace_once(
         &mut body,
@@ -256,13 +256,13 @@ fn specialize_visibility_derivatives(source: &str) -> String {
     );
     replace_once(
         &mut body,
-        "bloom_sample_raw_bias(material.texture_ids_0.w, material.sampler_ids_0.w, in.uv, 0.0)",
-        "bloom_visibility_sample_raw_grad(\n        material.texture_ids_0.w, material.sampler_ids_0.w, in.uv,\n        visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n    )",
+        "bloom_sample_raw_bias(material.texture_ids_0.w, material.sampler_ids_0.w, emissive_uv, 0.0)",
+        "bloom_visibility_sample_raw_grad(\n        material.texture_ids_0.w, material.sampler_ids_0.w, emissive_uv,\n        material_uv_delta(visibility_gradients.uv_dx, material.uv_transforms[6], material.uv_transforms[7]),\n        material_uv_delta(visibility_gradients.uv_dy, material.uv_transforms[6], material.uv_transforms[7]),\n    )",
     );
     replace_once(
         &mut body,
-        "bloom_sample_raw(material.texture_ids_1.x, material.sampler_ids_1.x, in.uv)",
-        "bloom_visibility_sample_raw_grad(\n        material.texture_ids_1.x, material.sampler_ids_1.x, in.uv,\n        visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n    )",
+        "bloom_sample_raw(material.texture_ids_1.x, material.sampler_ids_1.x, occlusion_uv)",
+        "bloom_visibility_sample_raw_grad(\n        material.texture_ids_1.x, material.sampler_ids_1.x, occlusion_uv,\n        material_uv_delta(visibility_gradients.uv_dx, material.uv_transforms[8], material.uv_transforms[9]),\n        material_uv_delta(visibility_gradients.uv_dy, material.uv_transforms[8], material.uv_transforms[9]),\n    )",
     );
 
     // The original raster entry points follow `shade_main_scene`; retaining

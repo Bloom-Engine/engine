@@ -9,7 +9,8 @@ pub(super) fn scene_node_gpu_driven_ready(
     node: &SceneNode,
     imported_refraction_enabled: bool,
 ) -> bool {
-    node.active_lod < 0
+    node.render_layer == 0
+        && node.active_lod < 0
         // Retained MASK/transparent nodes historically blend in submission
         // order while depth-writing in the same pass. A depth prepass would
         // collapse overlapping translucent layers to the nearest surface,
@@ -59,6 +60,14 @@ pub(super) fn scene_geometry_key(vertices: &[Vertex3D], indices: &[u32]) -> Scen
 }
 
 pub(super) fn scene_material_key(material: &PbrMaterial) -> SceneMaterialKey {
+    let mut texture_transforms = [0; StandardMaterialTextureSlot::COUNT * 8];
+    for (slot, transform) in material.texture_transforms.iter().enumerate() {
+        let offset = slot * 8;
+        for lane in 0..4 {
+            texture_transforms[offset + lane] = transform.row_0[lane].to_bits();
+            texture_transforms[offset + 4 + lane] = transform.row_1[lane].to_bits();
+        }
+    }
     SceneMaterialKey {
         metal_rough: [
             material.metalness.to_bits(),
@@ -89,6 +98,12 @@ pub(super) fn scene_material_key(material: &PbrMaterial) -> SceneMaterialKey {
             material.metallic_roughness_texture_idx,
             material.emissive_texture_idx,
             material.occlusion_texture_idx,
+        ],
+        texture_transforms,
+        texture_strengths: [
+            material.normal_scale[0].to_bits(),
+            material.normal_scale[1].to_bits(),
+            material.occlusion_strength.to_bits(),
         ],
     }
 }
@@ -307,6 +322,18 @@ mod gpu_driven_cache_tests {
         assert_ne!(
             scene_material_key(&spec_gloss),
             scene_material_key(&other_spec_gloss)
+        );
+
+        let mut transformed = first.clone();
+        transformed.texture_transforms[StandardMaterialTextureSlot::BaseColor.index()] =
+            MaterialTextureAffineTransform::from_rows([3.0, 0.25, 0.1], [-0.5, 2.0, 0.2]);
+        assert_ne!(scene_material_key(&first), scene_material_key(&transformed));
+
+        let mut scaled_normal = first.clone();
+        scaled_normal.normal_scale = [0.5, 0.75];
+        assert_ne!(
+            scene_material_key(&first),
+            scene_material_key(&scaled_normal)
         );
     }
 
