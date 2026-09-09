@@ -232,7 +232,16 @@ class ReproducibilityTests(unittest.TestCase):
         for case in manifest["case"]:
             values = quality.placeholders(case, Path("case-output"))
             self.assertEqual(values["python"], sys.executable)
+            self.assertEqual(
+                values["executable"],
+                ".\\main.exe" if quality.os.name == "nt" else "./main",
+            )
             capture = case["capture"]
+            self.assertEqual(
+                capture["command"][0],
+                "{executable}",
+                f"{case['id']}.command must use the host executable name",
+            )
             for key in ("prepare", "build"):
                 argv = capture.get(key)
                 if argv:
@@ -241,6 +250,8 @@ class ReproducibilityTests(unittest.TestCase):
                         "{python}",
                         f"{case['id']}.{key} must use the active interpreter",
                     )
+        self.assertEqual(quality.scene_executable("nt"), ".\\main.exe")
+        self.assertEqual(quality.scene_executable("posix"), "./main")
 
         temporal_evidence = {
             "ssr",

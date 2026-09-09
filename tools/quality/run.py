@@ -786,6 +786,10 @@ def verify_assets(case: Mapping[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
+def scene_executable(host_os_name: str | None = None) -> str:
+    return ".\\main.exe" if (host_os_name or os.name) == "nt" else "./main"
+
+
 def placeholders(case: Mapping[str, Any], case_dir: Path) -> dict[str, str]:
     width, height = case["resolution"]
     camera = case["camera"]
@@ -794,6 +798,7 @@ def placeholders(case: Mapping[str, Any], case_dir: Path) -> dict[str, str]:
     return {
         "repo": str(REPO_ROOT),
         "python": sys.executable,
+        "executable": scene_executable(),
         "case_dir": str(case_dir),
         "candidate": str(case_dir / "final.png"),
         "telemetry": str(case_dir / "telemetry.json"),

@@ -130,7 +130,7 @@ present_mode = "auto-no-vsync"
 working_dir = "examples/pbr-spheres"
 build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
 command = [
-  "./main",
+  "{executable}",
   "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
   "{camera_tx}", "{camera_ty}", "{camera_tz}", "{camera_fov}",
   "--res", "{width}", "{height}",
@@ -198,7 +198,7 @@ present_mode = "auto-no-vsync"
 working_dir = "examples/pbr-spheres"
 build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
 command = [
-  "./main",
+  "{executable}",
   "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
   "{camera_tx}", "{camera_ty}", "{camera_tz}", "{camera_fov}",
   "--res", "{width}", "{height}",
@@ -279,7 +279,7 @@ present_mode = "auto-no-vsync"
 working_dir = "examples/renderer-test"
 build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/renderer-test"]
 command = [
-  "./main",
+  "{executable}",
   "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
   "{camera_tx}", "{camera_ty}", "{camera_tz}", "{camera_fov}",
   "--res", "{width}", "{height}",
@@ -372,7 +372,7 @@ present_mode = "auto-no-vsync"
 working_dir = "examples/sponza"
 build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/sponza"]
 command = [
-  "./main", "--yaw", "0", "--taa", "1",
+  "{executable}", "--yaw", "0", "--taa", "1",
   "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
@@ -469,7 +469,7 @@ prepare = [
 ]
 build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/bistro"]
 command = [
-  "./main", "--scene", "{case_dir}/bistro-quality.gltf",
+  "{executable}", "--scene", "{case_dir}/bistro-quality.gltf",
   "--yaw", "-1.8608027466", "--taa", "1",
   "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
@@ -561,7 +561,7 @@ present_mode = "auto-no-vsync"
 working_dir = "examples/quality-motion"
 build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-motion"]
 command = [
-  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "{executable}", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
 ]
@@ -651,7 +651,7 @@ present_mode = "auto-no-vsync"
 working_dir = "examples/quality-stress"
 build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-stress"]
 command = [
-  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "{executable}", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
 ]
@@ -734,7 +734,7 @@ build = [
   "{repo}/examples/quality-transparency",
 ]
 command = [
-  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "{executable}", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
 ]
@@ -820,7 +820,7 @@ build = [
   "{repo}/examples/quality-masked",
 ]
 command = [
-  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "{executable}", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
 ]
