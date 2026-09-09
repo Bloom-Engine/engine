@@ -100,7 +100,11 @@ pub struct InputState {
 
 impl InputState {
     pub fn new() -> Self {
-        const EMPTY_TOUCH: TouchPoint = TouchPoint { x: 0.0, y: 0.0, active: false };
+        const EMPTY_TOUCH: TouchPoint = TouchPoint {
+            x: 0.0,
+            y: 0.0,
+            active: false,
+        };
         Self {
             keys_pressed: [false; MAX_KEYS],
             keys_down: [false; MAX_KEYS],
@@ -190,8 +194,10 @@ impl InputState {
             self.mouse_released[i] = !self.mouse_down[i] && self.prev_mouse_down[i];
         }
         for i in 0..MAX_GAMEPAD_BUTTONS {
-            self.gamepad_buttons_pressed[i] = self.gamepad_buttons_down[i] && !self.prev_gamepad_buttons[i];
-            self.gamepad_buttons_released[i] = !self.gamepad_buttons_down[i] && self.prev_gamepad_buttons[i];
+            self.gamepad_buttons_pressed[i] =
+                self.gamepad_buttons_down[i] && !self.prev_gamepad_buttons[i];
+            self.gamepad_buttons_released[i] =
+                !self.gamepad_buttons_down[i] && self.prev_gamepad_buttons[i];
         }
     }
 
@@ -217,27 +223,60 @@ impl InputState {
     // Keyboard
     /// Real key events, delivered from the platform's message pump. These run
     /// before begin_frame(), so writing keys_down directly is correct here.
-    pub fn set_key_down(&mut self, key: usize) { if key < MAX_KEYS { self.keys_down[key] = true; } }
-    pub fn set_key_up(&mut self, key: usize) { if key < MAX_KEYS { self.keys_down[key] = false; } }
+    pub fn set_key_down(&mut self, key: usize) {
+        if key < MAX_KEYS {
+            self.keys_down[key] = true;
+        }
+    }
+    pub fn set_key_up(&mut self, key: usize) {
+        if key < MAX_KEYS {
+            self.keys_down[key] = false;
+        }
+    }
 
     /// Synthetic key events (bloom_inject_key_down/up), which callers raise from
     /// inside the game loop. Staged, not written — see pending_key_down.
     pub fn inject_key_down(&mut self, key: usize) {
-        if key < MAX_KEYS { self.pending_key_down[key] = true; self.pending_key_up[key] = false; }
+        if key < MAX_KEYS {
+            self.pending_key_down[key] = true;
+            self.pending_key_up[key] = false;
+        }
     }
     pub fn inject_key_up(&mut self, key: usize) {
-        if key < MAX_KEYS { self.pending_key_up[key] = true; self.pending_key_down[key] = false; }
+        if key < MAX_KEYS {
+            self.pending_key_up[key] = true;
+            self.pending_key_down[key] = false;
+        }
     }
 
-    pub fn is_key_pressed(&self, key: usize) -> bool { key < MAX_KEYS && self.keys_pressed[key] }
-    pub fn is_key_down(&self, key: usize) -> bool { key < MAX_KEYS && self.keys_down[key] }
-    pub fn is_key_released(&self, key: usize) -> bool { key < MAX_KEYS && self.keys_released[key] }
+    pub fn is_key_pressed(&self, key: usize) -> bool {
+        key < MAX_KEYS && self.keys_pressed[key]
+    }
+    pub fn is_key_down(&self, key: usize) -> bool {
+        key < MAX_KEYS && self.keys_down[key]
+    }
+    pub fn is_key_released(&self, key: usize) -> bool {
+        key < MAX_KEYS && self.keys_released[key]
+    }
 
     // Mouse
-    pub fn set_mouse_position(&mut self, x: f64, y: f64) { self.mouse_x = x; self.mouse_y = y; }
-    pub fn accumulate_mouse_delta(&mut self, dx: f64, dy: f64) { self.raw_delta_x += dx; self.raw_delta_y += dy; }
-    pub fn clear_mouse_delta(&mut self) { self.raw_delta_x = 0.0; self.raw_delta_y = 0.0; self.mouse_delta_x = 0.0; self.mouse_delta_y = 0.0; }
-    pub fn accumulate_mouse_wheel(&mut self, dy: f64) { self.mouse_wheel_y += dy; }
+    pub fn set_mouse_position(&mut self, x: f64, y: f64) {
+        self.mouse_x = x;
+        self.mouse_y = y;
+    }
+    pub fn accumulate_mouse_delta(&mut self, dx: f64, dy: f64) {
+        self.raw_delta_x += dx;
+        self.raw_delta_y += dy;
+    }
+    pub fn clear_mouse_delta(&mut self) {
+        self.raw_delta_x = 0.0;
+        self.raw_delta_y = 0.0;
+        self.mouse_delta_x = 0.0;
+        self.mouse_delta_y = 0.0;
+    }
+    pub fn accumulate_mouse_wheel(&mut self, dy: f64) {
+        self.mouse_wheel_y += dy;
+    }
     /// Returns the accumulated scroll delta since the last call, and resets it.
     /// Games/editors call this once per frame.
     pub fn consume_mouse_wheel(&mut self) -> f64 {
@@ -267,22 +306,42 @@ impl InputState {
         c
     }
 
-    pub fn set_mouse_button_down(&mut self, button: usize) { if button < MAX_MOUSE_BUTTONS { self.mouse_down[button] = true; } }
-    pub fn set_mouse_button_up(&mut self, button: usize) { if button < MAX_MOUSE_BUTTONS { self.mouse_down[button] = false; } }
+    pub fn set_mouse_button_down(&mut self, button: usize) {
+        if button < MAX_MOUSE_BUTTONS {
+            self.mouse_down[button] = true;
+        }
+    }
+    pub fn set_mouse_button_up(&mut self, button: usize) {
+        if button < MAX_MOUSE_BUTTONS {
+            self.mouse_down[button] = false;
+        }
+    }
 
-    pub fn is_mouse_button_pressed(&self, button: usize) -> bool { button < MAX_MOUSE_BUTTONS && self.mouse_pressed[button] }
-    pub fn is_mouse_button_down(&self, button: usize) -> bool { button < MAX_MOUSE_BUTTONS && self.mouse_down[button] }
-    pub fn is_mouse_button_released(&self, button: usize) -> bool { button < MAX_MOUSE_BUTTONS && self.mouse_released[button] }
+    pub fn is_mouse_button_pressed(&self, button: usize) -> bool {
+        button < MAX_MOUSE_BUTTONS && self.mouse_pressed[button]
+    }
+    pub fn is_mouse_button_down(&self, button: usize) -> bool {
+        button < MAX_MOUSE_BUTTONS && self.mouse_down[button]
+    }
+    pub fn is_mouse_button_released(&self, button: usize) -> bool {
+        button < MAX_MOUSE_BUTTONS && self.mouse_released[button]
+    }
 
     // Gamepad
     pub fn set_gamepad_axis(&mut self, axis: usize, value: f32) {
-        if axis < MAX_GAMEPAD_AXES { self.gamepad_axes[axis] = value; }
+        if axis < MAX_GAMEPAD_AXES {
+            self.gamepad_axes[axis] = value;
+        }
     }
     pub fn set_gamepad_button_down(&mut self, button: usize) {
-        if button < MAX_GAMEPAD_BUTTONS { self.gamepad_buttons_down[button] = true; }
+        if button < MAX_GAMEPAD_BUTTONS {
+            self.gamepad_buttons_down[button] = true;
+        }
     }
     pub fn set_gamepad_button_up(&mut self, button: usize) {
-        if button < MAX_GAMEPAD_BUTTONS { self.gamepad_buttons_down[button] = false; }
+        if button < MAX_GAMEPAD_BUTTONS {
+            self.gamepad_buttons_down[button] = false;
+        }
     }
 
     /// Clear polled gamepad axes + buttons at the top of a hardware poll.
@@ -296,9 +355,15 @@ impl InputState {
         self.gamepad_buttons_down = [false; MAX_GAMEPAD_BUTTONS];
     }
 
-    pub fn is_gamepad_available(&self) -> bool { self.gamepad_available }
+    pub fn is_gamepad_available(&self) -> bool {
+        self.gamepad_available
+    }
     pub fn get_gamepad_axis(&self, axis: usize) -> f32 {
-        if axis < MAX_GAMEPAD_AXES { self.gamepad_axes[axis] } else { 0.0 }
+        if axis < MAX_GAMEPAD_AXES {
+            self.gamepad_axes[axis]
+        } else {
+            0.0
+        }
     }
     pub fn is_gamepad_button_pressed(&self, button: usize) -> bool {
         button < MAX_GAMEPAD_BUTTONS && self.gamepad_buttons_pressed[button]
@@ -309,7 +374,9 @@ impl InputState {
     pub fn is_gamepad_button_released(&self, button: usize) -> bool {
         button < MAX_GAMEPAD_BUTTONS && self.gamepad_buttons_released[button]
     }
-    pub fn get_gamepad_axis_count(&self) -> usize { self.gamepad_axis_count }
+    pub fn get_gamepad_axis_count(&self) -> usize {
+        self.gamepad_axis_count
+    }
 
     // Touch
     pub fn set_touch(&mut self, index: usize, x: f64, y: f64, active: bool) {
@@ -332,12 +399,22 @@ impl InputState {
         }
     }
     pub fn get_touch_x(&self, index: usize) -> f64 {
-        if index < MAX_TOUCH_POINTS { self.touch_points[index].x } else { 0.0 }
+        if index < MAX_TOUCH_POINTS {
+            self.touch_points[index].x
+        } else {
+            0.0
+        }
     }
     pub fn get_touch_y(&self, index: usize) -> f64 {
-        if index < MAX_TOUCH_POINTS { self.touch_points[index].y } else { 0.0 }
+        if index < MAX_TOUCH_POINTS {
+            self.touch_points[index].y
+        } else {
+            0.0
+        }
     }
-    pub fn get_touch_count(&self) -> usize { self.touch_count }
+    pub fn get_touch_count(&self) -> usize {
+        self.touch_count
+    }
     /// Whether touch *slot* `index` currently holds a live finger.
     ///
     /// `get_touch_count` counts active fingers, but `touch_points` is indexed
@@ -350,10 +427,14 @@ impl InputState {
     pub fn is_touch_active(&self, index: usize) -> bool {
         index < MAX_TOUCH_POINTS && self.touch_points[index].active
     }
-    pub fn max_touch_points(&self) -> usize { MAX_TOUCH_POINTS }
+    pub fn max_touch_points(&self) -> usize {
+        MAX_TOUCH_POINTS
+    }
 
     // Digital Crown (watchOS)
-    pub fn accumulate_crown_rotation(&mut self, delta: f64) { self.crown_rotation += delta; }
+    pub fn accumulate_crown_rotation(&mut self, delta: f64) {
+        self.crown_rotation += delta;
+    }
     pub fn consume_crown_rotation(&mut self) -> f64 {
         let v = self.crown_rotation;
         self.crown_rotation = 0.0;

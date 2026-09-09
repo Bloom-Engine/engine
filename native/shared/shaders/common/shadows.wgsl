@@ -3,12 +3,12 @@
 // Depends on material_abi.wgsl for PerView.shadow_cascades, shadow_splits,
 // camera_pos, and the three shadow_tex_N depth samplers.
 //
-// Cascade selection uses world-space DISTANCE from the camera (not view-space
-// depth) so that merely rotating the camera doesn't reshuffle which cascade a
-// surface falls in — that view-dependent reshuffle made terrain/foliage
-// shadows visibly swim as the camera turned. Cross-cascade blending at the
-// split boundaries removes the hard seam that otherwise slides across the
-// ground with the camera. This mirrors the deferred core path
+// Cascade selection uses the same positive view-space depth as the camera
+// frustum slices fitted by ShadowMap::compute_cascade_vps. A spherical-distance
+// selector can choose a tight cascade whose fitted XY footprint does not cover
+// a receiver near the side of the camera, truncating otherwise valid shadows
+// when the camera turns. Cross-cascade blending hides the remaining resolution
+// transition at split boundaries. This mirrors the deferred core path
 // (renderer/shaders/core.rs::sample_shadow), so the material-shaded surfaces
 // (terrain, grass, trees, water) match the rest of the scene.
 
@@ -16,16 +16,19 @@
 // softens the edge a touch and hides per-texel crawl without the cost of a
 // full Poisson disk.
 fn sample_shadow_cascade(
-  cascade_idx: u32, world_pos: vec3<f32>,
+  cascade_idx: u32, world_pos: vec3<f32>, outside_value: f32,
 ) -> f32 {
   let light_clip = view.shadow_cascades[cascade_idx]
                  * vec4<f32>(world_pos, 1.0);
   let light_ndc = light_clip.xyz / light_clip.w;
 
-  // Outside the cascade's frustum → treat as lit.
+  // A selected cascade miss is lit. During cross-cascade blending the
+  // caller instead supplies the valid current-cascade value: the next
+  // fitted slice is not required to cover the inner part of the blend
+  // zone, especially while a translation-slack fit is retained.
   if (abs(light_ndc.x) > 1.0 || abs(light_ndc.y) > 1.0
       || light_ndc.z < 0.0  || light_ndc.z > 1.0) {
-    return 1.0;
+    return outside_value;
   }
 
   let uv = vec2<f32>(
@@ -60,8 +63,13 @@ fn sample_shadow_cascade(
   return result * 0.25;
 }
 
-// Game-shader entry point. Picks a cascade by rotation-independent world-space
-// distance, blends across the boundary, and returns a shadow factor in [0, 1]
+fn shadow_view_depth(world_pos: vec3<f32>) -> f32 {
+  let view_pos = view.shadow_view * vec4<f32>(world_pos, 1.0);
+  return max(-view_pos.z, 0.0);
+}
+
+// Game-shader entry point. Picks the fitted view-depth cascade, blends across
+// the boundary, and returns a shadow factor in [0, 1]
 // (1 = fully lit, 0 = fully shadowed). Use this from custom materials (grass,
 // tree, terrain, water) that want to receive the directional sun shadow with
 // one line. Requires `view` (PerView) to be in scope — any shader that
@@ -74,17 +82,30 @@ fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
   if (view.dir_light_count.y < 0.5) {
     return 1.0;
   }
-  let cam = view.camera_pos.xyz;
-  let dist = length(world_pos - cam);
+  let view_depth = shadow_view_depth(world_pos);
 
   var cascade = 2u;
-  if (dist <= view.shadow_splits.x) {
+  if (view_depth <= view.shadow_splits.x) {
     cascade = 0u;
-  } else if (dist <= view.shadow_splits.y) {
+  } else if (view_depth <= view.shadow_splits.y) {
     cascade = 1u;
   }
 
-  let shadow_val = sample_shadow_cascade(cascade, world_pos);
+  // A retained fit can leave the selected cascade just short of an offset
+  // receiver while the next, wider cascade still covers it. Use a negative
+  // sentinel for an out-of-fit sample and hand off only in that rare case;
+  // valid receivers keep the same single PCF sample as before.
+  var shadow_val = sample_shadow_cascade(cascade, world_pos, -1.0);
+  for (var handoff = 0; handoff < 2 && shadow_val < 0.0; handoff = handoff + 1) {
+    if (cascade >= 2u) {
+      return 1.0;
+    }
+    cascade = cascade + 1u;
+    shadow_val = sample_shadow_cascade(cascade, world_pos, -1.0);
+  }
+  if (shadow_val < 0.0) {
+    return 1.0;
+  }
 
   // Blend into the next cascade over the last 10% of this cascade's range so
   // the transition is a soft gradient rather than a hard line that the camera
@@ -99,9 +120,9 @@ fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
     split_far  = view.shadow_splits.z;
   }
   let blend_zone = (split_far - split_near) * 0.1;
-  let dist_to_edge = split_far - dist;
+  let dist_to_edge = split_far - view_depth;
   if (cascade < 2u && dist_to_edge < blend_zone) {
-    let next_val = sample_shadow_cascade(cascade + 1u, world_pos);
+    let next_val = sample_shadow_cascade(cascade + 1u, world_pos, shadow_val);
     let t = clamp(dist_to_edge / blend_zone, 0.0, 1.0);
     return mix(next_val, shadow_val, t);
   }
@@ -122,42 +143,39 @@ fn sample_sun_shadow_n(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
   if (view.dir_light_count.y < 0.5) {
     return 1.0;
   }
-  let cam = view.camera_pos.xyz;
-  let dist = length(world_pos - cam);
+  let view_depth = shadow_view_depth(world_pos);
   var cascade = 2u;
-  if (dist <= view.shadow_splits.x) {
+  if (view_depth <= view.shadow_splits.x) {
     cascade = 0u;
-  } else if (dist <= view.shadow_splits.y) {
+  } else if (view_depth <= view.shadow_splits.y) {
     cascade = 1u;
   }
   // World-space size of one shadow texel in this cascade: the ortho span
   // is ~2×split distance, mapped across the cascade map's width.
   // textureDimensions keeps this honest if CASCADE_MAP_SIZE changes.
   //
-  // Near a split boundary sample_sun_shadow blends in the NEXT cascade,
-  // whose texels are larger — an offset sized for this cascade
-  // under-biases that sample and paints acne bands exactly in the blend
-  // zones (the deferred core path hit the same thing). Size the offset
-  // by the next cascade's texel when inside its blend zone.
+  // Near a split boundary sample_sun_shadow blends in the NEXT cascade.
+  // Both maps must compare the same receiver position: abruptly switching to
+  // the next cascade's larger normal offset creates two displaced edges and a
+  // camera-following dark/light stroke. Interpolate the world-space offset
+  // continuously across the same blend interval instead.
   var split_far = view.shadow_splits.z;
   if (cascade == 0u) { split_far = view.shadow_splits.x; }
   else if (cascade == 1u) { split_far = view.shadow_splits.y; }
   var split_near = 0.0;
   if (cascade == 1u) { split_near = view.shadow_splits.x; }
   else if (cascade == 2u) { split_near = view.shadow_splits.y; }
-  var eff_cascade = cascade;
-  if (cascade < 2u && (split_far - dist) < (split_far - split_near) * 0.1) {
-    eff_cascade = cascade + 1u;
-    if (eff_cascade == 1u) { split_far = view.shadow_splits.y; }
-    else { split_far = view.shadow_splits.z; }
+  let blend_zone = (split_far - split_near) * 0.1;
+  let dist_to_edge = split_far - view_depth;
+  var receiver_fit = split_far;
+  if (cascade < 2u && dist_to_edge < blend_zone) {
+    var next_fit = view.shadow_splits.z;
+    if (cascade == 0u) { next_fit = view.shadow_splits.y; }
+    let toward_next = clamp(1.0 - dist_to_edge / blend_zone, 0.0, 1.0);
+    receiver_fit = mix(receiver_fit, next_fit, toward_next);
   }
-  var dims: vec2<u32>;
-  switch (eff_cascade) {
-    case 0u: { dims = textureDimensions(shadow_tex_0); }
-    case 1u: { dims = textureDimensions(shadow_tex_1); }
-    default: { dims = textureDimensions(shadow_tex_2); }
-  }
-  let texel_ws = (2.0 * split_far) / f32(dims.x);
+  let map_dim = f32(textureDimensions(shadow_tex_0).x);
+  let texel_ws = (2.0 * receiver_fit) / map_dim;
   // Slope-adaptive: at grazing sun incidence one shadow texel spans many
   // times its footprint in receiver depth, so the fixed 1.5-texel offset
   // still stripes walls that run nearly parallel to the light and distant
@@ -171,7 +189,7 @@ fn sample_sun_shadow_n(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
 
 // ---- Back-compat shims -----------------------------------------------------
 // Older callers selected a cascade from view-space depth then sampled it.
-// Cascade selection now lives inside sample_sun_shadow (world-space distance),
+// Cascade selection now lives inside sample_sun_shadow (using the same depth),
 // so these just forward — kept so any shader still including the old names
 // keeps compiling.
 fn select_cascade(view_space_depth: f32) -> u32 {

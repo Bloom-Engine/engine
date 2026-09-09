@@ -1,0 +1,8 @@
+[package]
+name = "bloom-scene-format"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bincode = { version = "2", features = ["derive"] }
+sha2 = "0.10"

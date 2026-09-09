@@ -230,7 +230,9 @@ fn build_transmittance_row(y: u32, w: u32, h: u32) -> Vec<u16> {
 pub fn build_transmittance_lut(w: u32, h: u32) -> Vec<u16> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let rows_per_thread = (h as usize + nthreads - 1) / nthreads;
         let mut all_rows: Vec<Option<Vec<Vec<u16>>>> = (0..nthreads).map(|_| None).collect();
         std::thread::scope(|s| {
@@ -253,7 +255,9 @@ pub fn build_transmittance_lut(w: u32, h: u32) -> Vec<u16> {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        (0..h).flat_map(|y| build_transmittance_row(y, w, h)).collect()
+        (0..h)
+            .flat_map(|y| build_transmittance_row(y, w, h))
+            .collect()
     }
 }
 
@@ -285,7 +289,11 @@ pub fn sample_transmittance_lut(lut: &[u16], w: u32, h: u32, r: f32, mu: f32) ->
     let c11 = fetch(x1, y1);
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let lerp3 = |a: [f32; 3], b: [f32; 3], t: f32| {
-        [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
+        [
+            lerp(a[0], b[0], t),
+            lerp(a[1], b[1], t),
+            lerp(a[2], b[2], t),
+        ]
     };
     let bottom = lerp3(c00, c10, tx);
     let top = lerp3(c01, c11, tx);
@@ -382,7 +390,13 @@ fn integrate_single_scatter_along_ray(
     (l_sum, f_sum)
 }
 
-fn build_multi_scattering_row(transmittance_lut: &[u16], tw: u32, th: u32, y: u32, size: u32) -> Vec<u16> {
+fn build_multi_scattering_row(
+    transmittance_lut: &[u16],
+    tw: u32,
+    th: u32,
+    y: u32,
+    size: u32,
+) -> Vec<u16> {
     let v = (y as f32 + 0.5) / size as f32;
     let mut row = Vec::with_capacity(size as usize * 4);
     let n_dirs = MULTI_SCATTERING_SQRT_SAMPLES;
@@ -444,10 +458,17 @@ fn build_multi_scattering_row(transmittance_lut: &[u16], tw: u32, th: u32, y: u3
 /// Build the multi-scattering LUT as `Rgba16Float` texels, row-major.
 /// Requires the transmittance LUT (must be built first); samples it
 /// internally to get the sun-to-point transmittance for each integration step.
-pub fn build_multi_scattering_lut(transmittance_lut: &[u16], tw: u32, th: u32, size: u32) -> Vec<u16> {
+pub fn build_multi_scattering_lut(
+    transmittance_lut: &[u16],
+    tw: u32,
+    th: u32,
+    size: u32,
+) -> Vec<u16> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let rows_per_thread = (size as usize + nthreads - 1) / nthreads;
         let mut all_rows: Vec<Option<Vec<Vec<u16>>>> = (0..nthreads).map(|_| None).collect();
         std::thread::scope(|s| {
@@ -505,11 +526,27 @@ mod tests {
         let t = lerp_lut_at(&lut, w, h, GROUND_RADIUS, 1.0);
         // Loose tolerance — exact values depend on integration step
         // count, ozone profile shape, and bilinear bias near the edge.
-        assert!((t[0] - 0.94).abs() < 0.05, "R channel: got {}, expected ~0.94", t[0]);
-        assert!((t[1] - 0.87).abs() < 0.05, "G channel: got {}, expected ~0.87", t[1]);
-        assert!((t[2] - 0.76).abs() < 0.05, "B channel: got {}, expected ~0.76", t[2]);
+        assert!(
+            (t[0] - 0.94).abs() < 0.05,
+            "R channel: got {}, expected ~0.94",
+            t[0]
+        );
+        assert!(
+            (t[1] - 0.87).abs() < 0.05,
+            "G channel: got {}, expected ~0.87",
+            t[1]
+        );
+        assert!(
+            (t[2] - 0.76).abs() < 0.05,
+            "B channel: got {}, expected ~0.76",
+            t[2]
+        );
         // R > G > B — Rayleigh scattering scales with 1/λ⁴.
-        assert!(t[0] > t[1] && t[1] > t[2], "expected R > G > B, got {:?}", t);
+        assert!(
+            t[0] > t[1] && t[1] > t[2],
+            "expected R > G > B, got {:?}",
+            t
+        );
     }
 
     #[test]
@@ -547,9 +584,21 @@ mod tests {
         let h = TRANSMITTANCE_H;
         let lut = build_transmittance_lut(w, h);
         let t = lerp_lut_at(&lut, w, h, GROUND_RADIUS, 0.05);
-        assert!(t[2] < 0.2, "blue should be heavily attenuated at horizon, got {}", t[2]);
-        assert!(t[0] > t[1] && t[1] > t[2], "horizon transmittance should still preserve R>G>B ordering, got {:?}", t);
-        assert!(t[0] - t[2] > 0.2, "expected strong red/blue separation at horizon, got R-B={}", t[0] - t[2]);
+        assert!(
+            t[2] < 0.2,
+            "blue should be heavily attenuated at horizon, got {}",
+            t[2]
+        );
+        assert!(
+            t[0] > t[1] && t[1] > t[2],
+            "horizon transmittance should still preserve R>G>B ordering, got {:?}",
+            t
+        );
+        assert!(
+            t[0] - t[2] > 0.2,
+            "expected strong red/blue separation at horizon, got R-B={}",
+            t[0] - t[2]
+        );
     }
 
     #[test]
@@ -561,7 +610,10 @@ mod tests {
         let th = TRANSMITTANCE_H;
         let t_lut = build_transmittance_lut(tw, th);
         let ms = build_multi_scattering_lut(&t_lut, tw, th, MULTI_SCATTERING_SIZE);
-        assert_eq!(ms.len() as u32, MULTI_SCATTERING_SIZE * MULTI_SCATTERING_SIZE * 4);
+        assert_eq!(
+            ms.len() as u32,
+            MULTI_SCATTERING_SIZE * MULTI_SCATTERING_SIZE * 4
+        );
         for chunk in ms.chunks(4) {
             for &bits in &chunk[..3] {
                 let v = f16::from_bits(bits).to_f32();

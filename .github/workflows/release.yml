@@ -16,7 +16,8 @@ name: Release
 # secret needed. Provenance attestation is automatic under this flow.
 #
 # Job order:
-#   await-tests          — gate on Tests workflow passing for the tag SHA
+#   resolve-release      — resolve/peel the requested tag to one commit SHA
+#   await-tests          — gate on Tests workflow passing for that exact SHA
 #   github-release       — create/keep the GH Release object
 #   build-jolt-prebuilt  — matrix: build libJolt + libbloom_jolt for every
 #                          (os, arch) variant on its native runner
@@ -35,7 +36,7 @@ on:
         required: true
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.inputs.tag || github.ref }}
   cancel-in-progress: false  # never cancel a release mid-flight
 
 permissions:
@@ -43,12 +44,71 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Resolve both tag-push and manual-republish events to the same immutable
+  # commit. Annotated tags are peeled until they reach a commit; every later
+  # checkout and test query consumes these outputs.
+  # ---------------------------------------------------------------------------
+  resolve-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
+      version: ${{ steps.ref.outputs.version }}
+      sha: ${{ steps.ref.outputs.sha }}
+    steps:
+      - name: Resolve and peel release tag
+        id: ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+          EVENT: ${{ github.event_name }}
+          PUSH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            TAG="$DISPATCH_TAG"
+          else
+            TAG="${PUSH_REF#refs/tags/}"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::invalid release tag: $TAG"
+            exit 1
+          fi
+
+          object=$(gh api "/repos/$REPO/git/ref/tags/$TAG" --jq '.object')
+          type=$(jq -r '.type' <<<"$object")
+          sha=$(jq -r '.sha' <<<"$object")
+          for _ in 1 2 3 4; do
+            if [ "$type" = "commit" ]; then
+              break
+            fi
+            if [ "$type" != "tag" ]; then
+              echo "::error::tag $TAG resolves to unsupported object type $type"
+              exit 1
+            fi
+            object=$(gh api "/repos/$REPO/git/tags/$sha" --jq '.object')
+            type=$(jq -r '.type' <<<"$object")
+            sha=$(jq -r '.sha' <<<"$object")
+          done
+          if [ "$type" != "commit" ] || [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::tag $TAG did not resolve to a commit SHA"
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved $TAG to $sha"
+
+  # ---------------------------------------------------------------------------
   # Gate: wait for `Tests` to pass on this commit before we create the GitHub
   # Release. Same pattern as Perry's release-packages.yml — query the API by
   # workflow filename + head_sha and poll until it completes. Fails loud if
   # Tests failed so we don't ship a known-broken tag.
   # ---------------------------------------------------------------------------
   await-tests:
+    needs: resolve-release
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -56,15 +116,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-          EVENT: ${{ github.event_name }}
+          SHA: ${{ needs.resolve-release.outputs.sha }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            echo "workflow_dispatch — bypassing test gate (manual republish)."
-            exit 0
-          fi
-          echo "Gating release on commit $SHA"
+          echo "Gating release $TAG on commit $SHA"
           deadline=$(( SECONDS + 45 * 60 ))
           retry_on_error=1
           while :; do
@@ -118,30 +174,29 @@ jobs:
   # creates one with auto-generated notes.
   # ---------------------------------------------------------------------------
   github-release:
-    needs: await-tests
+    needs: [resolve-release, await-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ needs.resolve-release.outputs.sha }}
 
-      - name: Resolve tag
-        id: tag
+      - name: Verify package.json version matches tag
         env:
-          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
-          if [ -n "$DISPATCH_TAG" ]; then
-            TAG="$DISPATCH_TAG"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PKG_VERSION" != "$VERSION" ]; then
+            echo "::error::Tag $TAG ($VERSION) does not match package.json ($PKG_VERSION) — refusing to release."
+            exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release (if missing)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists — leaving body alone."
@@ -151,19 +206,6 @@ jobs:
           gh release create "$TAG" \
             --title "$TAG" \
             --generate-notes
-
-      - name: Verify package.json version matches tag
-        env:
-          VERSION: ${{ steps.tag.outputs.version }}
-        run: |
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          if [ "$PKG_VERSION" != "$VERSION" ]; then
-            echo "WARNING  package.json version ($PKG_VERSION) does not match tag ($VERSION)."
-            echo "         This is normally a bug — the /release skill should bump package.json"
-            echo "         and commit before tagging. Continuing, but investigate."
-          else
-            echo "OK  package.json version matches tag ($VERSION)"
-          fi
 
   # ---------------------------------------------------------------------------
   # Build the JoltPhysics + bloom_jolt static libraries for every (os, arch)
@@ -180,7 +222,7 @@ jobs:
   # README update + corresponding arch mapping in native/shared/build.rs.
   # ---------------------------------------------------------------------------
   build-jolt-prebuilt:
-    needs: await-tests
+    needs: [resolve-release, await-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -260,6 +302,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.resolve-release.outputs.sha }}
 
       - name: Configure cmake
         shell: bash
@@ -308,13 +351,15 @@ jobs:
   # an old tag won't republish the same version, won't fail either).
   # ---------------------------------------------------------------------------
   publish-jolt-prebuilt:
-    needs: build-jolt-prebuilt
+    needs: [resolve-release, build-jolt-prebuilt]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release.outputs.sha }}
 
       - uses: actions/setup-node@v5
         with:
@@ -370,7 +415,7 @@ jobs:
   # package vendors them rather than relying on a postinstall git clone.
   # ---------------------------------------------------------------------------
   publish-npm:
-    needs: [github-release, publish-jolt-prebuilt]
+    needs: [resolve-release, github-release, publish-jolt-prebuilt]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -379,29 +424,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.resolve-release.outputs.sha }}
 
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Resolve tag
-        id: tag
-        env:
-          DISPATCH_TAG: ${{ github.event.inputs.tag }}
-        run: |
-          if [ -n "$DISPATCH_TAG" ]; then
-            TAG="$DISPATCH_TAG"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
       - name: Verify package.json version matches tag
         env:
-          VERSION: ${{ steps.tag.outputs.version }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
           if [ "$PKG_VERSION" != "$VERSION" ]; then

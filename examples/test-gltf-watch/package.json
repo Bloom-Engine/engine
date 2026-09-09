@@ -1,5 +1,10 @@
 {
   "name": "bloom-gltf-watch-test",
   "version": "0.1.0",
+  "perry": {
+    "allow": {
+      "nativeLibrary": ["bloom", "bloom/*"]
+    }
+  },
   "dependencies": { "bloom": "file:../../" }
 }

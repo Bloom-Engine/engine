@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with the Bloom Engine co
 
 ## Project Overview
 
-Bloom is a native TypeScript game engine compiled by [Perry](../../perry/perry) (a TypeScript AOT compiler). It provides a simple, function-based API for 2D/3D games that compiles to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU.
+Bloom is a native TypeScript game engine compiled by [Perry](https://github.com/PerryTS/perry) (a TypeScript AOT compiler). It provides a simple, function-based API for 2D/3D games that compiles to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU.
 
 ## Build Commands
 
@@ -117,7 +117,9 @@ String parameters are `i64` on native (Perry StringHeader pointers) and NaN-boxe
   (`bloom_mesh_scratch_*`) like createMesh does.
 - Engine TS in `src/` is compiled by Perry too, so Perry codegen quirks
   apply here as well (no reachable `throw`, explicit object keys in
-  returns — the shooter's `docs/perry-quirks.md` is the reference list).
+  returns — the shooter's
+  [`docs/perry-quirks.md`](https://github.com/Bloom-Engine/shooter/blob/main/docs/perry-quirks.md)
+  is the reference list).
 
 ### Runtime/debug behavior worth knowing
 
@@ -179,5 +181,7 @@ The web crate exposes `_str` variants (accepting `&str`) and `_bytes` variants (
 - `docs/crash-triage-windows.md` — native-fault runbook (the engine
   self-reports crashes since 2026-07).
 - The Bloom Shooter (`../shooter`) is the flagship consumer; its
-  `CLAUDE.md` + `docs/perry-quirks.md` document the Perry-side rules
+  `CLAUDE.md` plus the shooter's
+  [`docs/perry-quirks.md`](https://github.com/Bloom-Engine/shooter/blob/main/docs/perry-quirks.md)
+  document the Perry-side rules
   games (and engine `src/` TS) must follow.

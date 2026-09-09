@@ -1,0 +1,49 @@
+{
+  "schema": "bloom-virtual-geometry-ordinary-gltf-invariance-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "405d383bcb800ab0b1e819f70cfd1b4d339141de",
+  "date": "2026-08-29",
+  "adapter": {
+    "backend": "metal",
+    "gpu": "Apple M1 Max",
+    "profile": "native-full",
+    "os": "macOS 26.5 (25F71)"
+  },
+  "ordinary_asset": {
+    "path": "examples/renderer-test/assets/DamagedHelmet.glb",
+    "loader": "load_model_with_textures_from_source_path",
+    "submission": "cached-model",
+    "imported_meshes": 1,
+    "visible_pixels": 328
+  },
+  "gpu_pixel_oracle": {
+    "extent": [128, 128],
+    "comparison": "ordinary frame versus identical frame with virtual renderer enabled and empty virtual batch",
+    "changed_pixels": 0,
+    "maximum_channel_delta": 0,
+    "changed_pixel_bounds": null
+  },
+  "isolation": {
+    "render_scale": 1.0,
+    "taa_enabled": false,
+    "ssao_enabled": false,
+    "ssr_enabled": false,
+    "ssgi_enabled": false,
+    "bloom_enabled": false,
+    "motion_blur_enabled": false,
+    "sharpen_strength": 0.0,
+    "auto_exposure_enabled": false
+  },
+  "qualification": {
+    "visibility_runtime_tests_passed": 1,
+    "shared_unit_tests_passed": 480,
+    "shared_unit_tests_failed": 0,
+    "shared_unit_tests_ignored": 1,
+    "scoped_format": "pass",
+    "diff_check": "pass"
+  },
+  "acceptance_boxes_changed": 1,
+  "remaining": [
+    "fixed cross-backend camera-motion corpus"
+  ]
+}

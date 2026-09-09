@@ -1,0 +1,70 @@
+{
+  "schema": "bloom-asset-variant-evidence-v2",
+  "issue": 136,
+  "qualified_revision": "8bfa90580dbb60a439ad8cdff91d53d441fb7fa1",
+  "contract": {
+    "legacy_manifest_schema": "bloom-asset-manifest-v1",
+    "profiled_manifest_schema": "bloom-asset-manifest-v2",
+    "legacy_index_schema": "bloom-asset-index-v1",
+    "profiled_index_schema": "bloom-asset-index-v2",
+    "legacy_bytes_preserved": true,
+    "profile_in_build_key": true,
+    "profile_in_artifact_hash": false,
+    "fallback_is_explicit_and_ordered": true,
+    "unprofiled_fallback_requires_opt_in": true,
+    "resolution_revalidates_store": true,
+    "runtime_enabled": false
+  },
+  "bistro": {
+    "source_revision": "7c9f9f9ac0915024ccf3dddbccd8bfc643a42607",
+    "source_sha256": "96138eb738a85631802f03e8755157bc7661d53a2ea60f2f960fb04957ef2529",
+    "derived_meshes": 16,
+    "derived_gltf_sha256": "0798b05c71f91fcae850433b782b4a0db7d63967db73c980146b7a352db93483",
+    "artifact_bytes": 13015712,
+    "artifact_sha256": "4d6120ce64101f53d54f5d3707d84d15fdb3aed3a7ab6c7ee0482ab96e42dd92",
+    "payload_sha256": "3577631e2f9d3c1122a5782f62c7c42d6f3fdfed815d6a4bc2e5e4eba3a470bf",
+    "profiles": [
+      {
+        "platform": "macos",
+        "quality": "high",
+        "build_key_sha256": "1f4f815e0f55ecafe69f5d047148f6c727458eec8a2b9f459ce39388aab24f1c"
+      },
+      {
+        "platform": "portable",
+        "quality": "high",
+        "build_key_sha256": "6a288e0c4d956df15acfc57e82d9e3dab1d9693f587fa38051fd42354c81230a"
+      }
+    ],
+    "cache_hit_wall_seconds": 0.43,
+    "cache_hit_writes": 0,
+    "index_entries": 2,
+    "profiled_entries": 2,
+    "referenced_bytes": 26031424,
+    "unique_chunks": 1,
+    "unique_chunk_bytes": 13015712,
+    "index_bytes": 1929,
+    "index_sha256": "1212607e840cd023a9d872870ed0fbfb98881d43171abb1e7436062315db9af6",
+    "reverse_insertion_index_byte_identical": true,
+    "strict_index_inspection": "pass",
+    "exact_resolution": "macos/high",
+    "explicit_fallback_request": "windows/ultra",
+    "explicit_fallback_selection": "portable/high",
+    "rejected_non_finite_mesh_sets": [64, 96]
+  },
+  "qualification": {
+    "release_tests_passed": 29,
+    "strict_clippy": "pass",
+    "format": "pass",
+    "file_line_gate": "pass"
+  },
+  "shipping_runtime_delta": {
+    "passes": 0,
+    "draws": 0,
+    "buffers": 0,
+    "textures": 0,
+    "allocations": 0,
+    "bindings": 0,
+    "shader_branches": 0,
+    "pixels_changed": false
+  }
+}

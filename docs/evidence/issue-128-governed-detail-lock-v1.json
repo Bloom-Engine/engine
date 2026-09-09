@@ -1,0 +1,58 @@
+{
+  "schema": "bloom-quality-governed-detail-lock-evidence-v1",
+  "issue": 128,
+  "comparison_base": "922aff287f42898e94118372f898e0846aba2ec2",
+  "candidate_revision": "1938e86c2ecbcdda139d8a76adf95407682114d0",
+  "scope": "quality-contract-only",
+  "production_pixel_changes": false,
+  "runtime_resource_changes": false,
+  "render_graph_changes": false,
+  "migration": {
+    "obsolete_name": "taa-thin-feature-confidence",
+    "current_name": "taa-detail-lock",
+    "reason": "production detail-lock replaced the capture-only ridge classifier in 2e9e744",
+    "manifest_cases_migrated": 8,
+    "runner_allowlist_migrated": true,
+    "unit_contract_migrated": true
+  },
+  "governed_run": {
+    "suite": "quick",
+    "case": "pbr-spheres-high",
+    "status": "baseline-approval-required",
+    "failures": [
+      "approved baseline missing: tools/quality/baselines/portable/pbr-spheres-high.png"
+    ],
+    "missing_named_intermediates": [],
+    "named_intermediate_count": 30,
+    "detail_lock_present": true,
+    "fixed_timestep": 0.016666667,
+    "measured_frames": 300,
+    "measurement_wall_ms": 1720.394042,
+    "wall_frame_mean_ms": 5.734647,
+    "cpu_frame_mean_ms": 2.031954,
+    "cpu_frame_p95_ms": 2.384414,
+    "gpu_frame_mean_ms": 12.569622,
+    "gpu_frame_p95_ms": 23.123957,
+    "result_sha256": "b5c5feb45b88c3981e205884d56402d82cb0cb940112290b9afca258b97010bb",
+    "final_image_sha256": "8a4061b51573d9a509b7ecee2e0a37bf5aa5289bef119064af86a54aa5cb057a",
+    "detail_lock_sha256": "a3292ba0201de59ccd4c99e48698b5edce16926cd9a84bd7db75bcaecfbf8992",
+    "reconstruction_footprint_sha256": "bd38da6b4b6d962430c4a54344f7b9473c9896ab1ac9ff6e7ef88b4ae86e7e8b",
+    "source_commit": "1938e86c2ecbcdda139d8a76adf95407682114d0",
+    "source_dirty_paths": ["native/macos/Cargo.lock"],
+    "source_dirty_reason": "quality build refreshed inherited stale platform dependency lock"
+  },
+  "baseline_review": {
+    "directory": "/private/tmp/bloom-quality-detail-lock-review-v2",
+    "review_sha256": "4f72fc7ad20d160a585d080f55e8bbf81faf7be96470d611dbc4dbb00a062908",
+    "baseline_state": "absent",
+    "proposed_image": "pbr-spheres-high/after.png",
+    "intermediate_count": 30,
+    "installed": false,
+    "installation_requires_independent_human_approval": true
+  },
+  "validation": {
+    "quality_runner_unit_tests": { "passed": 12, "failed": 0 },
+    "diff_whitespace": "passed"
+  },
+  "issue_closed": false
+}

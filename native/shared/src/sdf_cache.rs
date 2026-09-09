@@ -108,13 +108,19 @@ pub fn compute_mesh_hash(positions: &[[f32; 3]], indices: &[u32]) -> MeshHash {
 ///   - wasm32:                       `None`
 pub fn cache_dir() -> Option<PathBuf> {
     #[cfg(target_arch = "wasm32")]
-    { return None; }
+    {
+        return None;
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
         let dir = if cfg!(target_vendor = "apple") {
             let home = std::env::var_os("HOME")?;
-            PathBuf::from(home).join("Library").join("Caches").join("bloom").join("sdf")
+            PathBuf::from(home)
+                .join("Library")
+                .join("Caches")
+                .join("bloom")
+                .join("sdf")
         } else if cfg!(target_os = "windows") {
             let local = std::env::var_os("LOCALAPPDATA")?;
             PathBuf::from(local).join("bloom").join("cache").join("sdf")
@@ -149,16 +155,24 @@ pub fn load(hash: MeshHash) -> Option<Vec<u8>> {
 
     let mut header = [0u8; 16];
     f.read_exact(&mut header).ok()?;
-    if header[..6] != FILE_MAGIC { return None; }
-    if header[6] != FILE_VERSION { return None; }
+    if header[..6] != FILE_MAGIC {
+        return None;
+    }
+    if header[6] != FILE_VERSION {
+        return None;
+    }
     // header[7] reserved (alignment pad / future flags).
     let res = u32::from_le_bytes(header[8..12].try_into().ok()?);
-    if res != VOXEL_RES { return None; }
+    if res != VOXEL_RES {
+        return None;
+    }
     // header[12..16] reserved.
 
     let mut bytes = Vec::with_capacity(VOXEL_BYTES);
     f.read_to_end(&mut bytes).ok()?;
-    if bytes.len() != VOXEL_BYTES { return None; }
+    if bytes.len() != VOXEL_BYTES {
+        return None;
+    }
     Some(bytes)
 }
 
@@ -210,7 +224,10 @@ mod tests {
         let pos1 = vec![[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let pos2 = vec![[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.001, 0.0]];
         let idx = vec![0_u32, 1, 2];
-        assert_ne!(compute_mesh_hash(&pos1, &idx), compute_mesh_hash(&pos2, &idx));
+        assert_ne!(
+            compute_mesh_hash(&pos1, &idx),
+            compute_mesh_hash(&pos2, &idx)
+        );
     }
 
     #[test]
@@ -218,7 +235,10 @@ mod tests {
         let pos = vec![[0.0_f32; 3]; 3];
         let idx1 = vec![0_u32, 1, 2];
         let idx2 = vec![0_u32, 2, 1];
-        assert_ne!(compute_mesh_hash(&pos, &idx1), compute_mesh_hash(&pos, &idx2));
+        assert_ne!(
+            compute_mesh_hash(&pos, &idx1),
+            compute_mesh_hash(&pos, &idx2)
+        );
     }
 
     #[test]
@@ -233,7 +253,9 @@ mod tests {
     #[test]
     fn store_then_load_roundtrips() {
         // Skip when the env doesn't expose a cache dir (CI sandbox can do this).
-        let Some(_) = cache_dir() else { return; };
+        let Some(_) = cache_dir() else {
+            return;
+        };
         // Use a hash unlikely to collide with anything else's tests.
         let h = MeshHash(0xfeed_cafe_dead_beef);
         let bytes: Vec<u8> = (0..VOXEL_BYTES).map(|i| (i * 7 + 13) as u8).collect();
@@ -241,14 +263,20 @@ mod tests {
         let got = load(h).expect("load hit");
         assert_eq!(got, bytes);
         // Cleanup so the test is repeatable.
-        if let Some(p) = cache_path(h) { let _ = fs::remove_file(p); }
+        if let Some(p) = cache_path(h) {
+            let _ = fs::remove_file(p);
+        }
     }
 
     #[test]
     fn load_miss_returns_none() {
-        let Some(_) = cache_dir() else { return; };
+        let Some(_) = cache_dir() else {
+            return;
+        };
         let h = MeshHash(0x0000_0000_dead_dead);
-        if let Some(p) = cache_path(h) { let _ = fs::remove_file(p); }
+        if let Some(p) = cache_path(h) {
+            let _ = fs::remove_file(p);
+        }
         assert!(load(h).is_none());
     }
 
@@ -260,7 +288,9 @@ mod tests {
 
     #[test]
     fn load_rejects_wrong_magic() {
-        let Some(dir) = cache_dir() else { return; };
+        let Some(dir) = cache_dir() else {
+            return;
+        };
         let _ = fs::create_dir_all(&dir);
         let h = MeshHash(0xbad_0_bad_1);
         let p = dir.join(h.to_filename());

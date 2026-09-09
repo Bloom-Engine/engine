@@ -1,0 +1,117 @@
+{
+  "schema": "bloom-tsr-moderate-motion-phase-refresh-evidence-v1",
+  "issue": 149,
+  "comparison_base": "b54eba9e1ea65b1b0149e82125a11c64e3d9a676",
+  "candidate_revision": "commit-containing-this-artifact",
+  "adapter": "Apple M1 Max",
+  "backend": "Metal",
+  "production_policy": {
+    "detail_source": "existing-current-feature-lock",
+    "motion_threshold_normalized_uv": 0.0005,
+    "minimum_current_weight": 0.15,
+    "added_texture_reads_per_output_pixel": 0,
+    "added_bindings": 0,
+    "added_passes": 0,
+    "added_allocations": 0,
+    "added_persistent_bytes": 0
+  },
+  "coplanar_material_boundary": {
+    "frames": 12,
+    "candidate_scale": 0.75,
+    "reference": "2x-raster-box-filtered-to-output",
+    "base": {
+      "mean_rgb": 1.818761,
+      "mean_ssim": 0.974989,
+      "minimum_ssim": 0.942141,
+      "motion_derivative_error": 0.456143
+    },
+    "candidate": {
+      "mean_rgb": 1.356988,
+      "mean_ssim": 0.987080,
+      "minimum_ssim": 0.975482,
+      "motion_derivative_error": 0.421135
+    },
+    "enforced": {
+      "maximum_mean_rgb": 1.42,
+      "minimum_mean_ssim": 0.985,
+      "minimum_frame_ssim": 0.97,
+      "maximum_motion_derivative_error": 0.44
+    }
+  },
+  "unchanged_controls": {
+    "stationary_fractional": {
+      "mean_rgb": 0.6107025146484375,
+      "ssim": 0.991220444933616
+    },
+    "fractional_glossy_slow_pan": {
+      "mean_rgb": 1.077261,
+      "mean_ssim": 0.978843,
+      "minimum_ssim": 0.974621,
+      "motion_derivative_error": 0.113418
+    },
+    "fractional_thin_feature_slow_pan": {
+      "mean_rgb": 10.376356,
+      "mean_ssim": 0.720353,
+      "minimum_ssim": 0.634745,
+      "motion_derivative_error": 0.903769
+    }
+  },
+  "rejected_stable_identity": [
+    {
+      "policy": "stable-key-lock-kill-only",
+      "mean_rgb": 1.818452,
+      "mean_ssim": 0.974988,
+      "minimum_ssim": 0.942147,
+      "motion_derivative_error": 0.456155,
+      "decision": "removed-neutral-within-quantization"
+    },
+    {
+      "policy": "full-stable-key-rejection",
+      "mean_rgb": 1.824365,
+      "mean_ssim": 0.974837,
+      "minimum_ssim": 0.942015,
+      "motion_derivative_error": 0.489838,
+      "decision": "removed-reference-and-derivative-regression"
+    },
+    {
+      "policy": "nearest-matched-history",
+      "mean_rgb": 1.828624,
+      "mean_ssim": 0.974586,
+      "minimum_ssim": 0.943273,
+      "motion_derivative_error": 0.529244,
+      "decision": "removed-reference-and-derivative-regression"
+    },
+    {
+      "policy": "same-surface-bilinear-taps",
+      "mean_rgb": 1.832525,
+      "mean_ssim": 0.974367,
+      "minimum_ssim": 0.940711,
+      "motion_derivative_error": 0.486263,
+      "decision": "removed-reference-and-derivative-regression"
+    }
+  ],
+  "performance": {
+    "output": [1600, 900],
+    "render_scale": 0.75,
+    "moving_frames_per_run": 1200,
+    "camera_step": 0.002,
+    "candidate_taa_gpu_us": [1826.640, 1603.400, 1873.366, 1809.632],
+    "baseline_taa_gpu_us": [2009.076, 1461.669, 1986.851],
+    "candidate_bracket_mean_us": 1764.967,
+    "baseline_mean_us": 1819.199,
+    "relative_change": -0.029811,
+    "classification": "no-measurable-regression-run-noise-dominates"
+  },
+  "validation": {
+    "quality_presets": { "passed": 11, "failed": 0 },
+    "shared_library": { "passed": 482, "ignored": 1, "failed": 0 },
+    "gpu_golden": { "passed": 79, "ignored": 3, "failed": 0 },
+    "formatting": "passed",
+    "diff_whitespace": "passed",
+    "bistro_placements_loaded": 2909,
+    "bistro_ssgi_backend": "hw-ray-query",
+    "interactive_motion_verdict": "clean",
+    "final_exact_tree_gpu_rerun": "passed"
+  },
+  "scope": "qualified-issue-slice-not-issue-closure"
+}

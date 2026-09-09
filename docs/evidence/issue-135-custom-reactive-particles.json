@@ -1,0 +1,51 @@
+{
+  "schema": "bloom-temporal-motion-evidence-v1",
+  "issue": 135,
+  "producer": "custom-instanced-particles",
+  "comparison_base": "80ce85ce2ce361636fd00bc0670b64edb9dbfcb6",
+  "qualified_revision": "8724f3007b93704d46e740765502d0ab62d6ea1d",
+  "adapter": "Apple M1 Max",
+  "backend": "Metal",
+  "motion_sequence": {
+    "reactive_rejection_pixels": 2222,
+    "movement_mean": 5.5887,
+    "frame_four_mean": 0.5551,
+    "frame_four_outlier_fraction": 0.010361,
+    "severe_trail_frames": 0,
+    "stable_flicker": 0.4743,
+    "ordinary_control_reactive_topology_active": false,
+    "ordinary_control_severe_trail_frames": 0
+  },
+  "performance": {
+    "resolution": [1920, 1080],
+    "warmup_frames": 300,
+    "measured_frames": 900,
+    "alternating_runs_per_revision": 4,
+    "before": {
+      "render_submit_mean_ms": [3.022422, 3.116155, 2.286328, 2.313249],
+      "render_submit_p50_ms": [2.790583, 2.8865, 2.524625, 2.580666],
+      "render_submit_p95_ms": [6.603958, 5.797625, 3.391, 3.110417],
+      "render_submit_p99_ms": [9.547833, 8.835916, 4.400625, 4.244125],
+      "prepare_mean_ms": [0.112385, 0.098009, 0.058487, 0.057564]
+    },
+    "after": {
+      "render_submit_mean_ms": [2.954485, 2.542662, 2.273735, 2.249427],
+      "render_submit_p50_ms": [2.827, 2.642875, 2.544709, 2.512459],
+      "render_submit_p95_ms": [5.198, 4.191833, 3.186375, 2.826708],
+      "render_submit_p99_ms": [6.618833, 5.749166, 4.156083, 3.629917],
+      "prepare_mean_ms": [0.09667, 0.065556, 0.058652, 0.051343]
+    },
+    "steady_upload_bytes_per_frame_before": 23264,
+    "steady_upload_bytes_per_frame_after": 23264
+  },
+  "resources": {
+    "ordinary_frame_additional_image_bytes": 0,
+    "ordinary_frame_added_passes": 0,
+    "ordinary_frame_added_draws": 0,
+    "active_bytes_per_render_pixel": 1,
+    "active_image_bytes_at_1920x1080": 2073600,
+    "active_added_passes": 0,
+    "active_added_draws": 0,
+    "active_lazy_pipeline_count_per_material": 1
+  }
+}

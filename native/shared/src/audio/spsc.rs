@@ -92,7 +92,8 @@ impl<T> Consumer<T> {
             return None; // empty
         }
         let item = unsafe { (*ring.buf[head].get()).assume_init_read() };
-        ring.head.store((head + 1) % ring.buf.len(), Ordering::Release);
+        ring.head
+            .store((head + 1) % ring.buf.len(), Ordering::Release);
         Some(item)
     }
 }

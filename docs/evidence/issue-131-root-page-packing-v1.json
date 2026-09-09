@@ -1,0 +1,137 @@
+{
+  "schema": "bloom-virtual-geometry-root-page-packing-evidence-v1",
+  "issue": 131,
+  "geometry_recipe_version": 3,
+  "wire_format_version": 2,
+  "fault": {
+    "page_class": "lod-level-and-root-residency",
+    "root_payload_bytes": 58229152,
+    "root_pages": 1593,
+    "physical_pool_slots": 2048,
+    "detail_slots_remaining": 455,
+    "direct_parity_ssim": 0.87003,
+    "direct_fallback_groups": 317,
+    "visible_regression": "virtual-only blue surface beside the Bistro menu sign"
+  },
+  "correction": {
+    "root_page_class": "pinned-root-residency",
+    "root_streamable_page_separation": true,
+    "streamable_lod_isolation": true,
+    "mixed_root_lod_pages_allowed": true,
+    "root_page_prefix_preserved": true,
+    "runtime_passes_added": 0,
+    "runtime_allocations_added": 0,
+    "runtime_shader_branches_added": 0
+  },
+  "artifact": {
+    "path": "/tmp/bloom-bistro-packed-roots/BistroReference.bgeo",
+    "file_bytes": 261627824,
+    "meshlets": 115375,
+    "hierarchy_triangles": 5911684,
+    "pages": 3828,
+    "root_pages": 905,
+    "root_payload_bytes": 58229152,
+    "artifact_sha256": "593a4b6b31da0498873986ae9f9488779dee4f7db5734533e12a0fd25eca1c29",
+    "payload_sha256": "a7aade15d57f9aa10f1ffebda46ac4ec921bf91a2c26719002b97e72152afa02",
+    "source_closure_sha256": "5ac44350964992261184fee6db70f0962da1baf974f50d2bd8c367463c731289"
+  },
+  "packing_delta": {
+    "root_pages_removed": 688,
+    "detail_slots_remaining": 1143,
+    "artifact_bytes_removed": 44032,
+    "runtime_page_table_bytes_removed": 11008
+  },
+  "determinism": {
+    "independent_clean_cooks": 2,
+    "byte_identical": true,
+    "repeat_artifact_sha256": "593a4b6b31da0498873986ae9f9488779dee4f7db5734533e12a0fd25eca1c29"
+  },
+  "bistro_qualification": {
+    "direct_ordinary_vs_virtual": {
+      "mean_rgb": 0.9309606481481482,
+      "ssim": 0.9673468330104639,
+      "missing_geometry_fraction": 0.00001736111111111111,
+      "background_leak_fraction": 0.000004340277777777778
+    },
+    "virtual_direct_vs_returned": {
+      "mean_rgb": 0.16379050925925925,
+      "ssim": 0.9920888754990391,
+      "missing_geometry_fraction": 0.0,
+      "background_leak_fraction": 0.0
+    },
+    "moving_ordinary_vs_virtual": {
+      "maximum_mean_rgb": 0.9615104166666667,
+      "minimum_ssim": 0.9659313182490084,
+      "maximum_missing_geometry_fraction": 0.000008680555555555556,
+      "maximum_background_leak_fraction": 0.0000998263888888889
+    },
+    "matched_path_return": {
+      "maximum_mean_rgb": 0.21506655092592591,
+      "minimum_ssim": 0.993539055954396
+    },
+    "thresholds": {
+      "maximum_root_pages": 920,
+      "maximum_ordinary_virtual_mean_rgb": 3.0,
+      "minimum_ordinary_virtual_ssim": 0.95,
+      "maximum_missing_geometry_fraction": 0.005,
+      "maximum_background_leak_fraction": 0.001
+    },
+    "runtime_snapshot": {
+      "backend": "metal",
+      "adapter": "Apple M1 Max",
+      "physical_pool_capacity_bytes": 134217728,
+      "resident_pages": 2048,
+      "selected_clusters": 14078,
+      "fallback_groups": 173,
+      "pending_groups": 168,
+      "missing_current_pages": 0,
+      "selected_overflow": 0,
+      "request_overflow": 0,
+      "page_use_overflow": 0,
+      "invalid_records": 0,
+      "depth_limit_fallbacks": 0
+    }
+  },
+  "stress_qualification": {
+    "backend": "metal",
+    "adapter": "Apple M1 Max",
+    "source_triangles": 10000000,
+    "placements": [
+      1,
+      10,
+      100
+    ],
+    "validation": "pass",
+    "pool_capacity_bytes": 67108864,
+    "resident_pages_at_100": 955,
+    "selected_clusters_at_100": 10220,
+    "gpu_frame_mean_ms_at_100": 5.265658,
+    "gpu_frame_p95_ms_at_100": 8.426207,
+    "wall_frame_mean_ms_at_100": 6.693620133333334,
+    "selector_gpu_mean_ms_at_100": 2.138291,
+    "draw_emission_gpu_mean_ms_at_100": 0.116362,
+    "fallback_groups": 0,
+    "missing_current_pages": 0,
+    "streaming_io_failures": 0,
+    "truncated_requests": 0,
+    "truncated_page_uses": 0,
+    "selected_overflow": 0,
+    "request_overflow": 0,
+    "page_use_overflow": 0,
+    "artifact_sha256": "13ab0d150328b9f67ebc8abbe0d73891a10d72033bc3a18b4d9f6a8364cbd864"
+  },
+  "qualification": {
+    "focused_root_packing_test": "pass",
+    "cooker_tests_passed": 35,
+    "cooker_strict_clippy": "pass",
+    "geometry_format_tests": "pass",
+    "detailed_bistro_gate": "pass",
+    "shared_models3d_command": "pass",
+    "shared_library_tests_passed": 471,
+    "shared_library_tests_ignored": 1,
+    "gpu_golden_tests_passed": 78,
+    "gpu_golden_tests_ignored": 2,
+    "metal_10m_stress": "pass",
+    "diff_whitespace": "pass"
+  }
+}

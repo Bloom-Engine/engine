@@ -29,7 +29,7 @@ format. Summary:
 Colors in world files are **0–1 floats** everywhere. (The runtime scene API
 takes 0–255; the shared helpers convert — never convert twice.)
 
-Loading is `loadWorld(path)` from `bloom/world`: read → parse → migrate →
+Loading is `loadWorld(path)` from `@bloomengine/engine/world`: read → parse → migrate →
 validate. It throws on malformed files and **migrates old schema versions
 automatically** (v1 worlds carrying `userData.kind === "point_light"` entities
 get them lifted into `lights[]`).
@@ -89,8 +89,9 @@ losslessly — it just renders model-less placeholder boxes (no catalog).
 The editor's Play button saves the current level to a scratch world file and
 runs your `playCommand` with `--world <path>` appended, from your project
 root. To opt in: accept that flag and load the given world instead of your
-default. That's the whole contract. (The shooter's `worldFromArgs` in
-`src/world-runtime.ts` is a 9-line reference.)
+default. That's the whole contract. The shooter's
+[`worldFromArgs`](https://github.com/Bloom-Engine/shooter/blob/main/src/world-runtime.ts)
+is a compact reference implementation.
 
 ## 5. Consuming worlds at runtime
 
@@ -99,7 +100,7 @@ Two proven shapes:
 **Generic path** (shortest; the world-viewer example is exactly this):
 
 ```ts
-import { loadWorld, instantiateWorld, applyWorldEnvironment } from 'bloom/world';
+import { loadWorld, instantiateWorld, applyWorldEnvironment } from '@bloomengine/engine/world';
 
 const world = loadWorld('assets/worlds/level1.world.json');
 const result = instantiateWorld(world, {

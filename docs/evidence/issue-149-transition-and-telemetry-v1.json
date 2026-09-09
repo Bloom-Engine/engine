@@ -1,0 +1,102 @@
+{
+  "schema": "bloom-tsr-transition-and-telemetry-evidence-v1",
+  "issue": 149,
+  "comparison_base": "2e9e7440eab4bf01f9cc772c0e5d715701ef5ce3",
+  "candidate_revision": "commit-containing-this-artifact",
+  "production_pixel_changes": false,
+  "fov_transition": {
+    "settled_fov_degrees": 42.0,
+    "stepped_fov_degrees": 70.0,
+    "settled_frames": 16,
+    "compared_frames": 8,
+    "comparison": "fresh-history-versus-stepped-history-at-matched-halton-phases",
+    "frames": [
+      { "index": 0, "mean_rgb": 0.0782, "outlier_fraction": 0.000076, "ssim": 0.999575 },
+      { "index": 1, "mean_rgb": 0.0372, "outlier_fraction": 0.000870, "ssim": 0.998096 },
+      { "index": 2, "mean_rgb": 0.1342, "outlier_fraction": 0.001083, "ssim": 0.997061 },
+      { "index": 3, "mean_rgb": 0.1802, "outlier_fraction": 0.002487, "ssim": 0.995744 },
+      { "index": 4, "mean_rgb": 0.1858, "outlier_fraction": 0.002884, "ssim": 0.995776 },
+      { "index": 5, "mean_rgb": 0.0914, "outlier_fraction": 0.000824, "ssim": 0.999031 },
+      { "index": 6, "mean_rgb": 0.0830, "outlier_fraction": 0.000641, "ssim": 0.999017 },
+      { "index": 7, "mean_rgb": 0.0688, "outlier_fraction": 0.000290, "ssim": 0.999124 }
+    ],
+    "all_frame_bounds": {
+      "maximum_mean_rgb": 0.35,
+      "maximum_outlier_fraction": 0.01,
+      "minimum_ssim": 0.992
+    },
+    "recovery_frame_bounds": {
+      "frame": 7,
+      "maximum_mean_rgb": 0.15,
+      "maximum_outlier_fraction": 0.002
+    }
+  },
+  "reconstruction_telemetry": {
+    "settled_paths": [
+      {
+        "scale_class": "fractional-0.75-to-below-0.95",
+        "source_filter": "approximate-separable-lanczos2",
+        "source_filter_samples": 9,
+        "statistics_filter": "reused-lanczos-cross",
+        "statistics_filter_samples": 5,
+        "statistics_additional_samples": 0,
+        "composed_source_samples": 9
+      },
+      {
+        "scale_class": "half-0.50-to-below-0.75",
+        "source_filter": "approximate-radial-lanczos2",
+        "source_filter_samples": 5,
+        "statistics_filter": "variance-corrected-output-cross",
+        "statistics_filter_samples": 5,
+        "statistics_additional_samples": 4,
+        "composed_source_samples": 9
+      },
+      {
+        "scale_class": "native-or-other",
+        "source_filter": "exact-separable-catmull-rom",
+        "source_filter_samples": 9,
+        "statistics_filter": "variance-corrected-output-cross",
+        "statistics_filter_samples": 5,
+        "statistics_additional_samples": 5,
+        "composed_source_samples": 14
+      }
+    ],
+    "bootstrap": {
+      "source_filter": "exact-separable-catmull-rom",
+      "source_filter_samples": 9,
+      "statistics_additional_samples": 5,
+      "composed_source_samples": 14
+    }
+  },
+  "static_native_reference_baselines": {
+    "bistro": {
+      "resolution": [512, 288],
+      "candidate_scale": 0.75,
+      "native_scale": 1.0,
+      "luminance_rmse": 0.022507694,
+      "ssim": 0.941883624,
+      "oklab": 0.010912822,
+      "edge_error": 0.012089252
+    },
+    "sponza": {
+      "resolution": [1600, 900],
+      "candidate_scale": 0.75,
+      "native_scale": 1.0,
+      "luminance_rmse": 0.016017228,
+      "ssim": 0.952767253,
+      "oklab": 0.011815320,
+      "edge_error": 0.007303152,
+      "candidate_sha256": "2a2d39270ef1ebd6c260c666b07dc1b90e0ecc49e8d140fbe9f1ac12d0bb6b31",
+      "native_sha256": "1971450eeaf7a95fca103087cb8ff50efd130c41b78afc33de27dffa7afa38df"
+    }
+  },
+  "rejected_candidates": [
+    "stationary-residual-gain-increase-regressed-absolute-native-reference-error",
+    "half-strength-material-mip-bias-was-within-repeat-noise",
+    "broader-global-lanczos-regressed-geometric-and-glossy-motion-gates",
+    "depth-adaptive-lanczos-regressed-untextured-native-distance",
+    "depth-luma-variance-center-blend-regressed-glossy-edge-and-motion-fidelity",
+    "stationary-residual-gain-decrease-regressed-rmse-edge-ssim-and-glossy-motion"
+  ],
+  "next_constraint": "add-a-reliable-surface-or-material-discriminator-before-further-static-reconstruction-tuning"
+}

@@ -1,3 +1,11 @@
 {
-  "native/shared/src/renderer/mod.rs": 12556
+  "native/shared/src/physics_jolt.rs": 3858,
+  "native/shared/src/renderer/material_system.rs": 2335,
+  "native/shared/src/renderer/mod.rs": 14649,
+  "native/shared/src/renderer/shaders/post.rs": 2026,
+  "native/shared/src/renderer/shaders/ssgi.rs": 2014,
+  "native/shared/src/scene.rs": 2778,
+  "native/shared/tests/golden_render.rs": 2249,
+  "native/shared/tests/golden_render/temporal_history.rs": 2070,
+  "native/web/src/lib.rs": 2349
 }

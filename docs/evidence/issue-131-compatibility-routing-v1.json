@@ -1,0 +1,86 @@
+{
+  "schema": "bloom-virtual-geometry-compatibility-routing-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "88e8d048f4af0e738043476845dfd779125e71cb",
+  "date": "2026-08-26",
+  "source_ownership": {
+    "shared_versioned_source_closure_hash": true,
+    "hash_buffer_order": "gltf-buffer-index",
+    "runtime_requires_complete_source_closure": true,
+    "source_mesh_identity": true,
+    "source_primitive_identity": true,
+    "source_placement_identity": true,
+    "immutable_primitive_payloads_remain_shared": true,
+    "missing_or_mismatched_source_fails_closed": true
+  },
+  "archive_partition": {
+    "compatibility_overlap_rejected": true,
+    "compatibility_duplicate_rejected": true,
+    "runtime_requires_exactly_one_route_per_primitive": true,
+    "archive_primitive_missing_from_model_rejected": true,
+    "incomplete_placement_metadata_rejected": true
+  },
+  "mixed_scene_route": {
+    "virtual_instance_granularity": "source-mesh-node-placement",
+    "gpu_instance_bytes": 208,
+    "source_mesh_filter_cpu_and_gpu": true,
+    "unfiltered_multi_source_archive_rejected": true,
+    "compatibility_only_source_rejected_from_virtual_traversal": true,
+    "ordinary_full_model_draw_unchanged": true,
+    "ordinary_subset_preflight_atomic": true,
+    "ordinary_subset_allocation_free": true,
+    "alpha_masked_visibility_owner": "ordinary-cached-renderer",
+    "alpha_masked_virtual_raster": false
+  },
+  "metal_routing_oracle": {
+    "backend": "metal",
+    "source_0_cluster_table_indices": [4, 5],
+    "source_1_cluster_table_indices": [6, 7],
+    "combined_selected_records": 4,
+    "gpu_matches_cpu_reference": true,
+    "missing_page_requests": 0,
+    "unfiltered_instance_preflight_rejected": true,
+    "compatibility_only_instance_preflight_rejected": true
+  },
+  "qualification": {
+    "shared_unit_tests_passed": 454,
+    "shared_unit_tests_ignored": 1,
+    "golden_tests_passed": 77,
+    "golden_tests_ignored": 2,
+    "cooker_tests_passed": 30,
+    "native_no_default_check": "pass",
+    "wasm_web_models3d_check": "pass",
+    "format": "pass",
+    "diff_check": "pass",
+    "cooker_strict_clippy": "pass",
+    "geometry_format_strict_clippy": "pass",
+    "shared_scoped_clippy": {
+      "status": "pre_existing_failures_only",
+      "slice_diagnostics": 0,
+      "pre_existing_diagnostics": 8,
+      "pre_existing_files": [
+        "native/shared/src/input.rs",
+        "native/shared/src/renderer/mod.rs",
+        "native/shared/src/string_header.rs",
+        "native/shared/src/shadows.rs"
+      ]
+    },
+    "file_size_ratchet": {
+      "status": "pre_existing_failures_only",
+      "slice_files_over_ceiling": 0,
+      "pre_existing_files_over_ceiling": [
+        "native/shared/src/renderer/shaders/post.rs",
+        "native/shared/src/renderer/shaders/ssgi.rs",
+        "native/shared/tests/golden_render/temporal_history.rs"
+      ]
+    }
+  },
+  "acceptance_boxes_changed": 0,
+  "remaining": [
+    "bounded asynchronous missing-page feedback and streaming",
+    "conservative previous-frame virtual Hi-Z",
+    "approved Bistro motion and parity corpus",
+    "10-million-source-triangle stress asset",
+    "integrated and discrete Metal Vulkan and Direct3D 12 qualification"
+  ]
+}

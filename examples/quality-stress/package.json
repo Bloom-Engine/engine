@@ -1,0 +1,13 @@
+{
+  "name": "bloom-quality-stress",
+  "version": "0.1.0",
+  "private": true,
+  "perry": {
+    "allow": {
+      "nativeLibrary": ["bloom/*"]
+    }
+  },
+  "dependencies": {
+    "bloom": "file:../../"
+  }
+}

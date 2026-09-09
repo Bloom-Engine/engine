@@ -34,8 +34,11 @@ fixed exposure) so images are comparable number-to-number.
 
 Mode is a runtime setting (`bloom_set_path_tracing`), toggleable per frame.
 When PT is active, SSGI/SSR/GTAO are skipped (their output would be
-overwritten; skipping banks their cost). Shadow cascades still render — mode 2
-reuses them nowhere, but the card-light pass (Tier 1 hit shading) does.
+overwritten; skipping banks their cost). PT independently keeps only the
+shared TLAS/geometry rebuild and raw-albedo card capture it consumes. SSGI-only
+SDF, clipmap, radiance-cache, and card-light passes remain absent when SSGI is
+off. Shadow cascades still render because realtime PT can use them for its
+noise-free hybrid sun path.
 
 ## Tiers
 
@@ -72,6 +75,26 @@ multi-bounce colour bleed.
   albedo where absent. DX12 with DXC and Vulkan both qualify.
 - **GGX specular lobe** with lobe selection + MIS, mirroring
   `bloom-reference/src/tracer.rs` so the two tracers stay comparable.
+- **Layered-material sidecar**: a 96-byte scalar record and group-2 pipeline
+  are created only after PT encounters a qualified layered TLAS instance.
+  Scalar clearcoat, dielectric specular/IOR, Charlie sheen, anisotropic GGX,
+  and iridescence direct lighting and bounce sampling match the CPU reference's
+  reciprocal GGX, F0/F90, diffuse-complement, directional-albedo,
+  authored-tangent, visible-normal, and bounded spectral thin-film contracts,
+  including their combined composition. Sheen, anisotropy, and iridescence
+  select independently lazy, constant-folded code variants; only sheen adds
+  the 32 KiB LUT. The base kernel, shared GI record, bindings, and cost remain
+  unchanged. Resolved specular-factor/color, clearcoat-factor/roughness,
+  sheen-color/roughness, iridescence-factor/thickness, and
+  anisotropy-direction/strength textures use the existing texture array plus
+  separate lazy 64-byte transform records, with transformed UV0/UV1
+  reconstruction at primary and bounce hits. UV1 is an aligned
+  8-byte-per-vertex sidecar retained for static and skinned geometry only when
+  selected. Neutral scalar-channel textures are byte-identical to the
+  corresponding scalar path; the centered UNORM8 anisotropy direction uses an
+  explicit quantization tolerance. Missing UV1 streams, clearcoat normal maps,
+  and other unqualified texture-bearing lobes continue to use exact
+  established PT semantics until their complete transport is qualified.
 - Emissive from material data (VFX/muzzle flashes become real light in PT).
 
 ### Tier 3 — PT-3/PT-4: gameplay

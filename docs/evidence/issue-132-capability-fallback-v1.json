@@ -1,0 +1,117 @@
+{
+  "schema": "bloom-vsm-capability-fallback-evidence-v1",
+  "issue": 132,
+  "validated_revision": "c34743e4c51177de3638cb2e5173bc5b41e2ce80",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "os": "macOS 26.5"
+  },
+  "pre_fix_reproduction": {
+    "forced_tier": "baseline",
+    "vsm_requested": true,
+    "vsm_active": true,
+    "physical_capacity": 256,
+    "gpu_total_bytes": 19951824,
+    "verdict": "incorrect-high-tier-path-on-baseline"
+  },
+  "policy": {
+    "minimum_vsm_tier": "high-end",
+    "baseline_and_modern_path": "csm",
+    "lower_tier_reason": "lower-tier-csm-fallback",
+    "high_tier_reason": "high-tier-vsm",
+    "selection_occurs_before_shader_and_resource_construction": true
+  },
+  "baseline_oracle": {
+    "fixture": "examples/quality-motion/main.ts --vsm-contact-detail",
+    "warmup_frames": 120,
+    "measured_frames": 120,
+    "fixed_timestep": 0.016666667,
+    "capture_resolution": [
+      2560,
+      1440
+    ],
+    "control_sha256": "596a8b611496b56b9f2e5747f95b706effa2b85e136e84e481afb1d0bc987d6f",
+    "requested_fallback_sha256": "596a8b611496b56b9f2e5747f95b706effa2b85e136e84e481afb1d0bc987d6f",
+    "byte_identical": true,
+    "telemetry": {
+      "requested": true,
+      "capability_eligible": false,
+      "enabled": false,
+      "active": false,
+      "selection_reason": "lower-tier-csm-fallback",
+      "fallback": "csm",
+      "physical_capacity": 0,
+      "gpu_total_bytes": 0,
+      "resident": 0,
+      "dirty": 0,
+      "requested_pages": 0,
+      "pending_render": 0,
+      "receiver_dispatches": 0,
+      "vsm_caster_bytes": 0
+    }
+  },
+  "modern_oracle": {
+    "requested_fallback_matches_control": true,
+    "capability_eligible": false,
+    "enabled": false,
+    "active": false,
+    "gpu_total_bytes": 0
+  },
+  "high_tier_non_regression": {
+    "sha256": "81c6d840a275ee4fe3ff9fbeb87a5a1e21b23bb1c087a4e24c024c2f778b0bde",
+    "matches_prior_qualified_sha256": true,
+    "capability_eligible": true,
+    "enabled": true,
+    "active": true,
+    "resident": 224,
+    "dirty": 0,
+    "pending_render": 0,
+    "gpu_total_bytes": 19951824
+  },
+  "performance_medians_ms": {
+    "runs_per_mode": 5,
+    "warmup_frames": 60,
+    "measured_frames": 180,
+    "control": {
+      "wall_frame_mean": 13.772097,
+      "cpu_frame_mean": 7.341116,
+      "cpu_frame_p50": 3.597667,
+      "gpu_frame_mean": 64.712663,
+      "gpu_frame_p50": 61.159793,
+      "render_total_cpu": 3.681061,
+      "shadow_cpu": 0.087858,
+      "main_hdr_gpu": 2.560346
+    },
+    "requested_fallback": {
+      "wall_frame_mean": 13.248781,
+      "cpu_frame_mean": 6.191538,
+      "cpu_frame_p50": 3.739,
+      "gpu_frame_mean": 62.33886,
+      "gpu_frame_p50": 60.532874,
+      "render_total_cpu": 3.106676,
+      "shadow_cpu": 0.088146,
+      "main_hdr_gpu": 2.486581
+    },
+    "shadow_cpu_delta": 0.000288,
+    "verdict": "same-frame-path-no-regression",
+    "note": "No timing improvement claimed; CPU p50 was noisy while all other listed whole-frame and render medians improved."
+  },
+  "qualification": {
+    "quick_lane": "pass",
+    "shared_tests_passed": 348,
+    "shared_tests_ignored": 1,
+    "headless_device_tests_passed": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "ffi_parity": "pass",
+    "strict_clippy": "pass",
+    "file_size_ratchet": "pass",
+    "shared_wasm_check": "pass",
+    "web_crate_wasm_check": "pass",
+    "ios_aarch64_check": "pass",
+    "android_aarch64_check": "pass",
+    "canonical_examples": 20
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "schema": "bloom-asset-index-evidence-v1",
+  "issue": 136,
+  "qualified_revision": "2effe1e3fb05c4ec26943a55ee054ca6e66cf188",
+  "contract": {
+    "index_schema": "bloom-asset-index-v1",
+    "sorted_by_logical_id": true,
+    "timestamps_in_index": false,
+    "output_root_in_index": false,
+    "every_manifest_and_chunk_revalidated": true,
+    "manifest_symlinks_allowed": false,
+    "unexpected_manifest_tree_files_allowed": false,
+    "unchanged_index_is_zero_write": true,
+    "stale_or_noncanonical_index_rejected": true,
+    "duplicate_content_counted_once": true,
+    "runtime_enabled": false
+  },
+  "canonical_store": {
+    "logical_ids": [
+      "quality/damaged-helmet",
+      "showcase/helmet-copy"
+    ],
+    "entries": 2,
+    "unique_chunks": 1,
+    "referenced_bytes": 2892992,
+    "unique_chunk_bytes": 1446496,
+    "index_bytes": 1686,
+    "index_sha256": "abab52afb3e9365afc36edc3fad322c993ff07e3ffb73a35cccd2410be21ff58",
+    "clean_store_index_byte_identical": true,
+    "strict_inspection": "pass"
+  },
+  "incremental_measurement": {
+    "tool": "/usr/bin/time -p",
+    "first_index_wall_seconds": 0.37,
+    "verified_unchanged_index_wall_seconds": 0.03,
+    "unchanged_index_writes": 0,
+    "scoped_manifest_change_marks_index_stale": true,
+    "index_rebuild_writes_only_index": true,
+    "unrelated_manifest_changed": false
+  },
+  "qualification": {
+    "release_tests_passed": 25,
+    "strict_clippy": "pass",
+    "format": "pass",
+    "file_line_gate": "pass",
+    "strict_index_inspection": "pass"
+  },
+  "shipping_runtime_delta": {
+    "passes": 0,
+    "draws": 0,
+    "buffers": 0,
+    "images": 0,
+    "allocations": 0,
+    "bindings": 0,
+    "shader_branches": 0,
+    "engine_dependencies": 0,
+    "pixels_changed": false
+  },
+  "remaining": [
+    "source path and license provenance",
+    "non-geometry recipes and cross-asset dependency edges",
+    "platform and quality variants",
+    "declarative multi-asset build input",
+    "garbage collection and packed shipping archives",
+    "runtime index lookup and asynchronous streaming"
+  ]
+}

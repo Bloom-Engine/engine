@@ -42,7 +42,9 @@ fn generate_sdf(bitmap: &[u8], w: u32, h: u32, spread: f32) -> Vec<u8> {
                         let dx = (sx - x) as f32;
                         let dy = (sy - y) as f32;
                         let dist = (dx * dx + dy * dy).sqrt();
-                        if dist < min_dist { min_dist = dist; }
+                        if dist < min_dist {
+                            min_dist = dist;
+                        }
                     }
                 }
             }
@@ -142,8 +144,7 @@ impl TextRenderer {
     }
 
     pub fn load_font(&mut self, data: &[u8]) -> usize {
-        let font = Font::from_bytes(data, FontSettings::default())
-            .expect("Failed to load font");
+        let font = Font::from_bytes(data, FontSettings::default()).expect("Failed to load font");
         self.fonts.push(font);
         self.fonts.len() - 1
     }
@@ -202,29 +203,43 @@ impl TextRenderer {
         }
         self.atlas_dirty = true;
 
-        self.glyph_cache.insert(key, GlyphInfo {
-            atlas_x: ax,
-            atlas_y: ay,
-            width: gw,
-            height: gh,
-            advance: metrics.advance_width,
-            x_offset: metrics.xmin as f32,
-            y_offset: metrics.ymin as f32,
-        });
+        self.glyph_cache.insert(
+            key,
+            GlyphInfo {
+                atlas_x: ax,
+                atlas_y: ay,
+                width: gw,
+                height: gh,
+                advance: metrics.advance_width,
+                x_offset: metrics.xmin as f32,
+                y_offset: metrics.ymin as f32,
+            },
+        );
 
         &self.glyph_cache[&key]
     }
 
     fn ensure_atlas_uploaded(&mut self, renderer: &mut Renderer) {
-        if !self.atlas_dirty { return; }
+        if !self.atlas_dirty {
+            return;
+        }
 
         match self.atlas_bind_group_idx {
             None => {
-                let idx = renderer.register_texture_no_mips(self.atlas_width, self.atlas_height, &self.atlas_data);
+                let idx = renderer.register_texture_no_mips(
+                    self.atlas_width,
+                    self.atlas_height,
+                    &self.atlas_data,
+                );
                 self.atlas_bind_group_idx = Some(idx);
             }
             Some(idx) => {
-                renderer.replace_texture_no_mips(idx, self.atlas_width, self.atlas_height, &self.atlas_data);
+                renderer.replace_texture_no_mips(
+                    idx,
+                    self.atlas_width,
+                    self.atlas_height,
+                    &self.atlas_data,
+                );
             }
         }
         self.atlas_dirty = false;
@@ -235,7 +250,11 @@ impl TextRenderer {
     }
 
     pub fn measure_text_ex(&mut self, font_idx: usize, text: &str, size: u32, spacing: f32) -> f64 {
-        let idx = if font_idx < self.fonts.len() { font_idx } else { 0 };
+        let idx = if font_idx < self.fonts.len() {
+            font_idx
+        } else {
+            0
+        };
         let mut width = 0.0f32;
         let mut first = true;
         for ch in text.chars() {
@@ -256,7 +275,10 @@ impl TextRenderer {
         x: f64,
         y: f64,
         size: u32,
-        r: f64, g: f64, b: f64, a: f64,
+        r: f64,
+        g: f64,
+        b: f64,
+        a: f64,
     ) {
         self.draw_text_ex(renderer, 0, text, x, y, size, 0.0, r, g, b, a);
     }
@@ -270,9 +292,16 @@ impl TextRenderer {
         y: f64,
         size: u32,
         spacing: f32,
-        r: f64, g: f64, b: f64, a: f64,
+        r: f64,
+        g: f64,
+        b: f64,
+        a: f64,
     ) {
-        let idx = if font_idx < self.fonts.len() { font_idx } else { 0 };
+        let idx = if font_idx < self.fonts.len() {
+            font_idx
+        } else {
+            0
+        };
 
         // Round-2 audit F5: glyphs were rasterized at LOGICAL pixel size
         // and stretched ×dpi by the 2D projection — a soft, bilinear-
@@ -331,9 +360,7 @@ impl TextRenderer {
                 // ×dpi stretch then lands the bitmap 1:1 on physical
                 // pixels instead of magnifying a logical-res raster.
                 let gx = cursor_x + glyph.x_offset * inv_dpi;
-                let gy = y as f32
-                    - (glyph.y_offset + glyph.height as f32) * inv_dpi
-                    + size as f32;
+                let gy = y as f32 - (glyph.y_offset + glyph.height as f32) * inv_dpi + size as f32;
                 let gw = glyph.width as f32 * inv_dpi;
                 let gh = glyph.height as f32 * inv_dpi;
 
@@ -410,28 +437,42 @@ impl TextRenderer {
         }
         self.sdf_atlas_dirty = true;
 
-        self.sdf_glyph_cache.insert(key, GlyphInfo {
-            atlas_x: ax,
-            atlas_y: ay,
-            width: gw,
-            height: gh,
-            advance: metrics.advance_width,
-            x_offset: metrics.xmin as f32,
-            y_offset: metrics.ymin as f32,
-        });
+        self.sdf_glyph_cache.insert(
+            key,
+            GlyphInfo {
+                atlas_x: ax,
+                atlas_y: ay,
+                width: gw,
+                height: gh,
+                advance: metrics.advance_width,
+                x_offset: metrics.xmin as f32,
+                y_offset: metrics.ymin as f32,
+            },
+        );
 
         &self.sdf_glyph_cache[&key]
     }
 
     fn ensure_sdf_atlas_uploaded(&mut self, renderer: &mut Renderer) {
-        if !self.sdf_atlas_dirty { return; }
+        if !self.sdf_atlas_dirty {
+            return;
+        }
         match self.sdf_atlas_bind_group_idx {
             None => {
-                let idx = renderer.register_texture(self.atlas_width, self.atlas_height, &self.sdf_atlas_data);
+                let idx = renderer.register_texture(
+                    self.atlas_width,
+                    self.atlas_height,
+                    &self.sdf_atlas_data,
+                );
                 self.sdf_atlas_bind_group_idx = Some(idx);
             }
             Some(idx) => {
-                renderer.update_texture(idx, self.atlas_width, self.atlas_height, &self.sdf_atlas_data);
+                renderer.update_texture(
+                    idx,
+                    self.atlas_width,
+                    self.atlas_height,
+                    &self.sdf_atlas_data,
+                );
             }
         }
         self.sdf_atlas_dirty = false;
@@ -447,9 +488,16 @@ impl TextRenderer {
         y: f64,
         size: u32,
         spacing: f32,
-        r: f64, g: f64, b: f64, a: f64,
+        r: f64,
+        g: f64,
+        b: f64,
+        a: f64,
     ) {
-        let idx = if font_idx < self.fonts.len() { font_idx } else { 0 };
+        let idx = if font_idx < self.fonts.len() {
+            font_idx
+        } else {
+            0
+        };
         let scale = size as f32 / Self::SDF_BASE_SIZE as f32;
 
         for ch in text.chars() {
@@ -478,12 +526,15 @@ impl TextRenderer {
         let mut cursor_x = x as f32;
         let mut first = true;
         for ch in text.chars() {
-            if !first && spacing != 0.0 { cursor_x += spacing * scale; }
+            if !first && spacing != 0.0 {
+                cursor_x += spacing * scale;
+            }
             first = false;
             let key = (idx, ch);
             if let Some(glyph) = self.sdf_glyph_cache.get(&key) {
                 let gx = cursor_x + glyph.x_offset * scale;
-                let gy = y as f32 - glyph.y_offset * scale - glyph.height as f32 * scale + size as f32;
+                let gy =
+                    y as f32 - glyph.y_offset * scale - glyph.height as f32 * scale + size as f32;
                 let gw = glyph.width as f32 * scale;
                 let gh = glyph.height as f32 * scale;
 

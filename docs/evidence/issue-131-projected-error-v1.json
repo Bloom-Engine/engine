@@ -1,0 +1,106 @@
+{
+  "schema": "bloom-virtual-geometry-projected-error-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "6ea4c5b3ce6430e15c9deeeea169236e46400ce3",
+  "geometry_recipe_version": 2,
+  "wire_format_version": 2,
+  "fault": {
+    "oracle": "maximum LOD0-descendant vertex distance to parent triangle surface",
+    "measured_error": 0.00053679076,
+    "previous_recorded_error": 0.00040672,
+    "previous_underestimated": true
+  },
+  "correction": {
+    "simplifier_quadric_metric_retained": true,
+    "independent_triangle_bvh": true,
+    "one_sided_source_vertex_measurement": true,
+    "larger_metric_selected": true,
+    "child_error_accumulated": true,
+    "runtime_passes_added": 0,
+    "runtime_allocations_added": 0,
+    "runtime_shader_branches_added": 0
+  },
+  "oracle": {
+    "source_surface": "32x32 multi-level hierarchy",
+    "samples": "every vertex of every LOD0 descendant for each parent group",
+    "reference": "independent brute-force point-to-triangle distance",
+    "projection_scale": 1080.0,
+    "target_pixels": 1.0,
+    "stored_object_space_bound": "pass",
+    "projected_pixel_threshold": "pass"
+  },
+  "determinism": {
+    "clean_cooks": 2,
+    "cook_wall_seconds": [92.35, 100.27],
+    "previous_reference_cook_wall_seconds": 121.4069,
+    "source_closure_sha256": "d28cc38f1fa6568e38f8a5ed29ecacdda2507af0995d4b0aa463e76f38038649",
+    "build_key_sha256": "f13f69fe60a03ca7014d49ede75b83d26ef77e036deb8f253f5150421c2f74ef",
+    "artifact_sha256": "13ab0d150328b9f67ebc8abbe0d73891a10d72033bc3a18b4d9f6a8364cbd864",
+    "payload_sha256": "1a9ca79489830d81211f54f2a9b2e55446a77b9ee5f36fe9ad1490c699001e13",
+    "manifest_sha256": "41559b4fea12bb32fa111c6010af4540114770ae7ec98520c743335f67c43032",
+    "index_sha256": "5c69a9a6cbf979d4c8483b3d8adc980cbe23d73862d5a79457051fe626d053c8",
+    "artifact_bytes": 582052704,
+    "clusters": 245500,
+    "pages": 8496,
+    "byte_identical": true
+  },
+  "runtime": {
+    "backend": "metal",
+    "adapter": "Apple M1 Max",
+    "adapter_type": "integratedgpu",
+    "width": 640,
+    "height": 360,
+    "warmup_frames": 180,
+    "measured_frames": 120,
+    "pool_capacity_bytes": 67108864,
+    "resident_pages": 955,
+    "uploaded_pages": 905,
+    "io_requests": 370,
+    "io_completions": 370,
+    "io_failures": 0,
+    "io_bytes_read": 75965888,
+    "selected_clusters": 10220,
+    "fallback_groups": 0,
+    "missing_current_pages": 0,
+    "selected_overflow": 0,
+    "request_overflow": 0,
+    "invalid_records": 0,
+    "depth_limit_fallbacks": 0,
+    "pending_streaming_groups": 0
+  },
+  "timing_ms": {
+    "wall_frame_mean": 6.058494,
+    "cpu_frame_mean": 1.721499,
+    "cpu_frame_p95": 1.956204,
+    "gpu_frame_mean": 4.39925,
+    "gpu_frame_p95": 7.777499,
+    "hierarchy_selection_gpu_mean": 1.599959,
+    "draw_emission_gpu_mean": 0.109078
+  },
+  "thresholds_ms": {
+    "maximum_wall_frame_mean": 16.666666666666668,
+    "maximum_gpu_frame_mean": 8.0,
+    "maximum_gpu_frame_p95": 12.0,
+    "maximum_hierarchy_selection_gpu_mean": 3.0,
+    "maximum_draw_emission_gpu_mean": 0.5
+  },
+  "qualification": {
+    "cooker_tests_passed": 34,
+    "cooker_strict_clippy": "pass",
+    "projected_error_oracle": "pass",
+    "clean_cook_determinism": "pass",
+    "asset_index_inspection": "pass",
+    "file_backed_10m_stress": "pass",
+    "format": "pass",
+    "diff_whitespace": "pass",
+    "new_file_size_overages": 0,
+    "unrelated_preexisting_file_size_overages": 3
+  },
+  "cross_backend": {
+    "workflow": "https://github.com/Bloom-Engine/engine/actions/runs/33046639665",
+    "contract_job": "pass",
+    "metal_hardware_job": "queued",
+    "vulkan_hardware_job": "queued",
+    "online_self_hosted_runners": 0
+  }
+}

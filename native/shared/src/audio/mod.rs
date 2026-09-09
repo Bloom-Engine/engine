@@ -31,9 +31,9 @@ mod render;
 mod spsc;
 pub mod stream;
 
-pub use decode::{decode_audio, parse_ogg, parse_wav};
 #[cfg(feature = "mp3")]
 pub use decode::parse_mp3;
+pub use decode::{decode_audio, parse_ogg, parse_wav};
 pub use render::AudioRenderer;
 
 use crate::handles::HandleRegistry;
@@ -150,10 +150,17 @@ impl AudioMixer {
     /// `ref_dist`/`rolloff` of 1 with a huge `max_dist` is exactly the
     /// pre-EN-062 1/d behaviour, which is what the plain play calls use.
     fn send_play(
-        &mut self, handle: f64, spatial: Option<[f32; 3]>, looping: bool,
-        ref_dist: f32, max_dist: f32, rolloff: f32,
+        &mut self,
+        handle: f64,
+        spatial: Option<[f32; 3]>,
+        looping: bool,
+        ref_dist: f32,
+        max_dist: f32,
+        rolloff: f32,
     ) -> f64 {
-        let Some(data) = self.sounds.get(handle).cloned() else { return 0.0 };
+        let Some(data) = self.sounds.get(handle).cloned() else {
+            return 0.0;
+        };
         let volume = self.get_sound_volume(handle);
         let (bus, send, lowpass) = self.routing(handle);
         self.next_voice += 1;
@@ -169,7 +176,9 @@ impl AudioMixer {
             max_dist,
             rolloff,
             pitch: 1.0,
-            bus, send, lowpass,
+            bus,
+            send,
+            lowpass,
         });
         voice_id as f64
     }
@@ -194,11 +203,20 @@ impl AudioMixer {
     /// volume, `rolloff` how hard the level falls past it, `max_dist` where
     /// the mixer culls entirely. Returns the voice id (0.0 = unknown sound).
     pub fn play_sound_3d_ex(
-        &mut self, handle: f64, x: f32, y: f32, z: f32,
-        looping: bool, ref_dist: f32, max_dist: f32, rolloff: f32,
+        &mut self,
+        handle: f64,
+        x: f32,
+        y: f32,
+        z: f32,
+        looping: bool,
+        ref_dist: f32,
+        max_dist: f32,
+        rolloff: f32,
     ) -> f64 {
         self.send_play(
-            handle, Some([x, y, z]), looping,
+            handle,
+            Some([x, y, z]),
+            looping,
             ref_dist.max(1e-3),
             if max_dist > 0.0 { max_dist } else { 1.0e9 },
             rolloff.max(0.0),
@@ -206,29 +224,43 @@ impl AudioMixer {
     }
 
     pub fn set_voice_position(&mut self, voice: f64, x: f32, y: f32, z: f32) {
-        self.send(Cmd::SetVoicePosition { voice_id: voice as u64, pos: [x, y, z] });
+        self.send(Cmd::SetVoicePosition {
+            voice_id: voice as u64,
+            pos: [x, y, z],
+        });
     }
 
     /// Fades the voice out over one mix block (~10 ms) and removes it — a
     /// hard cut mid-waveform on a looping bed is an audible click.
     pub fn stop_voice(&mut self, voice: f64) {
-        self.send(Cmd::StopVoice { voice_id: voice as u64 });
+        self.send(Cmd::StopVoice {
+            voice_id: voice as u64,
+        });
     }
 
     pub fn set_voice_volume(&mut self, voice: f64, volume: f32) {
-        self.send(Cmd::SetVoiceVolume { voice_id: voice as u64, volume });
+        self.send(Cmd::SetVoiceVolume {
+            voice_id: voice as u64,
+            volume,
+        });
     }
 
     /// Playback-rate multiplier, clamped 0.25..4. Doppler multiplies on top.
     pub fn set_voice_pitch(&mut self, voice: f64, pitch: f32) {
-        self.send(Cmd::SetVoicePitch { voice_id: voice as u64, pitch });
+        self.send(Cmd::SetVoicePitch {
+            voice_id: voice as u64,
+            pitch,
+        });
     }
 
     /// Per-voice occlusion low-pass (Hz; 0 = bypass). Unlike
     /// [`Self::set_sound_lowpass`] this muffles ONE emitter, not every voice
     /// sharing the asset.
     pub fn set_voice_lowpass(&mut self, voice: f64, cutoff: f32) {
-        self.send(Cmd::SetVoiceLowpass { voice_id: voice as u64, cutoff });
+        self.send(Cmd::SetVoiceLowpass {
+            voice_id: voice as u64,
+            cutoff,
+        });
     }
 
     // ---- EN-029 routing ------------------------------------------------
@@ -246,26 +278,41 @@ impl AudioMixer {
 
     /// Assign a sound to a mix bus (see `render::bus`).
     pub fn set_sound_bus(&mut self, handle: f64, bus: u8) {
-        let e = self.routes.entry(handle.to_bits()).or_insert((render::bus::SFX, 0.0, 0.0));
+        let e = self
+            .routes
+            .entry(handle.to_bits())
+            .or_insert((render::bus::SFX, 0.0, 0.0));
         e.0 = bus;
     }
 
     /// Reverb send for this sound, 0..1. This is what gives a gunshot its tail.
     pub fn set_sound_reverb_send(&mut self, handle: f64, send: f32) {
         let send = send.clamp(0.0, 1.0);
-        let e = self.routes.entry(handle.to_bits()).or_insert((render::bus::SFX, 0.0, 0.0));
+        let e = self
+            .routes
+            .entry(handle.to_bits())
+            .or_insert((render::bus::SFX, 0.0, 0.0));
         e.1 = send;
         // Also steer voices already in flight, so a zone change is audible on
         // the tail that is sounding right now rather than only the next one.
-        self.send(Cmd::SetSoundSend { sound_id: handle.to_bits(), send });
+        self.send(Cmd::SetSoundSend {
+            sound_id: handle.to_bits(),
+            send,
+        });
     }
 
     /// Low-pass cutoff in Hz for this sound; 0 = bypass. The occlusion knob.
     pub fn set_sound_lowpass(&mut self, handle: f64, cutoff: f32) {
         let cutoff = cutoff.max(0.0);
-        let e = self.routes.entry(handle.to_bits()).or_insert((render::bus::SFX, 0.0, 0.0));
+        let e = self
+            .routes
+            .entry(handle.to_bits())
+            .or_insert((render::bus::SFX, 0.0, 0.0));
         e.2 = cutoff;
-        self.send(Cmd::SetSoundLowpass { sound_id: handle.to_bits(), cutoff });
+        self.send(Cmd::SetSoundLowpass {
+            sound_id: handle.to_bits(),
+            cutoff,
+        });
     }
 
     pub fn set_bus_gain(&mut self, bus: u8, gain: f32) {
@@ -273,7 +320,13 @@ impl AudioMixer {
     }
 
     pub fn duck_bus(&mut self, bus: u8, amount: f32, attack: f32, release: f32, hold: f32) {
-        self.send(Cmd::DuckBus { bus, amount, attack, release, hold });
+        self.send(Cmd::DuckBus {
+            bus,
+            amount,
+            attack,
+            release,
+            hold,
+        });
     }
 
     pub fn set_reverb(&mut self, size: f32, damp: f32, wet: f32) {
@@ -281,19 +334,27 @@ impl AudioMixer {
     }
 
     pub fn stop_sound(&mut self, handle: f64) {
-        self.send(Cmd::StopSound { sound_id: handle.to_bits() });
+        self.send(Cmd::StopSound {
+            sound_id: handle.to_bits(),
+        });
     }
 
     pub fn set_sound_volume(&mut self, handle: f64, volume: f32) {
         for entry in &mut self.sound_volumes {
             if entry.0 == handle {
                 entry.1 = volume;
-                self.send(Cmd::SetSoundVolume { sound_id: handle.to_bits(), volume });
+                self.send(Cmd::SetSoundVolume {
+                    sound_id: handle.to_bits(),
+                    volume,
+                });
                 return;
             }
         }
         self.sound_volumes.push((handle, volume));
-        self.send(Cmd::SetSoundVolume { sound_id: handle.to_bits(), volume });
+        self.send(Cmd::SetSoundVolume {
+            sound_id: handle.to_bits(),
+            volume,
+        });
     }
 
     fn get_sound_volume(&self, handle: f64) -> f32 {
@@ -367,7 +428,9 @@ impl AudioMixer {
     }
 
     pub fn play_music(&mut self, handle: f64) {
-        let Some(m) = self.music.get(handle) else { return };
+        let Some(m) = self.music.get(handle) else {
+            return;
+        };
         // Optimistically flip the flag so is_music_playing is true the
         // moment play_music returns (the render thread confirms on its
         // next callback).
@@ -375,7 +438,11 @@ impl AudioMixer {
         let payload = match &m.source {
             MusicSource::Full(data) => render::MusicPayload::Full(data.clone()),
             #[cfg(not(target_arch = "wasm32"))]
-            MusicSource::Streamed { kind, bytes, channels } => render::MusicPayload::Stream {
+            MusicSource::Streamed {
+                kind,
+                bytes,
+                channels,
+            } => render::MusicPayload::Stream {
                 consumer: stream::start(*kind, bytes.clone(), m.looping),
                 channels: *channels,
             },
@@ -394,14 +461,19 @@ impl AudioMixer {
         if let Some(m) = self.music.get(handle) {
             m.shared.playing.store(false, Ordering::Relaxed);
         }
-        self.send(Cmd::StopMusic { music_id: handle.to_bits() });
+        self.send(Cmd::StopMusic {
+            music_id: handle.to_bits(),
+        });
     }
 
     pub fn set_music_volume(&mut self, handle: f64, volume: f32) {
         if let Some(m) = self.music.get_mut(handle) {
             m.volume = volume;
         }
-        self.send(Cmd::SetMusicVolume { music_id: handle.to_bits(), volume });
+        self.send(Cmd::SetMusicVolume {
+            music_id: handle.to_bits(),
+            volume,
+        });
     }
 
     pub fn is_music_playing(&self, handle: f64) -> bool {
@@ -434,7 +506,10 @@ impl AudioMixer {
         } else {
             [0.0, 0.0, -1.0]
         };
-        self.send(Cmd::SetListener { pos: [x, y, z], forward });
+        self.send(Cmd::SetListener {
+            pos: [x, y, z],
+            forward,
+        });
     }
 
     /// Inline mixing for single-threaded targets (web) and tests: mixes
@@ -458,7 +533,9 @@ mod tests {
 
     fn tone(len: usize) -> SoundData {
         SoundData {
-            samples: (0..len).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect(),
+            samples: (0..len)
+                .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+                .collect(),
             sample_rate: 44_100,
             channels: 1,
         }
@@ -495,8 +572,12 @@ mod tests {
         let mut quiet = [0.0f32; 256];
         b.mix_output(&mut quiet);
 
-        assert!(peak(&quiet) < peak(&loud) * 0.5,
-            "SFX bus gain did not attenuate: {} vs {}", peak(&quiet), peak(&loud));
+        assert!(
+            peak(&quiet) < peak(&loud) * 0.5,
+            "SFX bus gain did not attenuate: {} vs {}",
+            peak(&quiet),
+            peak(&loud)
+        );
 
         // A sound on a *different* bus must be untouched by that gain.
         let mut c = AudioMixer::new();
@@ -527,8 +608,12 @@ mod tests {
         a.mix_output(&mut ducked);
         ducked = [0.0f32; 512];
         a.mix_output(&mut ducked);
-        assert!(peak(&ducked) < dry * 0.5,
-            "duck had no effect: {} vs {}", peak(&ducked), dry);
+        assert!(
+            peak(&ducked) < dry * 0.5,
+            "duck had no effect: {} vs {}",
+            peak(&ducked),
+            dry
+        );
     }
 
     #[test]
@@ -541,8 +626,11 @@ mod tests {
         a.play_sound(h);
         let mut out = [0.0f32; 512];
         a.mix_output(&mut out);
-        assert!(peak(&out) < 0.1,
-            "low-pass did not attenuate a Nyquist tone: peak {}", peak(&out));
+        assert!(
+            peak(&out) < 0.1,
+            "low-pass did not attenuate a Nyquist tone: peak {}",
+            peak(&out)
+        );
     }
 
     /// Mix `blocks` × 256-sample blocks, returning the peak seen *after* the
@@ -589,7 +677,7 @@ mod tests {
     fn music_playing_flag_round_trip() {
         let mut a = AudioMixer::new();
         let h = a.load_music(tone(16)); // tiny, non-looping after we set it
-        // default looping=true → flip via the public surface used by FFI
+                                        // default looping=true → flip via the public surface used by FFI
         a.music.get_mut(h).unwrap().looping = false;
         assert!(!a.is_music_playing(h));
         a.play_music(h);
@@ -613,7 +701,10 @@ mod tests {
             out
         });
         let out = worker.join().unwrap();
-        assert!(out.iter().any(|&s| s != 0.0), "handed-off renderer produced no output");
+        assert!(
+            out.iter().any(|&s| s != 0.0),
+            "handed-off renderer produced no output"
+        );
         // Control side mixing is now inert (no double-mixing race).
         let mut silent = [1.0f32; 8];
         a.mix_output(&mut silent);
@@ -635,7 +726,11 @@ mod tests {
 
     /// All-0.5 mono signal: peaks read gains directly.
     fn flat(len: usize) -> SoundData {
-        SoundData { samples: vec![0.5; len], sample_rate: 44_100, channels: 1 }
+        SoundData {
+            samples: vec![0.5; len],
+            sample_rate: 44_100,
+            channels: 1,
+        }
     }
 
     fn sine(freq: f32, len: usize) -> SoundData {
@@ -664,7 +759,7 @@ mod tests {
     fn looping_voice_persists_until_stop_voice() {
         let mut a = AudioMixer::new();
         let h = a.load_sound(flat(64)); // 64 frames — far shorter than a block
-        // Listener at origin looking down -Z; source dead ahead at 1 m.
+                                        // Listener at origin looking down -Z; source dead ahead at 1 m.
         let v = a.play_sound_3d_ex(h, 0.0, 0.0, -1.0, true, 1.0, 0.0, 1.0);
         assert!(v > 0.0, "no voice id returned");
         let mut out = [0.0f32; 512];
@@ -691,7 +786,12 @@ mod tests {
         let mut out = [0.0f32; 512];
         a.mix_output(&mut out);
         let (l1, r1) = peak_lr(&out);
-        assert!(l1 > r1 * 2.0, "left source not left-dominant: L={} R={}", l1, r1);
+        assert!(
+            l1 > r1 * 2.0,
+            "left source not left-dominant: L={} R={}",
+            l1,
+            r1
+        );
 
         a.set_voice_position(v, 10.0, 0.0, 0.0);
         // One block to ramp, one to settle.
@@ -700,7 +800,12 @@ mod tests {
             a.mix_output(&mut out);
         }
         let (l2, r2) = peak_lr(&out);
-        assert!(r2 > l2 * 2.0, "moved source not right-dominant: L={} R={}", l2, r2);
+        assert!(
+            r2 > l2 * 2.0,
+            "moved source not right-dominant: L={} R={}",
+            l2,
+            r2
+        );
     }
 
     #[test]
@@ -718,8 +823,11 @@ mod tests {
         let near = run(1.0);
         let far = run(10.0);
         let ratio = far / near;
-        assert!((ratio - 0.1).abs() < 0.02,
-            "distance curve changed: 10m/1m = {} (want ~0.1)", ratio);
+        assert!(
+            (ratio - 0.1).abs() < 0.02,
+            "distance curve changed: 10m/1m = {} (want ~0.1)",
+            ratio
+        );
     }
 
     #[test]
@@ -731,8 +839,17 @@ mod tests {
         a.mix_output(&mut out);
         let (l, r) = peak_lr(&out);
         // 0.5 sample × cos(π/4) ≈ 0.3536 per channel (linear pan gave 0.25).
-        assert!((l - r).abs() < 0.01, "center source unbalanced: L={} R={}", l, r);
-        assert!(l > 0.32 && l < 0.39, "not equal-power: L={} (want ~0.354)", l);
+        assert!(
+            (l - r).abs() < 0.01,
+            "center source unbalanced: L={} R={}",
+            l,
+            r
+        );
+        assert!(
+            l > 0.32 && l < 0.39,
+            "not equal-power: L={} (want ~0.354)",
+            l
+        );
     }
 
     #[test]
@@ -750,8 +867,12 @@ mod tests {
         };
         let near = run(2.0);
         let far = run(150.0);
-        assert!(far < near * 0.7,
-            "no air absorption: near(norm)={} far(norm)={}", near, far);
+        assert!(
+            far < near * 0.7,
+            "no air absorption: near(norm)={} far(norm)={}",
+            near,
+            far
+        );
     }
 
     #[test]
@@ -766,8 +887,12 @@ mod tests {
         };
         let front = run(-5.0);
         let behind = run(5.0);
-        assert!(behind < front * 0.6,
-            "rear cue missing: front={} behind={}", front, behind);
+        assert!(
+            behind < front * 0.6,
+            "rear cue missing: front={} behind={}",
+            front,
+            behind
+        );
     }
 
     #[test]
@@ -806,12 +931,16 @@ mod tests {
                 }
                 let mut out = [0.0f32; 512];
                 a.mix_output(&mut out);
-                if block < 10 { continue; } // let the smoothed rate settle
+                if block < 10 {
+                    continue;
+                } // let the smoothed rate settle
                 let mut i = 0;
                 while i < out.len() {
                     let s = out[i]; // left channel
                     if s != 0.0 {
-                        if last != 0.0 && (s > 0.0) != (last > 0.0) { n += 1; }
+                        if last != 0.0 && (s > 0.0) != (last > 0.0) {
+                            n += 1;
+                        }
                         last = s;
                     }
                     i += 2;
@@ -821,8 +950,12 @@ mod tests {
         };
         let moving = crossings(true);
         let still = crossings(false);
-        assert!(moving as f32 > still as f32 * 1.05,
-            "no doppler: approaching={} static={}", moving, still);
+        assert!(
+            moving as f32 > still as f32 * 1.05,
+            "no doppler: approaching={} static={}",
+            moving,
+            still
+        );
     }
 
     #[test]
@@ -857,7 +990,11 @@ mod tests {
         b.play_sound_3d_ex(h2, -2.0, 0.0, -2.0, true, 1.0, 0.0, 1.0);
         let mut open = [0.0f32; 2048];
         b.mix_output(&mut open);
-        assert!(muffled_peak < peak(&open) * 0.3,
-            "voice lowpass had no effect: {} vs {}", muffled_peak, peak(&open));
+        assert!(
+            muffled_peak < peak(&open) * 0.3,
+            "voice lowpass had no effect: {} vs {}",
+            muffled_peak,
+            peak(&open)
+        );
     }
 }

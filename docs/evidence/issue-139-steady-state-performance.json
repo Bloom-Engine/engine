@@ -1,0 +1,76 @@
+{
+  "schema": "bloom-render-perf-evidence-v1",
+  "issue": 139,
+  "machine": {
+    "adapter": "Apple M1 Max",
+    "backend": "Metal",
+    "device_type": "IntegratedGpu"
+  },
+  "revisions": {
+    "before": "0bc6fabc7bb868f2ec8cb25469853ae2a3b74e4e",
+    "after": "93dfd942373024d4899071c9e3b8e561647906ef"
+  },
+  "timing": {
+    "warmup_frames": 300,
+    "measured_frames": 900,
+    "runs_per_revision_resolution": 3,
+    "aggregate": "median of per-run percentiles",
+    "trace_enabled": false,
+    "quality_preset": 4,
+    "headless_uncapped": true,
+    "resolutions": {
+      "1920x1080": {
+        "before_runs_ms": [
+          { "p50": 2.467834, "p95": 4.069458, "p99": 12.179083 },
+          { "p50": 2.798000, "p95": 10.465416, "p99": 32.675083 },
+          { "p50": 2.654000, "p95": 2.953167, "p99": 3.094875 }
+        ],
+        "after_runs_ms": [
+          { "p50": 2.229750, "p95": 3.351584, "p99": 3.507458 },
+          { "p50": 2.732750, "p95": 7.643542, "p99": 13.848625 },
+          { "p50": 2.465375, "p95": 2.699541, "p99": 2.949875 }
+        ],
+        "median_ms": {
+          "before": { "p50": 2.654000, "p95": 4.069458, "p99": 12.179083 },
+          "after": { "p50": 2.465375, "p95": 3.351584, "p99": 3.507458 }
+        },
+        "delta_percent": { "p50": -7.107, "p95": -17.641, "p99": -71.201 },
+        "median_prepare_mean_ms": { "before": 0.261216, "after": 0.046771 },
+        "median_end_frame_mean_ms": { "before": 2.452808, "after": 2.168491 }
+      },
+      "3840x2160": {
+        "before_runs_ms": [
+          { "p50": 6.300917, "p95": 6.527375, "p99": 6.668166 },
+          { "p50": 6.435250, "p95": 7.711333, "p99": 7.899500 },
+          { "p50": 6.279666, "p95": 6.557583, "p99": 7.687584 }
+        ],
+        "after_runs_ms": [
+          { "p50": 6.099917, "p95": 6.270541, "p99": 6.386958 },
+          { "p50": 6.099625, "p95": 6.273042, "p99": 6.364458 },
+          { "p50": 6.109709, "p95": 6.279458, "p99": 7.039625 }
+        ],
+        "median_ms": {
+          "before": { "p50": 6.300917, "p95": 6.557583, "p99": 7.687584 },
+          "after": { "p50": 6.099917, "p95": 6.273042, "p99": 6.386958 }
+        },
+        "delta_percent": { "p50": -3.190, "p95": -4.339, "p99": -16.919 },
+        "median_prepare_mean_ms": { "before": 0.217251, "after": 0.061485 },
+        "median_end_frame_mean_ms": { "before": 5.834215, "after": 5.838722 }
+      }
+    }
+  },
+  "uploads": {
+    "warmup_frames": 32,
+    "measured_frames": 32,
+    "trace_enabled": true,
+    "trace_timings_used": false,
+    "per_frame_bytes": {
+      "1920x1080": { "before": 422120, "after": 23264 },
+      "3840x2160": { "before": 422120, "after": 23264 }
+    },
+    "reduction_bytes": 398856,
+    "reduction_percent": 94.489,
+    "reduction_ratio": 18.145,
+    "steady_texture_upload_bytes": 0
+  }
+}

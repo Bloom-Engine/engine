@@ -146,6 +146,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "gltf",
+ "half",
  "image",
  "rayon",
  "serde",

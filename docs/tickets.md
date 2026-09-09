@@ -1919,21 +1919,69 @@ adjacent but does not remove the duplication.
 ## EN-056 — Per-frame upload/allocation tail in the renderer 🟡 *(2026-07-16 audit)*
 
 Individually small, collectively the class of waste the frame no longer has
-budget for at 4K. All VERIFIED still present:
+budget for at 4K.
 
-- Lighting UBO (~8.7 KB, 256 point-light slots) uploaded whole **8-9x/frame**
-  with no dirty flag (`mod.rs:10245,11526,11919-11955`; `shadow_pass.rs:73`
-  is explicitly unconditional).
-- Bloom chain creates **9 uniform buffers + 9 bind groups per frame**
-  (`postfx_chain.rs:66-141` — the per-pass UBOs are argued for in comments;
-  the bind-group re-creation is not).
-- The render graph is rebuilt from scratch **twice per frame** — 17 boxed
-  closures, fresh HashMap + HashSets, O(n^3) topo sort (`graph.rs:103-224`,
-  `mod.rs:10650,10824,11067`); composite/post bind groups rebuilt per frame
-  (`mod.rs:10862,10946`).
+- **Lighting UBO fixed in #139:** setters now update one CPU snapshot and the
+  renderer submits at most three aligned dirty ranges after the frame has
+  finalized camera and cascade data. Unchanged ranges submit nothing; exact
+  per-frame write/byte counts live in
+  `renderer_paths.steady_state_uploads.lighting`. The shader layout and bind
+  group are unchanged, and the many-light golden hard-gates a steady frame to
+  at most 512 bytes instead of the former 8-9 full ~8.7 KiB uploads.
+- **Bloom pass resources fixed:** per-mip buffers and bind groups are rebuilt
+  only with the mip chain (initialization/resize); steady frames update only
+  the first threshold uniform when exposure policy changes.
+- **Graph planning fixed in #129:** immutable topology is compiled and cached;
+  per-frame execution only binds closures to the cached pass slots. Composite
+  and post-pass bind-group creation remain part of this ticket's audit.
+- **Recurring bind-group creation is now measured:** a fixed twelve-counter
+  array names scene compose, SSR temporal, the post-FX chain, final composite,
+  and custom post-pass creation in
+  `renderer_paths.steady_state_resources.bind_group_creations`. Measurement
+  adds no heap allocation and leaves GPU resources, descriptors, and pass order
+  untouched.
+- **Final composite fixed in #139:** its bind groups are cached for every exact
+  source/exposure combination (eight source views × two exposure slots).
+  Resize clears all sixteen entries before recreating their referenced views;
+  after warmup the real-GPU many-light golden hard-gates
+  `final_composite: 0`.
+- **Scene compose fixed in #139:** three distinct cached groups cover the SSR
+  fallback and both history slots. SSR toggles and PT ownership select a whole
+  binding identity, while resize clears all slots before replacing any input
+  view. The same golden now hard-gates `scene_compose: 0`.
+- **SSR temporal fixed in #139:** both alternating previous-history bindings
+  are cached and shared with the diagnostics pass. Resize invalidates them
+  before replacing history/raw/velocity views; the steady golden hard-gates
+  `ssr_temporal: 0`.
+- **Ordinary TAA fixed in #139:** both previous-history bindings are cached and
+  invalidated before resize replaces composed/depth/velocity/history views.
+  The steady golden hard-gates `taa: 0`.
+- **Reactive TAA fixed in #139:** both history slots are additionally keyed by
+  the compiled plan ID and transient-pool rebuild epoch that own the reactive
+  coverage view. The retained transparent-motion corpus hard-gates
+  `taa_reactive: 0` before and after a resize/rebuild cycle.
+- **Non-TAA upscale fixed in #139:** its single persistent composed-input
+  binding is invalidated before resize. A dedicated half-resolution real-GPU
+  test proves rendered geometry survives and hard-gates `upscale: 0` after
+  warmup.
+- **Optional color-chain passes fixed in #139:** DoF, motion blur, SSS, and CAS
+  cache lazily against the exact upstream target, including both TAA slots.
+  Resize invalidates all source arrays before replacing views. A forced
+  full-chain GPU test renders geometry and hard-gates all four counters to
+  zero after warmup.
+- **Auto exposure fixed in #139:** its cache covers all eight composite sources
+  crossed with both previous-exposure slots. The same full-chain test enables
+  adaptation, exercises the ping-pong, and hard-gates `auto_exposure: 0`.
+- **Custom post-pass stack fixed in #139:** each pass lazily caches both A/B
+  input parities and invalidates them before resize replaces LDR/depth views. A
+  two-pass GPU copy stack preserves geometry and reaches zero churn before and
+  after resize.
+- **Bind-group acceptance is now hard-gated:** official post-warmup quality
+  telemetry fails unless the sum across all twelve named core sites is zero.
 
-Fix: dirty-flag the lighting UBO, cache bloom + composite bind groups keyed
-on the views they wrap, build the graph once and rebuild on topology change.
+Remaining: eliminate the measured bind-group hotspots only with complete
+resource-generation keys, then instrument and eliminate the other steady-state
+upload/allocation sites under #139.
 
 ## EN-057 — Hi-Z occlusion runs every frame for zero consumers ✅ *(shipped same day)*
 

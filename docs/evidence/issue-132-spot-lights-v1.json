@@ -1,0 +1,128 @@
+{
+  "schema": "bloom-vsm-spot-lights-evidence-v1",
+  "issue": 132,
+  "qualified_head": "0bcd2c79fa6542aa1894645b9c27b37cfa29cfd4",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end",
+    "width": 2560,
+    "height": 1440
+  },
+  "runtime_contract": {
+    "api": "addShadowedSpotLight",
+    "direction_normalization": "engine",
+    "cone_units": "full-vertex-angle-degrees",
+    "projection": "single-perspective-page-circular-cone",
+    "submission_limit": 256,
+    "admission_limit": 5,
+    "faces_per_spot": 1,
+    "maximum_spot_pages": 5,
+    "shared_render_budget_pages": 8,
+    "fallback": "suppress-direct-contribution",
+    "pending_intensity": 0,
+    "activation": "single-page-resident-and-clean",
+    "unsupported": [
+      "lower-tier",
+      "web",
+      "path-tracing",
+      "shadows-disabled",
+      "invalid-input",
+      "submission-overflow"
+    ],
+    "equal_inner_outer_angle": "hard-edge-without-undefined-smoothstep",
+    "sampling_uniform_bytes": 6384,
+    "sampling_uniform_bytes_added": 0,
+    "additional_graph_passes": 0
+  },
+  "fixture": {
+    "example": "examples/quality-stress/main.ts",
+    "candidate_flag": "--vsm-spot-lights",
+    "reference_flag": "--vsm-spot-reference",
+    "submitted": 128,
+    "visible": 128,
+    "admitted": 5,
+    "budget_suppressed": 123,
+    "admitted_submission_indices": [0, 1, 2, 3, 4]
+  },
+  "warm_cache": {
+    "local": {
+      "active_shaded": 5,
+      "requested_pages": 5,
+      "resident_pages": 5,
+      "dirty_pages": 0,
+      "rendered_pages": 0
+    },
+    "shared": {
+      "physical_capacity": 256,
+      "resident_pages": 229,
+      "dirty_pages": 0,
+      "requested_pages": 229,
+      "cache_hits": 229,
+      "cache_misses": 0,
+      "denied_pages": 0,
+      "rendered_pages": 0,
+      "render_budget": 8,
+      "gpu_total_bytes": 19958000
+    },
+    "directional": {
+      "requested_pages": 224,
+      "resident_pages": 224,
+      "dirty_pages": 0,
+      "rendered_pages": 0
+    },
+    "frame_sha256": "9e6378948c3ac2a85646cf68789f15088a5aeec94349aed9c88d54e1f8ef1487",
+    "telemetry_sha256": "1b48c83b5da77901438ca7613df6edbfc051c69f28d6a8bfb40ce1c8bb5d87d7",
+    "validator": "pass"
+  },
+  "controlled_image_oracle": {
+    "reference": "same-scene-same-spot-cones-with-caster-submission-disabled",
+    "reference_sha256": "b9150563d945c890d20a34d248a17e1829937d60b6cd5a160581d21fdbb08e32",
+    "reference_telemetry_sha256": "88e99a53d37f0212e2194b3fdc12d76e4e7f04a6440a7265246595a296b9f6a0",
+    "candidate_sha256": "9e6378948c3ac2a85646cf68789f15088a5aeec94349aed9c88d54e1f8ef1487",
+    "selected_pixels": 3686400,
+    "rmse_luminance": 0.016437929,
+    "rmse_r": 0.016165752,
+    "rmse_g": 0.016869184,
+    "rmse_b": 0.016376235,
+    "max_abs_error": 0.470588237,
+    "percent_above_0_02": 2.027099609,
+    "ssim_luminance": 0.980780780,
+    "mean_oklab_delta": 0.001977820,
+    "mean_edge_delta": 0.001253707,
+    "heatmap_sha256": "991c3bcac383854afdd84343a9e6e83bc9bd0cc8549a080335a7745dca3f1315",
+    "composite_sha256": "0b9d25eae961a94ffc313e4c43ef2eaef483debf89beeb1cee10e2d833bcf5cb",
+    "visual_review": "pass-localized-occluder-silhouettes-no-page-cone-or-frame-wide-artifacts"
+  },
+  "bounded_performance": {
+    "spot_pages_per_admitted_light": 1,
+    "point_pages_per_admitted_light": 6,
+    "spot_page_reduction_percent": 83.333333333,
+    "suppression_before_shading_and_froxel_assignment": true,
+    "ordinary_point_light_goldens": "exact-pass",
+    "persistent_gpu_bytes_added_over_point_milestone": 0
+  },
+  "qualification": {
+    "quick_lane": "pass",
+    "ffi_schema_parity": "pass",
+    "native_web_crate_check": "pass",
+    "format": "pass",
+    "strict_clippy": "pass",
+    "file_size_ratchet": "pass",
+    "wasm32_web_feature_check": "pass",
+    "shared_unit_tests_passed": 356,
+    "shared_unit_tests_ignored": 1,
+    "focused_virtual_shadow_tests_passed": 47,
+    "spot_validator_tests_passed": 7,
+    "headless_device_tests_passed": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "quality_oracle_tests_passed": 39,
+    "visual_metric_tests_passed": 3,
+    "asset_cooker_tests_passed": 17,
+    "canonical_examples": 20
+  },
+  "passed": true
+}

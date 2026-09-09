@@ -99,15 +99,15 @@ fn fs_outline(in: VertexOutput) -> @location(0) vec4<f32> {
 pub struct OutlineParams {
     pub color_selected: [f32; 4],
     pub color_hovered: [f32; 4],
-    pub thickness: [f32; 4],  // [thickness, glow, pulse_time, 0]
+    pub thickness: [f32; 4], // [thickness, glow, pulse_time, 0]
     pub screen_size: [f32; 4],
 }
 
 impl Default for OutlineParams {
     fn default() -> Self {
         Self {
-            color_selected: [0.2, 0.5, 1.0, 1.0],  // blue
-            color_hovered: [0.8, 0.8, 0.2, 1.0],    // yellow
+            color_selected: [0.2, 0.5, 1.0, 1.0], // blue
+            color_hovered: [0.8, 0.8, 0.2, 1.0],  // yellow
             thickness: [2.0, 0.3, 0.0, 0.0],
             screen_size: [1280.0, 720.0, 0.0, 0.0],
         }
@@ -146,9 +146,16 @@ pub struct PostFxPipeline {
 }
 
 impl PostFxPipeline {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32, surface_format: wgpu::TextureFormat) -> Self {
-        let (color_texture, color_view) = create_color_target(device, width, height, surface_format);
-        let (object_id_texture, object_id_view) = create_color_target(device, width, height, wgpu::TextureFormat::R32Float);
+    pub fn new(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        let (color_texture, color_view) =
+            create_color_target(device, width, height, surface_format);
+        let (object_id_texture, object_id_view) =
+            create_color_target(device, width, height, wgpu::TextureFormat::R32Float);
         let (depth_texture, depth_view) = create_depth_target(device, width, height);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -185,10 +192,22 @@ impl PostFxPipeline {
             label: Some("outline_bg"),
             layout: &outline_bg_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&color_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&object_id_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: outline_params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&object_id_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: outline_params_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -199,11 +218,12 @@ impl PostFxPipeline {
             source: wgpu::ShaderSource::Wgsl(outline_shader_src.into()),
         });
 
-        let outline_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("outline_pipeline_layout"),
-            bind_group_layouts: &[Some(&outline_bg_layout)],
-            immediate_size: 0,
-        });
+        let outline_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("outline_pipeline_layout"),
+                bind_group_layouts: &[Some(&outline_bg_layout)],
+                immediate_size: 0,
+            });
 
         let outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("outline_pipeline"),
@@ -255,8 +275,16 @@ impl PostFxPipeline {
         }
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32, surface_format: wgpu::TextureFormat) {
-        if width == self.width && height == self.height { return; }
+    pub fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        surface_format: wgpu::TextureFormat,
+    ) {
+        if width == self.width && height == self.height {
+            return;
+        }
         *self = Self::new(device, width, height, surface_format);
     }
 
@@ -271,7 +299,11 @@ impl PostFxPipeline {
     pub fn update(&mut self, queue: &wgpu::Queue, dt: f32) {
         self.time += dt;
         self.outline_params.thickness[2] = self.time;
-        queue.write_buffer(&self.outline_params_buffer, 0, bytemuck::bytes_of(&self.outline_params));
+        queue.write_buffer(
+            &self.outline_params_buffer,
+            0,
+            bytemuck::bytes_of(&self.outline_params),
+        );
     }
 }
 
@@ -279,10 +311,19 @@ impl PostFxPipeline {
 // Helpers
 // ============================================================
 
-fn create_color_target(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> (wgpu::Texture, wgpu::TextureView) {
+fn create_color_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("postfx_color"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -294,10 +335,18 @@ fn create_color_target(device: &wgpu::Device, width: u32, height: u32, format: w
     (tex, view)
 }
 
-fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+fn create_depth_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("postfx_depth"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,

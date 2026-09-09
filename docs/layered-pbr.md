@@ -1,0 +1,437 @@
+# Layered PBR contract
+
+Bloom's layered material work uses one versioned reference model before a lobe
+is added to a realtime shader. The checked-in version-1 contract covers the
+existing metallic/roughness base layer. Version 2 composes clearcoat and
+dielectric specular/IOR over that base. Version 3 adds Charlie sheen and
+tangent-space anisotropic GGX. All three are deliberately independent from the
+renderer, textures, tone mapping, and scene lighting so energy and reciprocity
+failures cannot hide inside an image.
+
+## Version 1 base layer
+
+`tools/bloom-reference/src/layered_pbr.rs` is the authoritative target
+evaluator for new layered-material work. The companion
+`bloom-brdf-reference` binary uses it to generate the parameter matrix.
+Version 1 defines:
+
+- linear base color in `[0, 1]`;
+- metallic weight in `[0, 1]`;
+- perceptual roughness in `[0.04, 1]`, with `alpha = roughness²`;
+- dielectric normal-incidence reflectance `F0 = 0.04`;
+- Schlick Fresnel;
+- GGX/Trowbridge-Reitz distribution;
+- height-correlated Smith visibility including
+  `1 / (4 NdotV NdotL)`;
+- energy-normalized Burley diffuse;
+- reciprocal diffuse interface transmission
+  `(1 - F(NdotV)) (1 - F(NdotL))`.
+
+The view/light Fresnel factors matter. Diffuse light enters and leaves a
+dielectric interface, while reflected energy remains in the specular lobe.
+Using only the half-vector Fresnel term allowed a smooth white dielectric at a
+grazing view to retain nearly full diffuse response while its specular
+response approached one.
+
+The Burley lobe uses the roughness-dependent Frostbite normalization, fading
+from `1` to `1/1.51`. This retains the reciprocal rough-surface response
+without the original Disney form's white-furnace gain.
+
+## Version 2 clearcoat and dielectric specular/IOR
+
+Version 2 retains the version-1 result exactly when all new parameters are at
+their glTF defaults. When either new lobe is active it defines:
+
+- dielectric `F0 = ((ior - 1) / (ior + 1))²`;
+- glTF's `ior = 0` compatibility mode as positive-infinite IOR and `F0 = 1`;
+- `KHR_materials_specular` color clamped only after multiplication by the IOR
+  reflectance, followed by its scalar factor;
+- explicit `F90 = specularFactor`, while pure conductors remain unaffected;
+- a max-RGB dielectric diffuse complement so colored specular cannot create
+  inverse-colored diffuse energy;
+- fixed clearcoat IOR `1.5`, independent perceptual roughness, and the common
+  GGX microfacet distribution;
+- reciprocal clearcoat transmission at the view and light interfaces,
+  attenuating diffuse and base specular before the coat response is added.
+
+The final point is a deliberate energy-conserving refinement of the
+non-normative one-sided glTF sample formula. The first implementation used
+that one-sided mix and reached approximately `1.252` for a rough conductor
+under a coat in a white furnace. Treating the coat as a real interface crossed
+on entry and exit removes that unexplained gain while retaining reciprocity.
+This convention is the target for every Bloom realtime and path-traced
+consumer.
+
+The independent clearcoat normal uses the same authored tangent-space
+orientation in realtime and path-traced shading. Import preserves its
+texture, transform, UV set, and scale losslessly. The mapped normal affects
+only the coat interface, is constrained to the base geometric hemisphere, and
+widens coat roughness from baked normal-length/variance metadata. Realtime
+shading additionally applies screen-space curvature variance; path tracing
+has no derivatives and therefore consumes only the baked terms.
+
+## Version 3 sheen and anisotropy
+
+Version 3 remains exactly version 2 when sheen color and anisotropy strength
+are zero. Active lobes follow the ratified Khronos conventions:
+
+- sheen uses the Charlie distribution with
+  `alphaG = sheenPerceptualRoughness²`;
+- visibility uses the full fitted Charlie lambda function, not the older
+  Ashikhmin shortcut;
+- the base below sheen is scaled by the maximum sheen-color channel and the
+  greater of the view/light directional albedos, preserving reciprocity;
+- the directional-albedo oracle is a checked 128×128 R16F LUT generated with
+  4,096 Charlie-importance samples per texel;
+- sheen sits below clearcoat in direct, environment, and physical-transmission
+  composition;
+- anisotropy uses Burley anisotropic GGX with
+  `alphaT = mix(alpha, 1, strength²)` and `alphaB = alpha`;
+- visibility is height-correlated anisotropic Smith;
+- positive rotation is counter-clockwise in the glTF tangent frame;
+- texture RG maps from `[0,1]` to `[-1,1]`, texture B multiplies strength, and
+  `KHR_texture_transform` changes lookup coordinates without rotating the
+  physical tangent frame.
+
+Valid mesh tangents are authoritative, including `tangent.w` and mirrored
+model handedness. If the tangent is absent, zero, or parallel to the normal,
+the shader reconstructs a frame from the selected untransformed UV set and
+screen-space derivatives. A finite orthogonal fallback covers degenerate UV
+derivatives. The realtime roughness floor is `0.04`, matching the established
+specular-AA stability contract.
+
+## Qualification corpora
+
+`bloom-brdf-reference` writes a deterministic 48-case sphere parameter matrix:
+
+```shell
+cargo run --release \
+  --manifest-path tools/bloom-reference/Cargo.toml \
+  --bin bloom-brdf-reference -- \
+  --out tools/bloom-reference/reference/layered-pbr-v1.json
+```
+
+The matrix spans two base colors, dielectric and conductor endpoints, four
+roughness values, and three view angles. Each row records separate direct
+diffuse/specular values, `BRDF * NdotL`, the current MIS PDF, and white-furnace
+directional reflectance. Values are rounded to six decimal places only when
+serialized; all tests evaluate full-precision values.
+
+The checked-in JSON is a contract, not an automatically refreshed golden.
+Unit tests regenerate it in memory and fail on any drift. Updating it requires
+reviewing the formula change and its visual/reference evidence.
+
+White-furnace integration uses deterministic GGX visible-normal importance
+sampling for specular and cosine sampling for diffuse. Uniform hemisphere
+quadrature is intentionally not used: it aliases the near-delta GGX peak at
+the roughness floor and can report false energy gain.
+
+The current gates require:
+
+- finite, non-negative output across the parameter matrix;
+- reciprocal BRDF values when view and light are exchanged;
+- no more than 2% white-furnace gain at the deliberately conservative
+  numerical integration resolution;
+- one clamping contract for invalid CPU parameters;
+- exact agreement between the generator and checked-in versioned matrix.
+
+The version-2 matrix is generated explicitly:
+
+```shell
+cargo run --release \
+  --manifest-path tools/bloom-reference/Cargo.toml \
+  --bin bloom-brdf-reference -- \
+  --version 2 \
+  --out tools/bloom-reference/reference/layered-pbr-v2.json
+```
+
+It contains 39 cases: 13 base, IOR, specular, clearcoat, and combined
+scenarios at three view angles. The checked file's SHA-256 is
+`f8b1cdf215b6df2e264b2499b5a2cfaf81da1b18e547ad6aa04af8e21e178497`.
+At the deterministic corpus resolution, reflectance ranges from `0.032862` to
+`0.967294`. Broader unit sweeps cover metallic `0/0.5/1`, four base
+roughnesses, five IOR/specular configurations, four clearcoat
+factor/roughness configurations, and four view angles with a `1.02` numerical
+tolerance.
+
+The version-3 matrix is generated with:
+
+```shell
+cargo run --release \
+  --manifest-path tools/bloom-reference/Cargo.toml \
+  --bin bloom-brdf-reference -- \
+  --version 3 \
+  --out tools/bloom-reference/reference/layered-pbr-v3.json
+```
+
+Its 30 rows cover ten default, sheen, anisotropy, fabric, coated-fabric, and
+all-lobe scenarios at three view angles. The checked JSON SHA-256 is
+`0324c95b489f611888163df8ac879033313af6b9190e05af251db91aaca06bfa`.
+The checked LUT SHA-256 is
+`c4433c235610212432e0da83a0106b8289f08beec9c2524fd82b677945235118`.
+Recorded furnace channels range from `0.030422` to `0.834041`; broader tests
+also pin reciprocity, finite output, rotation periodicity, the version-2
+default, and LUT agreement with a 65,536-sample oracle.
+
+Version 4 adds bounded thin-film interference. Its 39-row checked matrix is
+`tools/bloom-reference/reference/layered-pbr-v4.json`, SHA-256
+`cc8b586bb69123be172987b5c974e1f001e9ef5df3f99df2687396a3f7ae7209`.
+It covers dielectric and conductor bases, three film thickness ranges,
+strength and IOR variation, clearcoat over film, and the combined layered
+model at three view cosines.
+
+The separate angular comparison corpus expands the complete version-4 model
+over three view directions and three light directions:
+
+```shell
+cargo run --release \
+  --manifest-path tools/bloom-reference/Cargo.toml \
+  --bin bloom-brdf-reference -- \
+  --angular \
+  --out tools/bloom-reference/reference/layered-pbr-angular-v1.json
+```
+
+Its 63 rows isolate base, specular/IOR, clearcoat, sheen, anisotropy,
+iridescence, and combined scenarios. Every row records lobe-separated linear
+BRDF output, total `BRDF * NdotL`, PDF, and view/light reciprocity error. The
+checked file's SHA-256 is
+`110142a66bc22acaf0e7f6664a86f135b194fc62d203f1a92b685fbf2487f309`.
+Regeneration is byte-exact at six serialized decimals; the full-precision CPU
+component and reciprocity tolerance is `3e-5`.
+
+The corpus records its comparison boundary rather than hiding known model
+differences. It excludes IBL, SSR, exposure, tone mapping, realtime finite
+highlight compression, texture filtering, and normal variance. Stochastic
+path transport is compared after convergence rather than sample-for-sample,
+and iridescence is the bounded Khronos Belcour/Barla Rec.709 approximation,
+not spectral conductor Fresnel.
+
+The hardware cross-path gate loads the exact `v1-l2` records from this file
+and renders them through forward MRT and Metal ray-query path tracing with
+IBL, screen-space effects, exposure adaptation, bloom, and shadows disabled.
+This isolates one white directional light while preserving each production
+shader's intentional stability behavior. A 32x32 center region must keep
+forward/path mean RGB error at or below 24 display levels, RGB direction
+cosine at or above `0.96`, and relative display-luminance error at or below
+`0.30`. Responses whose linear-reference length is at least `0.01` must also
+track the reference direction with cosine at or above `0.85`; smaller
+responses remain bounded to 12 display levels because the forward path's
+documented smooth highlight compression can legitimately dominate them.
+
+On the qualified Apple M1 Max run, the worst display error was `20.4333`
+(anisotropy), the minimum forward/path color cosine was `0.985835`, the
+maximum relative luminance error was `0.2365`, and the minimum significant
+path/reference response cosine was `0.904537`. Bloom does not currently ship
+a deferred-shading or visibility-buffer material evaluator: the renderer is
+forward MRT by design, and the future visibility path is tracked by issue
+#27. Its parity gate must consume this same corpus when that path lands.
+
+## Transport defect found by the foundation
+
+The audit found that the former CPU and GPU path-tracing Smith equations
+multiplied the alpha term by `NdotV`/`NdotL` inside the square root instead of
+using the squared-cosine form. A rough white conductor at `NdotV = 0.1`
+returned about `2.06` units in a unit white furnace with that equation.
+
+Both path tracers now use the corrected correlated-GGX visibility,
+energy-normalized Burley diffuse, and reciprocal view/light interface
+transmission. The CPU scene tracer imports the named version-1 evaluator
+directly rather than maintaining another copy. Its remaining sampler-specific
+code uses view-angle Fresnel lobe probabilities to control finite-sample
+grazing variance.
+
+The Metal progressive and moving-camera oracles were reviewed and regenerated
+for this intentional broad energy correction. Three identical reruns of each
+mode produce bit-exact images, while the BRDF-energy and reprojection fault
+controls still fail their respective goldens. The realtime base shader already
+used the corrected Smith visibility.
+
+Scalar clearcoat, dielectric specular/IOR, sheen, anisotropic-GGX, and
+iridescent path transport now live in lazy group-2 specializations. They
+identify the primary TLAS instance without growing the G-buffer, apply the CPU
+reference's reciprocal fixed-IOR clearcoat, KHR_materials_specular F0/F90,
+energy-compensated Charlie sheen, Burley anisotropy, and bounded
+Belcour/Barla thin-film contracts for direct light, and sample every qualified
+lobe at each bounce. Anisotropy reconstructs the retained vertex tangent and
+mirrored handedness from the existing geometry megabuffer and committed
+object-to-world transform. Texture-free iridescence uses glTF's authored
+maximum thickness and spectrally modifies dielectric or conductor Fresnel
+without creating a second lobe. Clearcoat composes over the modified base and
+sheen with reciprocal attenuation, and pure metals remain independent of
+dielectric specular/IOR settings.
+
+A scene without a qualified record dispatches the original base pipeline
+exactly. Clearcoat/specular-only scenes bind one sidecar buffer; scalar
+anisotropy and iridescence select separately constant-folded code variants
+without adding a resource, and only a scene with scalar sheen creates the
+32 KiB directional-albedo LUT.
+
+Resolved `KHR_materials_specular` factor/color,
+`KHR_materials_clearcoat` factor/roughness, and `KHR_materials_sheen`
+color/roughness textures, plus `KHR_materials_iridescence` factor/thickness
+and `KHR_materials_anisotropy` direction/strength textures, are the first
+qualified texture-bearing PT slices.
+They use the renderer's existing texture array, reconstruct the committed
+triangle UV at both primary and bounce hits, and apply the exact authored
+offset/rotation/scale transform. Specular reads factor from alpha and converts
+color from sRGB; clearcoat reads factor from red and roughness from green;
+sheen converts color from sRGB and reads roughness from alpha; iridescence
+reads factor from red and maps thickness texture green across the authored
+minimum/maximum range; anisotropy reconstructs its tangent-space direction
+from centered red/green and scales strength by blue, matching glTF. Each
+factor/color lobe owns a separate, independently lazy 64-byte-per-instance
+transform sidecar. Clearcoat normals use a separate 48-byte-per-instance
+sidecar, so adding normal transport does not grow the established clearcoat
+factor/roughness record. None of the texture paths change the 96-byte scalar
+ABI or scalar-only bind groups.
+
+Resolved UV1 textures additionally use an aligned storage sidecar that is
+backfilled from retained or skinned CPU geometry only when a qualified texture
+actually selects `TEXCOORD_1`. Missing streams remain explicitly unqualified
+instead of receiving an incorrect scalar approximation. On adapters without
+PT texture arrays, a clearcoat normal is ignored while its scalar clearcoat
+factor/roughness remains active; the entire lobe is never silently dropped.
+
+## Runtime material-record ABI
+
+The renderer reserves layered-material identity without growing either
+existing material record:
+
+- the 176-byte global storage record packs an 8-bit version in bits 24–31 of
+  `header.y` and a 24-bit lobe mask in bits 0–23;
+- the 80-byte bound/custom uniform stores the exact `u32` version and mask bit
+  patterns in `foliage_params.zw` with `bitcast`, not numeric conversion;
+- version 1 assigns mask bits 0–5 to clearcoat, sheen, anisotropy,
+  iridescence, specular/IOR, and transmission respectively;
+- every existing material is version 1 with mask zero.
+
+Version-zero global records are the pre-layered layout. Allocation and update
+normalize them to version 1 with an empty mask, so stale data from the old
+flags lane cannot activate a future lobe. Tier C still binds the existing ABI
+v3 group layout. Foliage setters modify only `foliage_params.xy`, preserving
+the metadata lanes.
+
+The WGSL headers expose named version/mask accessors but no production shader
+calls them in the ABI foundation. Consequently the base-only path adds no
+shader read, branch, bind-group entry, graph pass, image, allocation, or
+material-record byte. Quality telemetry reports the two record sizes, both
+default masks, the active-lobe material count, and all four zero-cost
+invariants.
+
+## Imported material contract
+
+`MaterialLayeredPbr` preserves the complete scalar and source-texture contract
+for `KHR_materials_clearcoat`, `KHR_materials_specular`,
+`KHR_materials_ior`, `KHR_materials_sheen`, and
+`KHR_materials_anisotropy`:
+
+- authored/default identity, factors, clearcoat roughness, clearcoat normal
+  scale, specular color, IOR (including zero), sheen color/roughness, and
+  anisotropy strength/rotation;
+- source texture and image indices plus an optional resolved runtime texture;
+- `KHR_texture_transform` offset, rotation, scale, and effective UV set for
+  each texture;
+- lazy `TEXCOORD_1` retention only when a contributing physical texture
+  requests it.
+
+Plain CPU, staged, and runtime glTF/GLB loaders all produce the same material
+metadata. Invalid ranges are rejected with the asset material name rather than
+clamped silently. The import record is propagated to `PbrMaterial`; it remains
+data-only until the corresponding specialized renderer path is present.
+
+## Runtime and compatibility boundary
+
+Clearcoat, specular/IOR, sheen, and anisotropy are live only in lazy scene
+specializations. They cover retained and cached opaque geometry, depth-
+prepassed opaque geometry, sorted BLEND, TAA-reactive BLEND, weighted OIT, and
+combined physical transmission. Scalar, textured UV0/UV1, double-sided,
+clustered-light, virtual-shadow, folded scene-input, and native reflection
+variants share the same injected source.
+
+All ten layered textures share one sampler. The sheen directional-albedo LUT
+is allocated only after the first contributing sheen material and consumes
+32,768 persistent bytes. It adds no render-graph pass or transient image.
+Base-only materials retain the exact established shader, bind-group layout,
+GPU-driven record, and pipeline selection; they do not load or branch on the
+layered ABI and do not allocate the LUT.
+
+The CPU scene tracer and GPU path tracer now share the version-1 base equations.
+GPU PT also has the isolated transport foundation for the remaining lobes:
+`InstanceGiData` is unchanged, while the first contributing layered TLAS
+instance lazily backfills a parallel 96-byte-per-instance scalar record.
+Only a frame that both enables PT and contains one of those records compiles
+the group-2 pipeline and allocates/binds its storage buffer. Base-only scenes
+retain the established shader source, pipeline, bindings, instance record, and
+GPU cost. Qualified specular, clearcoat, sheen, iridescence, and anisotropy
+textures independently backfill separate 64-byte texture-transform records
+and select independent pipeline/resource bits. Clearcoat normals independently
+backfill a 48-byte transform/scale record at group 2 binding 8 and carry a
+separate pipeline/resource bit; factor-only clearcoat retains its exact
+64-byte record and allocates zero normal bytes. Textured sheen reuses the
+scalar path's lazily allocated directional-albedo LUT. UV1 adds a separate
+8-byte-per-vertex stream and its own pipeline/layout bit only on
+texture-array-capable adapters; no texture record, binding, UV interpolation,
+or texture fetch exists in the base pipeline or scalar-only resource layouts.
+Array-incapable adapters also skip building the unreachable CPU texture-record
+vectors.
+
+Metal ray-query qualification renders the same seeded scene through base,
+clearcoat, specular/IOR, sheen, anisotropy, iridescence, and combined scalar
+pipelines. It requires byte-identical output for an unqualified textured lobe,
+visible bounded-energy responses for every qualified lobe, a distinct highlight
+after a 90-degree anisotropy rotation on explicit vertex tangents, and a
+spectral image change between 180 nm and 520 nm films. Telemetry verifies that
+sheen, anisotropy, iridescence, and texture code variants remain independently
+lazy. The texture corpus additionally requires white UV0 specular, clearcoat,
+sheen, and iridescence textures to be byte-identical to their scalar
+transport, and the closest UNORM8 +X anisotropy direction to stay within the
+documented quantization tolerance. Varying factor/color/roughness/thickness
+and anisotropy direction/strength textures must produce visible bounded
+responses, 90-degree texture transforms must turn those responses, and UV1
+must select independently retained coordinates on capable adapters. Adapters
+without PT texture arrays retain scalar-lobe output and allocate no texture or
+UV1 storage. Clearcoat-normal qualification additionally requires a flat
+zero-scale normal to be byte-identical to scalar clearcoat, a directional map
+to create a bounded visible response, and transformed UV0/UV1 maps to rotate
+that response. Telemetry pins the normal record at 48 bytes and proves zero
+normal allocation for base, scalar, and factor/roughness-only materials.
+
+The realtime motion corpus minifies alternating two-texel tangent-space coat
+normals across a slowly moving camera. A matching flat-normal run removes
+ordinary edge and lighting motion before the texture-specific residual is
+measured. On Apple M1 Max / Metal, camera motion measured `2.432037` mean RGB,
+the filtered coat response measured `0.205539`, the worst adjacent-frame
+residual was `0.532235`, and no sampled channel crossed the coherent-outlier
+threshold. The hard gates remain `1.5` mean residual and 2% outlier channels.
+
+## Public authoring API
+
+`setSceneNodeMaterial(node, descriptor)` is the single public authoring entry
+point for base, emissive, clearcoat, specular/IOR, sheen, anisotropy, and
+iridescence factors. Every field is optional. An empty descriptor restores the
+same base defaults as a new scene node, while an omitted layered lobe is absent
+from the native lobe mask and keeps the allocation-free base-material path.
+
+```ts
+setSceneNodeMaterial(node, {
+  color: [210, 68, 32],
+  roughness: 0.22,
+  metalness: 0,
+  layered: {
+    clearcoat: { factor: 0.8, roughness: 0.1 },
+    iridescence: {
+      factor: 0.65,
+      ior: 1.3,
+      thicknessMinimum: 120,
+      thicknessMaximum: 380,
+    },
+  },
+});
+```
+
+Base color follows Bloom's engine-wide 0–255 convention. Layered colors are
+linear factors, anisotropy rotation is in radians, and iridescence thickness is
+in nanometres. Unsafe scalar input is bounded before it reaches a shader, and
+reapplying an unchanged descriptor does not rebuild the material. Layer
+textures and texture transforms remain glTF-authored in this first API version;
+the importer continues to preserve and render their full UV contract.

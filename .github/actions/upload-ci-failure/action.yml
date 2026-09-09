@@ -1,0 +1,18 @@
+name: Upload Bloom CI failure evidence
+description: Preserve lane summaries and renderer diagnostics from a failed job.
+inputs:
+  name:
+    description: Unique artifact prefix for this job.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}-${{ github.run_attempt }}
+        path: |
+          target/ci
+          native/shared/tests/golden/**/*.actual.png
+          tools/quality/out
+        if-no-files-found: warn
+        retention-days: 14

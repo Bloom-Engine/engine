@@ -1,0 +1,89 @@
+{
+  "schema": "bloom-tsr-fast-orbit-recovery-evidence-v1",
+  "issue": 149,
+  "comparison_base": "ae2e6b7fe5b3ff1cf0e8cbccda7a7ce2cad4cd27",
+  "candidate_revision": "commit-containing-this-artifact",
+  "adapter": "Apple M1 Max",
+  "backend": "Metal",
+  "production_pixel_changes": false,
+  "runtime_resource_changes": false,
+  "fixture": {
+    "resolution": [256, 256],
+    "native_render_scale": 1.0,
+    "fractional_render_scale": 0.75,
+    "settled_old_pose_frames": 16,
+    "transition_frames": 4,
+    "recovery_frames": 8,
+    "world_translation_metres": 8.130852,
+    "orbit_rotation_radians": 1.2,
+    "scene": "high-frequency-grid-33-alternating-thin-columns-colored-primitives",
+    "fresh_recovery_reference": "separately-reset-final-pose-at-matched-halton-phases"
+  },
+  "negative_control": {
+    "native_movement_mean_rgb": 23.392517,
+    "native_movement_outlier_fraction": 0.294907,
+    "minimum_mean_rgb": 5.0,
+    "minimum_outlier_fraction": 0.05
+  },
+  "native_match": {
+    "measured": {
+      "mean_rgb": 1.062483,
+      "maximum_frame_mean_rgb": 1.271566,
+      "minimum_frame_ssim": 0.966792,
+      "motion_derivative_error": 1.094460
+    },
+    "enforced": {
+      "maximum_mean_rgb": 1.12,
+      "maximum_frame_mean_rgb": 1.34,
+      "minimum_frame_ssim": 0.962,
+      "maximum_motion_derivative_error": 1.16
+    },
+    "frames": [
+      { "index": 0, "mean_rgb": 1.153315, "ssim": 0.970825 },
+      { "index": 1, "mean_rgb": 1.271566, "ssim": 0.972888 },
+      { "index": 2, "mean_rgb": 1.025477, "ssim": 0.969152 },
+      { "index": 3, "mean_rgb": 1.091563, "ssim": 0.972541 },
+      { "index": 4, "mean_rgb": 1.200358, "ssim": 0.966792 },
+      { "index": 5, "mean_rgb": 1.124934, "ssim": 0.977451 },
+      { "index": 6, "mean_rgb": 1.050975, "ssim": 0.980123 },
+      { "index": 7, "mean_rgb": 0.910177, "ssim": 0.982246 },
+      { "index": 8, "mean_rgb": 0.984004, "ssim": 0.979817 },
+      { "index": 9, "mean_rgb": 0.999822, "ssim": 0.981159 },
+      { "index": 10, "mean_rgb": 1.000539, "ssim": 0.980477 },
+      { "index": 11, "mean_rgb": 0.937073, "ssim": 0.982872 }
+    ]
+  },
+  "fresh_epoch_recovery": {
+    "measured": {
+      "mean_rgb": 0.188578,
+      "maximum_outlier_fraction": 0.005402,
+      "final_mean_rgb": 0.092255,
+      "final_ssim": 0.999525,
+      "final_to_initial_mean_rgb_ratio": 0.211733
+    },
+    "enforced": {
+      "maximum_mean_rgb": 0.20,
+      "maximum_outlier_fraction": 0.006,
+      "maximum_final_mean_rgb": 0.11,
+      "minimum_final_ssim": 0.9994,
+      "maximum_final_to_initial_mean_rgb_ratio": 0.25
+    },
+    "frames": [
+      { "index": 0, "mean_rgb": 0.435740, "outlier_fraction": 0.005402, "ssim": 0.990881 },
+      { "index": 1, "mean_rgb": 0.273702, "outlier_fraction": 0.002609, "ssim": 0.995364 },
+      { "index": 2, "mean_rgb": 0.199092, "outlier_fraction": 0.001099, "ssim": 0.997844 },
+      { "index": 3, "mean_rgb": 0.154073, "outlier_fraction": 0.000381, "ssim": 0.998637 },
+      { "index": 4, "mean_rgb": 0.134120, "outlier_fraction": 0.000168, "ssim": 0.999116 },
+      { "index": 5, "mean_rgb": 0.115234, "outlier_fraction": 0.000061, "ssim": 0.999320 },
+      { "index": 6, "mean_rgb": 0.104411, "outlier_fraction": 0.000046, "ssim": 0.999428 },
+      { "index": 7, "mean_rgb": 0.092255, "outlier_fraction": 0.000046, "ssim": 0.999525 }
+    ]
+  },
+  "validation": {
+    "shared_library": { "passed": 482, "ignored": 1, "failed": 0 },
+    "gpu_golden": { "passed": 80, "ignored": 3, "failed": 0 },
+    "formatting": "passed",
+    "diff_whitespace": "passed"
+  },
+  "scope": "corpus-checkpoint-not-issue-closure"
+}

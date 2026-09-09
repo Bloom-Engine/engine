@@ -1,0 +1,179 @@
+{
+  "schema": "bloom-shipping-scene-evidence-v1",
+  "issue": 136,
+  "qualified_revision": "1420e5a307dfe9b36654730fdbeef44097215d76",
+  "host": {
+    "architecture": "arm64",
+    "cpu": "Apple M1 Max",
+    "os": "macOS 26.5 (25F71)"
+  },
+  "toolchain": {
+    "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
+    "cargo": "1.97.1 (c980f4866 2026-06-30)"
+  },
+  "contract": {
+    "scene_format": "bscene-v1",
+    "scene_recipe": 1,
+    "texture_recipe": 4,
+    "profile": {
+      "platform": "portable",
+      "quality": "high"
+    },
+    "shipping_input_set": [
+      "index.json",
+      "chunks/sha256/*"
+    ],
+    "source_gltf_reads": 0,
+    "cooker_manifests_required_at_runtime": false
+  },
+  "scenes": [
+    {
+      "name": "Damaged Helmet",
+      "logical_id": "scenes/damaged-helmet",
+      "source_path": "examples/renderer-test/assets/DamagedHelmet.glb",
+      "source_file_sha256": "a1e3b04de97b11de564ce6e53b95f02954a297f0008183ac63a4f5974f6b32d8",
+      "source_geometry_closure_sha256": "3de5114323cba08aaef85757a90ed9685f1597b5ea0e7d7913f9fa45eeacaae7",
+      "scene_artifact_sha256": "188e61a0ae190c3822bec06ddeb1af3492d06e19edc24a80d94b48b1f6da5aba",
+      "scene_payload_sha256": "30519a7e153820f3b70c8fe188bce863ce88983a4b35a4aeb571da92b709feb6",
+      "scene_bytes": 1583687,
+      "primitives": 1,
+      "placements": 1,
+      "texture_dependencies": 5,
+      "texture_artifact_bytes": 111848840,
+      "joints": 0,
+      "animation_clips": 0,
+      "index_entries": 6,
+      "index_sha256": "f308c8f9e4c6ed4d2bf818ccaa6d6bd0c67388605fe64cd3994e3d74925f2018",
+      "referenced_bytes": 113432527,
+      "unique_chunks": 6,
+      "unique_chunk_bytes": 113432527,
+      "diagnostics": {
+        "non_finite_position_vertices": 0,
+        "non_finite_attribute_vertices": 14556,
+        "dropped_triangles": 0,
+        "dropped_primitives": 0,
+        "dropped_placements": 0
+      },
+      "manifest_free_runtime_smoke": "pass"
+    },
+    {
+      "name": "Fox",
+      "logical_id": "scenes/fox",
+      "source_path": "examples/test-gltf-watch/assets/Fox.glb",
+      "source_file_sha256": "d97044e701822bac5a62696459b27d7b375aada5de8574ed4362edbba94771f7",
+      "source_geometry_closure_sha256": "310e02a618f906534aef8651359257bd6c6bfd99d3f140c56108677626acda12",
+      "scene_artifact_sha256": "48112037f0c85e0470a7bebe4a84dcaa8069b7db0892127e889625aeca15eefd",
+      "scene_payload_sha256": "d38c55016e2ba40e47a6a69e281a21bcc05c5b05aa52577bc706925f9286b9dc",
+      "scene_bytes": 242225,
+      "primitives": 1,
+      "placements": 1,
+      "texture_dependencies": 1,
+      "texture_artifact_bytes": 5592552,
+      "joints": 24,
+      "animation_clips": 3,
+      "index_entries": 2,
+      "index_sha256": "e670b4dce89107ea928fed75926e4992a7b2dfa5e53989883c83e1e280295959",
+      "referenced_bytes": 5834777,
+      "unique_chunks": 2,
+      "unique_chunk_bytes": 5834777,
+      "diagnostics": {
+        "non_finite_position_vertices": 0,
+        "non_finite_attribute_vertices": 1728,
+        "dropped_triangles": 0,
+        "dropped_primitives": 0,
+        "dropped_placements": 0
+      },
+      "manifest_free_runtime_smoke": "pass"
+    },
+    {
+      "name": "Sponza",
+      "logical_id": "scenes/sponza",
+      "source_path": "examples/sponza/assets/Sponza.glb",
+      "source_file_sha256": "a72339e2b02bf597cdf72d3147014eb60df947d88b7b48e1f2ebf0cb111405bc",
+      "source_geometry_closure_sha256": "6d1166cc8e62acac817acc68549e5242a4cfde0407adb64f560f03efaf05e1f9",
+      "scene_artifact_sha256": "e1bba7b98edc1e6b303193089312fd08b18850bf8e01cdcf7337daa9cbb77ad0",
+      "scene_payload_sha256": "8c604f3c47a509cc3e8ef73897489d3499bd5e9babb257486b4404c5b639d3b8",
+      "scene_bytes": 21660807,
+      "primitives": 103,
+      "placements": 103,
+      "texture_dependencies": 69,
+      "texture_artifact_bytes": 380293768,
+      "joints": 0,
+      "animation_clips": 0,
+      "index_entries": 70,
+      "index_sha256": "62c061e0f1a73a8a535c1cccf18230210b0ef54e98484a0fc09dea71a64742f7",
+      "referenced_bytes": 401954575,
+      "unique_chunks": 66,
+      "unique_chunk_bytes": 379584367,
+      "diagnostics": {
+        "non_finite_position_vertices": 0,
+        "non_finite_attribute_vertices": 192496,
+        "dropped_triangles": 0,
+        "dropped_primitives": 0,
+        "dropped_placements": 0
+      },
+      "manifest_free_runtime_smoke": "pass"
+    },
+    {
+      "name": "Bistro",
+      "logical_id": "scenes/bistro",
+      "source_path": "examples/bistro/assets/bistrox.gltf",
+      "source_file_sha256": "bfdf046769168359d07f585e2635e926778310606ccd466bfdbb9aa1a6aa01b0",
+      "source_geometry_closure_sha256": "89d1ea17e0850f0961b51f4d4265cc858879072b1a884a415ccc927d8cb0c49b",
+      "scene_artifact_sha256": "c5745f374ba2ebe9589df6aec9bdd0bdebcd2fde8909c184091cd451948170d6",
+      "scene_payload_sha256": "b9614416695f5b6e9477198b8c45be03333a21c67b05c52575fb36504b835bca",
+      "scene_bytes": 188317493,
+      "primitives": 551,
+      "placements": 2909,
+      "texture_dependencies": 680,
+      "texture_artifact_bytes": 16266801464,
+      "joints": 0,
+      "animation_clips": 7,
+      "index_entries": 681,
+      "index_sha256": "4d021133d2383c847795761cfb0dba67c3e100577ee82c6bf6a6f4b414f66df5",
+      "referenced_bytes": 16455118957,
+      "unique_chunks": 669,
+      "unique_chunk_bytes": 16185283637,
+      "diagnostics": {
+        "non_finite_position_vertices": 0,
+        "non_finite_attribute_vertices": 1738262,
+        "dropped_triangles": 0,
+        "dropped_primitives": 0,
+        "dropped_placements": 0
+      },
+      "manifest_free_runtime_smoke": "pass"
+    }
+  ],
+  "negative_controls": {
+    "scene_payload_hash_damage": "rejected",
+    "incompatible_scene_version": "rejected-with-recook-message",
+    "indexed_scene_chunk_hash_damage": "rejected",
+    "dependency_handle_count_mismatch": "rejected"
+  },
+  "qualification": {
+    "scene_format_release_tests_passed": 2,
+    "cooker_release_tests_passed": 46,
+    "native_release_tests_passed": 480,
+    "native_release_tests_ignored": 1,
+    "scene_format_strict_clippy": "pass",
+    "cooker_strict_clippy": "pass",
+    "native_ci_clippy_policy": "pass",
+    "feature_builds": {
+      "no_default_features": "pass",
+      "models3d_only": "pass",
+      "image_extras_only": "pass",
+      "models3d_and_image_extras": "pass"
+    },
+    "format": "pass",
+    "diff_check": "pass",
+    "file_line_gate": {
+      "status": "pre-existing-failures",
+      "unrelated_failures": 5,
+      "new_files_over_limit": 0
+    }
+  },
+  "acceptance": {
+    "four_named_shipping_scene_cooks_without_runtime_source_gltf_parsing": "pass",
+    "issue_136_acceptance_items_remaining": 0
+  }
+}

@@ -1,0 +1,108 @@
+{
+  "schema": "bloom-virtual-geometry-runtime-residency-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "c2a0bd2f78f8da7be4ee27a709a9bba900115f59",
+  "archive_contract": {
+    "shared_cooker_runtime_reader": true,
+    "immutable_runtime_ownership": true,
+    "complete_format_validation_before_page_access": true,
+    "indexed_file_length_and_sha256_verified": true,
+    "indexed_format_payload_source_identity_verified": true,
+    "corrupt_magic_rejected": true,
+    "wrong_index_identity_rejected": true
+  },
+  "residency_fixture": {
+    "format_version": 1,
+    "clusters": 8,
+    "pages": 5,
+    "hierarchy_levels": 3,
+    "root_pages": 1,
+    "root_bytes": 448,
+    "budget_bytes": 1120,
+    "maximum_observed_resident_bytes": 1120,
+    "budget_respected": true,
+    "root_pinned": true,
+    "atomic_group_transition": true,
+    "deterministic_lru": true,
+    "fallback_sequence": [2, 1, 0]
+  },
+  "negative_budget_fixture": {
+    "root_bytes": 448,
+    "budget_bytes": 672,
+    "available_streamable_bytes": 224,
+    "atomic_group_bytes": 448,
+    "request_rejected": true,
+    "state_unchanged": true,
+    "undersized_root_budget_rejected": true
+  },
+  "default_path": {
+    "benchmark_dependency_contains_format_crate": false,
+    "engine_state_fields_added": 0,
+    "renderer_fields_added": 0,
+    "model_manager_fields_added": 0,
+    "passes_added": 0,
+    "draws_added": 0,
+    "buffers_added": 0,
+    "images_added": 0,
+    "bindings_added": 0,
+    "shader_branches_added": 0,
+    "renderer_paths_sha256": "6d71f4a20210d875593d16d2995909ec78b78314b9e2f5fc89d843dffe26389f",
+    "renderer_paths_identical_runs": 6
+  },
+  "performance": {
+    "machine": "Apple M1 Max",
+    "backend": "metal",
+    "resolution": [1920, 1080],
+    "warmup_frames": 180,
+    "measured_frames": 240,
+    "runs_per_side": 3,
+    "interleaved": true,
+    "baseline_revision": "9cebeefa30710c680b0aef9b7b3bbb18c2dea3c9",
+    "baseline_median": {
+      "wall_mean_ms": 6.808140,
+      "cpu_mean_ms": 1.894302,
+      "cpu_p95_ms": 2.377622,
+      "gpu_mean_ms": 26.548903,
+      "gpu_p95_ms": 30.787500
+    },
+    "candidate_median": {
+      "wall_mean_ms": 6.052478,
+      "cpu_mean_ms": 1.728291,
+      "cpu_p95_ms": 2.115582,
+      "gpu_mean_ms": 18.830057,
+      "gpu_p95_ms": 25.628209
+    },
+    "candidate_delta_percent": {
+      "wall_mean": -11.0994,
+      "cpu_mean": -8.7637,
+      "cpu_p95": -11.0211,
+      "gpu_mean": -29.0741,
+      "gpu_p95": -16.7577
+    },
+    "interpretation": "no regression; favorable magnitude treated as machine noise"
+  },
+  "qualification": {
+    "shared_unit_tests_passed": 382,
+    "shared_unit_tests_ignored": 1,
+    "new_runtime_tests_passed": 3,
+    "cooker_tests_passed": 29,
+    "quality_governance_tests_passed": 39,
+    "strict_production_clippy": "pass",
+    "format": "pass",
+    "contracts_ffi_file_ratchet": "pass",
+    "wasm_no_default_check": "pass",
+    "wasm_models3d_check": "pass",
+    "native_models3d_check": "pass"
+  },
+  "remaining": [
+    "stable runtime mesh and page IDs",
+    "asynchronous asset-index lookup",
+    "fixed GPU page allocation and upload staging",
+    "per-frame request, upload, and eviction budgets",
+    "projected-error GPU hierarchy traversal",
+    "frustum, cone, and Hi-Z culling",
+    "indirect visibility submission",
+    "10-million-triangle stress and motion qualification",
+    "integrated and discrete GPU captures"
+  ]
+}

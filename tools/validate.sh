@@ -11,6 +11,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+echo "note: tools/validate.sh is legacy exploration; use tools/quality/run.py for qualification" >&2
 RENDERER_TEST="$REPO_ROOT/examples/renderer-test"
 REF_BIN="$REPO_ROOT/tools/bloom-reference/target/release/bloom-reference"
 DIFF_BIN="$REPO_ROOT/tools/bloom-diff/target/release/bloom-diff"

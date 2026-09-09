@@ -47,7 +47,11 @@ fn importance_sample_ggx(xi: (f32, f32), n: [f32; 3], roughness: f32) -> [f32; 3
     let h_local = [sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta];
 
     // Build TBN around N.
-    let up = if n[2].abs() < 0.999 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+    let up = if n[2].abs() < 0.999 {
+        [0.0, 0.0, 1.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
     let t = normalize3(cross3(up, n));
     let b = cross3(n, t);
     [
@@ -58,7 +62,11 @@ fn importance_sample_ggx(xi: (f32, f32), n: [f32; 3], roughness: f32) -> [f32; 3
 }
 
 fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 fn normalize3(v: [f32; 3]) -> [f32; 3] {
@@ -86,11 +94,7 @@ fn build_brdf_lut_row(y: usize, size: usize) -> Vec<u16> {
     let mut row = Vec::with_capacity(size * 2);
     for x in 0..size {
         let n_dot_v = ((x as f32) + 0.5) / size as f32;
-        let v = [
-            (1.0 - n_dot_v * n_dot_v).max(0.0).sqrt(),
-            0.0,
-            n_dot_v,
-        ];
+        let v = [(1.0 - n_dot_v * n_dot_v).max(0.0).sqrt(), 0.0, n_dot_v];
         let mut a_sum = 0.0_f32;
         let mut b_sum = 0.0_f32;
         for i in 0..BRDF_LUT_SAMPLES {
@@ -128,7 +132,9 @@ fn build_brdf_lut_row(y: usize, size: usize) -> Vec<u16> {
 pub fn build_brdf_lut(size: usize) -> Vec<u16> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let rows_per_thread = (size + nthreads - 1) / nthreads;
         let mut all_rows: Vec<Option<Vec<Vec<u16>>>> = (0..nthreads).map(|_| None).collect();
         std::thread::scope(|s| {
@@ -137,7 +143,9 @@ pub fn build_brdf_lut(size: usize) -> Vec<u16> {
                 let y_start = t * rows_per_thread;
                 let y_end = ((t + 1) * rows_per_thread).min(size);
                 let h = s.spawn(move || {
-                    (y_start..y_end).map(|y| build_brdf_lut_row(y, size)).collect::<Vec<_>>()
+                    (y_start..y_end)
+                        .map(|y| build_brdf_lut_row(y, size))
+                        .collect::<Vec<_>>()
                 });
                 handles.push(h);
             }
@@ -149,6 +157,8 @@ pub fn build_brdf_lut(size: usize) -> Vec<u16> {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        (0..size).flat_map(|y| build_brdf_lut_row(y, size)).collect()
+        (0..size)
+            .flat_map(|y| build_brdf_lut_row(y, size))
+            .collect()
     }
 }

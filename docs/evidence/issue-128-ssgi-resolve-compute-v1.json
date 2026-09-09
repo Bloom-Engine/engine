@@ -1,0 +1,106 @@
+{
+  "schema": "bloom-issue-128-ssgi-resolve-compute-v1",
+  "issues": [128],
+  "qualification_date": "2026-08-30",
+  "candidate_revision": "09ad0b755af9f10083712327d7f0edb1d88f228b",
+  "comparison_revision": "5e543a0c5a8ec94105ae7e5365851b7235abf801",
+  "hardware": {
+    "adapter": "Apple M1 Max",
+    "backend": "Metal",
+    "device_profile": "native-full",
+    "ssgi_trace_backend": "hw-ray-query"
+  },
+  "change": {
+    "pass": "probe_resolve_pass",
+    "from": "fullscreen-raster-render-pass",
+    "to": "8x8-compute-storage-write",
+    "output_format": "rgba16float",
+    "pixel_center_uv_preserved": true,
+    "resolve_filter_changed": false
+  },
+  "balanced_repeats": {
+    "order": ["candidate", "base", "base", "candidate", "candidate", "base"],
+    "runs_per_revision": 3,
+    "pbr_spheres_high": {
+      "base": {
+        "resolve_gpu_mean_ms": 2.798154,
+        "gpu_frame_mean_ms": 20.776159,
+        "gpu_frame_p95_ms": 23.373917,
+        "wall_frame_mean_ms": 6.264883
+      },
+      "candidate": {
+        "resolve_gpu_mean_ms": 0.051559,
+        "gpu_frame_mean_ms": 14.438051,
+        "gpu_frame_p95_ms": 15.920502,
+        "wall_frame_mean_ms": 5.877354
+      }
+    },
+    "sponza_interior": {
+      "base": {
+        "resolve_gpu_mean_ms": 5.067656,
+        "gpu_frame_mean_ms": 41.959461,
+        "gpu_frame_p95_ms": 59.994255,
+        "wall_frame_mean_ms": 9.937736
+      },
+      "candidate": {
+        "resolve_gpu_mean_ms": 0.056151,
+        "gpu_frame_mean_ms": 29.890249,
+        "gpu_frame_p95_ms": 41.746121,
+        "wall_frame_mean_ms": 9.934126
+      }
+    }
+  },
+  "clean_exact_corpus": {
+    "result_sha256": "49de2b4a46d2f4ad309908777769c0de81d182a9f403afb294de59224cf24d37",
+    "git_dirty": false,
+    "cases": 9,
+    "high_tier_intermediates_per_case": 30,
+    "constrained_intermediates": 8,
+    "steady_state_resource_churn": 0,
+    "frame_submission_encoders": 1,
+    "gpu_p95_ms": {
+      "pbr_spheres_high": {"base": 23.461290, "candidate": 15.407542, "budget": 20.0},
+      "pbr_spheres_constrained": {"base": 5.791336, "candidate": 5.964876, "budget_applicable": false},
+      "damaged_helmet": {"base": 12.181002, "candidate": 8.424915, "budget": 12.0},
+      "sponza_interior": {"base": 56.685251, "candidate": 41.824460, "budget": 55.0},
+      "bistro_exterior": {"base": 44.033331, "candidate": 34.862126, "budget_applicable": false},
+      "skinned_alpha_motion": {"base": 27.497002, "candidate": 19.830001, "budget": 30.0},
+      "draw_light_stress": {"base": 35.642585, "candidate": 26.960583, "budget_applicable": false},
+      "weighted_transparency": {"base": 30.840710, "candidate": 23.647751, "budget": 30.0},
+      "masked_alpha_coverage": {"base": 20.388457, "candidate": 14.885875, "budget": 30.0}
+    }
+  },
+  "exact_repeat_medians": {
+    "pbr_spheres_high": {"cpu_p95_ms": 2.605, "gpu_p95_ms": 15.877, "resolve_gpu_mean_ms": 0.050},
+    "weighted_transparency": {"cpu_p95_ms": 7.159, "gpu_p95_ms": 24.575, "resolve_gpu_mean_ms": 0.046},
+    "masked_alpha_coverage": {"cpu_p95_ms": 5.240, "gpu_p95_ms": 15.457, "resolve_gpu_mean_ms": 0.066}
+  },
+  "visual_equivalence": {
+    "final_images": {
+      "passed": 9,
+      "total": 9,
+      "worst_ssim": 0.999997616,
+      "worst_luma_rmse": 0.000093042
+    },
+    "ssgi_intermediates": {
+      "passed": 8,
+      "total": 8,
+      "worst_ssim": 0.999997973,
+      "worst_luma_rmse": 0.000042475,
+      "max_abs_error": 0.003921569,
+      "pixels_above_tolerance_percent": 0.0
+    }
+  },
+  "tests": {
+    "release_library": {"passed": 483, "failed": 0, "ignored": 1},
+    "release_gpu_golden": {"passed": 86, "failed": 0, "ignored": 4},
+    "focused_ssgi_shader_contract": {"passed": 9, "failed": 0},
+    "final_image_diffs": {"passed": 9, "failed": 0},
+    "ssgi_intermediate_diffs": {"passed": 8, "failed": 0}
+  },
+  "open_gates": [
+    "human-approved corpus baselines are not installed",
+    "hosted RTX 4080 Vulkan qualification is unavailable"
+  ],
+  "conclusion": "The SSGI resolve compute path preserves output while removing the Metal render-pass tail. Every applicable Metal GPU p95 budget now clears in qualification; strict corpus status remains open only for absent approved baselines and transient CPU outliers that clear on exact repeats."
+}

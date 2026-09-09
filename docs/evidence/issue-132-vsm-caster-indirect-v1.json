@@ -1,0 +1,137 @@
+{
+  "schema": "bloom-directional-vsm-caster-indirect-v1",
+  "issue": 132,
+  "validated_revision": "7962bee2f8b64c21a2a0b1bec49369aaaf1aa678",
+  "performance_qualification": "accepted",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end",
+    "os": "macOS 26.5"
+  },
+  "runtime_contract": {
+    "classification": "cpu-exact-page-frustum-prefilter",
+    "submission": "compact-multi-draw-indexed-indirect",
+    "minimum_visible_eligible_draws_per_page": 48,
+    "maximum_page_entries": 1024,
+    "maximum_page_budget": 64,
+    "maximum_caster_records": 65536,
+    "caster_record_bytes": 80,
+    "indirect_command_bytes": 20,
+    "automatic_activation": true,
+    "control": "BLOOM_VSM_GPU_CASTERS=0",
+    "small_workload_resources": 0,
+    "vsm_disabled_resources": 0,
+    "gpu_driven_disabled_resources": 0,
+    "compatibility_paths": [
+      "cutout",
+      "skinned",
+      "foliage-motion",
+      "dynamic-overlay",
+      "dedicated-buffer",
+      "overflow",
+      "small-page",
+      "unsupported",
+      "web"
+    ]
+  },
+  "fixture": {
+    "example": "examples/quality-stress/main.ts",
+    "flag": "--vsm-gpu-casters",
+    "nodes": 512,
+    "warmup_frames": 60,
+    "measured_frames": 180,
+    "fixed_timestep": 0.016666667,
+    "light_basis_period_frames": 30,
+    "considered_pages": 8,
+    "max_page_candidates": 85,
+    "indirect_pages": 4,
+    "caster_records": 302,
+    "indirect_calls": 4,
+    "gpu_bytes": 51200,
+    "classification_source": "cpu-exact-prefilter+gpu-indirect-submit"
+  },
+  "image_comparison": {
+    "reference_sha256": "06c69658f481bc335ac6dc3333cc7758d315182bb7e9b4797ee18882f28c9c01",
+    "candidate_sha256": "06c69658f481bc335ac6dc3333cc7758d315182bb7e9b4797ee18882f28c9c01",
+    "selected_pixels": 3686400,
+    "rmse_luminance": 0.0,
+    "rmse_r": 0.0,
+    "rmse_g": 0.0,
+    "rmse_b": 0.0,
+    "max_abs_error": 0.0,
+    "percent_above_0_02": 0.0,
+    "ssim_luminance": 1.0,
+    "mean_oklab_delta": 0.0,
+    "mean_edge_delta": 0.0
+  },
+  "performance": {
+    "runs_per_mode": 5,
+    "aggregation": "median-of-run-metrics",
+    "control_medians_ms": {
+      "wall_frame_mean": 11.893637,
+      "cpu_frame_p50": 4.548665,
+      "cpu_frame_mean": 9.824165,
+      "gpu_frame_p50": 21.095042,
+      "gpu_frame_mean": 20.292364,
+      "virtual_shadow_pages_cpu": 0.106694,
+      "virtual_shadow_pages_gpu": 1.092336,
+      "render_total_cpu": 4.921546,
+      "queue_submit_cpu": 1.853704
+    },
+    "candidate_medians_ms": {
+      "wall_frame_mean": 11.457747,
+      "cpu_frame_p50": 4.618707,
+      "cpu_frame_mean": 8.851101,
+      "gpu_frame_p50": 19.216956,
+      "gpu_frame_mean": 19.262754,
+      "virtual_shadow_pages_cpu": 0.094448,
+      "virtual_shadow_pages_gpu": 0.582765,
+      "render_total_cpu": 4.435739,
+      "queue_submit_cpu": 1.910965
+    },
+    "percent_delta": {
+      "wall_frame_mean": -3.664901,
+      "cpu_frame_p50": 1.539836,
+      "cpu_frame_mean": -9.904801,
+      "gpu_frame_p50": -8.902974,
+      "gpu_frame_mean": -5.073879,
+      "virtual_shadow_pages_cpu": -11.477684,
+      "virtual_shadow_pages_gpu": -46.649657,
+      "render_total_cpu": -9.871024,
+      "queue_submit_cpu": 3.089005
+    },
+    "verdict": "accepted-direct-vsm-and-end-to-end-means-improve",
+    "cpu_p50_note": "0.070042 ms movement is below unrelated inter-run dispersion; direct VSM CPU, render-total CPU, CPU mean, and wall all improve",
+    "queue_submit_note": "0.057261 ms attribution increase is offset by 0.485807 ms lower render-total CPU and 0.973064 ms lower CPU-frame mean"
+  },
+  "rejected_prototypes": [
+    "fixed-count-page-by-caster-cartesian-indirect-table",
+    "gpu-safety-cull-with-fixed-compact-consumption"
+  ],
+  "qualification": {
+    "quick_lane": "pass",
+    "ffi_schema_parity": "pass",
+    "format": "pass",
+    "strict_clippy": "pass",
+    "file_size_ratchet": "pass",
+    "wasm32_web_feature_check": "pass",
+    "shared_unit_tests_passed": 347,
+    "shared_unit_tests_ignored": 1,
+    "headless_device_tests_passed": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "canonical_examples": 20
+  },
+  "remaining": [
+    "GPU classifier plus indirect-count compaction on qualified backends",
+    "cutout and skinned caster indirect submission",
+    "foliage-motion and dynamic-overlay caster submission",
+    "instanced and dedicated-buffer caster submission",
+    "spot and point virtual projections with shared arbitration",
+    "Bistro, small-pool, contact-detail, and 100-light qualification",
+    "quality-tier rollout"
+  ]
+}

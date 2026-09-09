@@ -6,8 +6,12 @@ use super::SoundData;
 
 /// Parse a WAV file into SoundData.
 pub fn parse_wav(data: &[u8]) -> Option<SoundData> {
-    if data.len() < 44 { return None; }
-    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return None; }
+    if data.len() < 44 {
+        return None;
+    }
+    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return None;
+    }
 
     let channels = u16::from_le_bytes([data[22], data[23]]);
     let sample_rate = u32::from_le_bytes([data[24], data[25], data[26], data[27]]);
@@ -17,21 +21,30 @@ pub fn parse_wav(data: &[u8]) -> Option<SoundData> {
     while offset + 8 < data.len() {
         let chunk_id = &data[offset..offset + 4];
         let chunk_size = u32::from_le_bytes([
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]) as usize;
 
         if chunk_id == b"data" {
             let pcm_data = &data[offset + 8..std::cmp::min(offset + 8 + chunk_size, data.len())];
             let samples = match bits_per_sample {
-                16 => pcm_data.chunks_exact(2)
+                16 => pcm_data
+                    .chunks_exact(2)
                     .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0)
                     .collect(),
-                8 => pcm_data.iter()
+                8 => pcm_data
+                    .iter()
                     .map(|&b| (b as f32 - 128.0) / 128.0)
                     .collect(),
                 _ => return None,
             };
-            return Some(SoundData { samples, sample_rate, channels });
+            return Some(SoundData {
+                samples,
+                sample_rate,
+                channels,
+            });
         }
         offset += 8 + chunk_size;
     }
@@ -62,8 +75,14 @@ pub fn parse_mp3(data: &[u8]) -> Option<SoundData> {
         }
     }
 
-    if samples.is_empty() { return None; }
-    Some(SoundData { samples, sample_rate, channels })
+    if samples.is_empty() {
+        return None;
+    }
+    Some(SoundData {
+        samples,
+        sample_rate,
+        channels,
+    })
 }
 
 /// Parse an OGG Vorbis file into SoundData.
@@ -80,8 +99,14 @@ pub fn parse_ogg(data: &[u8]) -> Option<SoundData> {
         }
     }
 
-    if samples.is_empty() { return None; }
-    Some(SoundData { samples, sample_rate, channels })
+    if samples.is_empty() {
+        return None;
+    }
+    Some(SoundData {
+        samples,
+        sample_rate,
+        channels,
+    })
 }
 
 /// Decode an audio file by extension, falling back to format sniffing.

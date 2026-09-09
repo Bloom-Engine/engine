@@ -4,10 +4,10 @@
 //! occlusion-culling grid. Split out of renderer/mod.rs (2000-line file
 //! policy); pipelines and the mip chain stay fields on [`Renderer`].
 
-use super::formats::HIZ_MIP_COUNT;
 use super::formats::halton;
-use super::{HizDownsampleParams, HizLinearizeParams, SsaoBlurParams, SsaoParams};
+use super::formats::HIZ_MIP_COUNT;
 use super::Renderer;
+use super::{HizDownsampleParams, HizLinearizeParams, SsaoBlurParams, SsaoParams};
 
 impl Renderer {
     pub(super) fn record_hiz_chain(
@@ -18,24 +18,42 @@ impl Renderer {
         half_h: u32,
         p22: f32,
         p32: f32,
+        build_downsamples: bool,
     ) {
         // --- Hi-Z build: linearize depth into mip 0 -----------------
         let lin_params = HizLinearizeParams {
             params: [1.0 / half_w as f32, 1.0 / half_h as f32, p22, p32],
             size: [half_w, half_h, 0, 0],
         };
-        self.queue.write_buffer(&self.hiz_linearize_uniform_buffer, 0, bytemuck::bytes_of(&lin_params));
+        self.queue.write_buffer(
+            &self.hiz_linearize_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&lin_params),
+        );
         if self.hiz_linearize_bg_cache.is_none() {
-            self.hiz_linearize_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("hiz_linearize_bg"),
-                layout: &self.hiz_linearize_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.hiz_linearize_uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
-                ],
-            }));
+            self.hiz_linearize_bg_cache =
+                Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("hiz_linearize_bg"),
+                    layout: &self.hiz_linearize_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.hiz_linearize_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]),
+                        },
+                    ],
+                }));
         }
         {
             let bg = self.hiz_linearize_bg_cache.as_ref().unwrap();
@@ -49,6 +67,10 @@ impl Renderer {
             pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
         }
 
+        if !build_downsamples {
+            return;
+        }
+
         // --- Hi-Z build: downsample mip i -> mip i+1 ----------------
         for i in 0..(HIZ_MIP_COUNT - 1) as usize {
             let dst_w = (half_w >> (i + 1)).max(1);
@@ -56,17 +78,34 @@ impl Renderer {
             let ds_params = HizDownsampleParams {
                 size: [dst_w, dst_h, 0, 0],
             };
-            self.queue.write_buffer(&self.hiz_downsample_uniform_buffers[i], 0, bytemuck::bytes_of(&ds_params));
+            self.queue.write_buffer(
+                &self.hiz_downsample_uniform_buffers[i],
+                0,
+                bytemuck::bytes_of(&ds_params),
+            );
             if self.hiz_downsample_bg_cache[i].is_none() {
-                self.hiz_downsample_bg_cache[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("hiz_downsample_bg"),
-                    layout: &self.hiz_downsample_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.hiz_downsample_uniform_buffers[i].as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.hiz_views[i]) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.hiz_views[i + 1]) },
-                    ],
-                }));
+                self.hiz_downsample_bg_cache[i] =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("hiz_downsample_bg"),
+                        layout: &self.hiz_downsample_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource:
+                                    self.hiz_downsample_uniform_buffers[i].as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&self.hiz_views[i]),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.hiz_views[i + 1],
+                                ),
+                            },
+                        ],
+                    }));
             }
             let bg = self.hiz_downsample_bg_cache[i].as_ref().unwrap();
             let ts_label: &'static str = match i {
@@ -84,7 +123,6 @@ impl Renderer {
             pass.set_bind_group(0, bg, &[]);
             pass.dispatch_workgroups((dst_w + 7) / 8, (dst_h + 7) / 8, 1);
         }
-
     }
 }
 
@@ -99,79 +137,96 @@ impl Renderer {
         surf_w: u32,
         surf_h: u32,
     ) {
-    // ============================================================
-    // SSAO bilateral blur: smooth the noisy GTAO output while
-    // preserving depth edges (depth-guided bilateral filter).
-    // Reads ssao_rt → writes ssao_blur_rt.
-    // ============================================================
-    // PT: when the path tracer owns the frame it computes real
-    // occlusion by tracing — screen-space AO on top double-darkens
-    // every crevice. Route compose to "no occlusion" (white clear
-    // below) for those frames.
-    if self.ssao_enabled && !self.pt_owns_frame() {
-        // texel_size is the size of one SSAO RT texel (half-res).
-        let ao_w = (surf_w / 2).max(1) as f32;
-        let ao_h = (surf_h / 2).max(1) as f32;
-        let bp = SsaoBlurParams {
-            params: [1.0 / ao_w, 1.0 / ao_h, 0.05, 0.0],
-        };
-        self.queue.write_buffer(&self.ssao_blur_uniform_buffer, 0, bytemuck::bytes_of(&bp));
+        // ============================================================
+        // SSAO bilateral blur: smooth the noisy GTAO output while
+        // preserving depth edges (depth-guided bilateral filter).
+        // Reads ssao_rt → writes ssao_blur_rt.
+        // ============================================================
+        // PT: when the path tracer owns the frame it computes real
+        // occlusion by tracing — screen-space AO on top double-darkens
+        // every crevice. Route compose to "no occlusion" (white clear
+        // below) for those frames.
+        if self.ssao_enabled && !self.pt_owns_frame() {
+            // texel_size is the size of one SSAO RT texel (half-res).
+            let ao_w = (surf_w / 2).max(1) as f32;
+            let ao_h = (surf_h / 2).max(1) as f32;
+            let bp = SsaoBlurParams {
+                params: [1.0 / ao_w, 1.0 / ao_h, 0.05, 0.0],
+            };
+            self.queue
+                .write_buffer(&self.ssao_blur_uniform_buffer, 0, bytemuck::bytes_of(&bp));
 
-        if self.ssao_blur_bg_cache.is_none() {
-            self.ssao_blur_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ssao_blur_bg"),
-                layout: &self.ssao_blur_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.ssao_blur_uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
-                ],
-            }));
+            if self.ssao_blur_bg_cache.is_none() {
+                self.ssao_blur_bg_cache =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("ssao_blur_bg"),
+                        layout: &self.ssao_blur_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.ssao_blur_uniform_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
+                            },
+                        ],
+                    }));
+            }
+            let bg = self.ssao_blur_bg_cache.as_ref().unwrap();
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssao_blur_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssao_blur_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.ssao_blur_pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.draw(0..3, 0..1);
+        } else {
+            // SSAO disabled — clear the blur RT to WHITE so the
+            // composite pass samples "no occlusion". Cheaper than a
+            // full blur pass; the clear is the only GPU work.
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssao_blur_disabled_clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssao_blur_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
         }
-        let bg = self.ssao_blur_bg_cache.as_ref().unwrap();
-
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("ssao_blur_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.ssao_blur_rt_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&self.ssao_blur_pipeline);
-        pass.set_bind_group(0, bg, &[]);
-        pass.draw(0..3, 0..1);
-    } else {
-        // SSAO disabled — clear the blur RT to WHITE so the
-        // composite pass samples "no occlusion". Cheaper than a
-        // full blur pass; the clear is the only GPU work.
-        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("ssao_blur_disabled_clear"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.ssao_blur_rt_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-    }
     }
 }
 
@@ -197,9 +252,9 @@ impl Renderer {
         let ld = self.lighting_uniforms.light_dir;
         let v = &self.current_view_matrix;
         let light_dir_vs = [
-            v[0][0]*ld[0] + v[1][0]*ld[1] + v[2][0]*ld[2],
-            v[0][1]*ld[0] + v[1][1]*ld[1] + v[2][1]*ld[2],
-            v[0][2]*ld[0] + v[1][2]*ld[1] + v[2][2]*ld[2],
+            v[0][0] * ld[0] + v[1][0] * ld[1] + v[2][0] * ld[2],
+            v[0][1] * ld[0] + v[1][1] * ld[1] + v[2][1] * ld[2],
+            v[0][2] * ld[0] + v[1][2] * ld[1] + v[2][2] * ld[2],
             0.0,
         ];
         // Temporal accumulation: ping-pong history textures.
@@ -209,7 +264,11 @@ impl Renderer {
         let write_idx = self.ssao_history_idx;
         let read_idx = 1 - write_idx;
         let frame_phase = self.ssao_history_frame % 4;
-        let force_refresh = if self.ssao_history_frame < 4 { 1u32 } else { 0u32 };
+        let force_refresh = if self.ssao_history_frame < 4 {
+            1u32
+        } else {
+            0u32
+        };
         // 4-frame EMA: alpha = 1/4 = 0.25 gives equal weight to
         // each of the 4 phases at steady state.
         let alpha = 0.25_f32;
@@ -229,27 +288,69 @@ impl Renderer {
             size: [half_w, half_h, frame_phase, force_refresh],
             temporal: [alpha, halton5, 0.0, 0.0],
         };
-        self.queue.write_buffer(&self.ssao_uniform_buffer, 0, bytemuck::bytes_of(&sp));
+        self.queue
+            .write_buffer(&self.ssao_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
         if self.ssao_bg_cache[write_idx].is_none() {
-            self.ssao_bg_cache[write_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ssao_bg"),
-                layout: &self.ssao_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.ssao_uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.hiz_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.hiz_views[1]) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.hiz_views[2]) },
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.hiz_views[3]) },
-                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.hiz_views[4]) },
-                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
-                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.ssao_history_views[read_idx]) },
-                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.ssao_history_views[write_idx]) },
-                ],
-            }));
+            self.ssao_bg_cache[write_idx] =
+                Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("ssao_bg"),
+                    layout: &self.ssao_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.ssao_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.hiz_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&self.hiz_views[1]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&self.hiz_views[2]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&self.hiz_views[3]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(&self.hiz_views[4]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.ssao_history_views[read_idx],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.ssao_history_views[write_idx],
+                            ),
+                        },
+                    ],
+                }));
         }
         let bg = self.ssao_bg_cache[write_idx].as_ref().unwrap();
 

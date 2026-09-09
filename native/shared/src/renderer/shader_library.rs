@@ -13,16 +13,50 @@
 use super::shader_include::{BakedSource, ShaderSource};
 
 const ENTRIES: &[(&str, &str)] = &[
-    ("material_abi.wgsl",           include_str!("../../../shared/shaders/material_abi.wgsl")),
-    ("common/pbr.wgsl",             include_str!("../../../shared/shaders/common/pbr.wgsl")),
-    ("common/shadows.wgsl",         include_str!("../../../shared/shaders/common/shadows.wgsl")),
-    ("common/imposter.wgsl",        include_str!("../../../shared/shaders/common/imposter.wgsl")),
-    ("common/fog.wgsl",             include_str!("../../../shared/shaders/common/fog.wgsl")),
-    ("common/tonemap.wgsl",         include_str!("../../../shared/shaders/common/tonemap.wgsl")),
-    ("common/sky.wgsl",             include_str!("../../../shared/shaders/common/sky.wgsl")),
-    ("common/clouds.wgsl",          include_str!("../../../shared/shaders/common/clouds.wgsl")),
-    ("materials/test_minimal.wgsl", include_str!("../../../shared/shaders/materials/test_minimal.wgsl")),
-    ("impulse_field.wgsl",          include_str!("../../../shared/shaders/impulse_field.wgsl")),
+    (
+        "material_abi.wgsl",
+        include_str!("../../../shared/shaders/material_abi.wgsl"),
+    ),
+    (
+        "common/pbr.wgsl",
+        include_str!("../../../shared/shaders/common/pbr.wgsl"),
+    ),
+    (
+        "common/shadows.wgsl",
+        include_str!("../../../shared/shaders/common/shadows.wgsl"),
+    ),
+    (
+        "common/imposter.wgsl",
+        include_str!("../../../shared/shaders/common/imposter.wgsl"),
+    ),
+    (
+        "common/fog.wgsl",
+        include_str!("../../../shared/shaders/common/fog.wgsl"),
+    ),
+    (
+        "common/tonemap.wgsl",
+        include_str!("../../../shared/shaders/common/tonemap.wgsl"),
+    ),
+    (
+        "common/sky.wgsl",
+        include_str!("../../../shared/shaders/common/sky.wgsl"),
+    ),
+    (
+        "common/clouds.wgsl",
+        include_str!("../../../shared/shaders/common/clouds.wgsl"),
+    ),
+    (
+        "materials/test_minimal.wgsl",
+        include_str!("../../../shared/shaders/materials/test_minimal.wgsl"),
+    ),
+    (
+        "impulse_field.wgsl",
+        include_str!("../../../shared/shaders/impulse_field.wgsl"),
+    ),
+    (
+        "material_indirection.wgsl",
+        include_str!("../../../shared/shaders/material_indirection.wgsl"),
+    ),
 ];
 
 /// The single shared source resolver for built-in shaders. Phase 1
@@ -36,7 +70,8 @@ pub fn library() -> impl ShaderSource {
 /// draw call.
 pub fn verify_abi_version(expected: u32) -> Result<(), String> {
     let src = library();
-    let body = src.fetch("material_abi.wgsl")
+    let body = src
+        .fetch("material_abi.wgsl")
         .ok_or_else(|| "material_abi.wgsl missing from shader library".to_string())?;
     let actual = super::shader_include::abi_version_of(body);
     if actual != expected {
@@ -88,6 +123,9 @@ mod tests {
         let out = process(&synthetic, "test.wgsl").unwrap();
         assert!(out.contains("struct PerFrame"));
         assert!(out.contains("fn d_ggx"));
+        assert!(out.contains("BLOOM_BOUND_MATERIAL_RECORD_VERSION"));
+        assert!(out.contains("fn bloom_bound_material_lobe_mask"));
+        assert!(out.contains("bitcast<u32>(material.foliage_params.w)"));
         assert!(out.contains("synthesised"));
     }
 
@@ -98,13 +136,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn material_indirection_header_is_baked_for_gpu_driven_passes() {
+        let src = library();
+        let body = src
+            .fetch("material_indirection.wgsl")
+            .expect("global material indirection header must be embedded");
+        assert!(body.contains("fn bloom_material_record"));
+        assert!(body.contains("global_resource_generations"));
+        assert!(body.contains("BLOOM_GLOBAL_MATERIAL_RECORD_VERSION"));
+        assert!(body.contains("fn bloom_global_material_record_version"));
+        assert!(body.contains("fn bloom_global_material_lobe_mask"));
+    }
+
     // EN-015 V1 — imposter helper library is registered and includes
     // cleanly through the preprocessor.
 
     #[test]
     fn imposter_helper_in_library() {
         let src = library();
-        let body = src.fetch("common/imposter.wgsl")
+        let body = src
+            .fetch("common/imposter.wgsl")
             .expect("common/imposter.wgsl must be registered in ENTRIES");
         assert!(body.contains("fn octahedral_encode"));
         assert!(body.contains("fn imposter_atlas_uv"));

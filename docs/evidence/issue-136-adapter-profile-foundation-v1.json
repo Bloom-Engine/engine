@@ -1,0 +1,84 @@
+{
+  "schema": "bloom-adapter-profile-foundation-evidence-v1",
+  "issue": 136,
+  "qualified_revision": "d5504aacf8f1a9a7cd6a6897b56c62308f984cb6",
+  "host": {
+    "architecture": "arm64",
+    "cpu": "Apple M1 Max",
+    "os": "macOS 26.5 (25F71)"
+  },
+  "source": {
+    "path": "embed-perry/bloomFull.png",
+    "sha256": "b6727d85a0793a3434ceb2f012b4df5613a9be51da43afbb960077c281087aa6",
+    "width": 880,
+    "height": 600,
+    "mip_levels": 10
+  },
+  "recipe": {
+    "name": "bloom-texture",
+    "version": 3
+  },
+  "variants": {
+    "portable_high": {
+      "format": "rgba8-unorm-srgb",
+      "bytes": 2815824,
+      "artifact_sha256": "df4aa2a4c036e669c83fd8cdccdc86b161cd6a952a8db5a09eda2a7defcbe8cb",
+      "build_key_sha256": "ea3a75ae47490b0b6e805a6870cfc29febd67e8fafc886c48226b0a329187e60"
+    },
+    "macos_high": {
+      "format": "bc7-rgba-unorm-srgb",
+      "bytes": 705156,
+      "artifact_sha256": "bfdceade7a6be6c8cc59edffa9f7958c6bceeadba96e67ec13152722e3a83a61",
+      "build_key_sha256": "10a24c548c980b9bdaaad0bc1d81e30b840940b2df5a372e137388152c3e44b7"
+    },
+    "distinct_artifacts": true,
+    "distinct_build_keys": true
+  },
+  "index": {
+    "schema": "bloom-asset-index-v2",
+    "sha256": "30e5ea01a53aca09e0ea25ea934211c94fb8286c6cffb6c473da24458ac23b4b",
+    "entries": 2,
+    "profiled_entries": 2,
+    "unique_chunks": 2,
+    "unique_chunk_bytes": 3520980,
+    "inspection": "pass"
+  },
+  "resolution": {
+    "macos_high": {
+      "kind": "exact",
+      "format": "bc7-rgba-unorm-srgb"
+    },
+    "windows_high_with_portable_fallback": {
+      "kind": "fallback",
+      "fallback_rank": 0,
+      "selected_profile": "portable/high",
+      "format": "rgba8-unorm-srgb"
+    }
+  },
+  "runtime_policy": {
+    "desktop_with_bc": "native-platform then portable fallback",
+    "without_bc_or_non_desktop": "portable directly",
+    "post_selection_mutation": "rejected",
+    "structured_report_schema": "bloom-runtime-asset-selection-v1",
+    "qualification": "native pure-policy test"
+  },
+  "qualification": {
+    "cooker_release_tests_passed": 44,
+    "native_release_tests_passed": 475,
+    "native_release_tests_ignored": 1,
+    "cooker_strict_clippy": "pass",
+    "native_ci_clippy_policy": "pass",
+    "format": "pass",
+    "diff_check": "pass",
+    "file_line_gate": {
+      "status": "pre-existing-failures",
+      "unrelated_failures": 5,
+      "changed_files_over_limit": 0
+    }
+  },
+  "scope": {
+    "adapter_profile_foundation": "qualified",
+    "indexed_texture_logical_loading": "not-implemented",
+    "issue_runtime_variant_acceptance": "open"
+  }
+}

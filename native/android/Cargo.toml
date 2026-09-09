@@ -17,8 +17,17 @@ image-extras = ["bloom-shared/image-extras"]
 
 [dependencies]
 bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
+# The define_core_ffi! macro expands to image::open(...) under models3d /
+# image-extras (see shared/src/ffi_core/game_loop.rs), so this crate needs a
+# direct `image` dep just like the macos/ios/linux crates. Matches linux's
+# codec set: HDR env maps + PNG/JPEG textures.
+image = { version = "0.25", default-features = false, features = ["hdr", "png", "jpeg"] }
 raw-window-handle = "0.6"
 wgpu = "29"
 libc = "0.2"
 ndk = "0.9"
 oboe = "0.6"
+# SH-055 diag — route wgpu/naga `log` output (shader-validation errors) to
+# logcat so the Adreno Vulkan material-compile failures are diagnosable.
+log = "0.4"
+android_logger = "0.14"

@@ -1,0 +1,134 @@
+{
+  "schema": "bloom-fractional-native-throughput-evidence-v1",
+  "implementation_commit": "27217f305f0f740c81fd15a663133eabdcc5dc5a",
+  "acceptance_criterion": "render-scale 0.75 temporal reconstruction preserves a performance advantage over otherwise matched native 1.0",
+  "configuration": {
+    "output_extent": [
+      1600,
+      900
+    ],
+    "quality_preset": 4,
+    "taa": true,
+    "fractional_render_scale": 0.75,
+    "native_render_scale": 1.0,
+    "camera_step": 0.002,
+    "pairs": 3,
+    "warmup_frames_per_run": 120,
+    "measured_frames_per_run": 600,
+    "order": [
+      "fractional/native",
+      "native/fractional",
+      "fractional/native"
+    ],
+    "profiler_gpu_readback_serialized": true
+  },
+  "adapter": {
+    "backend": "metal",
+    "name": "Apple M1 Max",
+    "device_type": "integratedgpu",
+    "capability_tier": "modern",
+    "features": [
+      "timestamp-query"
+    ]
+  },
+  "fractional_runs": [
+    {
+      "wall_mean_us": 5636.102521666666,
+      "wall_p50_us": 4894.792,
+      "wall_p95_us": 10111.833,
+      "gpu_mean_us": 5125.10797666666,
+      "gpu_p50_us": 5582.543,
+      "gpu_p95_us": 6083.749,
+      "taa_gpu_mean_us": 1865.5866383333334
+    },
+    {
+      "wall_mean_us": 4900.103151666664,
+      "wall_p50_us": 4719.875,
+      "wall_p95_us": 6331.625,
+      "gpu_mean_us": 5324.781693333334,
+      "gpu_p50_us": 5621.084,
+      "gpu_p95_us": 6115.709,
+      "taa_gpu_mean_us": 1939.1669900000004
+    },
+    {
+      "wall_mean_us": 5851.932099999999,
+      "wall_p50_us": 5004.667,
+      "wall_p95_us": 11572.666000000001,
+      "gpu_mean_us": 5253.940850000005,
+      "gpu_p50_us": 5623.124,
+      "gpu_p95_us": 6088.5,
+      "taa_gpu_mean_us": 1905.372991666667
+    }
+  ],
+  "native_runs": [
+    {
+      "wall_mean_us": 6431.650845000001,
+      "wall_p50_us": 5808.333,
+      "wall_p95_us": 12033.333,
+      "gpu_mean_us": 6510.949683333337,
+      "gpu_p50_us": 7473.625,
+      "gpu_p95_us": 8025.9169999999995,
+      "taa_gpu_mean_us": 2384.8396550000007
+    },
+    {
+      "wall_mean_us": 6092.545904999999,
+      "wall_p50_us": 5881.084,
+      "wall_p95_us": 8356.125,
+      "gpu_mean_us": 6884.91705666667,
+      "gpu_p50_us": 7565.668,
+      "gpu_p95_us": 8117.291000000001,
+      "taa_gpu_mean_us": 2520.582016666667
+    },
+    {
+      "wall_mean_us": 6618.15460333334,
+      "wall_p50_us": 5892.75,
+      "wall_p95_us": 12384.417,
+      "gpu_mean_us": 6815.749801666664,
+      "gpu_p50_us": 7575.791,
+      "gpu_p95_us": 8169.25,
+      "taa_gpu_mean_us": 2491.189108333333
+    }
+  ],
+  "summary": {
+    "fractional_wall_median_us": 5636.102521666666,
+    "native_wall_median_us": 6431.650845000001,
+    "wall_advantage": 0.12369271008419225,
+    "fractional_gpu_median_us": 5253.940850000005,
+    "native_gpu_median_us": 6815.749801666664,
+    "gpu_advantage": 0.22914704869077607
+  },
+  "limits": {
+    "min_wall_advantage": 0.05,
+    "min_gpu_advantage": 0.05
+  },
+  "independent_repeat": {
+    "commit": "e3b9446d115b1160721581b29bccefc35b34c260",
+    "wall_advantage": 0.09693451619141125,
+    "gpu_advantage": 0.23341784460928872,
+    "passed": true
+  },
+  "steady_state_resources": {
+    "bind_group_creations": 0,
+    "graph_compiles": 0,
+    "first_use_pipeline_creations": 0,
+    "transient_physical_texture_creations": 0,
+    "transient_physical_buffer_creations": 0,
+    "command_encoder_creations_per_frame": 1
+  },
+  "validation": {
+    "quality_preset_gpu_tests_passed": 11,
+    "quality_preset_gpu_tests_failed": 0,
+    "quality_preset_profile_tests_ignored": 2,
+    "quality_contract_python_tests_passed": 47,
+    "bloom_diff_tests_passed": 3,
+    "cooker_tests_passed": 48,
+    "rust_1_98_clippy_passed": true,
+    "workflow_lint_passed": true,
+    "ci_contract_passed": true
+  },
+  "production_renderer_changed": false,
+  "passed": true,
+  "metal_criterion_satisfied": true,
+  "vulkan_criterion_satisfied": false,
+  "parent_issue_closed": false
+}

@@ -1,0 +1,7 @@
+self-hosted-runner:
+  labels:
+    - bloom-quality
+    - apple-m1-max
+    - nvidia-rtx4080
+
+config-variables: null

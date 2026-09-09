@@ -250,7 +250,11 @@ mod tests {
         let p = alloc_perry_string("abc");
         let payload_end = std::mem::size_of::<StringHeader>() + 3;
         for i in 0..TAIL_PAD {
-            assert_eq!(unsafe { *p.add(payload_end + i) }, 0, "pad byte {i} not zero");
+            assert_eq!(
+                unsafe { *p.add(payload_end + i) },
+                0,
+                "pad byte {i} not zero"
+            );
         }
     }
 

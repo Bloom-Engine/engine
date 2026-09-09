@@ -3,7 +3,7 @@
 //! draws per tile. Split from material_system.rs (2000-line file
 //! policy).
 
-use super::material_system::{MaterialSystem, InstanceBuffer, InstanceTile};
+use super::material_system::{InstanceBuffer, InstanceTile, MaterialSystem};
 
 impl MaterialSystem {
     /// EN-001 — create a persistent instance buffer from CPU-side
@@ -37,10 +37,18 @@ impl MaterialSystem {
             let mut xz_max = [f32::MIN; 2];
             for i in 0..count {
                 let p = &raw[i * 9..i * 9 + 3];
-                if p[0] < xz_min[0] { xz_min[0] = p[0]; }
-                if p[0] > xz_max[0] { xz_max[0] = p[0]; }
-                if p[2] < xz_min[1] { xz_min[1] = p[2]; }
-                if p[2] > xz_max[1] { xz_max[1] = p[2]; }
+                if p[0] < xz_min[0] {
+                    xz_min[0] = p[0];
+                }
+                if p[0] > xz_max[0] {
+                    xz_max[0] = p[0];
+                }
+                if p[2] < xz_min[1] {
+                    xz_min[1] = p[2];
+                }
+                if p[2] > xz_max[1] {
+                    xz_max[1] = p[2];
+                }
             }
             let grid = ((count as f32 / TILE_TARGET as f32).sqrt().ceil() as usize).max(1);
             let ext_x = (xz_max[0] - xz_min[0]).max(1e-3);
@@ -57,17 +65,25 @@ impl MaterialSystem {
             while start < count {
                 let cell = cell_of(order[start]);
                 let mut end = start + 1;
-                while end < count && cell_of(order[end]) == cell { end += 1; }
+                while end < count && cell_of(order[end]) == cell {
+                    end += 1;
+                }
                 let mut pmin = [f32::MAX; 3];
                 let mut pmax = [f32::MIN; 3];
                 let mut max_scale = 0.0f32;
                 for &i in &order[start..end] {
                     let inst = &raw[i * 9..i * 9 + 9];
                     for a in 0..3 {
-                        if inst[a] < pmin[a] { pmin[a] = inst[a]; }
-                        if inst[a] > pmax[a] { pmax[a] = inst[a]; }
+                        if inst[a] < pmin[a] {
+                            pmin[a] = inst[a];
+                        }
+                        if inst[a] > pmax[a] {
+                            pmax[a] = inst[a];
+                        }
                     }
-                    if inst[4].abs() > max_scale { max_scale = inst[4].abs(); }
+                    if inst[4].abs() > max_scale {
+                        max_scale = inst[4].abs();
+                    }
                 }
                 tiles.push(InstanceTile {
                     first: start as u32,
@@ -83,11 +99,11 @@ impl MaterialSystem {
         let mut packed: Vec<f32> = Vec::with_capacity(count * 12);
         for &i in order.iter() {
             let off = i * 9;
-            packed.extend_from_slice(&raw[off..off + 3]);     // pos.xyz
-            packed.push(raw[off + 3]);                        // rot_y
-            packed.push(raw[off + 4]);                        // scale
+            packed.extend_from_slice(&raw[off..off + 3]); // pos.xyz
+            packed.push(raw[off + 3]); // rot_y
+            packed.push(raw[off + 4]); // scale
             packed.extend_from_slice(&raw[off + 5..off + 9]); // tint.rgba
-            packed.extend_from_slice(&[0.0, 0.0, 0.0]);       // pad to 48 bytes
+            packed.extend_from_slice(&[0.0, 0.0, 0.0]); // pad to 48 bytes
         }
         let size = (packed.len() * std::mem::size_of::<f32>()) as u64;
         // Empty buffers can't be created (size 0 is invalid in wgpu).
@@ -119,11 +135,7 @@ impl MaterialSystem {
     /// and would have to be re-tiled (a sort) each time. Here the caller
     /// simply writes the live prefix of the buffer and draws that many
     /// instances.
-    pub fn create_dynamic_instance_buffer(
-        &mut self,
-        device: &wgpu::Device,
-        capacity: u32,
-    ) -> u32 {
+    pub fn create_dynamic_instance_buffer(&mut self, device: &wgpu::Device, capacity: u32) -> u32 {
         let size = (capacity.max(1) as u64) * 48;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dynamic_instance_buffer"),
@@ -150,11 +162,17 @@ impl MaterialSystem {
         packed: &[f32],
         count: u32,
     ) {
-        if handle == 0 || count == 0 { return; }
+        if handle == 0 || count == 0 {
+            return;
+        }
         let idx = handle as usize - 1;
-        let Some(Some(ib)) = self.instance_buffers.get(idx) else { return };
+        let Some(Some(ib)) = self.instance_buffers.get(idx) else {
+            return;
+        };
         let n = (count as usize).min(packed.len() / 12);
-        if n == 0 { return; }
+        if n == 0 {
+            return;
+        }
         queue.write_buffer(&ib.buffer, 0, bytemuck::cast_slice(&packed[..n * 12]));
     }
 
@@ -162,7 +180,9 @@ impl MaterialSystem {
     /// `None` so previously-issued handles never alias a future
     /// allocation. No-op for `handle == 0` or out-of-range handles.
     pub fn destroy_instance_buffer(&mut self, handle: u32) {
-        if handle == 0 { return; }
+        if handle == 0 {
+            return;
+        }
         let idx = handle as usize - 1;
         if idx < self.instance_buffers.len() {
             self.instance_buffers[idx] = None;

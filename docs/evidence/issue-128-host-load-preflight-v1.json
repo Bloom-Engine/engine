@@ -1,0 +1,56 @@
+{
+  "schema": "bloom-issue-128-host-load-preflight-v1",
+  "issues": [128],
+  "qualification_date": "2026-09-06",
+  "base_revision": "d15a207f7d2a294b3ba5683f88bd2abf2827b4af",
+  "change_scope": "quality-orchestration-only",
+  "renderer_code_changed": false,
+  "measurement_contract": {
+    "schema": "bloom-quality-host-preflight-v1",
+    "max_host_cpu_fraction": 0.2,
+    "max_host_process_cpu_percent": 75.0,
+    "required_consecutive_samples": 3,
+    "sample_interval_seconds": 2.0,
+    "default_timeout_seconds": 120.0,
+    "busy_exit_code": 3,
+    "preflight_artifact": "host-preflight.json",
+    "postflight_artifact": "host-postflight.json",
+    "hard_budget_comparison_suppressed_when_postflight_busy": true
+  },
+  "unchanged": [
+    "scene quality settings",
+    "warm-up frames",
+    "measured frames",
+    "visual thresholds",
+    "CPU budgets",
+    "GPU budgets",
+    "VRAM budgets"
+  ],
+  "live_busy_host_control": {
+    "adapter_host": "Apple M1 Max",
+    "exit_code": 3,
+    "capture_started": false,
+    "aggregate_cpu_fraction": 0.9042,
+    "aggregate_cpu_percent": 90.42,
+    "one_minute_load_average": 191.44,
+    "artifact_sha256": "e29fd42a9d1bc5715e3364a31e61a185df50020b781fcb2154c25a25583fbd73",
+    "classification": "retry-when-idle"
+  },
+  "verification": {
+    "quality_contract": {
+      "passed": true,
+      "python_tests": 51,
+      "bloom_diff_tests": 3,
+      "bloom_cook_tests": 48
+    },
+    "manifest_assets_and_approved_baselines": {
+      "passed": true,
+      "cases": 9,
+      "manifest_sha256": "1ecd197e88c44b24c2c5ac58c1e070ecfa1e93de25eca224feef82426b32de14"
+    },
+    "shell_syntax": true,
+    "python_compile": true,
+    "git_diff_check": true
+  },
+  "remaining_gate": "strict full Apple M1 Max Metal run after host preflight passes"
+}

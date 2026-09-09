@@ -8,10 +8,15 @@ description = "Reference CPU path tracer for the Bloom renderer. Produces ground
 name = "bloom-reference"
 path = "src/main.rs"
 
+[[bin]]
+name = "bloom-brdf-reference"
+path = "src/brdf_reference.rs"
+
 [dependencies]
 gltf = "1.4"
 image = "0.25"
 glam = "0.30"
+half = "2.6"
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,0 +1,119 @@
+{
+  "schema": "bloom-quality-preset-evidence-v1",
+  "issue": 56,
+  "comparison_base": "30a3493",
+  "qualified_revision": "d2c2939",
+  "adapter": "Apple M1 Max",
+  "backend": "Metal",
+  "visual": {
+    "legacy_half_scale_detail_energy": 3.7882,
+    "default_075_detail_energy": 4.9969,
+    "ultra_native_detail_energy": 4.7173,
+    "legacy_half_to_native_mean_difference": 2.1083,
+    "default_075_to_native_mean_difference": 1.3781
+  },
+  "matched_performance": {
+    "resolution": [1920, 1080],
+    "quality_preset": 4,
+    "render_scale": 0.5,
+    "warmup_frames": 300,
+    "measured_frames": 900,
+    "alternating_runs_per_revision": 4,
+    "before": {
+      "render_submit_mean_ms": [2.201955, 2.217295, 2.230422, 2.208373],
+      "render_submit_p50_ms": [2.423209, 2.439500, 2.441209, 2.462708],
+      "render_submit_p95_ms": [2.711125, 2.735000, 2.767875, 2.814584],
+      "render_submit_p99_ms": [2.906875, 3.269041, 3.744833, 3.238792],
+      "prepare_mean_ms": [0.044282, 0.044905, 0.045262, 0.049310]
+    },
+    "after": {
+      "render_submit_mean_ms": [2.220145, 2.206539, 2.207559, 2.212751],
+      "render_submit_p50_ms": [2.432000, 2.425000, 2.423459, 2.411917],
+      "render_submit_p95_ms": [2.749875, 2.676208, 2.705042, 2.684750],
+      "render_submit_p99_ms": [3.708583, 2.887208, 2.910584, 2.822917],
+      "prepare_mean_ms": [0.044971, 0.043514, 0.044187, 0.041972]
+    },
+    "steady_upload_bytes_per_frame_before": 23264,
+    "steady_upload_bytes_per_frame_after": 23264
+  },
+  "tier_budget_1080p": [
+    {
+      "preset": 0,
+      "render_scale": 0.50,
+      "render_extent": [960, 540],
+      "render_pixels": 518400,
+      "graph_passes": 11,
+      "render_submit_mean_ms": 0.668259,
+      "render_submit_p50_ms": 0.269375,
+      "render_submit_p95_ms": 1.814792
+    },
+    {
+      "preset": 1,
+      "render_scale": 0.67,
+      "render_extent": [1286, 724],
+      "render_pixels": 931064,
+      "graph_passes": 12,
+      "render_submit_mean_ms": 0.943018,
+      "render_submit_p50_ms": 0.553291,
+      "render_submit_p95_ms": 2.206416
+    },
+    {
+      "preset": 2,
+      "render_scale": 0.75,
+      "render_extent": [1440, 810],
+      "render_pixels": 1166400,
+      "graph_passes": 15,
+      "render_submit_mean_ms": 2.428378,
+      "render_submit_p50_ms": 2.557875,
+      "render_submit_p95_ms": 4.268500
+    },
+    {
+      "preset": 3,
+      "render_scale": 0.85,
+      "render_extent": [1632, 918],
+      "render_pixels": 1498176,
+      "graph_passes": 24,
+      "render_submit_mean_ms": 3.260070,
+      "render_submit_p50_ms": 3.019083,
+      "render_submit_p95_ms": 4.679166
+    },
+    {
+      "preset": 4,
+      "render_scale": 1.00,
+      "render_extent": [1920, 1080],
+      "render_pixels": 2073600,
+      "graph_passes": 24,
+      "render_submit_mean_ms": 4.409377,
+      "render_submit_p50_ms": 4.425542,
+      "render_submit_p95_ms": 5.871292
+    }
+  ],
+  "resources": {
+    "new_persistent_images": 0,
+    "new_persistent_buffers": 0,
+    "new_history_images": 0,
+    "new_render_passes_at_matched_settings": 0,
+    "new_upload_bytes_per_frame": 0,
+    "cas_pass_enabled_by_any_preset": false,
+    "tracked_frame_cpu_capacity_bytes_all_tiers": 1918560
+  },
+  "regression_qualification": {
+    "lane": "quick",
+    "status": "pass",
+    "unit_tests_passed": 325,
+    "unit_tests_ignored": 1,
+    "gpu_goldens_passed": 57,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "thresholds_changed": false,
+    "golden_references_changed": false,
+    "completed_components": [
+      "contracts",
+      "lint",
+      "shared-tests",
+      "wasm-check",
+      "quality-contract",
+      "example-inventory"
+    ]
+  }
+}

@@ -19,12 +19,13 @@
 //! samples, not a tree) — post-FX passes are already flat and a tree
 //! would be overkill for a first pass.
 
-#[cfg(feature = "web")]
-use web_time::Instant;
 #[cfg(not(feature = "web"))]
 use std::time::Instant;
+#[cfg(feature = "web")]
+use web_time::Instant;
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 const ROLLING_FRAMES: usize = 120;
 const MAX_GPU_PAIRS: u32 = 32;
@@ -82,23 +83,91 @@ struct RollingStats {
     last_frame: u64,
 }
 
+#[derive(Clone, Copy)]
+struct QualityStats {
+    mean: f64,
+    p50: f64,
+    p95: f64,
+    max: f64,
+}
+
+fn quality_stats_ms(values_us: impl Iterator<Item = f64>) -> QualityStats {
+    let mut values: Vec<f64> = values_us
+        .map(|v| if v.is_finite() { v / 1000.0 } else { 0.0 })
+        .collect();
+    if values.is_empty() {
+        return QualityStats {
+            mean: 0.0,
+            p50: 0.0,
+            p95: 0.0,
+            max: 0.0,
+        };
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let p50 = values[((values.len() - 1) as f64 * 0.50).floor() as usize];
+    let p95 = values[((values.len() - 1) as f64 * 0.95).ceil() as usize];
+    QualityStats {
+        mean,
+        p50,
+        p95,
+        max: *values.last().unwrap_or(&0.0),
+    }
+}
+fn push_json_string(out: &mut String, value: &str) {
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(
+                    out,
+                    "\\u{:04x
+        }",
+                    c as u32
+                );
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
 impl RollingStats {
     fn new() -> Self {
-        Self { cpu: [0.0; ROLLING_FRAMES], gpu: [0.0; ROLLING_FRAMES], has_gpu: false, idx: 0, filled: 0, last_frame: 0 }
+        Self {
+            cpu: [0.0; ROLLING_FRAMES],
+            gpu: [0.0; ROLLING_FRAMES],
+            has_gpu: false,
+            idx: 0,
+            filled: 0,
+            last_frame: 0,
+        }
     }
     fn push(&mut self, cpu: f64, gpu: Option<f64>) {
         self.cpu[self.idx] = cpu;
-        if let Some(g) = gpu { self.gpu[self.idx] = g; self.has_gpu = true; }
+        if let Some(g) = gpu {
+            self.gpu[self.idx] = g;
+            self.has_gpu = true;
+        }
         self.idx = (self.idx + 1) % ROLLING_FRAMES;
         self.filled = (self.filled + 1).min(ROLLING_FRAMES);
     }
     fn avg_cpu(&self) -> f64 {
-        if self.filled == 0 { return 0.0; }
+        if self.filled == 0 {
+            return 0.0;
+        }
         let sum: f64 = self.cpu.iter().take(self.filled).sum();
         sum / self.filled as f64
     }
     fn avg_gpu(&self) -> Option<f64> {
-        if !self.has_gpu || self.filled == 0 { return None; }
+        if !self.has_gpu || self.filled == 0 {
+            return None;
+        }
         let sum: f64 = self.gpu.iter().take(self.filled).sum();
         Some(sum / self.filled as f64)
     }
@@ -172,19 +241,35 @@ impl Profiler {
         }
         self.enabled = on;
     }
-    pub fn is_enabled(&self) -> bool { self.enabled }
-    pub fn has_gpu(&self) -> bool { self.gpu_enabled }
-
-    pub fn begin(&mut self, label: &'static str) {
-        if !self.enabled { return; }
-        self.open_cpu.insert(label, CpuSample { start: Instant::now() });
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+    pub fn has_gpu(&self) -> bool {
+        self.gpu_enabled
     }
 
+    pub fn begin(&mut self, label: &'static str) {
+        if !self.enabled {
+            return;
+        }
+        self.open_cpu.insert(
+            label,
+            CpuSample {
+                start: Instant::now(),
+            },
+        );
+    }
     pub fn end(&mut self, label: &'static str) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
         if let Some(s) = self.open_cpu.remove(label) {
             let us = s.start.elapsed().as_secs_f64() * 1_000_000.0;
-            self.frame.push(FrameSample { label, cpu_us: us, gpu_us: None });
+            self.frame.push(FrameSample {
+                label,
+                cpu_us: us,
+                gpu_us: None,
+            });
         }
     }
 
@@ -193,7 +278,9 @@ impl Profiler {
     /// `RenderPassTimestampWrites` for the pass descriptor. Returns None
     /// when profiling or GPU queries are disabled, or when no slots remain.
     pub fn reserve_gpu_pair(&mut self, label: &'static str) -> Option<(u32, u32)> {
-        if !self.enabled || !self.gpu_enabled { return None; }
+        if !self.enabled || !self.gpu_enabled {
+            return None;
+        }
         self.query_set.as_ref()?;
         if self.next_query + 2 > MAX_GPU_PAIRS * 2 {
             if !self.budget_warned {
@@ -219,7 +306,10 @@ impl Profiler {
     /// Convenience: build a `RenderPassTimestampWrites` for a pass in one call.
     /// Returns None when GPU queries are disabled — the caller should plug
     /// the returned `Option` straight into `RenderPassDescriptor.timestamp_writes`.
-    pub fn pass_timestamp_writes(&mut self, label: &'static str) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+    pub fn pass_timestamp_writes(
+        &mut self,
+        label: &'static str,
+    ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
         let (b, e) = self.reserve_gpu_pair(label)?;
         let qs = self.query_set.as_ref()?;
         Some(wgpu::RenderPassTimestampWrites {
@@ -230,7 +320,10 @@ impl Profiler {
     }
 
     /// Same as `pass_timestamp_writes` but for a compute pass descriptor.
-    pub fn compute_pass_timestamp_writes(&mut self, label: &'static str) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+    pub fn compute_pass_timestamp_writes(
+        &mut self,
+        label: &'static str,
+    ) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
         let (b, e) = self.reserve_gpu_pair(label)?;
         let qs = self.query_set.as_ref()?;
         Some(wgpu::ComputePassTimestampWrites {
@@ -243,8 +336,12 @@ impl Profiler {
     /// Resolve any pending GPU queries into the readback buffer. Call once
     /// per frame, after all passes are encoded and before submit.
     pub fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        if !self.enabled || !self.gpu_enabled || self.next_query == 0 { return; }
-        let (Some(qs), Some(resolve)) = (&self.query_set, &self.resolve_buffer) else { return; };
+        if !self.enabled || !self.gpu_enabled || self.next_query == 0 {
+            return;
+        }
+        let (Some(qs), Some(resolve)) = (&self.query_set, &self.resolve_buffer) else {
+            return;
+        };
         encoder.resolve_query_set(qs, 0..self.next_query, resolve, 0);
         if let Some(readback) = &self.readback_buffer {
             let byte_count = (self.next_query as u64) * 8;
@@ -271,7 +368,10 @@ impl Profiler {
                 let byte_count = (self.next_query as u64) * 8;
                 let slice = readback.slice(0..byte_count);
                 slice.map_async(wgpu::MapMode::Read, |_| {});
-                let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                let _ = device.poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                });
                 let data = slice.get_mapped_range().to_vec();
                 readback.unmap();
                 let period = self.timestamp_period_ns as f64;
@@ -279,19 +379,29 @@ impl Profiler {
                 for (label, b, e) in &self.pending_gpu {
                     let bo = (*b as usize) * 8;
                     let eo = (*e as usize) * 8;
-                    if eo + 8 > data.len() { continue; }
-                    let bt = u64::from_le_bytes(data[bo..bo+8].try_into().unwrap());
-                    let et = u64::from_le_bytes(data[eo..eo+8].try_into().unwrap());
-                    if et <= bt { continue; }
+                    if eo + 8 > data.len() {
+                        continue;
+                    }
+                    let bt = u64::from_le_bytes(data[bo..bo + 8].try_into().unwrap());
+                    let et = u64::from_le_bytes(data[eo..eo + 8].try_into().unwrap());
+                    if et <= bt {
+                        continue;
+                    }
                     let us = (et - bt) as f64 * period / 1000.0;
                     *by_label.entry(*label).or_insert(0.0) += us;
                 }
                 for s in self.frame.iter_mut() {
-                    if let Some(us) = by_label.remove(s.label) { s.gpu_us = Some(us); }
+                    if let Some(us) = by_label.remove(s.label) {
+                        s.gpu_us = Some(us);
+                    }
                 }
                 // GPU samples without a CPU counterpart — record them too.
                 for (label, us) in by_label {
-                    self.frame.push(FrameSample { label, cpu_us: 0.0, gpu_us: Some(us) });
+                    self.frame.push(FrameSample {
+                        label,
+                        cpu_us: 0.0,
+                        gpu_us: Some(us),
+                    });
                 }
             }
         }
@@ -311,7 +421,9 @@ impl Profiler {
         let mut frame_gpu = 0.0;
         for s in &self.frame {
             frame_cpu += s.cpu_us;
-            if let Some(g) = s.gpu_us { frame_gpu += g; }
+            if let Some(g) = s.gpu_us {
+                frame_gpu += g;
+            }
         }
         self.frame_total_cpu_us[self.histogram_idx] = frame_cpu;
         self.frame_total_gpu_us[self.histogram_idx] = frame_gpu;
@@ -320,13 +432,17 @@ impl Profiler {
 
         let fc = self.frame_count;
         for s in self.frame.drain(..) {
-            let entry = self.rolling.entry(s.label).or_insert_with(RollingStats::new);
+            let entry = self
+                .rolling
+                .entry(s.label)
+                .or_insert_with(RollingStats::new);
             entry.push(s.cpu_us, s.gpu_us);
             entry.last_frame = fc;
         }
         // Drop entries that have not reported for several windows so a
         // disabled feature's passes leave the map instead of lingering.
-        self.rolling.retain(|_, s| fc.saturating_sub(s.last_frame) <= (4 * ROLLING_FRAMES) as u64);
+        self.rolling
+            .retain(|_, s| fc.saturating_sub(s.last_frame) <= (4 * ROLLING_FRAMES) as u64);
         self.open_cpu.clear();
         self.next_query = 0;
         self.pending_gpu.clear();
@@ -338,8 +454,14 @@ impl Profiler {
     /// first, exactly `ROLLING_FRAMES.min(filled)` entries long.
     pub fn frame_history(&self) -> Vec<(f64, f64)> {
         let n = self.histogram_filled;
-        if n == 0 { return Vec::new(); }
-        let start = if n < ROLLING_FRAMES { 0 } else { self.histogram_idx };
+        if n == 0 {
+            return Vec::new();
+        }
+        let start = if n < ROLLING_FRAMES {
+            0
+        } else {
+            self.histogram_idx
+        };
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             let idx = (start + i) % ROLLING_FRAMES;
@@ -353,22 +475,36 @@ impl Profiler {
             return String::from("profiler: disabled\n");
         }
         let fc = self.frame_count;
-        let mut entries: Vec<(&&str, &RollingStats)> = self.rolling.iter()
+        let mut entries: Vec<(&&str, &RollingStats)> = self
+            .rolling
+            .iter()
             .filter(|(_, s)| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
             .map(|(k, v)| (k, v))
             .collect();
-        entries.sort_by(|a, b| b.1.avg_cpu().partial_cmp(&a.1.avg_cpu()).unwrap_or(std::cmp::Ordering::Equal));
+        entries.sort_by(|a, b| {
+            b.1.avg_cpu()
+                .partial_cmp(&a.1.avg_cpu())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut out = String::new();
         out.push_str(&format!(
             "profiler (avg over last {} frames, gpu={}):\n",
-            ROLLING_FRAMES.min(entries.first().map(|(_,s)| s.filled).unwrap_or(0)),
+            ROLLING_FRAMES.min(entries.first().map(|(_, s)| s.filled).unwrap_or(0)),
             if self.gpu_enabled { "yes" } else { "no" },
         ));
         out.push_str("  phase                         cpu us     gpu us\n");
         for (label, stats) in entries {
-            let gpu = stats.avg_gpu().map(|v| format!("{:>9.1}", v)).unwrap_or_else(|| "        -".to_string());
-            out.push_str(&format!("  {:<28} {:>9.1}   {}\n", label, stats.avg_cpu(), gpu));
+            let gpu = stats
+                .avg_gpu()
+                .map(|v| format!("{:>9.1}", v))
+                .unwrap_or_else(|| "        -".to_string());
+            out.push_str(&format!(
+                "  {:<28} {:>9.1}   {}\n",
+                label,
+                stats.avg_cpu(),
+                gpu
+            ));
         }
         out
     }
@@ -377,17 +513,21 @@ impl Profiler {
     /// all phases). Useful for a single headline number.
     pub fn avg_frame_cpu_us(&self) -> f64 {
         let fc = self.frame_count;
-        self.rolling.values()
+        self.rolling
+            .values()
             .filter(|s| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
-            .map(|s| s.avg_cpu()).sum()
+            .map(|s| s.avg_cpu())
+            .sum()
     }
 
     /// Average total GPU frame time where available.
     pub fn avg_frame_gpu_us(&self) -> f64 {
         let fc = self.frame_count;
-        self.rolling.values()
+        self.rolling
+            .values()
             .filter(|s| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
-            .filter_map(|s| s.avg_gpu()).sum()
+            .filter_map(|s| s.avg_gpu())
+            .sum()
     }
 
     /// Snapshot the rolling averages in a stable, CPU-time-descending
@@ -396,12 +536,110 @@ impl Profiler {
     /// order would jitter the overlay otherwise.
     pub fn snapshot(&mut self) -> Vec<(&'static str, f64, Option<f64>)> {
         let fc = self.frame_count;
-        let mut v: Vec<(&'static str, f64, Option<f64>)> = self.rolling.iter()
+        let mut v: Vec<(&'static str, f64, Option<f64>)> = self
+            .rolling
+            .iter()
             .filter(|(_, s)| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
             .map(|(k, s)| (*k, s.avg_cpu(), s.avg_gpu()))
             .collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         v
+    }
+
+    /// Serialize the deterministic qualification snapshot natively.
+    ///
+    /// Perry 0.5.x is intentionally kept out of this aggregation path:
+    /// constructing and sorting nested TS arrays after a long render can
+    /// corrupt a method receiver in its native-call trampoline. The report
+    /// is written after the measured window, so this has no benchmark cost.
+    pub fn quality_report_json(
+        &mut self,
+        present_mode: u32,
+        warmup_frames: u32,
+        measured_frames: u32,
+        fixed_timestep: f64,
+        quality_preset: u32,
+        render_scale: f64,
+        measurement_wall_ms: f64,
+        adapter_json: &str,
+        runtime_paths_json: &str,
+    ) -> String {
+        let history = self.frame_history();
+        let cpu = quality_stats_ms(history.iter().map(|(cpu, _)| *cpu));
+        let gpu = quality_stats_ms(history.iter().map(|(_, gpu)| *gpu));
+        let rows = self.snapshot();
+        let gpu_timestamps = rows.iter().any(|(_, _, gpu)| gpu.is_some());
+        let mode_name = match present_mode {
+            0 => "fifo",
+            1 => "mailbox",
+            2 => "immediate",
+            3 => "auto-no-vsync",
+            4 => "fifo-relaxed",
+            5 => "auto-vsync",
+            _ => "unknown",
+        };
+        let uncapped = matches!(present_mode, 1 | 2 | 3);
+        let measured_frames = measured_frames.max(1);
+        let wall_ms = if measurement_wall_ms.is_finite() {
+            measurement_wall_ms.max(0.0)
+        } else {
+            0.0
+        };
+
+        let mut out = String::with_capacity(4096);
+        let _ = writeln!(out, "{{");
+        let _ = writeln!(out, "  \"schema\":\"bloom-quality-telemetry-v1\",");
+        let _ = writeln!(out, "  \"adapter\":{adapter_json},");
+        let _ = writeln!(out, "  \"renderer_paths\":{runtime_paths_json},");
+        let _ = writeln!(out, "  \"present_mode\":\"{mode_name}\",");
+        let _ = writeln!(out, "  \"present_mode_code\":{present_mode},");
+        let _ = writeln!(out, "  \"uncapped\":{uncapped},");
+        let _ = writeln!(out, "  \"warmup_excluded\":true,");
+        let _ = writeln!(out, "  \"shader_compilation_excluded\":true,");
+        let _ = writeln!(out, "  \"warmup_frames\":{warmup_frames},");
+        let _ = writeln!(out, "  \"measured_frames\":{measured_frames},");
+        let _ = writeln!(out, "  \"fixed_timestep\":{fixed_timestep:.9},");
+        let _ = writeln!(out, "  \"quality_preset\":{quality_preset},");
+        let _ = writeln!(out, "  \"render_scale\":{render_scale:.6},");
+        let _ = writeln!(out, "  \"measurement_wall_ms\":{wall_ms:.6},");
+        let _ = writeln!(
+            out,
+            "  \"wall_frame_mean_ms\":{:.6},",
+            wall_ms / measured_frames as f64
+        );
+        let _ = writeln!(out, "  \"cpu_frame_mean_ms\":{:.6},", cpu.mean);
+        let _ = writeln!(out, "  \"cpu_frame_p50_ms\":{:.6},", cpu.p50);
+        let _ = writeln!(out, "  \"cpu_frame_p95_ms\":{:.6},", cpu.p95);
+        let _ = writeln!(out, "  \"cpu_frame_max_ms\":{:.6},", cpu.max);
+        let _ = writeln!(out, "  \"gpu_frame_mean_ms\":{:.6},", gpu.mean);
+        let _ = writeln!(out, "  \"gpu_frame_p50_ms\":{:.6},", gpu.p50);
+        let _ = writeln!(out, "  \"gpu_frame_p95_ms\":{:.6},", gpu.p95);
+        let _ = writeln!(out, "  \"gpu_frame_max_ms\":{:.6},", gpu.max);
+        let _ = writeln!(out, "  \"gpu_timestamps_available\":{gpu_timestamps},");
+        let _ = writeln!(out, "  \"vram_peak_mb\":null,");
+        out.push_str("  \"passes\":[");
+        for (i, (label, cpu_us, gpu_us)) in rows.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"label\":");
+            push_json_string(&mut out, label);
+            let cpu_ms = if cpu_us.is_finite() {
+                *cpu_us / 1000.0
+            } else {
+                0.0
+            };
+            let _ = write!(out, ",\"cpu_mean_ms\":{cpu_ms:.6},\"gpu_mean_ms\":");
+            match gpu_us {
+                Some(gpu_us) if gpu_us.is_finite() => {
+                    let _ = write!(out, "{:.6}", gpu_us / 1000.0);
+                }
+                _ => out.push_str("null"),
+            }
+            out.push('}');
+        }
+        out.push_str("]\n}\n");
+        out
     }
 }
 
@@ -414,7 +652,11 @@ mod tests {
     /// sample with the given cpu_us so the histogram totals are
     /// known.
     fn fake_frame(p: &mut Profiler, cpu_us: f64) {
-        p.frame.push(FrameSample { label: "fake", cpu_us, gpu_us: None });
+        p.frame.push(FrameSample {
+            label: "fake",
+            cpu_us,
+            gpu_us: None,
+        });
         // Skip the gpu readback path (no device available) and go
         // straight to the CPU-only histogram + drain path.
         p.frame_end_cpu();
@@ -445,17 +687,28 @@ mod tests {
         let mut p = Profiler::new();
         p.set_enabled(true);
         // One label reports once, another keeps reporting.
-        p.frame.push(FrameSample { label: "once", cpu_us: 5.0, gpu_us: None });
+        p.frame.push(FrameSample {
+            label: "once",
+            cpu_us: 5.0,
+            gpu_us: None,
+        });
         p.frame_end_cpu();
-        for _ in 0..(ROLLING_FRAMES + 1) { fake_frame(&mut p, 1.0); }
+        for _ in 0..(ROLLING_FRAMES + 1) {
+            fake_frame(&mut p, 1.0);
+        }
         let snap = p.snapshot();
         assert!(snap.iter().any(|(l, _, _)| *l == "fake"));
         assert!(
             !snap.iter().any(|(l, _, _)| *l == "once"),
             "a pass that stopped reporting must leave the snapshot"
         );
-        for _ in 0..(4 * ROLLING_FRAMES) { fake_frame(&mut p, 1.0); }
-        assert!(!p.rolling.contains_key("once"), "stale label must eventually evict");
+        for _ in 0..(4 * ROLLING_FRAMES) {
+            fake_frame(&mut p, 1.0);
+        }
+        assert!(
+            !p.rolling.contains_key("once"),
+            "stale label must eventually evict"
+        );
     }
 
     #[test]
@@ -466,8 +719,14 @@ mod tests {
         assert!(!p.frame_history().is_empty());
         p.set_enabled(false);
         p.set_enabled(true);
-        assert!(p.frame_history().is_empty(), "histogram must clear on re-enable");
-        assert!(p.snapshot().is_empty(), "rolling stats must clear on re-enable");
+        assert!(
+            p.frame_history().is_empty(),
+            "histogram must clear on re-enable"
+        );
+        assert!(
+            p.snapshot().is_empty(),
+            "rolling stats must clear on re-enable"
+        );
     }
 
     #[test]
@@ -488,5 +747,33 @@ mod tests {
         for w in h.windows(2) {
             assert!(w[0].0 < w[1].0, "history must be in chronological order");
         }
+    }
+
+    #[test]
+    fn quality_report_is_valid_shape_and_uses_milliseconds() {
+        let mut p = Profiler::new();
+        fake_frame(&mut p, 1_000.0);
+        fake_frame(&mut p, 3_000.0);
+
+        let report = p.quality_report_json(
+            3,
+            60,
+            2,
+            1.0 / 60.0,
+            3,
+            1.0,
+            8.0,
+            "{\"availability\":\"test\"}",
+            "{\"ssgi_trace_backend\":\"test\"}",
+        );
+        assert!(report.starts_with("{\n"));
+        assert!(report.ends_with("}\n"));
+        assert!(report.contains("\"adapter\":{\"availability\":\"test\"}"));
+        assert!(report.contains("\"present_mode\":\"auto-no-vsync\""));
+        assert!(report.contains("\"uncapped\":true"));
+        assert!(report.contains("\"cpu_frame_mean_ms\":2.000000"));
+        assert!(report.contains("\"cpu_frame_p95_ms\":3.000000"));
+        assert!(report.contains("\"wall_frame_mean_ms\":4.000000"));
+        assert!(report.contains("\"gpu_timestamps_available\":false"));
     }
 }
