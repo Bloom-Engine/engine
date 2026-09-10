@@ -1,0 +1,333 @@
+{
+  "schema": "bloom-issue-127-windows-vulkan-v1",
+  "qualified_commit": "e8e08b90fc7cbad3e060d5ddb5c3ddb87aeb7add",
+  "git_dirty": false,
+  "adapter": {
+    "name": "AMD Radeon 760M Graphics",
+    "backend": "Vulkan",
+    "device_type": "IntegratedGpu",
+    "driver": "AMD proprietary driver",
+    "driver_info": "24.12.1 (LLPC)",
+    "supported_features": "Features { features_wgpu: FeaturesWGPU(SHADER_FLOAT32_ATOMIC | TEXTURE_FORMAT_16BIT_NORM | TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | PIPELINE_STATISTICS_QUERY | TIMESTAMP_QUERY_INSIDE_ENCODERS | TIMESTAMP_QUERY_INSIDE_PASSES | MAPPABLE_PRIMARY_BUFFERS | TEXTURE_BINDING_ARRAY | BUFFER_BINDING_ARRAY | STORAGE_RESOURCE_BINDING_ARRAY | SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING | STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING | PARTIALLY_BOUND_BINDING_ARRAY | MULTI_DRAW_INDIRECT_COUNT | ADDRESS_MODE_CLAMP_TO_ZERO | ADDRESS_MODE_CLAMP_TO_BORDER | POLYGON_MODE_LINE | POLYGON_MODE_POINT | CONSERVATIVE_RASTERIZATION | VERTEX_WRITABLE_STORAGE | CLEAR_TEXTURE | MULTIVIEW | TEXTURE_ATOMIC | TEXTURE_FORMAT_NV12 | TEXTURE_FORMAT_P010 | EXPERIMENTAL_RAY_QUERY | SHADER_F64 | SHADER_I16 | SHADER_EARLY_DEPTH_TEST | SHADER_INT64 | SUBGROUP | SUBGROUP_VERTEX | SUBGROUP_BARRIER | PIPELINE_CACHE | SHADER_INT64_ATOMIC_MIN_MAX | SHADER_INT64_ATOMIC_ALL_OPS | VULKAN_EXTERNAL_MEMORY_WIN32 | TEXTURE_INT64_ATOMIC | EXPERIMENTAL_MESH_SHADER | EXPERIMENTAL_RAY_HIT_VERTEX_RETURN | EXPERIMENTAL_MESH_SHADER_MULTIVIEW | EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS | PASSTHROUGH_SHADERS | SHADER_BARYCENTRICS | SELECTIVE_MULTIVIEW | EXPERIMENTAL_MESH_SHADER_POINTS | MULTISAMPLE_ARRAY | EXPERIMENTAL_COOPERATIVE_MATRIX | SHADER_PER_VERTEX | SHADER_DRAW_INDEX | ACCELERATION_STRUCTURE_BINDING_ARRAY | MEMORY_DECORATION_COHERENT | MEMORY_DECORATION_VOLATILE), features_webgpu: FeaturesWebGPU(DEPTH_CLIP_CONTROL | DEPTH32FLOAT_STENCIL8 | TEXTURE_COMPRESSION_BC | TEXTURE_COMPRESSION_BC_SLICED_3D | TIMESTAMP_QUERY | INDIRECT_FIRST_INSTANCE | SHADER_F16 | RG11B10UFLOAT_RENDERABLE | BGRA8UNORM_STORAGE | FLOAT32_FILTERABLE | FLOAT32_BLENDABLE | DUAL_SOURCE_BLENDING | CLIP_DISTANCES | IMMEDIATES | PRIMITIVE_INDEX) }",
+    "enabled_features": "Features { features_wgpu: FeaturesWGPU(TEXTURE_BINDING_ARRAY | SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING | EXPERIMENTAL_RAY_QUERY), features_webgpu: FeaturesWebGPU(TIMESTAMP_QUERY) }"
+  },
+  "canonical_runs": [
+    {
+      "mode": "pt_progressive",
+      "repeat": 1,
+      "mean_rgba": 0.134697,
+      "mean_rgb": 0.179596,
+      "outlier_percent": 0.038147,
+      "max_error": 69,
+      "ssim": 0.997543544,
+      "render_ms": 1363
+    },
+    {
+      "mode": "pt_progressive",
+      "repeat": 2,
+      "mean_rgba": 0.134697,
+      "mean_rgb": 0.179596,
+      "outlier_percent": 0.038147,
+      "max_error": 69,
+      "ssim": 0.997543544,
+      "render_ms": 239
+    },
+    {
+      "mode": "pt_progressive",
+      "repeat": 3,
+      "mean_rgba": 0.134697,
+      "mean_rgb": 0.179596,
+      "outlier_percent": 0.038147,
+      "max_error": 69,
+      "ssim": 0.997543544,
+      "render_ms": 239
+    },
+    {
+      "mode": "pt_realtime_motion",
+      "repeat": 1,
+      "mean_rgba": 0.060707,
+      "mean_rgb": 0.080943,
+      "outlier_percent": 0.012207,
+      "max_error": 48,
+      "ssim": 0.999237806,
+      "render_ms": 70
+    },
+    {
+      "mode": "pt_realtime_motion",
+      "repeat": 2,
+      "mean_rgba": 0.060707,
+      "mean_rgb": 0.080943,
+      "outlier_percent": 0.012207,
+      "max_error": 48,
+      "ssim": 0.999237806,
+      "render_ms": 70
+    },
+    {
+      "mode": "pt_realtime_motion",
+      "repeat": 3,
+      "mean_rgba": 0.060707,
+      "mean_rgb": 0.080943,
+      "outlier_percent": 0.012207,
+      "max_error": 48,
+      "ssim": 0.999237806,
+      "render_ms": 71
+    }
+  ],
+  "negative_controls": [
+    {
+      "test": "pt_progressive",
+      "git_commit": "e8e08b90fc7cbad3e060d5ddb5c3ddb87aeb7add",
+      "os": "windows",
+      "arch": "x86_64",
+      "width": 256,
+      "height": 256,
+      "mean_abs_rgba": 5.307064056,
+      "mean_abs_rgb": 7.076085409,
+      "max_abs": 78,
+      "outlier_pixel_fraction": 0.000839233,
+      "outlier_channel_fraction": 0.000278473,
+      "gated_outlier_kind": "pixel",
+      "gated_outlier_fraction": 0.000839233,
+      "ssim_luminance": 0.995034659,
+      "seed": 0,
+      "sample_index_start": 0,
+      "camera_frame_start": 0,
+      "jitter_sequence": "disabled",
+      "fault_injection": "brdf-energy",
+      "repeat_index": 0,
+      "repeat_count": 1,
+      "frames": 300,
+      "spp": 296,
+      "render_time_ms": 241,
+      "adapter": {
+        "name": "AMD Radeon 760M Graphics",
+        "backend": "Vulkan",
+        "device_type": "IntegratedGpu",
+        "driver": "AMD proprietary driver",
+        "driver_info": "24.12.1 (LLPC)",
+        "supported_features": "Features { features_wgpu: FeaturesWGPU(SHADER_FLOAT32_ATOMIC | TEXTURE_FORMAT_16BIT_NORM | TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | PIPELINE_STATISTICS_QUERY | TIMESTAMP_QUERY_INSIDE_ENCODERS | TIMESTAMP_QUERY_INSIDE_PASSES | MAPPABLE_PRIMARY_BUFFERS | TEXTURE_BINDING_ARRAY | BUFFER_BINDING_ARRAY | STORAGE_RESOURCE_BINDING_ARRAY | SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING | STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING | PARTIALLY_BOUND_BINDING_ARRAY | MULTI_DRAW_INDIRECT_COUNT | ADDRESS_MODE_CLAMP_TO_ZERO | ADDRESS_MODE_CLAMP_TO_BORDER | POLYGON_MODE_LINE | POLYGON_MODE_POINT | CONSERVATIVE_RASTERIZATION | VERTEX_WRITABLE_STORAGE | CLEAR_TEXTURE | MULTIVIEW | TEXTURE_ATOMIC | TEXTURE_FORMAT_NV12 | TEXTURE_FORMAT_P010 | EXPERIMENTAL_RAY_QUERY | SHADER_F64 | SHADER_I16 | SHADER_EARLY_DEPTH_TEST | SHADER_INT64 | SUBGROUP | SUBGROUP_VERTEX | SUBGROUP_BARRIER | PIPELINE_CACHE | SHADER_INT64_ATOMIC_MIN_MAX | SHADER_INT64_ATOMIC_ALL_OPS | VULKAN_EXTERNAL_MEMORY_WIN32 | TEXTURE_INT64_ATOMIC | EXPERIMENTAL_MESH_SHADER | EXPERIMENTAL_RAY_HIT_VERTEX_RETURN | EXPERIMENTAL_MESH_SHADER_MULTIVIEW | EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS | PASSTHROUGH_SHADERS | SHADER_BARYCENTRICS | SELECTIVE_MULTIVIEW | EXPERIMENTAL_MESH_SHADER_POINTS | MULTISAMPLE_ARRAY | EXPERIMENTAL_COOPERATIVE_MATRIX | SHADER_PER_VERTEX | SHADER_DRAW_INDEX | ACCELERATION_STRUCTURE_BINDING_ARRAY | MEMORY_DECORATION_COHERENT | MEMORY_DECORATION_VOLATILE), features_webgpu: FeaturesWebGPU(DEPTH_CLIP_CONTROL | DEPTH32FLOAT_STENCIL8 | TEXTURE_COMPRESSION_BC | TEXTURE_COMPRESSION_BC_SLICED_3D | TIMESTAMP_QUERY | INDIRECT_FIRST_INSTANCE | SHADER_F16 | RG11B10UFLOAT_RENDERABLE | BGRA8UNORM_STORAGE | FLOAT32_FILTERABLE | FLOAT32_BLENDABLE | DUAL_SOURCE_BLENDING | CLIP_DISTANCES | IMMEDIATES | PRIMITIVE_INDEX) }",
+        "enabled_features": "Features { features_wgpu: FeaturesWGPU(TEXTURE_BINDING_ARRAY | SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING | EXPERIMENTAL_RAY_QUERY), features_webgpu: FeaturesWebGPU(TIMESTAMP_QUERY) }"
+      }
+    },
+    {
+      "test": "pt_realtime_motion",
+      "git_commit": "e8e08b90fc7cbad3e060d5ddb5c3ddb87aeb7add",
+      "os": "windows",
+      "arch": "x86_64",
+      "width": 256,
+      "height": 256,
+      "mean_abs_rgba": 6.41450119,
+      "mean_abs_rgb": 8.552668254,
+      "max_abs": 146,
+      "outlier_pixel_fraction": 0.060714722,
+      "outlier_channel_fraction": 0.044906616,
+      "gated_outlier_kind": "pixel",
+      "gated_outlier_fraction": 0.060714722,
+      "ssim_luminance": 0.910611715,
+      "seed": 0,
+      "sample_index_start": 0,
+      "camera_frame_start": 0,
+      "jitter_sequence": "disabled",
+      "fault_injection": "reprojection",
+      "repeat_index": 0,
+      "repeat_count": 1,
+      "frames": 48,
+      "spp": 1,
+      "render_time_ms": 66,
+      "adapter": {
+        "name": "AMD Radeon 760M Graphics",
+        "backend": "Vulkan",
+        "device_type": "IntegratedGpu",
+        "driver": "AMD proprietary driver",
+        "driver_info": "24.12.1 (LLPC)",
+        "supported_features": "Features { features_wgpu: FeaturesWGPU(SHADER_FLOAT32_ATOMIC | TEXTURE_FORMAT_16BIT_NORM | TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | PIPELINE_STATISTICS_QUERY | TIMESTAMP_QUERY_INSIDE_ENCODERS | TIMESTAMP_QUERY_INSIDE_PASSES | MAPPABLE_PRIMARY_BUFFERS | TEXTURE_BINDING_ARRAY | BUFFER_BINDING_ARRAY | STORAGE_RESOURCE_BINDING_ARRAY | SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING | STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING | PARTIALLY_BOUND_BINDING_ARRAY | MULTI_DRAW_INDIRECT_COUNT | ADDRESS_MODE_CLAMP_TO_ZERO | ADDRESS_MODE_CLAMP_TO_BORDER | POLYGON_MODE_LINE | POLYGON_MODE_POINT | CONSERVATIVE_RASTERIZATION | VERTEX_WRITABLE_STORAGE | CLEAR_TEXTURE | MULTIVIEW | TEXTURE_ATOMIC | TEXTURE_FORMAT_NV12 | TEXTURE_FORMAT_P010 | EXPERIMENTAL_RAY_QUERY | SHADER_F64 | SHADER_I16 | SHADER_EARLY_DEPTH_TEST | SHADER_INT64 | SUBGROUP | SUBGROUP_VERTEX | SUBGROUP_BARRIER | PIPELINE_CACHE | SHADER_INT64_ATOMIC_MIN_MAX | SHADER_INT64_ATOMIC_ALL_OPS | VULKAN_EXTERNAL_MEMORY_WIN32 | TEXTURE_INT64_ATOMIC | EXPERIMENTAL_MESH_SHADER | EXPERIMENTAL_RAY_HIT_VERTEX_RETURN | EXPERIMENTAL_MESH_SHADER_MULTIVIEW | EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS | PASSTHROUGH_SHADERS | SHADER_BARYCENTRICS | SELECTIVE_MULTIVIEW | EXPERIMENTAL_MESH_SHADER_POINTS | MULTISAMPLE_ARRAY | EXPERIMENTAL_COOPERATIVE_MATRIX | SHADER_PER_VERTEX | SHADER_DRAW_INDEX | ACCELERATION_STRUCTURE_BINDING_ARRAY | MEMORY_DECORATION_COHERENT | MEMORY_DECORATION_VOLATILE), features_webgpu: FeaturesWebGPU(DEPTH_CLIP_CONTROL | DEPTH32FLOAT_STENCIL8 | TEXTURE_COMPRESSION_BC | TEXTURE_COMPRESSION_BC_SLICED_3D | TIMESTAMP_QUERY | INDIRECT_FIRST_INSTANCE | SHADER_F16 | RG11B10UFLOAT_RENDERABLE | BGRA8UNORM_STORAGE | FLOAT32_FILTERABLE | FLOAT32_BLENDABLE | DUAL_SOURCE_BLENDING | CLIP_DISTANCES | IMMEDIATES | PRIMITIVE_INDEX) }",
+        "enabled_features": "Features { features_wgpu: FeaturesWGPU(TEXTURE_BINDING_ARRAY | SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING | EXPERIMENTAL_RAY_QUERY), features_webgpu: FeaturesWebGPU(TIMESTAMP_QUERY) }"
+      }
+    }
+  ],
+  "focused_temporal_tests": {
+    "passed": 4,
+    "failed": 0,
+    "non_finite_hdr_pixels": 0,
+    "moving_texels": 855,
+    "retained_history_texels": 45,
+    "rejected_history_texels": 810,
+    "unclassified_moving_texels": 0,
+    "severe_trail_frames": 0,
+    "camera_cut_max_delta": 0,
+    "pt_toggle_max_delta": 0,
+    "non_seed_history_texels": 0
+  },
+  "baselines_changed": false,
+  "limitations": [
+    "This is a PT correctness qualification, not an RTX 4080 or full nine-scene performance qualification.",
+    "The first broader golden batch failed its Vulkan HAL texture-counter gate and later silently skipped raster cases; it is not an accepted broad-corpus pass."
+  ],
+  "cpu_reference": {
+    "source": "0c5d1cc",
+    "unchanged_reference_source_since_oracle": true,
+    "metadata": {
+      "camera": {
+        "fov_y_deg": 50.0,
+        "position": [
+          5.0,
+          4.0,
+          7.0
+        ],
+        "target": [
+          0.0,
+          0.5,
+          0.0
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "environment": "bloom-pt-golden-analytic",
+      "height": 256,
+      "max_bounces": 8,
+      "output": "C:\\Users\\Ralph\\projects\\bloom\\engine-quality-radeon\\tools\\quality\\out\\windows-engine-plan\\pt-cpu-reference\\pt-reference.png",
+      "render_seconds": 2.0054651,
+      "renderer": "bloom-reference",
+      "scene": "<builtin:pt-golden>",
+      "seed": 0,
+      "spp": 256,
+      "sun": {
+        "color": [
+          1.0,
+          0.9800000190734863,
+          0.9300000071525574
+        ],
+        "direction_to_light": [
+          0.4319342076778412,
+          0.8638684153556824,
+          0.2591605484485626
+        ],
+        "intensity": 1.2000000476837158
+      },
+      "triangles": 84,
+      "width": 256
+    },
+    "repeats": 2,
+    "pngs_byte_identical": true,
+    "sha256": "c0ef46e620f317a26fb695ce6b6e893abc90a81664bae8b71867503695423fee",
+    "visual_sanity": "Six cube placements, silhouettes, material-color ordering and shadow direction agree; model/display differences documented separately.",
+    "display_luminance_samples": {
+      "sample_box_size": 5,
+      "yellow": {
+        "xy": [
+          48,
+          146
+        ],
+        "cpu": 144.83124549,
+        "gpu": 133.37090365
+      },
+      "cyan": {
+        "xy": [
+          117,
+          157
+        ],
+        "cpu": 122.14981482,
+        "gpu": 116.6606463
+      },
+      "red": {
+        "xy": [
+          198,
+          151
+        ],
+        "cpu": 79.44307156,
+        "gpu": 89.05323387
+      },
+      "shadow_floor": {
+        "xy": [
+          86,
+          176
+        ],
+        "cpu": 152.91444424,
+        "gpu": 129.86561228
+      },
+      "nearby_floor": {
+        "xy": [
+          74,
+          180
+        ],
+        "cpu": 157.91949203,
+        "gpu": 132.45716602
+      }
+    }
+  },
+  "followup_qualification": {
+    "source": "dc3ca7eeb03938d0ec9ca1866f3ed4b66955195b",
+    "dirty_scope": "Documentation changes only; code and tests match the committed source.",
+    "canonical_runs": [
+      {
+        "mode": "pt_progressive",
+        "repeat": 1,
+        "mean_rgba": 0.134697,
+        "mean_rgb": 0.179596,
+        "outlier_pixel_percent": 0.038147,
+        "max_error": 69,
+        "ssim": 0.997543544,
+        "render_ms": 274
+      },
+      {
+        "mode": "pt_progressive",
+        "repeat": 2,
+        "mean_rgba": 0.134697,
+        "mean_rgb": 0.179596,
+        "outlier_pixel_percent": 0.038147,
+        "max_error": 69,
+        "ssim": 0.997543544,
+        "render_ms": 273
+      },
+      {
+        "mode": "pt_progressive",
+        "repeat": 3,
+        "mean_rgba": 0.134697,
+        "mean_rgb": 0.179596,
+        "outlier_pixel_percent": 0.038147,
+        "max_error": 69,
+        "ssim": 0.997543544,
+        "render_ms": 269
+      },
+      {
+        "mode": "pt_realtime_motion",
+        "repeat": 1,
+        "mean_rgba": 0.060707,
+        "mean_rgb": 0.080943,
+        "outlier_pixel_percent": 0.012207,
+        "max_error": 48,
+        "ssim": 0.999237806,
+        "render_ms": 86
+      },
+      {
+        "mode": "pt_realtime_motion",
+        "repeat": 2,
+        "mean_rgba": 0.060707,
+        "mean_rgb": 0.080943,
+        "outlier_pixel_percent": 0.012207,
+        "max_error": 48,
+        "ssim": 0.999237806,
+        "render_ms": 86
+      },
+      {
+        "mode": "pt_realtime_motion",
+        "repeat": 3,
+        "mean_rgba": 0.060707,
+        "mean_rgb": 0.080943,
+        "outlier_pixel_percent": 0.012207,
+        "max_error": 48,
+        "ssim": 0.999237806,
+        "render_ms": 87
+      }
+    ],
+    "negative_controls_rejected": [
+      "brdf-energy",
+      "reprojection"
+    ],
+    "result": "pass",
+    "elapsed_seconds": 4.04
+  }
+}
