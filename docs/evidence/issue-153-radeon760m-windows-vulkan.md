@@ -59,7 +59,7 @@ A subsequent [owner-isolation investigation](issue-153-radeon760m-owner-isolatio
 - Reproducibility: PASS, 257/257 artifact comparisons byte-identical.
 - Repository file-line gate still fails in nine unchanged files at the issue's pinned base; none of the edited files is a new violation. The exact output is included.
 
-[First final run](../../tools/quality/out/windows-radeon760m-vulkan-corrected/summary.html), [repeat](../../tools/quality/out/windows-radeon760m-vulkan-repeat/summary.html), [reproducibility result](../../tools/quality/out/windows-radeon760m-repro/result.json).
+The [published evidence archive](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-153-radeon760m-20260910) contains the first final run (`windows-radeon760m-vulkan-corrected/summary.html`), repeat (`windows-radeon760m-vulkan-repeat/summary.html`), and reproducibility result (`windows-radeon760m-repro/result.json`). These generated files are not part of a source checkout.
 
 The ZIP preserves repository-relative paths, approved references, all complete run directories, early failed-capture diagnostics, console/build/test logs, host inventory, the manifest, and a source patch. Generated toolchain binaries and third-party scene assets are excluded; their versions/revisions and hashes are recorded for fetching them again.
 

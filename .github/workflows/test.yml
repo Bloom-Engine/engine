@@ -87,6 +87,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: quick / contracts
         run: ./scripts/ci-check.sh --quick --component contracts
       - name: quick / example-inventory
