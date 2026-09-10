@@ -63,6 +63,11 @@ process limits; aggregate CPU load is normalized by the logical CPU count.
 Missing or unreadable counters fail the idle check. These snapshots identify
 CPU pressure before and after the run, not continuous background GPU load.
 
+Windows qualification uses a hidden window for adapter negotiation and an
+offscreen renderer at the manifest's pixel dimensions. Display DPI, window
+borders, and window resize events do not resize these captures. Final PNG
+export follows the actual RGBA/BGRA texture format.
+
 Before the Windows run, use `python tools/quality/run.py check` from a clean
 checkout and confirm that Python, Rust/Cargo, Node/npm, Perry, Vulkan, and the
 pinned Bistro assets are available. The runner records `windows` as the host

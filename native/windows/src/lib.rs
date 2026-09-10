@@ -15,6 +15,12 @@ static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut EMBEDDED: bool = false;
 
 #[cfg(windows)]
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 fn configured_backends() -> wgpu::Backends {
     match std::env::var("BLOOM_WGPU_BACKEND")
         .unwrap_or_default()
@@ -255,6 +261,9 @@ mod win32 {
     };
 
     pub fn set_fullscreen(fullscreen: bool) {
+        if super::env_flag("BLOOM_HEADLESS") || super::env_flag("BLOOM_NO_FULLSCREEN") {
+            return;
+        }
         unsafe {
             let Some(hwnd) = HWND_GLOBAL else { return };
 
@@ -442,8 +451,9 @@ mod win32 {
                 let phys_h = ((lparam.0 >> 16) & 0xFFFF) as u32;
                 if phys_w > 0 && phys_h > 0 {
                     if let Some(eng) = ENGINE.get_mut() {
-                        if phys_w != eng.renderer.physical_width()
-                            || phys_h != eng.renderer.physical_height()
+                        if eng.renderer.surface.is_some()
+                            && (phys_w != eng.renderer.physical_width()
+                                || phys_h != eng.renderer.physical_height())
                         {
                             let scale = dpi_scale(hwnd);
                             let log_w = ((phys_w as f64) / scale).round() as u32;
@@ -480,6 +490,7 @@ mod win32 {
     /// scaled-up physical pixels for the renderer to fill.
     pub fn create_window(width: f64, height: f64, title: &str) -> (HWND, u32, u32) {
         unsafe {
+            let headless = super::env_flag("BLOOM_HEADLESS");
             // Per-Monitor-Aware-V2: the window's DPI tracks the monitor
             // it's currently on, and Windows fires WM_DPICHANGED when
             // it moves between monitors of different DPI. Without this
@@ -518,7 +529,7 @@ mod win32 {
                 WINDOW_EX_STYLE::default(),
                 class_name,
                 PCWSTR(title_wide.as_ptr()),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                if headless { WS_OVERLAPPEDWINDOW } else { WS_OVERLAPPEDWINDOW | WS_VISIBLE },
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 phys_w,
@@ -530,7 +541,9 @@ mod win32 {
             )
             .unwrap();
 
-            ShowWindow(hwnd, SW_SHOW);
+            if !headless {
+                ShowWindow(hwnd, SW_SHOW);
+            }
             HWND_GLOBAL = Some(hwnd);
 
             // After the window exists, query the actual client-area
@@ -589,8 +602,9 @@ mod win32 {
                 let phys_h = ((lparam.0 >> 16) & 0xFFFF) as u32;
                 if phys_w > 0 && phys_h > 0 {
                     if let Some(eng) = ENGINE.get_mut() {
-                        if phys_w != eng.renderer.physical_width()
-                            || phys_h != eng.renderer.physical_height()
+                        if eng.renderer.surface.is_some()
+                            && (phys_w != eng.renderer.physical_width()
+                                || phys_h != eng.renderer.physical_height())
                         {
                             let scale = dpi_scale(hwnd);
                             let log_w = ((phys_w as f64) / scale).round() as u32;
@@ -832,6 +846,24 @@ unsafe fn init_engine_for_hwnd(
     let negotiation_report = negotiated.report.report_json();
     let device = negotiated.device;
     let queue = negotiated.queue;
+
+    if env_flag("BLOOM_HEADLESS") {
+        // Render qualification frames offscreen. DWM borders, DPI changes, and
+        // queued WM_SIZE events must not change the requested capture size.
+        let pixel_exact = env_flag("BLOOM_HEADLESS_PIXEL_EXACT");
+        let (width, height) = if pixel_exact {
+            (logical_w, logical_h)
+        } else {
+            (phys_w, phys_h)
+        };
+        let mut renderer = Renderer::new_headless(device, queue, width, height);
+        if !pixel_exact {
+            renderer.resize(width, height, logical_w, logical_h);
+        }
+        renderer.set_device_negotiation_report(negotiation_report);
+        let _ = ENGINE.set(EngineState::new(renderer));
+        return;
+    }
 
     let surface_caps = surface.get_capabilities(&adapter);
     let format = surface_caps.formats[0];
