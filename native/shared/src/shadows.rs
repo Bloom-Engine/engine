@@ -136,12 +136,13 @@ fn mask_coverage_threshold(
     // Match the scene pass's sampled-mip footprint. A level-zero phase at
     // distance makes one shadow texel cross many binary leaf decisions during
     // even a sub-texel cascade translation, which appears as bright sparkle.
-    let phase_lod = max(floor(lod), 1.0);
-    let mip_scale = exp2(-phase_lod);
-    let mip_dimensions = max(
-        floor(vec2<f32>(dimensions) * mip_scale),
-        vec2<f32>(1.0),
-    );
+    // Match the approved material-space phase with exact integer extents.
+    // exp2/floor rounded the phase differently on Metal and Vulkan.
+    let phase_lod = u32(clamp(floor(lod), 1.0, 31.0));
+    let mip_dimensions = vec2<f32>(max(
+        (dimensions - vec2<u32>(1u)) >> vec2<u32>(phase_lod),
+        vec2<u32>(1u),
+    ));
     let texel = vec2<u32>(floor(wrapped_uv * mip_dimensions));
     let x = texel.x & 3u;
     let y = texel.y & 3u;
@@ -1178,7 +1179,7 @@ mod shader_tests {
 
     #[test]
     fn cutout_shadow_coverage_phase_follows_authored_texture_coordinates() {
-        assert!(SHADOW_SHADER_CUTOUT.contains("let phase_lod = max(floor(lod), 1.0);"));
+        assert!(SHADOW_SHADER_CUTOUT.contains("let phase_lod = u32(clamp(floor(lod), 1.0, 31.0));"));
         assert!(SHADOW_SHADER_CUTOUT.contains("wrapped_uv * mip_dimensions"));
         assert!(!SHADOW_SHADER_CUTOUT.contains("mask_coverage_threshold(in.pos.xy"));
     }

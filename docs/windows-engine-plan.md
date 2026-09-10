@@ -15,7 +15,7 @@ first nine-scene Radeon evidence are in draft PR #154. Follow-up work starts at
 | Work | Required completion evidence | Current state |
 | --- | --- | --- |
 | #127 Vulkan PT correctness | Three deterministic progressive and motion runs, both negative controls, finite intermediates, reset/lighting/rigid-motion checks, retained report | Canonical hardware gate, all four focused temporal tests, and CPU reference sanity check pass on Radeon/Vulkan; [report](evidence/issue-127-windows-vulkan-v1.md) and [raw evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-155-windows-vulkan-20260910) published |
-| #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | Sponza and skinned/alpha still fail against portable baselines; original baseline source reproduces both failures |
+| #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | [Cutout phase correction](evidence/windows-alpha-phase-v1.md) makes both focused Windows images pass unchanged portable baselines; full strict corpus and reproducibility checks are pending |
 | #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device lifetime and resource gates repaired; [stationary SSGI fix](evidence/windows-ssgi-stationary-v1.md) and [profiler correction](evidence/windows-profiler-integrity-v1.md) pass 90 golden tests with 4 ignored and 2 optional external-input skips. Complete-phase/lighting control and corrected frozen A/B recorded. HD TAA-jitter and the full representative corpus remain open |
 | #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | All 23 hosted checks pass at #155 source `64d5eed`, including macOS shared/golden tests, all mobile target builds, native/web builds, and browser startup. Scheduled physical-hardware checks, all-example compilation, and release-install acceptance remain separate requirements |
 | #138 capability fallback | Actual constrained-adapter startup and relevant forced-tier corpus, truthful capability outputs | Existing implementation/evidence preserved; physical constrained-limit acceptance still needs proof |
@@ -88,9 +88,16 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    Skinned/alpha has 9,745 depth coverage disagreements before TAA, while
    albedo RGB closely agrees on matching surfaces. Disabling foliage shadows
    and an isolated isotropic alpha-sampling control retain the failure.
-   The cutout decision is the next diagnostic target; its precise cause remains
-   unresolved. Raw export leaves both Windows final PNGs byte-identical.
+   Exact cutout-input probes at `30e7625` identify a different Bayer phase
+   extent: Metal's observed extent predicts every inspected threshold away from
+   integer LOD boundaries. The [integer phase correction](evidence/windows-alpha-phase-v1.md)
+   preserves that approved grid on both backends. Focused Windows images now
+   pass at SSIM 0.986160457 and 0.990073442; full strict corpus and repeated-run
+   validation follow. Raw export leaves unmodified Windows final PNGs byte-identical.
    Shared-runner timing cannot qualify hardware budgets.
+   Separately, the HD TAA fixture fails at its required 16-frame warm-up but
+   passes diagnostic controls at 32, 64, and 128 frames. The startup/settling
+   requirement remains open; its warm-up and thresholds are unchanged.
 4. Continue starter/all-example and release-install checks, asset/world streaming,
    schema-generated APIs, components, and runtime UI against each issue's full
    acceptance criteria. Hardware-specific acceptance remains open while local
