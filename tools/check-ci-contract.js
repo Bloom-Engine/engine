@@ -46,6 +46,16 @@ const testWorkflow = read(".github/workflows/test.yml");
 const qualityWorkflow = read(".github/workflows/quality.yml");
 const releaseWorkflow = read(".github/workflows/release.yml");
 const failureAction = read(".github/actions/upload-ci-failure/action.yml");
+if (!/^defaults:\n  run:\n(?:    #[^\n]*\n)*    shell: bash$/m.test(testWorkflow)) {
+  console.error("FAIL  Tests must execute the shared Bash entry point with an explicit Bash shell on Windows");
+  failures += 1;
+}
+for (const summary of ["target/ci/quick-shared-tests.json", "target/ci/full-host-build.json"]) {
+  if (!testWorkflow.includes(`path: ${summary}\n          if-no-files-found: error`)) {
+    console.error(`FAIL  Tests must reject missing execution evidence: ${summary}`);
+    failures += 1;
+  }
+}
 const workflowCommands = [
   "./scripts/ci-check.sh --quick --component shared-tests",
   "./scripts/ci-check.sh --quick --component contracts",

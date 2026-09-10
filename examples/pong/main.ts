@@ -3,7 +3,7 @@ import {
   clearBackground, setTargetFPS, getDeltaTime, isKeyDown,
   getScreenWidth, getScreenHeight, closeWindow,
 } from "bloom/core";
-import { Color, Key } from "bloom/core";
+import { Colors, Key } from "bloom/core";
 import { drawRect, drawCircle, checkCollisionRecs } from "bloom/shapes";
 import { drawText, measureText } from "bloom/text";
 import { initAudioDevice, loadSound, playSound, closeAudioDevice } from "bloom/audio";
@@ -130,7 +130,7 @@ while (!windowShouldClose()) {
 
   // Drawing
   beginDrawing();
-  clearBackground(Color.Black);
+  clearBackground(Colors.Black);
 
   // Center line
   const segments = 20;
@@ -141,27 +141,27 @@ while (!windowShouldClose()) {
       i * segHeight * 2,
       2,
       segHeight,
-      Color.DarkGray,
+      Colors.DarkGray,
     );
   }
 
   // Paddles
-  drawRect(PADDLE_MARGIN, leftPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Color.White);
-  drawRect(SCREEN_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH, rightPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Color.White);
+  drawRect(PADDLE_MARGIN, leftPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Colors.White);
+  drawRect(SCREEN_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH, rightPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Colors.White);
 
   // Ball
-  drawCircle(ballX, ballY, BALL_RADIUS, Color.White);
+  drawCircle(ballX, ballY, BALL_RADIUS, Colors.White);
 
   // Scores
   const leftScoreText = leftScore.toString();
   const rightScoreText = rightScore.toString();
-  drawText(leftScoreText, SCREEN_WIDTH / 4 - measureText(leftScoreText, 40) / 2, 20, 40, Color.White);
-  drawText(rightScoreText, 3 * SCREEN_WIDTH / 4 - measureText(rightScoreText, 40) / 2, 20, 40, Color.White);
+  drawText(leftScoreText, SCREEN_WIDTH / 4 - measureText(leftScoreText, 40) / 2, 20, 40, Colors.White);
+  drawText(rightScoreText, 3 * SCREEN_WIDTH / 4 - measureText(rightScoreText, 40) / 2, 20, 40, Colors.White);
 
   // Pause text
   if (paused) {
     const pauseText = "PAUSED";
-    drawText(pauseText, SCREEN_WIDTH / 2 - measureText(pauseText, 30) / 2, SCREEN_HEIGHT / 2 - 15, 30, Color.LightGray);
+    drawText(pauseText, SCREEN_WIDTH / 2 - measureText(pauseText, 30) / 2, SCREEN_HEIGHT / 2 - 15, 30, Colors.LightGray);
   }
 
   endDrawing();

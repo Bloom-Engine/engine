@@ -15,11 +15,11 @@ first nine-scene Radeon evidence are in draft PR #154. Follow-up work starts at
 | Work | Required completion evidence | Current state |
 | --- | --- | --- |
 | #127 Vulkan PT correctness | Three deterministic progressive and motion runs, both negative controls, finite intermediates, reset/lighting/rigid-motion checks, retained report | Canonical hardware gate, all four focused temporal tests, and CPU reference sanity check pass on Radeon/Vulkan; [report](evidence/issue-127-windows-vulkan-v1.md) and [raw evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-155-windows-vulkan-20260910) published |
-| #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | [Cutout phase correction](evidence/windows-alpha-phase-v1.md) passes all nine Radeon image gates in two complete runs and both hosted Metal images. Reproducibility passes with 257 byte-identical artifacts. Both strict runs fail postflight host-load checks, so their timing remains unqualified |
-| #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device/resource, stationary SSGI, and profiler fixes are retained. The [surface reconstruction correction](evidence/windows-ssgi-surface-v1.md) passes the original HD startup limits on Radeon/Vulkan; all 93 local goldens that run pass, including lighting recovery. Full scene-image, timing, and platform qualification of that correction remain open, as does the wider representative corpus |
-| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | All 24 hosted checks pass at #158 source `662a44f`, including macOS shared/golden tests, mobile target builds, native/web builds, browser startup, and canonical Metal images. Scheduled physical-hardware checks, all-example compilation, and release-install acceptance remain separate requirements |
+| #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | Cutout and surface corrections pass all nine Radeon images. At #159 source `d610d6a`, full runs 2 and 3 pass every configured check and reproduce 257 artifacts byte-identically with matching metadata and timing differences inside existing noise bounds. Earlier invalid runs retain their failures; named hardware acceptance remains separate |
+| #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device/resource, stationary SSGI, and profiler fixes are retained. The surface correction passes original HD startup limits and 154,720 analytic receiver checks on Vulkan, DX12, and hosted Metal; 93 local goldens pass, including lighting recovery. The full Radeon corpus passes twice. Wider representative scenes, frozen A/B performance, memory/resize, and platform acceptance remain open |
+| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | #159 has 24 successful CheckRun statuses, but Windows logs reveal no Cargo execution because Bash was invoked through PowerShell without an explicit shell. Local Windows execution is verified. This follow-up selects Bash and requires execution-summary artifacts; actual hosted validation is pending. All-example PR compilation and release-install acceptance remain separate requirements |
 | #138 capability fallback | Actual constrained-adapter startup and relevant forced-tier corpus, truthful capability outputs | Existing implementation/evidence preserved; physical constrained-limit acceptance still needs proof |
-| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#158 remain drafts; no merge performed |
+| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#159 remain drafts; no merge performed |
 
 ## Engine work retained in scope
 
@@ -54,71 +54,28 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
 
 ## Current next steps
 
-1. #155 source `64d5eed` has passing hosted checks and published evidence. The
-   archive SHA-256 is `de9c1beca73bfcf60bf79d3a612b72c072f726f6272576a7f0f60ffdbc7ce25d`.
-   CI run URLs and conclusions are in its separate `pr155-checks-64d5eed.json`
-   release asset. No draft PR has been merged.
-2. The [profiler correction](evidence/windows-profiler-integrity-v1.md) on
-   `codex/windows-profiler-integrity` passes local contracts, lint, the quality
-   lane, and the complete shared suite. Its current-frame regression rejects
-   all 12 old Vulkan samples and passes with the correction on Vulkan and DX12.
-   Corrected SSGI timing covers 20 isolated runs, each with 120 complete GPU
-   frames. Hosted Metal's shared lane passes, but its Apple Paravirtual adapter
-   lacks timestamp queries: the profiler GPU regression explicitly skips.
-   The retained `--nocapture` log at `1965a0b` confirms this; a test reported as
-   "ok" after that early return does not qualify Metal GPU timing.
-   Its colored-shadow
-   failure exposed an [inverse-matrix upload defect](evidence/windows-transmitted-shadow-inverse-vp-v1.md);
-   the correction passes the isolated local check and rejects the wrong-color
-   control. At follow-up source `fa93690`, all 23 hosted checks and the complete
-   local shared suite pass. The shadow regression passes on Metal. The shadow archive
-   and CI receipt are published alongside the immutable profiler archive.
-3. Diagnose Sponza and skinned/alpha against the portable baselines, then repair
-   HD temporal stability and complete the representative temporal/geometry
-   corpus. Recapture affected timing evidence with explicit coverage fields.
-   Disabling foliage shadow casting retains the Windows skinned/alpha mismatch;
-   canonical captures at `98cce62` pass on hosted Metal with SSIM 0.997442544 for
-   Sponza and 0.999417603 for skinned/alpha. That Apple Paravirtual adapter uses
-   the modern tier and software GI and exposes no timestamps. At `0dd8f67`,
-   [PR #157](https://github.com/Bloom-Engine/engine/pull/157) has all 24 hosted
-   checks passing; both Metal images pass with raw export enabled. The
-   [published diagnostic archive](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-image-portability-20260910)
-   retains exact depth and MRT bytes, commands, checksums, and source identity.
-   On matching modern/software-GI paths, Windows still fails both images.
-   Skinned/alpha has 9,745 depth coverage disagreements before TAA, while
-   albedo RGB closely agrees on matching surfaces. Disabling foliage shadows
-   and an isolated isotropic alpha-sampling control retain the failure.
-   Exact cutout-input probes at `30e7625` identify a different Bayer phase
-   extent: Metal's observed extent predicts every inspected threshold away from
-   integer LOD boundaries. The [integer phase correction](evidence/windows-alpha-phase-v1.md)
-   preserves that approved grid on both backends. Focused Windows images now
-   pass at SSIM 0.986160457 and 0.990073442. At `662a44f`, all nine Radeon image
-   gates pass twice and reproducibility passes with 257 byte-identical artifacts.
-   Both full runs fail their unchanged postflight host-load checks: System CPU
-   exceeds the 75% per-process limit on Bistro, and in the second run also on
-   draw/light stress and weighted transparency. Those timing windows remain
-   unqualified. The [#158 evidence archive](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-alpha-phase-20260910)
-   retains both failed strict runs and their separate passing image/repro checks.
-   All 24 hosted checks pass; the new cutout GPU regression actually executes on
-   Vulkan, DX12, and Metal. Raw export leaves unmodified Windows final PNGs byte-identical.
-   Shared-runner timing cannot qualify hardware budgets.
-   The HD TAA fixture originally failed at its required 16-frame warm-up and
-   passed diagnostic controls at 32, 64, and 128 frames. The follow-up
-   [surface correction](evidence/windows-ssgi-surface-v1.md) repairs depth-texel
-   coordinates and resolution-dependent normal reconstruction. It passes the
-   original 16-frame HD limits, removes the observed horizontal GI bands, and
-   preserves the existing lighting-recovery regression on Radeon/Vulkan.
-   Both isolated partial corrections fail. Full scene and platform checks of
-   the combined change remain in progress; no threshold or warm-up was relaxed.
-4. Continue starter/all-example and release-install checks, asset/world streaming,
-   schema-generated APIs, components, and runtime UI against each issue's full
-   acceptance criteria. Hardware-specific acceptance remains open while local
-   work progresses.
+1. Verify actual hosted Windows test and build execution. The
+   [CI and example correction](evidence/windows-example-ci-v1.md) explicitly
+   selects Bash and requires execution-summary artifacts. Its hosted run must
+   show Cargo output and successful summary contents before this gap is closed.
+2. Finish all-example native linking, real starter/example startup, and clean
+   Windows installation. Six palette corrections bring the local link audit
+   from 13 to 19 successful examples out of 20. The embedded-view example needs
+   a newer Perry API, and both available newer Windows bundles have an
+   independent standard-library link failure that still needs resolution.
+   All-example compilation must become a required PR check.
+3. Complete the wider temporal/geometry, performance, memory, resize, and
+   capability corpus. The
+   [HD surface correction](evidence/windows-ssgi-surface-v1.md) and two valid
+   full Radeon runs are [published with #159](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-ssgi-surface-20260911).
+   All nine images pass; reproducibility retains 257 byte-identical artifacts.
+   The original 16-frame HD startup limits pass on Vulkan, DX12, and hosted
+   Metal. Earlier host-load failures remain invalid timing windows. Hosted
+   Metal lacks timestamp queries and cannot qualify GPU timing.
+4. Complete API generation, streaming, components, runtime UI, and packaging
+   against the full issue requirements above, then prepare the draft stack for
+   review and integration. These outcomes include both implementation work and
+   acceptance evidence; they do not imply that every subsystem is absent.
 
-The immediate order is to repair the HD temporal startup failure, obtain valid
-full Radeon timing windows, and finish all-example startup and clean Windows
-installation checks. Then complete the wider temporal/geometry corpus and the
-engine API, streaming, component, and UI requirements above. These remaining
-outcomes include both implementation work and acceptance evidence; they are not
-a claim that each subsystem is absent. None requires waiting for an RTX 4080 to
-continue local work.
+Local work continues on the Radeon 760M. RTX-specific, physical constrained
+adapter, and other unavailable hardware acceptance remains explicitly open.

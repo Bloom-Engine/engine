@@ -200,6 +200,20 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# Git Bash prepends /usr/bin after the MSVC setup action has populated PATH.
+# Its `link.exe` creates hard links; rustc must use the Microsoft linker.
+# Restore the active developer toolchain first for Cargo and C/C++ build scripts.
+if [ "$host_crate" = "windows" ] && [ -n "${VCToolsInstallDir:-}" ]; then
+  msvc_bin="$(cygpath -u "$VCToolsInstallDir")/bin/Host${VSCMD_ARG_HOST_ARCH:-x64}/${VSCMD_ARG_TGT_ARCH:-x64}"
+  if [ ! -f "$msvc_bin/link.exe" ]; then
+    echo "MSVC linker missing: $msvc_bin/link.exe; initialize the Visual Studio C++ developer environment" >&2
+    exit 2
+  fi
+  export PATH="$msvc_bin:$PATH"
+  hash -r
+  hr "Windows linker: $(command -v link.exe)"
+fi
+
 run_component() {
   CURRENT_COMPONENT="$1"
   case "$CURRENT_COMPONENT" in
