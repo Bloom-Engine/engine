@@ -211,10 +211,13 @@ mod ray_query_variant_tests {
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("mean_luminance * 5.0"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("concentrated for this sampling density"));
         assert!(!SSGI_PROBE_TEMPORAL_WGSL.contains("spatially_filter_current_sample"));
+        // One pair validates the repeated current phase; the other retains
+        // the remaining phase radiance and world owners. Neither reads old
+        // directional lanes as matching temporal samples.
         assert_eq!(
             SSGI_PROBE_TEMPORAL_WGSL.matches("history_in,").count(),
-            2,
-            "only phase radiance and its paired world owner may load temporal texture history",
+            4,
+            "only current-phase validation and retained phase/owner pairs may load history",
         );
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("i32(48u + phase_slot)"));
         assert!(PROBE_HELPERS_WGSL.contains("fn probe_trace_direction("));
@@ -242,15 +245,15 @@ mod ray_query_variant_tests {
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("fn cs_spatial("));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("same surface"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("sample.diffuse.rgb * weight"));
-        // History is bounded by neighborhood mean ± spread, never a hard
-        // min/max of one frame's binomially noisy realizations.
+        // Unsettled software history is bounded by neighborhood mean ± spread,
+        // never a hard min/max of one frame's binomially noisy realizations.
         assert!(!SSGI_PROBE_TEMPORAL_WGSL
             .contains("clamp(center.diffuse.rgb, current_min, current_max)"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL
             .contains("clamp(\n            center.diffuse.rgb,\n            current_mean - slack,\n            current_mean + slack,\n        )"));
-        assert!(
-            SSGI_PROBE_TEMPORAL_WGSL.contains("if (u.confidence.x < 0.5 && weight_sum > 0.0001)")
-        );
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains(
+            "if (u.confidence.x < 0.5 && center.current_diffuse.w < 0.5 && weight_sum > 0.0001)"
+        ));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("abs(current_mean) * 0.02"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("let hardware_history = u.confidence.x > 0.5;"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("select(1, 2, confidence_error > 0.08)"));
