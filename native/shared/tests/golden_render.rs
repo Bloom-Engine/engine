@@ -11,6 +11,8 @@
 //! - Runs on a non-CPU GPU adapter and skips gracefully without one.
 //! - Most scenes disable TAA; fixed warm-up counts settle temporal passes.
 //! - Tolerances absorb GPU-family rasterization differences.
+//! - `BLOOM_REQUIRE_GPU=1` makes a missing physical raster adapter fail;
+//!   `WGPU_BACKEND` constrains both raster and PT device selection.
 
 use bloom_shared::engine::EngineState;
 use bloom_shared::models::{
@@ -22,6 +24,10 @@ use bloom_shared::renderer::{Renderer, Vertex3D};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
+
+#[path = "golden_render/device.rs"]
+mod golden_device;
+use golden_device::{requested_backends, try_engine, try_isolated_engine};
 
 #[path = "golden_render/metrics.rs"]
 mod metrics;
@@ -377,38 +383,6 @@ fn capture_realtime_diagnostics(eng: &mut EngineState, final_rgba: &[u8]) {
     }
     eng.renderer.set_path_tracing_debug_view(0);
 }
-fn try_engine() -> Option<EngineState> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    // Software rasterizers (WARP on the Windows CI runners, llvmpipe on
-    // Linux) are not regression targets — WARP crashes outright in the
-    // surface-less path, and software fidelity differs from the real
-    // GPUs the goldens were generated on. Real-GPU coverage comes from
-    // the macos-14 runners.
-    if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
-        return None;
-    }
-    let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features,
-        required_limits: adapter.limits(),
-        ..Default::default()
-    }))
-    .ok()?;
-    let renderer = Renderer::new_headless(device, queue, W, H);
-    let mut eng = EngineState::new(renderer);
-    // Deterministic native-resolution output: TAA and resolution are
-    // independent controls, so the golden harness sets both explicitly.
-    eng.renderer.set_taa_enabled(false);
-    eng.renderer.set_render_scale(1.0);
-    Some(eng)
-}
-
 /// Render `frames` frames of `draw`, capturing the last one as RGBA.
 fn render(
     eng: &mut EngineState,
@@ -1713,19 +1687,20 @@ fn lock_rt_goldens() -> MutexGuard<'static, ()> {
 /// PT golden is not applicable. A ray-query adapter that fails device creation
 /// is an infrastructure/test failure, not a passing skip.
 fn create_rt_device_context() -> Result<Option<RtDeviceContext>, String> {
+    let backends = requested_backends();
     let mut backend_options = wgpu::BackendOptions::default();
     backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::DynamicDxc {
         dxc_path: String::from("dxcompiler.dll"),
     };
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
+        backends,
         backend_options,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
     // The default adapter pick may be an FXC-capped DX12 view of a GPU
     // whose Vulkan view traces fine — enumerate and prefer ray query.
-    let mut adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    let mut adapters = pollster::block_on(instance.enumerate_adapters(backends));
     for adapter in &adapters {
         let info = adapter.get_info();
         eprintln!(

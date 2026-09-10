@@ -21,12 +21,19 @@ struct LiveGpuObjects {
     memory_allocations: isize,
 }
 
-fn live_gpu_objects(device: &wgpu::Device) -> LiveGpuObjects {
+fn live_gpu_objects(device: &wgpu::Device, instance: &wgpu::Instance) -> LiveGpuObjects {
     let counters = device.get_internal_counters();
     let hal = counters.hal;
+    // wgpu-hal 29.0.1 Vulkan decrements its texture counter on destruction
+    // without incrementing it for ordinary texture creation. Use the native
+    // registry's live user-owned textures instead. HAL texture bytes remain
+    // governed below, including allocations retained through views/bind groups.
+    let report = instance
+        .generate_report()
+        .expect("native resource registry");
     LiveGpuObjects {
         buffers: hal.buffers.read(),
-        textures: hal.textures.read(),
+        textures: report.hub.textures.num_kept_from_user as isize,
         texture_views: hal.texture_views.read(),
         bind_groups: hal.bind_groups.read(),
         bind_group_layouts: hal.bind_group_layouts.read(),
@@ -109,7 +116,7 @@ fn wait_for_gpu(device: &wgpu::Device) {
 
 #[test]
 fn static_ultra_scene_has_stable_renderer_owned_memory_for_1000_frames() {
-    let Some(mut eng) = try_engine() else {
+    let Some((mut eng, instance)) = try_isolated_engine() else {
         eprintln!("skip: no GPU adapter");
         return;
     };
@@ -161,7 +168,7 @@ fn static_ultra_scene_has_stable_renderer_owned_memory_for_1000_frames() {
     const POOL_WARMUP_FRAMES: u32 = 256;
     run_frames(&mut eng, POOL_WARMUP_FRAMES);
     wait_for_gpu(&eng.renderer.device);
-    let before = live_gpu_objects(&eng.renderer.device);
+    let before = live_gpu_objects(&eng.renderer.device, &instance);
     assert!(
         before.buffers > 0 && before.textures > 0,
         "wgpu test counters are disabled; this would be a vacuous memory gate: {before:?}"
@@ -173,7 +180,7 @@ fn static_ultra_scene_has_stable_renderer_owned_memory_for_1000_frames() {
 
     run_frames(&mut eng, 1_000);
     wait_for_gpu(&eng.renderer.device);
-    let after = live_gpu_objects(&eng.renderer.device);
+    let after = live_gpu_objects(&eng.renderer.device, &instance);
     let paths_after: serde_json::Value =
         serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
             .expect("post-run runtime paths are valid JSON");
@@ -211,6 +218,39 @@ fn static_ultra_scene_has_stable_renderer_owned_memory_for_1000_frames() {
         paths_before["render_graph"]["cached_plan_count"],
         paths_before["render_graph"]["physical_transient_slots"],
     );
+}
+
+#[test]
+fn texture_accounting_detects_live_allocations_and_releases() {
+    let Some((eng, instance)) = try_isolated_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let device = &eng.renderer.device;
+    wait_for_gpu(device);
+    let before = live_gpu_objects(device, &instance);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("memory-gate-negative-control"),
+        size: wgpu::Extent3d {
+            width: 64,
+            height: 64,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let live = live_gpu_objects(device, &instance);
+    assert_eq!(live.textures, before.textures + 1);
+    assert!(live.texture_memory > before.texture_memory);
+    drop(texture);
+    wait_for_gpu(device);
+    let released = live_gpu_objects(device, &instance);
+    assert_eq!(released.textures, before.textures);
+    assert_eq!(released.texture_memory, before.texture_memory);
 }
 
 #[test]
