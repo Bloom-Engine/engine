@@ -30,6 +30,12 @@ python tools/quality/run.py run full `
   --host-idle-timeout 600 `
   --out tools/quality/out/windows-rtx4080-vulkan
 
+# Measure on the available Radeon 760M Windows host.
+python tools/quality/run.py run full `
+  --machine-class amd-radeon760m-windows-vulkan `
+  --host-idle-timeout 600 `
+  --out tools/quality/out/windows-radeon760m-vulkan
+
 # Explore on an unqualified machine without changing the process exit code.
 python3 tools/quality/run.py run full \
   --report-only \
@@ -41,6 +47,21 @@ capture error, missing intermediate, visual threshold failure, or applicable
 hard performance budget. `--report-only` records those same failures in
 `result.json`; it only makes the process exit zero for local investigation.
 It never turns a failure into a recorded pass.
+
+The Radeon 760M profile selects Vulkan, opts into hardware GI, verifies the
+reported adapter, and records host preflight/postflight CPU load. Visual,
+intermediate-image, and telemetry contracts remain strict. Performance is
+measured without hard budgets: RTX 4080 and Apple timings are not qualified
+limits for this integrated GPU, and shared GPU memory is not treated as
+dedicated VRAM. Use repeated runs and `repro-check` to establish useful local
+comparisons before proposing Radeon performance budgets. This profile does
+not satisfy the RTX 4080 hardware qualification requested in #153.
+
+On Windows, host CPU load comes from native PerfProc counters through
+PowerShell/CIM. A fully occupied logical CPU is 100%, matching the Unix
+process limits; aggregate CPU load is normalized by the logical CPU count.
+Missing or unreadable counters fail the idle check. These snapshots identify
+CPU pressure before and after the run, not continuous background GPU load.
 
 Before the Windows run, use `python tools/quality/run.py check` from a clean
 checkout and confirm that Python, Rust/Cargo, Node/npm, Perry, Vulkan, and the

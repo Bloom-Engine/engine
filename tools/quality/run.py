@@ -177,6 +177,8 @@ def sha256_file(path: Path) -> str:
 def host_load_snapshot() -> dict[str, Any]:
     """Capture scheduler pressure without adding a non-stdlib dependency."""
     logical_cpus = max(int(os.cpu_count() or 1), 1)
+    if platform.system() == "Windows":
+        return windows_host_load_snapshot(logical_cpus)
     try:
         load_average = [round(float(value), 3) for value in os.getloadavg()]
     except (AttributeError, OSError):
@@ -230,6 +232,60 @@ def host_load_snapshot() -> dict[str, Any]:
         "cpu_fraction": round(total_cpu_percent / (logical_cpus * 100.0), 6),
         "top_processes": processes[:8],
     }
+
+
+def windows_host_load_snapshot(logical_cpus: int) -> dict[str, Any]:
+    # These counters use the same scale as ps: one saturated logical CPU is
+    # 100%, and a multithreaded process can exceed 100%. Exclude Idle/_Total
+    # (PID 0) and the monitoring processes, not unrelated workloads.
+    command = (
+        "$ErrorActionPreference = 'Stop'; "
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "@(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | "
+        f"Where-Object {{ $_.IDProcess -ne 0 -and $_.IDProcess -ne {os.getpid()} "
+        "-and $_.IDProcess -ne $PID } | "
+        "Select-Object IDProcess,Name,PercentProcessorTime) | ConvertTo-Json -Compress"
+    )
+    snapshot: dict[str, Any] = {
+        "logical_cpus": logical_cpus,
+        "load_average": [],
+        "available": False,
+        "source": "windows-perfproc",
+    }
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+            check=False, capture_output=True, text=True, encoding="utf-8", timeout=30.0,
+        )
+        if result.returncode != 0:
+            raise ValueError(result.stderr.strip() or f"PowerShell exited {result.returncode}")
+        rows = json.loads(result.stdout)
+        if isinstance(rows, dict):
+            rows = [rows]
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("Windows process counters are empty")
+        processes = []
+        for row in rows:
+            cpu = float(row["PercentProcessorTime"])
+            if not 0.0 <= cpu <= logical_cpus * 100.0:
+                raise ValueError("invalid Windows process CPU counter")
+            processes.append({
+                "pid": int(row["IDProcess"]),
+                "command": str(row["Name"]),
+                "cpu_percent": cpu,
+            })
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError) as exc:
+        snapshot["error"] = str(exc)
+        return snapshot
+    processes.sort(key=lambda item: item["cpu_percent"], reverse=True)
+    total = sum(item["cpu_percent"] for item in processes)
+    snapshot.update(
+        available=True,
+        total_cpu_percent=round(total, 3),
+        cpu_fraction=round(total / (logical_cpus * 100.0), 6),
+        top_processes=processes[:8],
+    )
+    return snapshot
 
 
 def classify_host_snapshot(
@@ -633,7 +689,10 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         for key in ("description", "os", "backend", "gpu"):
             if not isinstance(item.get(key), str) or not item[key]:
                 raise QualityError(f"machine class {item['id']}.{key} is required")
-        list_of_strings(item.get("hard_metrics"), f"{item['id']}.hard_metrics")
+        list_of_strings(
+            item.get("hard_metrics"), f"{item['id']}.hard_metrics",
+            allow_empty=not item.get("hard_gate", False),
+        )
         max_host_fraction = item.get("max_host_cpu_fraction")
         if (
             not isinstance(max_host_fraction, (int, float))
@@ -656,6 +715,8 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
             raise QualityError(
                 f"machine class {item['id']}.hardware_gi must be a boolean"
             )
+        if "check_host_load" in item and not isinstance(item["check_host_load"], bool):
+            raise QualityError(f"machine class {item['id']}.check_host_load must be a boolean")
     for case in cases:
         machine_id = case["budgets"]["machine_class"]
         if machine_id not in machine_ids:
@@ -840,12 +901,19 @@ def run_command(
 ) -> CommandResult:
     started = time.perf_counter()
     timed_out = False
+    argv = list(argv)
+    # CreateProcess resolves a relative executable against the parent's cwd,
+    # even when subprocess receives a different cwd for the child on Windows.
+    if not Path(argv[0]).is_absolute() and ("/" in argv[0] or "\\" in argv[0]):
+        argv[0] = str((cwd / argv[0]).resolve())
     try:
         proc = subprocess.run(
-            list(argv),
+            argv,
             cwd=cwd,
             env=dict(os.environ, **(dict(env or {}))),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout_seconds,
@@ -860,6 +928,10 @@ def run_command(
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         stderr += f"\nquality runner: timed out after {timeout_seconds:.1f}s\n"
+    except OSError as exc:
+        returncode = 127
+        stdout = ""
+        stderr = f"quality runner: cannot start command: {exc}\n"
     return CommandResult(
         argv=list(argv),
         cwd=str(cwd),
@@ -1243,6 +1315,25 @@ def performance_failures(
     return failures
 
 
+def machine_identity_failures(
+    machine: Mapping[str, Any] | None, telemetry: Mapping[str, Any] | None,
+) -> list[str]:
+    """A named measurement profile must prove its adapter even without budgets."""
+    if machine is None:
+        return []
+    adapter = (telemetry or {}).get("adapter")
+    if not isinstance(adapter, dict) or adapter.get("availability") != "reported":
+        return ["machine profile did not report native adapter metadata"]
+    failures = []
+    for key, adapter_key in (("backend", "backend"), ("gpu", "name")):
+        expected = str(machine.get(key, "")).lower()
+        actual = str(adapter.get(adapter_key, "")).lower()
+        matches = expected in actual if key == "gpu" else expected == actual
+        if expected and not matches:
+            failures.append(f"adapter {adapter_key} {actual!r} != machine profile {expected!r}")
+    return failures
+
+
 def diff_command(
     diff_bin: Path,
     case: Mapping[str, Any],
@@ -1421,14 +1512,6 @@ def run_case(
     env.update(machine_capture_environment(machine))
     capture_result = run_command(capture_argv, cwd, timeout_seconds, env)
     record["commands"].append({"kind": "capture", **command_record(capture_result)})
-    if capture_result.returncode != 0:
-        record["status"] = "error"
-        record["failures"].append(f"capture failed with exit {capture_result.returncode}")
-        return record
-    if not candidate.exists():
-        record["status"] = "error"
-        record["failures"].append(f"capture did not produce {candidate}")
-        return record
     host_postflight_passed = True
     if validate_host_load and machine is not None:
         max_cpu_fraction = float(machine.get("max_host_cpu_fraction", 0.20))
@@ -1451,6 +1534,14 @@ def run_case(
             record["failures"].append(
                 f"performance measurement invalid because host became busy: {reason}"
             )
+    if capture_result.returncode != 0:
+        record["status"] = "error"
+        record["failures"].append(f"capture failed with exit {capture_result.returncode}")
+        return record
+    if not candidate.exists():
+        record["status"] = "error"
+        record["failures"].append(f"capture did not produce {candidate}")
+        return record
     candidate_dimensions = png_dimensions(candidate)
     if candidate_dimensions != tuple(case["resolution"]):
         record["failures"].append(
@@ -1487,6 +1578,7 @@ def run_case(
                     f"invalid external VRAM measurement {external_vram!r}"
                 )
     record["telemetry"] = telemetry
+    record["failures"].extend(machine_identity_failures(machine, telemetry))
     record["failures"].extend(telemetry_contract_failures(case, telemetry))
     record["artifacts"]["candidate"] = str(candidate.relative_to(out_dir))
     intermediate_files = sorted(
@@ -1596,7 +1688,8 @@ def write_summaries(result: Mapping[str, Any], out_dir: Path) -> None:
         f"Overall: **{str(result['status']).upper()}**  \n"
         f"Commit: `{result['environment']['git_commit']}`  \n"
         f"Manifest: `{result['manifest_sha256']}`  \n"
-        f"Machine class: `{result.get('machine_class') or 'report-only'}`\n\n"
+        f"Machine class: `{result.get('machine_class') or 'unqualified'}`  \n"
+        f"Performance budgets: `{result.get('performance_budget_mode', 'unspecified')}`\n\n"
         + markdown_table(headers, rows)
         + "\n"
     )
@@ -1618,6 +1711,7 @@ th{{background:#292c2f}}code{{color:#9cdcfe}}.pass{{color:#7ee787}}.fail{{color:
 <h1>Bloom quality qualification: {html.escape(str(result["suite"]))}</h1>
 <p class="{html.escape(str(result["status"]))}">Overall: {html.escape(str(result["status"]).upper())}</p>
 <p>Commit <code>{html.escape(str(result["environment"]["git_commit"]))}</code></p>
+<p>Performance budgets: {html.escape(str(result.get("performance_budget_mode", "unspecified")))}</p>
 <table><thead><tr>{"".join(f"<th>{html.escape(h)}</th>" for h in headers)}</tr></thead>
 <tbody>{html_rows}</tbody></table>
 """
@@ -1968,7 +2062,9 @@ def execute_suite(args: argparse.Namespace) -> int:
             shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     host_preflight: dict[str, Any] | None = None
-    validate_host_load = bool(machine and machine.get("hard_gate", False))
+    validate_host_load = bool(machine and (
+        machine.get("hard_gate", False) or machine.get("check_host_load", False)
+    ))
     if validate_host_load:
         host_preflight = wait_for_idle_host(
             timeout_seconds=float(args.host_idle_timeout),
@@ -2043,6 +2139,9 @@ def execute_suite(args: argparse.Namespace) -> int:
         "suite": args.suite,
         "machine_class": machine_class,
         "report_only": bool(args.report_only),
+        "performance_budget_mode": (
+            "governed" if machine and machine.get("hard_gate", False) else "measurement-only"
+        ),
         "environment": environment,
         "features": sorted(observed_features or features),
         "artifacts": {

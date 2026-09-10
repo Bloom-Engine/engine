@@ -711,6 +711,13 @@ unsafe fn init_engine_for_hwnd(
         let mut handle = raw_window_handle::Win32WindowHandle::new(
             std::num::NonZeroIsize::new(hwnd.0 as isize).unwrap(),
         );
+        // Vulkan needs the instance that owns this window, including embedded HWNDs.
+        handle.hinstance = std::num::NonZeroIsize::new(
+            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::GWLP_HINSTANCE,
+            ),
+        );
         let raw = raw_window_handle::RawWindowHandle::Win32(handle);
         instance
             .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
@@ -877,7 +884,13 @@ pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f
             return 0.0;
         };
         let target = {
-            let h = raw_window_handle::Win32WindowHandle::new(hwnd_nz);
+            let mut h = raw_window_handle::Win32WindowHandle::new(hwnd_nz);
+            h.hinstance = std::num::NonZeroIsize::new(unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+                    windows::Win32::Foundation::HWND(handle as *mut _),
+                    windows::Win32::UI::WindowsAndMessaging::GWLP_HINSTANCE,
+                )
+            });
             wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Windows(
                     raw_window_handle::WindowsDisplayHandle::new(),

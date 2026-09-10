@@ -168,7 +168,50 @@ class BaselineGovernanceTests(unittest.TestCase):
             quality.baseline_review(args)
 
 
+class CommandExecutionTests(unittest.TestCase):
+    def test_relative_executable_resolves_against_child_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory).resolve()
+            result = mock.Mock(returncode=0, stdout="ok", stderr="")
+            with mock.patch.object(quality.subprocess, "run", return_value=result) as run:
+                record = quality.run_command(["./main.exe", "--quality-run"], cwd, 10.0)
+            self.assertEqual(run.call_args.args[0][0], str(cwd / "main.exe"))
+            self.assertEqual(record.argv[0], str(cwd / "main.exe"))
+
+    def test_missing_executable_preserves_failure_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            record = quality.run_command(["./missing-quality-scene"], Path(directory), 10.0)
+        self.assertEqual(record.returncode, 127)
+        self.assertIn("cannot start command", record.stderr)
+        self.assertFalse(record.timed_out)
+
+
 class HostLoadPreflightTests(unittest.TestCase):
+    def test_windows_counters_keep_single_core_units(self) -> None:
+        result = mock.Mock(returncode=0, stdout=json.dumps([
+            {"IDProcess": 123, "Name": "compiler", "PercentProcessorTime": 150},
+            {"IDProcess": 456, "Name": "editor", "PercentProcessorTime": 30},
+        ]))
+        with mock.patch.object(quality.subprocess, "run", return_value=result):
+            snapshot = quality.windows_host_load_snapshot(12)
+        self.assertTrue(snapshot["available"])
+        self.assertEqual(snapshot["cpu_fraction"], 0.15)
+        self.assertEqual(snapshot["top_processes"][0]["cpu_percent"], 150)
+        accepted, reason = quality.classify_host_snapshot(snapshot, 0.20, 75.0)
+        self.assertFalse(accepted)
+        self.assertIn("top process CPU", reason)
+
+    def test_windows_counter_failures_do_not_look_idle(self) -> None:
+        for stdout in ("", "[]", "null", "invalid", '[{"IDProcess": 1}]'):
+            with self.subTest(stdout=stdout), mock.patch.object(
+                quality.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=stdout)
+            ):
+                snapshot = quality.windows_host_load_snapshot(12)
+            self.assertFalse(snapshot["available"])
+            self.assertFalse(quality.classify_host_snapshot(snapshot, 0.20, 75.0)[0])
+        with mock.patch.object(quality.subprocess, "run", side_effect=OSError("missing")):
+            self.assertFalse(quality.windows_host_load_snapshot(12)["available"])
+
     def snapshot(self, fraction: float, top_cpu: float) -> dict[str, object]:
         return {
             "available": True,
@@ -219,6 +262,27 @@ class HostLoadPreflightTests(unittest.TestCase):
 
 
 class ReproducibilityTests(unittest.TestCase):
+    def test_radeon_profile_checks_identity_without_borrowing_budgets(self) -> None:
+        manifest, _ = quality.load_manifest(MODULE_PATH.with_name("scenes.toml"))
+        machine = quality.selected_machine_class(manifest, "amd-radeon760m-windows-vulkan")
+        self.assertFalse(machine["hard_gate"])
+        self.assertTrue(machine["check_host_load"])
+        self.assertEqual(quality.machine_capture_environment(machine), {
+            "BLOOM_WGPU_BACKEND": "vulkan", "BLOOM_HW_GI": "1",
+        })
+        telemetry = {"adapter": {
+            "availability": "reported", "name": "AMD Radeon 760M Graphics", "backend": "Vulkan",
+        }, "gpu_frame_p95_ms": 1000.0}
+        self.assertEqual(quality.machine_identity_failures(machine, telemetry), [])
+        for case in manifest["case"]:
+            self.assertEqual(quality.performance_failures(case, telemetry, machine), [])
+        telemetry["adapter"]["backend"] = "Dx12"
+        self.assertTrue(quality.machine_identity_failures(machine, telemetry))
+        telemetry["adapter"]["backend"] = "Vulkan"
+        telemetry["adapter"]["name"] = "Microsoft Basic Render Driver"
+        self.assertTrue(quality.machine_identity_failures(machine, telemetry))
+        self.assertTrue(quality.machine_identity_failures(machine, None))
+
     def test_checked_in_manifest_satisfies_contract(self) -> None:
         manifest, digest = quality.load_manifest(MODULE_PATH.with_name("scenes.toml"))
         self.assertEqual(manifest["schema_version"], 1)
