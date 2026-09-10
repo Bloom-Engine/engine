@@ -230,7 +230,7 @@ floor/cube geometry, materials, camera, sun, and deterministic seed:
 
 ```shell
 cd tools/bloom-reference
-cargo run --release -- \
+cargo run --release --bin bloom-reference -- \
   --builtin pt-golden \
   --out ../../native/shared/target/golden-artifacts/pt-reference.png \
   --metadata ../../native/shared/target/golden-artifacts/pt-reference.json \

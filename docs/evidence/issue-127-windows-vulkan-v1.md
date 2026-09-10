@@ -66,3 +66,34 @@ Raw commands, logs, and captures are preserved in
 `tools/quality/out/windows-engine-plan/issue-127-windows-vulkan-v1.zip` with a
 SHA-256 sidecar. Publication and the complete issue acceptance audit remain
 separate from these passing local hardware checks.
+
+## CPU reference sanity check
+
+The procedural `pt-golden` CPU reference was rendered twice at 256 x 256,
+256 spp, eight bounces, seed zero, camera `(5,4,7)` toward `(0,0.5,0)`, 50-degree
+vertical FOV, and sun direction `(0.5,1,0.3)` at intensity 1.2. Both PNGs are
+byte-identical, SHA-256
+`c0ef46e620f317a26fb695ce6b6e893abc90a81664bae8b71867503695423fee`.
+The scene has 84 triangles and four materials. The first render took 2.0054651
+seconds, excluding compilation. Command and metadata are retained under
+`tools/quality/out/windows-engine-plan/pt-cpu-reference/`.
+
+Visual comparison with the accepted GPU progressive output agrees on all six
+cube placements, silhouettes, material colors, and shadow direction. Five-pixel
+square samples inside front-facing yellow/cyan/red surfaces preserve the same
+display-luminance ordering: CPU 144.83/122.15/79.44, GPU 133.37/116.66/89.05.
+A floor sample beside the front cube's shadow is darker than a nearby lit floor
+sample in both renders (CPU 152.91 versus 157.92; GPU 129.87 versus 132.46).
+These display-space samples support an energy/occlusion sanity check, not a
+cross-renderer numeric golden.
+
+The [documented model differences](../pt/PT-6-7-8-skinned-tlas-motion-oracle.md)
+remain visible: the CPU renders the environment on primary misses, uses
+environment NEE/MIS, and applies fixed ACES/sRGB; the GPU preserves raster sky
+and uses its engine post pipeline. No baseline was changed for this comparison.
+
+The canonical oracle was also rerun after the renderer/harness fixes at code
+commit `dc3ca7e` (only report/document edits were uncommitted). All six image
+metric sets match the original clean run exactly; both negative controls are
+rejected again. The full command finishes in 4.04 seconds. The follow-up log and
+captures are retained under `tools/quality/out/windows-engine-plan/pt-final/`.

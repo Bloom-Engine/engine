@@ -162,5 +162,172 @@
   "limitations": [
     "This is a PT correctness qualification, not an RTX 4080 or full nine-scene performance qualification.",
     "The first broader golden batch failed its Vulkan HAL texture-counter gate and later silently skipped raster cases; it is not an accepted broad-corpus pass."
-  ]
+  ],
+  "cpu_reference": {
+    "source": "0c5d1cc",
+    "unchanged_reference_source_since_oracle": true,
+    "metadata": {
+      "camera": {
+        "fov_y_deg": 50.0,
+        "position": [
+          5.0,
+          4.0,
+          7.0
+        ],
+        "target": [
+          0.0,
+          0.5,
+          0.0
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "environment": "bloom-pt-golden-analytic",
+      "height": 256,
+      "max_bounces": 8,
+      "output": "C:\\Users\\Ralph\\projects\\bloom\\engine-quality-radeon\\tools\\quality\\out\\windows-engine-plan\\pt-cpu-reference\\pt-reference.png",
+      "render_seconds": 2.0054651,
+      "renderer": "bloom-reference",
+      "scene": "<builtin:pt-golden>",
+      "seed": 0,
+      "spp": 256,
+      "sun": {
+        "color": [
+          1.0,
+          0.9800000190734863,
+          0.9300000071525574
+        ],
+        "direction_to_light": [
+          0.4319342076778412,
+          0.8638684153556824,
+          0.2591605484485626
+        ],
+        "intensity": 1.2000000476837158
+      },
+      "triangles": 84,
+      "width": 256
+    },
+    "repeats": 2,
+    "pngs_byte_identical": true,
+    "sha256": "c0ef46e620f317a26fb695ce6b6e893abc90a81664bae8b71867503695423fee",
+    "visual_sanity": "Six cube placements, silhouettes, material-color ordering and shadow direction agree; model/display differences documented separately.",
+    "display_luminance_samples": {
+      "sample_box_size": 5,
+      "yellow": {
+        "xy": [
+          48,
+          146
+        ],
+        "cpu": 144.83124549,
+        "gpu": 133.37090365
+      },
+      "cyan": {
+        "xy": [
+          117,
+          157
+        ],
+        "cpu": 122.14981482,
+        "gpu": 116.6606463
+      },
+      "red": {
+        "xy": [
+          198,
+          151
+        ],
+        "cpu": 79.44307156,
+        "gpu": 89.05323387
+      },
+      "shadow_floor": {
+        "xy": [
+          86,
+          176
+        ],
+        "cpu": 152.91444424,
+        "gpu": 129.86561228
+      },
+      "nearby_floor": {
+        "xy": [
+          74,
+          180
+        ],
+        "cpu": 157.91949203,
+        "gpu": 132.45716602
+      }
+    }
+  },
+  "followup_qualification": {
+    "source": "dc3ca7eeb03938d0ec9ca1866f3ed4b66955195b",
+    "dirty_scope": "Documentation changes only; code and tests match the committed source.",
+    "canonical_runs": [
+      {
+        "mode": "pt_progressive",
+        "repeat": 1,
+        "mean_rgba": 0.134697,
+        "mean_rgb": 0.179596,
+        "outlier_pixel_percent": 0.038147,
+        "max_error": 69,
+        "ssim": 0.997543544,
+        "render_ms": 274
+      },
+      {
+        "mode": "pt_progressive",
+        "repeat": 2,
+        "mean_rgba": 0.134697,
+        "mean_rgb": 0.179596,
+        "outlier_pixel_percent": 0.038147,
+        "max_error": 69,
+        "ssim": 0.997543544,
+        "render_ms": 273
+      },
+      {
+        "mode": "pt_progressive",
+        "repeat": 3,
+        "mean_rgba": 0.134697,
+        "mean_rgb": 0.179596,
+        "outlier_pixel_percent": 0.038147,
+        "max_error": 69,
+        "ssim": 0.997543544,
+        "render_ms": 269
+      },
+      {
+        "mode": "pt_realtime_motion",
+        "repeat": 1,
+        "mean_rgba": 0.060707,
+        "mean_rgb": 0.080943,
+        "outlier_pixel_percent": 0.012207,
+        "max_error": 48,
+        "ssim": 0.999237806,
+        "render_ms": 86
+      },
+      {
+        "mode": "pt_realtime_motion",
+        "repeat": 2,
+        "mean_rgba": 0.060707,
+        "mean_rgb": 0.080943,
+        "outlier_pixel_percent": 0.012207,
+        "max_error": 48,
+        "ssim": 0.999237806,
+        "render_ms": 86
+      },
+      {
+        "mode": "pt_realtime_motion",
+        "repeat": 3,
+        "mean_rgba": 0.060707,
+        "mean_rgb": 0.080943,
+        "outlier_pixel_percent": 0.012207,
+        "max_error": 48,
+        "ssim": 0.999237806,
+        "render_ms": 87
+      }
+    ],
+    "negative_controls_rejected": [
+      "brdf-energy",
+      "reprojection"
+    ],
+    "result": "pass",
+    "elapsed_seconds": 4.04
+  }
 }
