@@ -257,6 +257,47 @@ jobs:
           path: target/ci/full-host-build.json
           if-no-files-found: error
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache matching Perry source build
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/bloom-perry
+          key: windows-perry-${{ hashFiles('tools/ci/setup_windows_perry.py') }}
+
+      - name: Prepare pinned Windows example toolchain
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: python tools/ci/setup_windows_perry.py --out "$env:RUNNER_TEMP/bloom-perry" --github-env
+
+      - name: full / example-compile
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: ./scripts/ci-check.sh --full --component example-compile
+
+      - name: Retain executed example-check summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-example-summary
+          path: target/ci/full-example-compile.json
+          if-no-files-found: error
+
+      - name: Retain native example build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-example-builds
+          path: |
+            target/ci/examples/result.json
+            target/ci/examples/logs/
+            ${{ runner.temp }}/bloom-perry/toolchain.json
+            ${{ runner.temp }}/bloom-perry/runtime-build.log
+          if-no-files-found: error
+
       - name: Upload failure evidence
         if: failure()
         uses: ./.github/actions/upload-ci-failure

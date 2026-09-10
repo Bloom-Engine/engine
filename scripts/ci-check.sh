@@ -77,8 +77,8 @@ done
 
 lane_components() {
   case "$1" in
-    quick) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory" ;;
-    full) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory host-build wasm-build" ;;
+    quick) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory example-compile" ;;
+    full) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory host-build example-compile wasm-build" ;;
     web) printf '%s\n' "wasm-check wasm-build browser-smoke" ;;
     cross) printf '%s\n' "target-check" ;;
     hardware) printf '%s\n' "example-compile quality-check quality-faults quality-run fractional-native-throughput virtual-geometry-stress" ;;
@@ -112,6 +112,12 @@ case "$host_os" in
   MINGW*|MSYS*|CYGWIN*) host_crate="windows" ;;
   *) host_crate="" ;;
 esac
+
+python_cmd="python3"
+if [ "$host_crate" = "windows" ]; then
+  # Windows installers expose python.exe; python3 may be a Store alias.
+  python_cmd="python"
+fi
 
 ALLOWED_COMPONENTS="$(lane_components "$LANE")"
 if [ -n "$COMPONENT" ]; then
@@ -260,7 +266,7 @@ run_component() {
       ;;
     quality-contract)
       hr "quality orchestration syntax and governance tests"
-      python3 -m py_compile \
+      "$python_cmd" -m py_compile \
         tools/quality/run.py \
         tools/quality/build_example.py \
         tools/quality/khronos_materials.py \
@@ -272,8 +278,11 @@ run_component() {
         tools/quality/vsm_motion_corpus.py \
         tools/quality/prepare_bistro.py \
         tools/ci/web_smoke.py \
-        tools/ci/test_web_smoke.py
-      python3 -m unittest \
+        tools/ci/test_web_smoke.py \
+        tools/ci/compile_examples.py \
+        tools/ci/setup_windows_perry.py \
+        tools/ci/test_compile_examples.py
+      "$python_cmd" -m unittest \
         tools/quality/test_run.py \
         tools/quality/test_khronos_materials.py \
         tools/quality/test_shadow_detail.py \
@@ -283,6 +292,7 @@ run_component() {
         tools/quality/test_vsm_debug_views.py \
         tools/quality/test_vsm_motion_corpus.py \
         tools/ci/test_web_smoke.py \
+        tools/ci/test_compile_examples.py \
         -v
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
@@ -297,7 +307,7 @@ run_component() {
       ;;
     example-inventory)
       hr "canonical TypeScript example inventory"
-      python3 tools/ci/compile_examples.py --check
+      "$python_cmd" tools/ci/compile_examples.py --check
       ;;
     host-build)
       if [ -z "$host_crate" ]; then
@@ -317,7 +327,7 @@ run_component() {
       ;;
     browser-smoke)
       hr "Bloom WebGPU real-browser known-frame smoke"
-      python3 tools/ci/web_smoke.py
+      "$python_cmd" tools/ci/web_smoke.py
       ;;
     target-check)
       cross_crate="${BLOOM_CROSS_CRATE:-}"
@@ -382,16 +392,21 @@ run_component() {
       ( cd "native/$cross_crate" && cargo "${cargo_args[@]}" )
       ;;
     example-compile)
-      hr "compile every canonical TypeScript example"
-      python3 tools/ci/compile_examples.py
+      if [ "$LANE" = "quick" ]; then
+        hr "compile and link the representative Pong example"
+        "$python_cmd" tools/ci/compile_examples.py --example examples/pong
+      else
+        hr "compile and link every canonical TypeScript example"
+        "$python_cmd" tools/ci/compile_examples.py
+      fi
       ;;
     quality-check)
       hr "validate quality manifest, assets, and approved baselines"
-      python3 tools/quality/run.py check
+      "$python_cmd" tools/quality/run.py check
       ;;
     quality-faults)
       hr "prove seeded quality regressions are detected"
-      python3 tools/quality/run.py faults \
+      "$python_cmd" tools/quality/run.py faults \
         --out "${BLOOM_QUALITY_FAULTS_OUT:-tools/quality/out/ci-faults}" \
         --timeout "${BLOOM_QUALITY_TIMEOUT:-900}"
       ;;
@@ -404,14 +419,14 @@ run_component() {
       quality_out="${BLOOM_QUALITY_OUT:-tools/quality/out/ci-hardware}"
       hr "run '$quality_suite' quality suite on $BLOOM_QUALITY_MACHINE_CLASS"
       if [ -n "${BLOOM_QUALITY_CASE:-}" ]; then
-        python3 tools/quality/run.py run "$quality_suite" \
+        "$python_cmd" tools/quality/run.py run "$quality_suite" \
           --case "$BLOOM_QUALITY_CASE" \
           --machine-class "$BLOOM_QUALITY_MACHINE_CLASS" \
           --out "$quality_out" \
           --host-idle-timeout "${BLOOM_QUALITY_HOST_IDLE_TIMEOUT:-120}" \
           --timeout "${BLOOM_QUALITY_TIMEOUT:-1800}"
       else
-        python3 tools/quality/run.py run "$quality_suite" \
+        "$python_cmd" tools/quality/run.py run "$quality_suite" \
           --machine-class "$BLOOM_QUALITY_MACHINE_CLASS" \
           --out "$quality_out" \
           --host-idle-timeout "${BLOOM_QUALITY_HOST_IDLE_TIMEOUT:-120}" \
@@ -444,7 +459,7 @@ run_component() {
       vg_stress_out="${BLOOM_VIRTUAL_STRESS_OUT:-tools/quality/out/ci-virtual-geometry}"
       vg_stress_work="${BLOOM_VIRTUAL_STRESS_WORK:-${RUNNER_TEMP:-/tmp}/bloom-virtual-geometry-stress}"
       hr "run 10M virtual-geometry stress on $BLOOM_VIRTUAL_STRESS_BACKEND"
-      python3 tools/quality/virtual_geometry_stress.py \
+      "$python_cmd" tools/quality/virtual_geometry_stress.py \
         --platform "$BLOOM_VIRTUAL_STRESS_PLATFORM" \
         --backend "$BLOOM_VIRTUAL_STRESS_BACKEND" \
         --work "$vg_stress_work" \
