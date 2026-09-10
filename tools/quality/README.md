@@ -48,6 +48,38 @@ hard performance budget. `--report-only` records those same failures in
 `result.json`; it only makes the process exit zero for local investigation.
 It never turns a failure into a recorded pass.
 
+The `Portable image diagnostics` GitHub workflow captures Sponza and skinned/alpha
+motion on hosted Metal with the canonical commands and a SHA-256-pinned Perry
+0.5.1182 toolchain. It uploads final images, required intermediates, telemetry,
+diff metrics, and source/toolchain identity on success and failure. It uses
+`--report-only` to retain visual failures for backend investigation, then rejects
+incomplete captures separately. A green diagnostic job proves capture
+completeness; inspect `result.json` for visual results. Shared-runner timing does
+not qualify the Apple M1 Max or RTX 4080 budgets.
+
+For comparisons that need original attachment values, set `BLOOM_QUALITY_RAW=1`
+before running the diagnostic command. Alongside the PNGs, `intermediates/raw/`
+contains packed rows of each captured texture and JSON describing dimensions,
+format, byte count, and checksum. `intermediates/mrt/` contains the existing raw
+HDR, material, motion-vector, and albedo capture with its manifest. These files
+preserve float depth and linear HDR values; depth PNGs independently normalize
+their display range and cannot establish numerical depth equality. Raw capture
+is opt-in and runs after the measured window.
+
+`python3 tools/quality/alpha_probe.py --out <directory>` builds two temporary
+skinned/alpha diagnostics on Windows or macOS. It makes the depth prepass opaque
+and records the original cutout decision on each nearest card. The albedo MRT
+contains the exact little-endian f32 bits of U or V; HDR RGB contains mip LOD,
+coverage probability, and authored alpha. Material R contains the Bayer threshold
+(UNORM8); material G stores bit flags for survival (1), coverage mips (2), and
+positive alpha cutoff (4). Motion RG contains half-precision UVs for orientation.
+These are input diagnostics, not rendered-image or timing qualification: opaque
+cards change occlusion and do not describe all layers of the original leaf.
+The tool retains shader patches, commands, source and executable hashes, logs,
+and raw captures, then restores both the original source and native library.
+Run it without concurrent native builds. The Metal diagnostic workflow retains
+these inputs alongside the unmodified canonical captures.
+
 The Radeon 760M profile selects Vulkan, opts into hardware GI, verifies the
 reported adapter, and records host preflight/postflight CPU load. Visual,
 intermediate-image, and telemetry contracts remain strict. Performance is

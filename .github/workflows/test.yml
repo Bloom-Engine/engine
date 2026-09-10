@@ -67,6 +67,10 @@ jobs:
           restore-keys: ${{ runner.os }}-shared-
 
       - name: quick / shared-tests
+        # Retain adapter identities and capability skips even when Rust reports
+        # an early-returning GPU test as "ok".
+        env:
+          RUST_TEST_NOCAPTURE: "1"
         run: ./scripts/ci-check.sh --quick --component shared-tests
 
       - name: Upload failure evidence

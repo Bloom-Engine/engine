@@ -9,6 +9,8 @@ use std::sync::mpsc;
 #[path = "capture_pixels.rs"]
 mod capture_pixels;
 use capture_pixels::{frame_rgb, rgba8_rgb};
+#[path = "quality_capture_raw.rs"]
+mod raw;
 
 use super::util::encode_png_simple;
 use super::weighted_transparency::WEIGHTED_TRANSPARENCY_AUTO_DRAW_THRESHOLD;
@@ -847,6 +849,7 @@ impl Renderer {
                 continue;
             }
             let data = readback.buffer.slice(..).get_mapped_range();
+            raw::write_intermediate(directory, readback, &data);
             if matches!(readback.kind, ReadbackKind::Hdr) {
                 let metrics = hdr_metrics_json(
                     &data,

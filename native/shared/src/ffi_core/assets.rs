@@ -52,7 +52,7 @@ macro_rules! __bloom_ffi_assets {
                 if eng.renderer.pending_quality_capture_dir.is_none() {
                     if let Ok(directory) = std::env::var("BLOOM_QUALITY_INTERMEDIATES") {
                         if !directory.is_empty() {
-                            eng.renderer.pending_quality_capture_dir = Some(directory);
+                            eng.renderer.request_quality_capture(directory);
                         }
                     }
                 }
@@ -81,7 +81,7 @@ macro_rules! __bloom_ffi_assets {
                     );
                     return 0.0;
                 }
-                engine().renderer.pending_quality_capture_dir = Some(path);
+                engine().renderer.request_quality_capture(path);
                 1.0
             })
         }
