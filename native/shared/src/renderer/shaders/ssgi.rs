@@ -253,6 +253,28 @@ fn bounded_probe_history(value: vec3<f32>) -> vec3<f32> {
     );
 }
 
+fn probe_surface_normal(right: vec3<f32>, up: vec3<f32>) -> vec3<f32> {
+    // The cross product's magnitude shrinks with pixel area. Apply the
+    // degeneracy guard to its angle, not its resolution-dependent area.
+    let right_scale = max(max(abs(right.x), abs(right.y)), abs(right.z));
+    let up_scale = max(max(abs(up.x), abs(up.y)), abs(up.z));
+    if (right_scale <= 0.0 || up_scale <= 0.0) {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return safe_probe_direction(
+        cross(right / right_scale, up / up_scale),
+        vec3<f32>(0.0, 0.0, 1.0),
+    );
+}
+
+fn probe_depth_uv(uv: vec2<f32>, size: vec2<u32>) -> vec2<f32> {
+    // A point-sampled depth belongs to the texel center. Reconstructing it at
+    // the requested fractional UV moves the receiver off its actual plane.
+    let dimensions = vec2<f32>(size);
+    let pixel = clamp(floor(uv * dimensions), vec2<f32>(0.0), dimensions - 1.0);
+    return (pixel + 0.5) / dimensions;
+}
+
 fn safe_probe_direction(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     let clean = bounded_probe_history(value);
     let len2 = dot(clean, clean);
@@ -306,7 +328,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         select(0.0, 1.0, u.params.z > 0.5);
     let px_x = f32(gid.x) * tile + tile * (0.5 + placement_jitter.x);
     let px_y = f32(gid.y) * tile + tile * (0.5 + placement_jitter.y);
-    let uv = vec2<f32>(px_x / half_w, px_y / half_h);
+    let uv = probe_depth_uv(
+        vec2<f32>(px_x / half_w, px_y / half_h), textureDimensions(hiz0),
+    );
 
     let linear_z = textureSampleLevel(hiz0, hiz_samp, uv, 0.0).r;
 
@@ -327,16 +351,13 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // texel to the right and one up. Uses the same Hi-Z mip 0 the
     // center tap read from.
     let texel = vec2<f32>(1.0 / half_w, 1.0 / half_h);
-    let uv_r = uv + vec2<f32>(texel.x, 0.0);
-    let uv_u = uv + vec2<f32>(0.0, -texel.y);
+    let uv_r = probe_depth_uv(uv + vec2<f32>(texel.x, 0.0), textureDimensions(hiz0));
+    let uv_u = probe_depth_uv(uv + vec2<f32>(0.0, -texel.y), textureDimensions(hiz0));
     let zr = textureSampleLevel(hiz0, hiz_samp, uv_r, 0.0).r;
     let zu = textureSampleLevel(hiz0, hiz_samp, uv_u, 0.0).r;
     let P_r = view_pos_from_linear(uv_r, zr, p00, p11, p20, p21);
     let P_u = view_pos_from_linear(uv_u, zu, p00, p11, p20, p21);
-    let N_vs = safe_probe_direction(
-        cross(P_r - P, P_u - P),
-        vec3<f32>(0.0, 0.0, 1.0),
-    );
+    let N_vs = probe_surface_normal(P_r - P, P_u - P);
 
     let sampled_world_pos = (u.inv_view * vec4<f32>(P, 1.0)).xyz;
     let N_world = safe_probe_direction(

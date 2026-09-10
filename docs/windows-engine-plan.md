@@ -15,11 +15,11 @@ first nine-scene Radeon evidence are in draft PR #154. Follow-up work starts at
 | Work | Required completion evidence | Current state |
 | --- | --- | --- |
 | #127 Vulkan PT correctness | Three deterministic progressive and motion runs, both negative controls, finite intermediates, reset/lighting/rigid-motion checks, retained report | Canonical hardware gate, all four focused temporal tests, and CPU reference sanity check pass on Radeon/Vulkan; [report](evidence/issue-127-windows-vulkan-v1.md) and [raw evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-155-windows-vulkan-20260910) published |
-| #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | [Cutout phase correction](evidence/windows-alpha-phase-v1.md) makes both focused Windows images pass unchanged portable baselines; full strict corpus and reproducibility checks are pending |
-| #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device lifetime and resource gates repaired; [stationary SSGI fix](evidence/windows-ssgi-stationary-v1.md) and [profiler correction](evidence/windows-profiler-integrity-v1.md) pass 90 golden tests with 4 ignored and 2 optional external-input skips. Complete-phase/lighting control and corrected frozen A/B recorded. HD TAA-jitter and the full representative corpus remain open |
-| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | All 23 hosted checks pass at #155 source `64d5eed`, including macOS shared/golden tests, all mobile target builds, native/web builds, and browser startup. Scheduled physical-hardware checks, all-example compilation, and release-install acceptance remain separate requirements |
+| #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | [Cutout phase correction](evidence/windows-alpha-phase-v1.md) passes all nine Radeon image gates in two complete runs and both hosted Metal images. Reproducibility passes with 257 byte-identical artifacts. Both strict runs fail postflight host-load checks, so their timing remains unqualified |
+| #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device/resource, stationary SSGI, and profiler fixes are retained. The [surface reconstruction correction](evidence/windows-ssgi-surface-v1.md) passes the original HD startup limits on Radeon/Vulkan; all 93 local goldens that run pass, including lighting recovery. Full scene-image, timing, and platform qualification of that correction remain open, as does the wider representative corpus |
+| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | All 24 hosted checks pass at #158 source `662a44f`, including macOS shared/golden tests, mobile target builds, native/web builds, browser startup, and canonical Metal images. Scheduled physical-hardware checks, all-example compilation, and release-install acceptance remain separate requirements |
 | #138 capability fallback | Actual constrained-adapter startup and relevant forced-tier corpus, truthful capability outputs | Existing implementation/evidence preserved; physical constrained-limit acceptance still needs proof |
-| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147, #154, and follow-up [#155](https://github.com/Bloom-Engine/engine/pull/155) remain drafts; no merge performed |
+| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#158 remain drafts; no merge performed |
 
 ## Engine work retained in scope
 
@@ -92,13 +92,33 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    extent: Metal's observed extent predicts every inspected threshold away from
    integer LOD boundaries. The [integer phase correction](evidence/windows-alpha-phase-v1.md)
    preserves that approved grid on both backends. Focused Windows images now
-   pass at SSIM 0.986160457 and 0.990073442; full strict corpus and repeated-run
-   validation follow. Raw export leaves unmodified Windows final PNGs byte-identical.
+   pass at SSIM 0.986160457 and 0.990073442. At `662a44f`, all nine Radeon image
+   gates pass twice and reproducibility passes with 257 byte-identical artifacts.
+   Both full runs fail their unchanged postflight host-load checks: System CPU
+   exceeds the 75% per-process limit on Bistro, and in the second run also on
+   draw/light stress and weighted transparency. Those timing windows remain
+   unqualified. The [#158 evidence archive](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-alpha-phase-20260910)
+   retains both failed strict runs and their separate passing image/repro checks.
+   All 24 hosted checks pass; the new cutout GPU regression actually executes on
+   Vulkan, DX12, and Metal. Raw export leaves unmodified Windows final PNGs byte-identical.
    Shared-runner timing cannot qualify hardware budgets.
-   Separately, the HD TAA fixture fails at its required 16-frame warm-up but
-   passes diagnostic controls at 32, 64, and 128 frames. The startup/settling
-   requirement remains open; its warm-up and thresholds are unchanged.
+   The HD TAA fixture originally failed at its required 16-frame warm-up and
+   passed diagnostic controls at 32, 64, and 128 frames. The follow-up
+   [surface correction](evidence/windows-ssgi-surface-v1.md) repairs depth-texel
+   coordinates and resolution-dependent normal reconstruction. It passes the
+   original 16-frame HD limits, removes the observed horizontal GI bands, and
+   preserves the existing lighting-recovery regression on Radeon/Vulkan.
+   Both isolated partial corrections fail. Full scene and platform checks of
+   the combined change remain in progress; no threshold or warm-up was relaxed.
 4. Continue starter/all-example and release-install checks, asset/world streaming,
    schema-generated APIs, components, and runtime UI against each issue's full
    acceptance criteria. Hardware-specific acceptance remains open while local
    work progresses.
+
+The immediate order is to repair the HD temporal startup failure, obtain valid
+full Radeon timing windows, and finish all-example startup and clean Windows
+installation checks. Then complete the wider temporal/geometry corpus and the
+engine API, streaming, component, and UI requirements above. These remaining
+outcomes include both implementation work and acceptance evidence; they are not
+a claim that each subsystem is absent. None requires waiting for an RTX 4080 to
+continue local work.

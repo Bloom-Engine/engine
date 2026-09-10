@@ -51,7 +51,8 @@ fn continuous_probe_coordinate(t: f32) -> f32 {
     return t * t * (3.0 - 2.0 * t);
 }
 
-fn resolve_pixel(uv: vec2<f32>) -> vec4<f32> {
+fn resolve_pixel(output_uv: vec2<f32>) -> vec4<f32> {
+    let uv = probe_depth_uv(output_uv, textureDimensions(hiz0));
     let linear_z = textureSampleLevel(hiz0, hiz_samp, uv, 0.0).r;
     if (linear_z >= HIZ_SKY_Z * 0.5) {
         return vec4<f32>(0.0);
@@ -76,10 +77,7 @@ fn resolve_pixel(uv: vec2<f32>) -> vec4<f32> {
     let zu = textureSampleLevel(hiz0, hiz_samp, uv + vec2<f32>(0.0, -texel.y), 0.0).r;
     let Pr = view_pos_from_linear(uv + vec2<f32>(texel.x, 0.0), zr, p00, p11, p20, p21);
     let Pu = view_pos_from_linear(uv + vec2<f32>(0.0, -texel.y), zu, p00, p11, p20, p21);
-    let N_vs = safe_probe_direction(
-        cross(Pr - P_vs, Pu - P_vs),
-        vec3<f32>(0.0, 0.0, 1.0),
-    );
+    let N_vs = probe_surface_normal(Pr - P_vs, Pu - P_vs);
     let N_ws = safe_probe_direction(
         (u.inv_view * vec4<f32>(N_vs, 0.0)).xyz,
         vec3<f32>(0.0, 1.0, 0.0),

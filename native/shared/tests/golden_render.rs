@@ -48,6 +48,8 @@ mod motion_producer_audit;
 mod profiler_integrity;
 #[path = "golden_render/quality_presets.rs"]
 mod quality_presets;
+#[path = "golden_render/ssgi_surface.rs"]
+mod ssgi_surface;
 #[path = "golden_render/temporal_history.rs"]
 mod temporal_history;
 #[path = "golden_render/transparency.rs"]
