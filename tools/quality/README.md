@@ -66,6 +66,20 @@ preserve float depth and linear HDR values; depth PNGs independently normalize
 their display range and cannot establish numerical depth equality. Raw capture
 is opt-in and runs after the measured window.
 
+`python3 tools/quality/alpha_probe.py --out <directory>` builds two temporary
+skinned/alpha diagnostics on Windows or macOS. It makes the depth prepass opaque
+and records the original cutout decision on each nearest card. The albedo MRT
+contains the exact little-endian f32 bits of U or V; HDR RGB contains mip LOD,
+coverage probability, and authored alpha. Material R contains the Bayer threshold
+(UNORM8); material G stores bit flags for survival (1), coverage mips (2), and
+positive alpha cutoff (4). Motion RG contains half-precision UVs for orientation.
+These are input diagnostics, not rendered-image or timing qualification: opaque
+cards change occlusion and do not describe all layers of the original leaf.
+The tool retains shader patches, commands, source and executable hashes, logs,
+and raw captures, then restores both the original source and native library.
+Run it without concurrent native builds. The Metal diagnostic workflow retains
+these inputs alongside the unmodified canonical captures.
+
 The Radeon 760M profile selects Vulkan, opts into hardware GI, verifies the
 reported adapter, and records host preflight/postflight CPU load. Visual,
 intermediate-image, and telemetry contracts remain strict. Performance is

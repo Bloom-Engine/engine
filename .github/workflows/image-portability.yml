@@ -119,6 +119,8 @@ jobs:
                   assert (mrt / (attachment["name"] + ".raw")).stat().st_size == attachment["byte_count"]
           print("Both Metal captures are complete. Visual differences remain in result.json.")
           PY
+      - name: Capture the cutout decision on opaque diagnostic cards
+        run: python3 tools/quality/alpha_probe.py --out tools/quality/out/ci-alpha-inputs-metal
       - name: Publish diagnostic summary
         if: always()
         shell: bash
@@ -134,6 +136,8 @@ jobs:
           name: image-portability-metal-${{ github.run_attempt }}
           path: |
             tools/quality/out/ci-image-portability-metal
+            tools/quality/out/ci-alpha-inputs-metal
+            !tools/quality/out/ci-alpha-inputs-metal/build/**
             target/ci
           if-no-files-found: warn
           retention-days: 30

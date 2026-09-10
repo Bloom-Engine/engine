@@ -63,8 +63,10 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    lane, and the complete shared suite. Its current-frame regression rejects
    all 12 old Vulkan samples and passes with the correction on Vulkan and DX12.
    Corrected SSGI timing covers 20 isolated runs, each with 120 complete GPU
-   frames. Hosted Metal's shared lane passes; GPU timestamp validation there
-   remains unproven because a capability skip can also report a test as "ok".
+   frames. Hosted Metal's shared lane passes, but its Apple Paravirtual adapter
+   lacks timestamp queries: the profiler GPU regression explicitly skips.
+   The retained `--nocapture` log at `1965a0b` confirms this; a test reported as
+   "ok" after that early return does not qualify Metal GPU timing.
    Its colored-shadow
    failure exposed an [inverse-matrix upload defect](evidence/windows-transmitted-shadow-inverse-vp-v1.md);
    the correction passes the isolated local check and rejects the wrong-color
@@ -77,10 +79,18 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    Disabling foliage shadow casting retains the Windows skinned/alpha mismatch;
    canonical captures at `98cce62` pass on hosted Metal with SSIM 0.997442544 for
    Sponza and 0.999417603 for skinned/alpha. That Apple Paravirtual adapter uses
-   the modern tier and software GI and exposes no timestamps. Raw intermediates
-   are retained in PR #157's diagnostic artifact. Compare matching fallback
-   paths before assigning a backend cause. Shared-runner timing cannot qualify
-   hardware budgets.
+   the modern tier and software GI and exposes no timestamps. At `0dd8f67`,
+   [PR #157](https://github.com/Bloom-Engine/engine/pull/157) has all 24 hosted
+   checks passing; both Metal images pass with raw export enabled. The
+   [published diagnostic archive](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-image-portability-20260910)
+   retains exact depth and MRT bytes, commands, checksums, and source identity.
+   On matching modern/software-GI paths, Windows still fails both images.
+   Skinned/alpha has 9,745 depth coverage disagreements before TAA, while
+   albedo RGB closely agrees on matching surfaces. Disabling foliage shadows
+   and an isolated isotropic alpha-sampling control retain the failure.
+   The cutout decision is the next diagnostic target; its precise cause remains
+   unresolved. Raw export leaves both Windows final PNGs byte-identical.
+   Shared-runner timing cannot qualify hardware budgets.
 4. Continue starter/all-example and release-install checks, asset/world streaming,
    schema-generated APIs, components, and runtime UI against each issue's full
    acceptance criteria. Hardware-specific acceptance remains open while local
