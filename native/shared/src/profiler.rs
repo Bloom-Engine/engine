@@ -54,12 +54,16 @@ pub struct Profiler {
     query_set: Option<wgpu::QuerySet>,
     resolve_buffer: Option<wgpu::Buffer>,
     readback_buffer: Option<wgpu::Buffer>,
+    gpu_queue: Option<wgpu::Queue>,
     timestamp_period_ns: f32,
     next_query: u32,
     // label -> (begin_index, end_index)
     pending_gpu: Vec<(&'static str, u32, u32)>,
     /// One-shot warning guard for GPU timestamp-pair exhaustion.
     budget_warned: bool,
+    gpu_queries_resolved: bool,
+    frame_gpu_exhausted: bool,
+    frame_gpu_complete: bool,
 
     /// Phase 8 — last `ROLLING_FRAMES` frame totals (sum of all
     /// samples in `frame` at frame_end), in microseconds. Ring
@@ -67,14 +71,14 @@ pub struct Profiler {
     /// `bloom_profiler_frame_history` and render a bar chart.
     frame_total_cpu_us: [f64; ROLLING_FRAMES],
     frame_total_gpu_us: [f64; ROLLING_FRAMES],
+    frame_gpu_valid: [bool; ROLLING_FRAMES],
     histogram_idx: usize,
     histogram_filled: usize,
 }
 
 struct RollingStats {
     cpu: [f64; ROLLING_FRAMES],
-    gpu: [f64; ROLLING_FRAMES],
-    has_gpu: bool,
+    gpu: [Option<f64>; ROLLING_FRAMES],
     idx: usize,
     filled: usize,
     /// Frame index of the most recent sample. A pass that stops running
@@ -114,6 +118,16 @@ fn quality_stats_ms(values_us: impl Iterator<Item = f64>) -> QualityStats {
         max: *values.last().unwrap_or(&0.0),
     }
 }
+fn gpu_duration_us(begin: u64, end: u64, period_ns: f32) -> Option<f64> {
+    if !period_ns.is_finite() || period_ns <= 0.0 {
+        return None;
+    }
+    // Equal timestamps are a legitimate sub-tick duration. Backwards pairs
+    // cannot be measured without the backend's timestamp wraparound width.
+    let duration = end.checked_sub(begin)? as f64 * f64::from(period_ns) / 1000.0;
+    duration.is_finite().then_some(duration)
+}
+
 fn push_json_string(out: &mut String, value: &str) {
     out.push('"');
     for c in value.chars() {
@@ -141,8 +155,7 @@ impl RollingStats {
     fn new() -> Self {
         Self {
             cpu: [0.0; ROLLING_FRAMES],
-            gpu: [0.0; ROLLING_FRAMES],
-            has_gpu: false,
+            gpu: [None; ROLLING_FRAMES],
             idx: 0,
             filled: 0,
             last_frame: 0,
@@ -150,10 +163,7 @@ impl RollingStats {
     }
     fn push(&mut self, cpu: f64, gpu: Option<f64>) {
         self.cpu[self.idx] = cpu;
-        if let Some(g) = gpu {
-            self.gpu[self.idx] = g;
-            self.has_gpu = true;
-        }
+        self.gpu[self.idx] = gpu.filter(|g| g.is_finite() && *g >= 0.0);
         self.idx = (self.idx + 1) % ROLLING_FRAMES;
         self.filled = (self.filled + 1).min(ROLLING_FRAMES);
     }
@@ -165,11 +175,13 @@ impl RollingStats {
         sum / self.filled as f64
     }
     fn avg_gpu(&self) -> Option<f64> {
-        if !self.has_gpu || self.filled == 0 {
+        if self.filled == 0 {
             return None;
         }
-        let sum: f64 = self.gpu.iter().take(self.filled).sum();
-        Some(sum / self.filled as f64)
+        // A failed latest sample must not display an older measurement.
+        self.gpu[(self.idx + ROLLING_FRAMES - 1) % ROLLING_FRAMES]?;
+        let values = self.gpu.iter().take(self.filled).flatten();
+        Some(values.clone().sum::<f64>() / values.count() as f64)
     }
 }
 
@@ -185,12 +197,17 @@ impl Profiler {
             query_set: None,
             resolve_buffer: None,
             readback_buffer: None,
+            gpu_queue: None,
             timestamp_period_ns: 1.0,
             next_query: 0,
             pending_gpu: Vec::new(),
             budget_warned: false,
+            gpu_queries_resolved: false,
+            frame_gpu_exhausted: false,
+            frame_gpu_complete: false,
             frame_total_cpu_us: [0.0; ROLLING_FRAMES],
             frame_total_gpu_us: [0.0; ROLLING_FRAMES],
+            frame_gpu_valid: [false; ROLLING_FRAMES],
             histogram_idx: 0,
             histogram_filled: 0,
         }
@@ -223,6 +240,7 @@ impl Profiler {
         self.query_set = Some(query_set);
         self.resolve_buffer = Some(resolve_buffer);
         self.readback_buffer = Some(readback_buffer);
+        self.gpu_queue = Some(queue.clone());
         self.timestamp_period_ns = queue.get_timestamp_period();
         self.gpu_enabled = true;
     }
@@ -234,8 +252,16 @@ impl Profiler {
             // until the rolling window refills and skew the first seconds
             // of every new session.
             self.rolling.clear();
+            self.frame.clear();
+            self.open_cpu.clear();
+            self.next_query = 0;
+            self.pending_gpu.clear();
+            self.gpu_queries_resolved = false;
+            self.frame_gpu_exhausted = false;
+            self.frame_gpu_complete = false;
             self.frame_total_cpu_us = [0.0; ROLLING_FRAMES];
             self.frame_total_gpu_us = [0.0; ROLLING_FRAMES];
+            self.frame_gpu_valid = [false; ROLLING_FRAMES];
             self.histogram_idx = 0;
             self.histogram_filled = 0;
         }
@@ -283,6 +309,7 @@ impl Profiler {
         }
         self.query_set.as_ref()?;
         if self.next_query + 2 > MAX_GPU_PAIRS * 2 {
+            self.frame_gpu_exhausted = true;
             if !self.budget_warned {
                 self.budget_warned = true;
                 eprintln!(
@@ -295,6 +322,7 @@ impl Profiler {
         let begin = self.next_query;
         let end = self.next_query + 1;
         self.next_query += 2;
+        self.gpu_queries_resolved = false;
         self.pending_gpu.push((label, begin, end));
         Some((begin, end))
     }
@@ -333,8 +361,9 @@ impl Profiler {
         })
     }
 
-    /// Resolve any pending GPU queries into the readback buffer. Call once
-    /// per frame, after all passes are encoded and before submit.
+    /// Resolve pending GPU queries into the resolve buffer. Call once
+    /// per frame, after all passes are encoded and before submit. The host
+    /// copy is submitted by `frame_end` after this command buffer is submitted.
     pub fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if !self.enabled || !self.gpu_enabled || self.next_query == 0 {
             return;
@@ -343,10 +372,7 @@ impl Profiler {
             return;
         };
         encoder.resolve_query_set(qs, 0..self.next_query, resolve, 0);
-        if let Some(readback) = &self.readback_buffer {
-            let byte_count = (self.next_query as u64) * 8;
-            encoder.copy_buffer_to_buffer(resolve, 0, readback, 0, byte_count);
-        }
+        self.gpu_queries_resolved = true;
     }
 
     /// End-of-frame bookkeeping. Resolves this frame's GPU timestamps via
@@ -360,53 +386,76 @@ impl Profiler {
             self.open_cpu.clear();
             self.next_query = 0;
             self.pending_gpu.clear();
+            self.gpu_queries_resolved = false;
+            self.frame_gpu_exhausted = false;
+            self.frame_gpu_complete = false;
             return;
         }
 
-        if self.gpu_enabled && self.next_query > 0 {
-            if let Some(readback) = &self.readback_buffer {
-                let byte_count = (self.next_query as u64) * 8;
-                let slice = readback.slice(0..byte_count);
-                slice.map_async(wgpu::MapMode::Read, |_| {});
-                let _ = device.poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
+        self.frame_gpu_complete = false;
+        for (label, _, _) in &self.pending_gpu {
+            if !self.frame.iter().any(|s| s.label == *label) {
+                self.frame.push(FrameSample {
+                    label,
+                    cpu_us: 0.0,
+                    gpu_us: None,
                 });
-                let data = slice.get_mapped_range().to_vec();
-                readback.unmap();
-                let period = self.timestamp_period_ns as f64;
-                let mut by_label: HashMap<&'static str, f64> = HashMap::new();
+            }
+        }
+        if self.gpu_enabled && self.gpu_queries_resolved && self.next_query > 0 {
+            if let Some(data) = self.read_gpu_timestamps(device) {
+                let mut by_label: HashMap<&'static str, Option<f64>> = HashMap::new();
+                self.frame_gpu_complete = !self.frame_gpu_exhausted;
                 for (label, b, e) in &self.pending_gpu {
                     let bo = (*b as usize) * 8;
                     let eo = (*e as usize) * 8;
-                    if eo + 8 > data.len() {
-                        continue;
-                    }
                     let bt = u64::from_le_bytes(data[bo..bo + 8].try_into().unwrap());
                     let et = u64::from_le_bytes(data[eo..eo + 8].try_into().unwrap());
-                    if et <= bt {
-                        continue;
-                    }
-                    let us = (et - bt) as f64 * period / 1000.0;
-                    *by_label.entry(*label).or_insert(0.0) += us;
+                    let us = gpu_duration_us(bt, et, self.timestamp_period_ns);
+                    self.frame_gpu_complete &= us.is_some();
+                    let total = by_label.entry(*label).or_insert(Some(0.0));
+                    *total = total.zip(us).map(|(sum, us)| sum + us);
                 }
                 for s in self.frame.iter_mut() {
                     if let Some(us) = by_label.remove(s.label) {
-                        s.gpu_us = Some(us);
+                        s.gpu_us = us;
                     }
-                }
-                // GPU samples without a CPU counterpart — record them too.
-                for (label, us) in by_label {
-                    self.frame.push(FrameSample {
-                        label,
-                        cpu_us: 0.0,
-                        gpu_us: Some(us),
-                    });
                 }
             }
         }
 
         self.frame_end_cpu();
+    }
+
+    fn read_gpu_timestamps(&self, device: &wgpu::Device) -> Option<Vec<u8>> {
+        let readback = self.readback_buffer.as_ref()?;
+        let byte_count = u64::from(self.next_query) * 8;
+        // On Windows/Radeon Vulkan, resolving and copying in one encoder
+        // returned the previous frame's queries, with stale data on frame zero.
+        // Submit the copy after the renderer submits the resolve. This only
+        // runs while profiling and adds no render pass or additional CPU wait.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("bloom_profiler_readback_copy"),
+        });
+        encoder.copy_buffer_to_buffer(self.resolve_buffer.as_ref()?, 0, readback, 0, byte_count);
+        self.gpu_queue.as_ref()?.submit([encoder.finish()]);
+        let slice = readback.slice(0..byte_count);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let completed = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let data = if completed.is_ok() && matches!(rx.try_recv(), Ok(Ok(()))) {
+            Some(slice.get_mapped_range().to_vec())
+        } else {
+            None
+        };
+        // Also cancels a still-pending map on backends without blocking poll.
+        readback.unmap();
+        data
     }
 
     /// CPU-only end-of-frame: histogram update + drain into rolling.
@@ -427,6 +476,7 @@ impl Profiler {
         }
         self.frame_total_cpu_us[self.histogram_idx] = frame_cpu;
         self.frame_total_gpu_us[self.histogram_idx] = frame_gpu;
+        self.frame_gpu_valid[self.histogram_idx] = self.frame_gpu_complete;
         self.histogram_idx = (self.histogram_idx + 1) % ROLLING_FRAMES;
         self.histogram_filled = (self.histogram_filled + 1).min(ROLLING_FRAMES);
 
@@ -446,6 +496,9 @@ impl Profiler {
         self.open_cpu.clear();
         self.next_query = 0;
         self.pending_gpu.clear();
+        self.gpu_queries_resolved = false;
+        self.frame_gpu_exhausted = false;
+        self.frame_gpu_complete = false;
         self.frame_count = self.frame_count.wrapping_add(1);
     }
 
@@ -566,9 +619,22 @@ impl Profiler {
     ) -> String {
         let history = self.frame_history();
         let cpu = quality_stats_ms(history.iter().map(|(cpu, _)| *cpu));
-        let gpu = quality_stats_ms(history.iter().map(|(_, gpu)| *gpu));
+        let valid_gpu_frames = self
+            .frame_gpu_valid
+            .iter()
+            .take(history.len())
+            .filter(|v| **v)
+            .count();
+        let gpu = quality_stats_ms(
+            self.frame_total_gpu_us
+                .iter()
+                .zip(&self.frame_gpu_valid)
+                .take(history.len())
+                .filter_map(|(us, valid)| valid.then_some(*us)),
+        );
+        let gpu_timing_valid = !history.is_empty() && valid_gpu_frames == history.len();
         let rows = self.snapshot();
-        let gpu_timestamps = rows.iter().any(|(_, _, gpu)| gpu.is_some());
+        let gpu_timestamps = self.gpu_enabled;
         let mode_name = match present_mode {
             0 => "fifo",
             1 => "mailbox",
@@ -616,6 +682,9 @@ impl Profiler {
         let _ = writeln!(out, "  \"gpu_frame_p95_ms\":{:.6},", gpu.p95);
         let _ = writeln!(out, "  \"gpu_frame_max_ms\":{:.6},", gpu.max);
         let _ = writeln!(out, "  \"gpu_timestamps_available\":{gpu_timestamps},");
+        let _ = writeln!(out, "  \"timing_window_frames\":{},", history.len());
+        let _ = writeln!(out, "  \"gpu_timing_valid_frames\":{valid_gpu_frames},");
+        let _ = writeln!(out, "  \"gpu_timing_valid\":{gpu_timing_valid},");
         let _ = writeln!(out, "  \"vram_peak_mb\":null,");
         out.push_str("  \"passes\":[");
         for (i, (label, cpu_us, gpu_us)) in rows.iter().enumerate() {
@@ -646,6 +715,80 @@ impl Profiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_gpu_samples_do_not_reuse_or_dilute_old_timings() {
+        let mut stats = RollingStats::new();
+        stats.push(1.0, Some(20.0));
+        assert_eq!(stats.avg_gpu(), Some(20.0));
+        stats.push(1.0, None);
+        assert_eq!(stats.avg_gpu(), None);
+        stats.push(1.0, Some(40.0));
+        assert_eq!(stats.avg_gpu(), Some(30.0));
+        for _ in 0..ROLLING_FRAMES {
+            stats.push(1.0, None);
+        }
+        assert_eq!(stats.avg_gpu(), None);
+        stats.push(1.0, Some(10.0));
+        assert_eq!(stats.avg_gpu(), Some(10.0));
+        for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+            stats.push(1.0, Some(invalid));
+            assert_eq!(stats.avg_gpu(), None);
+        }
+    }
+
+    #[test]
+    fn gpu_duration_rejects_backwards_pairs_and_invalid_periods() {
+        assert_eq!(gpu_duration_us(100, 200, 10.0), Some(1.0));
+        assert_eq!(gpu_duration_us(100, 100, 10.0), Some(0.0));
+        assert_eq!(gpu_duration_us(200, 100, 10.0), None);
+        for invalid in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
+            assert_eq!(gpu_duration_us(100, 200, invalid), None);
+        }
+    }
+
+    #[test]
+    fn quality_report_exposes_incomplete_gpu_windows_until_they_expire() {
+        let mut p = Profiler::new();
+        p.set_enabled(true);
+        p.gpu_enabled = true;
+        for valid in [true, false, true] {
+            p.frame_gpu_complete = valid;
+            p.frame.push(FrameSample {
+                label: "gpu-pass",
+                cpu_us: 100.0,
+                gpu_us: valid.then_some(2_000.0),
+            });
+            p.frame_end_cpu();
+        }
+        let report = |p: &mut Profiler| {
+            p.quality_report_json(3, 60, 120, 1.0 / 60.0, 3, 1.0, 250.0, "{}", "{}")
+        };
+        let json = report(&mut p);
+        assert!(json.contains("\"gpu_timestamps_available\":true"));
+        assert!(json.contains("\"timing_window_frames\":3"));
+        assert!(json.contains("\"gpu_timing_valid_frames\":2"));
+        assert!(json.contains("\"gpu_timing_valid\":false"));
+        assert!(json.contains("\"gpu_frame_mean_ms\":2.000000"));
+        for _ in 0..ROLLING_FRAMES {
+            p.frame_gpu_complete = true;
+            p.frame.push(FrameSample {
+                label: "gpu-pass",
+                cpu_us: 100.0,
+                gpu_us: Some(3_000.0),
+            });
+            p.frame_end_cpu();
+        }
+        let json = report(&mut p);
+        assert!(json.contains("\"gpu_timing_valid_frames\":120"));
+        assert!(json.contains("\"gpu_timing_valid\":true"));
+        assert!(json.contains("\"gpu_frame_mean_ms\":3.000000"));
+        p.set_enabled(false);
+        p.set_enabled(true);
+        let json = report(&mut p);
+        assert!(json.contains("\"timing_window_frames\":0"));
+        assert!(json.contains("\"gpu_timing_valid\":false"));
+    }
 
     /// Drive the profiler through `frame_end` purely on the CPU
     /// side (gpu_enabled stays false). Each "frame" pushes a single

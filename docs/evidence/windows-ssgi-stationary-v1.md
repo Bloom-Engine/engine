@@ -51,6 +51,10 @@ updating the two shader-source assertions for repeated phase validation.
 
 ## Isolated GPU timing
 
+The figures in this section predate the profiler readback correction. The
+[corrected comparison](windows-profiler-integrity-v1.md) supersedes them for
+timing qualification; the image evidence elsewhere in this report is retained.
+
 Five alternating before/after process pairs per size, each with 24 warm-up and
 120 profiled frames. No other local GPU test ran concurrently. These figures
 cover the sum of five probe passes, not complete frame time. Profiling uses
@@ -74,8 +78,10 @@ retained. These measurements do not establish a different adapter's budget.
   0.97931148 before and 0.97931067 after. Both shaders pass this check at 256
   square. The HD failure predates this fix and remains open; the static HD pass
   is not a claim that HD temporal qualification is complete.
-- The combined golden batch emitted invalid GPU timestamp totals. Its timing is
-  excluded from this comparison; profiler reliability still needs investigation.
+- The combined golden batch emitted invalid GPU timestamp totals. The later
+  [profiler investigation](windows-profiler-integrity-v1.md) identifies a
+  one-frame readback delay and repairs it; both SSGI shader variants have been
+  measured again with that correction.
 - The two portable-baseline Windows discrepancies, representative Bistro motion,
   other backends, and named RTX 4080 acceptance remain open.
 

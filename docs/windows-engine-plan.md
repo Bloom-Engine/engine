@@ -14,10 +14,10 @@ first nine-scene Radeon evidence are in draft PR #154. Follow-up work starts at
 
 | Work | Required completion evidence | Current state |
 | --- | --- | --- |
-| #127 Vulkan PT correctness | Three deterministic progressive and motion runs, both negative controls, finite intermediates, reset/lighting/rigid-motion checks, retained report | Canonical hardware gate, all four focused temporal tests, and CPU reference sanity check pass on Radeon/Vulkan; [report retained](evidence/issue-127-windows-vulkan-v1.md), archive publication pending |
+| #127 Vulkan PT correctness | Three deterministic progressive and motion runs, both negative controls, finite intermediates, reset/lighting/rigid-motion checks, retained report | Canonical hardware gate, all four focused temporal tests, and CPU reference sanity check pass on Radeon/Vulkan; [report](evidence/issue-127-windows-vulkan-v1.md) and [raw evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-155-windows-vulkan-20260910) published |
 | #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | Sponza and skinned/alpha still fail against portable baselines; original baseline source reproduces both failures |
-| #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device lifetime and resource gates repaired; [stationary SSGI fix](evidence/windows-ssgi-stationary-v1.md) passes 89 golden tests with 4 ignored and 2 optional external-input skips; complete-phase/lighting control and frozen A/B recorded. Existing HD TAA-jitter failure and invalid batch timestamps remain open |
-| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | Local contracts, formatting, and 484 shared tests pass. Hosted CI passes all mobile target builds, native/web builds, and browser startup. Metal texture-byte counter availability was the last failure; its repair and final source are awaiting CI |
+| #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device lifetime and resource gates repaired; [stationary SSGI fix](evidence/windows-ssgi-stationary-v1.md) and [profiler correction](evidence/windows-profiler-integrity-v1.md) pass 90 golden tests with 4 ignored and 2 optional external-input skips. Complete-phase/lighting control and corrected frozen A/B recorded. HD TAA-jitter and the full representative corpus remain open |
+| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | All 23 hosted checks pass at #155 source `64d5eed`, including macOS shared/golden tests, all mobile target builds, native/web builds, and browser startup. Scheduled physical-hardware checks, all-example compilation, and release-install acceptance remain separate requirements |
 | #138 capability fallback | Actual constrained-adapter startup and relevant forced-tier corpus, truthful capability outputs | Existing implementation/evidence preserved; physical constrained-limit acceptance still needs proof |
 | PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147, #154, and follow-up [#155](https://github.com/Bloom-Engine/engine/pull/155) remain drafts; no merge performed |
 
@@ -54,11 +54,20 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
 
 ## Current next steps
 
-1. Retain the stationary software-SSGI evidence with the final #155 source. The
-   previous shader fails the new regression; the fix passes at measured cost.
-2. Obtain passing hosted checks for the final #155 source and retain the exact
-   commits and run links. The combined golden batch also exposed invalid GPU
-   timestamp totals; investigate those before accepting batch timing evidence.
-3. Resume the two Windows portable-baseline discrepancies and the representative
-   temporal/geometry corpus, then continue the engine work retained above.
-   Hardware-specific acceptance remains open while local work progresses.
+1. #155 source `64d5eed` has passing hosted checks and published evidence. The
+   archive SHA-256 is `de9c1beca73bfcf60bf79d3a612b72c072f726f6272576a7f0f60ffdbc7ce25d`.
+   CI run URLs and conclusions are in its separate `pr155-checks-64d5eed.json`
+   release asset. No draft PR has been merged.
+2. The [profiler correction](evidence/windows-profiler-integrity-v1.md) on
+   `codex/windows-profiler-integrity` passes local contracts, lint, the quality
+   lane, and the complete shared suite. Its current-frame regression rejects
+   all 12 old Vulkan samples and passes with the correction on Vulkan and DX12.
+   Corrected SSGI timing covers 20 isolated runs, each with 120 complete GPU
+   frames. Hosted CI must qualify this follow-up's exact source before integration.
+3. Diagnose Sponza and skinned/alpha against the portable baselines, then repair
+   HD temporal stability and complete the representative temporal/geometry
+   corpus. Recapture affected timing evidence with explicit coverage fields.
+4. Continue starter/all-example and release-install checks, asset/world streaming,
+   schema-generated APIs, components, and runtime UI against each issue's full
+   acceptance criteria. Hardware-specific acceptance remains open while local
+   work progresses.

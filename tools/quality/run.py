@@ -14,6 +14,7 @@ import dataclasses
 import hashlib
 import html
 import json
+import math
 import os
 import platform
 import shlex
@@ -89,6 +90,9 @@ STABLE_TELEMETRY_METADATA_KEYS = (
     "present_mode_code",
     "uncapped",
     "gpu_timestamps_available",
+    "timing_window_frames",
+    "gpu_timing_valid_frames",
+    "gpu_timing_valid",
     "warmup_excluded",
     "shader_compilation_excluded",
     "adapter",
@@ -748,7 +752,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         "max_gpu_p95_absolute_delta_ms",
     ):
         value = reproducibility.get(key)
-        if not isinstance(value, (int, float)) or value < 0:
+        if not finite_nonnegative_number(value):
             raise QualityError(f"reproducibility.{key} must be a non-negative number")
     fault_controls = manifest.get("negative_control", [])
     if not isinstance(fault_controls, list):
@@ -1083,6 +1087,10 @@ def steady_state_renderer_failures(renderer_paths: Mapping[str, Any]) -> list[st
     return failures
 
 
+def finite_nonnegative_number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
 def telemetry_contract_failures(
     case: Mapping[str, Any], telemetry: Mapping[str, Any] | None
 ) -> list[str]:
@@ -1097,7 +1105,7 @@ def telemetry_contract_failures(
                 f"telemetry {key} {telemetry.get(key)!r} != requested {case.get(key)!r}"
             )
     observed_step = telemetry.get("fixed_timestep")
-    if not isinstance(observed_step, (int, float)) or abs(
+    if not finite_nonnegative_number(observed_step) or abs(
         float(observed_step) - float(case["fixed_timestep"])
     ) > 1e-6:
         failures.append(
@@ -1111,7 +1119,7 @@ def telemetry_contract_failures(
             f"!= requested {expected_preset!r}"
         )
     observed_scale = telemetry.get("render_scale")
-    if not isinstance(observed_scale, (int, float)) or abs(
+    if not finite_nonnegative_number(observed_scale) or abs(
         float(observed_scale) - float(case["render_scale"])
     ) > 1e-6:
         failures.append(
@@ -1136,12 +1144,23 @@ def telemetry_contract_failures(
         failures.extend(steady_state_renderer_failures(renderer_paths))
     for key in ("cpu_frame_mean_ms", "cpu_frame_p95_ms", "measurement_wall_ms"):
         value = telemetry.get(key)
-        if not isinstance(value, (int, float)) or value < 0:
+        if not finite_nonnegative_number(value):
             failures.append(f"telemetry {key} is unavailable")
     if telemetry.get("gpu_timestamps_available", False):
+        window = telemetry.get("timing_window_frames")
+        valid = telemetry.get("gpu_timing_valid_frames")
+        if (
+            telemetry.get("gpu_timing_valid") is not True
+            or type(window) is not int
+            or type(valid) is not int
+            or window <= 0
+            or window > case["measured_frames"]
+            or valid != window
+        ):
+            failures.append("telemetry GPU timing window is incomplete or unverified")
         for key in ("gpu_frame_mean_ms", "gpu_frame_p95_ms"):
             value = telemetry.get(key)
-            if not isinstance(value, (int, float)) or value < 0:
+            if not finite_nonnegative_number(value):
                 failures.append(f"telemetry {key} is unavailable despite GPU timestamps")
     passes = telemetry.get("passes")
     if not isinstance(passes, list) or not passes:
@@ -1300,7 +1319,7 @@ def performance_failures(
         if limit is None:
             continue
         measured = telemetry.get(measured_key)
-        if measured is None:
+        if not finite_nonnegative_number(measured):
             failures.append(f"{measured_key} unavailable for hard budget {budget_key}")
         elif float(measured) > float(limit):
             failures.append(f"{measured_key} {float(measured):.4f} > {float(limit):.4f}")
