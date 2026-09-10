@@ -57,6 +57,15 @@ incomplete captures separately. A green diagnostic job proves capture
 completeness; inspect `result.json` for visual results. Shared-runner timing does
 not qualify the Apple M1 Max or RTX 4080 budgets.
 
+For comparisons that need original attachment values, set `BLOOM_QUALITY_RAW=1`
+before running the diagnostic command. Alongside the PNGs, `intermediates/raw/`
+contains packed rows of each captured texture and JSON describing dimensions,
+format, byte count, and checksum. `intermediates/mrt/` contains the existing raw
+HDR, material, motion-vector, and albedo capture with its manifest. These files
+preserve float depth and linear HDR values; depth PNGs independently normalize
+their display range and cannot establish numerical depth equality. Raw capture
+is opt-in and runs after the measured window.
+
 The Radeon 760M profile selects Vulkan, opts into hardware GI, verifies the
 reported adapter, and records host preflight/postflight CPU load. Visual,
 intermediate-image, and telemetry contracts remain strict. Performance is

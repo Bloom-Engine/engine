@@ -27,6 +27,7 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
       BLOOM_WGPU_BACKEND: metal
+      BLOOM_QUALITY_RAW: "1"
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
@@ -105,6 +106,17 @@ jobs:
               assert (case_dir / "final.png").is_file(), case
               for name in spec.get("required_intermediates", []):
                   assert (case_dir / "intermediates" / f"{name}.png").is_file(), name
+              raw = case_dir / "intermediates" / "raw"
+              depth = json.loads((raw / "scene-depth.json").read_text())
+              assert depth["format"] == "depth32float", depth
+              assert (raw / "scene-depth.raw").stat().st_size == depth["byte_count"]
+              mrt = case_dir / "intermediates" / "mrt"
+              attachments = json.loads((mrt / "scene-mrt.json").read_text())
+              assert {a["name"] for a in attachments["attachments"]} == {
+                  "hdr-scene", "material-properties", "motion-vectors", "albedo"
+              }, attachments
+              for attachment in attachments["attachments"]:
+                  assert (mrt / (attachment["name"] + ".raw")).stat().st_size == attachment["byte_count"]
           print("Both Metal captures are complete. Visual differences remain in result.json.")
           PY
       - name: Publish diagnostic summary
