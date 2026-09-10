@@ -4,19 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = Path(__file__).with_name("examples.json")
-REPORT_SCHEMA = "bloom-example-compile-v1"
+REPORT_SCHEMA = "bloom-example-compile-v2"
 
 
 def load_inventory() -> tuple[list[str], list[str]]:
@@ -87,9 +89,22 @@ def write_report(path: Path, report: dict[str, Any]) -> None:
     )
 
 
+def is_native_binary(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size < 32:
+        return False
+    with path.open("rb") as binary:
+        magic = binary.read(4)
+    return magic[:2] == b"MZ" or magic in {
+        b"\x7fELF", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+        b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="validate inventory only")
+    parser.add_argument("--example", action="append", help="select an inventory entry; default: all")
+    parser.add_argument("--timeout", type=int, default=1800, help="seconds per example, including native dependencies")
     parser.add_argument(
         "--out",
         default=str(REPO_ROOT / "target" / "ci" / "examples"),
@@ -105,6 +120,14 @@ def main() -> int:
         print("PASS: canonical example inventory is complete")
         return 0
 
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
+    if args.example:
+        unknown = sorted(set(args.example) - set(examples))
+        if unknown:
+            parser.error(f"examples are not in the canonical inventory: {unknown}")
+        examples = [name for name in examples if name in args.example]
+
     perry = shutil.which("perry")
     if perry is None:
         print("FAIL  perry is required to compile canonical examples", file=sys.stderr)
@@ -117,55 +140,96 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
     started = time.perf_counter()
+    report = {
+        "schema": REPORT_SCHEMA,
+        "status": "running",
+        "mode": "native-compile-link",
+        "selected_examples": examples,
+        "examples": records,
+        "compiler": perry,
+        "environment": {
+            name: os.environ[name]
+            for name in ("PERRY_WORKSPACE_ROOT", "PERRY_RUNTIME_DIR", "PERRY_NO_AUTO_OPTIMIZE")
+            if name in os.environ
+        },
+    }
+    if (REPO_ROOT / ".git").exists():
+        report["source_commit"] = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, check=True,
+            stdout=subprocess.PIPE, encoding="utf-8",
+        ).stdout.strip()
+    write_report(out_dir / "result.json", report)
     for relative in examples:
         directory = REPO_ROOT / relative
         name = directory.name
-        output = bin_dir / name
+        output = bin_dir / (name + (".exe" if os.name == "nt" else ""))
+        # A successful command must produce a new executable. A previous run's
+        # output must never turn a compiler that emitted nothing into a pass.
+        fresh_output = output.with_name(f"{name}-{uuid.uuid4().hex}{output.suffix}")
         print(f"[example] {relative}", flush=True)
-        ensure_engine_dependency(directory)
         case_started = time.perf_counter()
-        result = subprocess.run(
-            [perry, "compile", "main.ts", "-o", str(output), "--no-link"],
-            cwd=directory,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        (log_dir / f"{name}.stdout.log").write_text(result.stdout, encoding="utf-8")
-        (log_dir / f"{name}.stderr.log").write_text(result.stderr, encoding="utf-8")
+        command = [perry, "compile", "main.ts", "-o", str(fresh_output)]
+        error = None
+        exit_code = None
+        with (log_dir / f"{name}.stdout.log").open("w", encoding="utf-8") as stdout, \
+             (log_dir / f"{name}.stderr.log").open("w", encoding="utf-8") as stderr:
+            try:
+                ensure_engine_dependency(directory)
+                result = subprocess.run(
+                    command, cwd=directory, stdout=stdout, stderr=stderr,
+                    check=False, timeout=args.timeout,
+                )
+                exit_code = result.returncode
+                if exit_code != 0:
+                    error = f"compiler exited with code {exit_code}"
+                elif not is_native_binary(fresh_output):
+                    error = "compiler did not produce a new native executable"
+                else:
+                    fresh_output.replace(output)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                error = str(exc)
+                stderr.write(f"\n{error}\n")
         record = {
             "example": relative,
-            "status": "pass" if result.returncode == 0 else "fail",
-            "mode": "codegen-no-link",
-            "exit_code": result.returncode,
+            "status": "pass" if error is None else "fail",
+            "mode": "native-compile-link",
+            "command": command,
+            "exit_code": exit_code,
+            "error": error,
             "duration_ms": round((time.perf_counter() - case_started) * 1000, 3),
             "stdout": f"logs/{name}.stdout.log",
             "stderr": f"logs/{name}.stderr.log",
         }
+        if error is None:
+            with output.open("rb") as binary:
+                digest = hashlib.file_digest(binary, "sha256").hexdigest()
+            record.update(artifact=f"bin/{output.name}", bytes=output.stat().st_size, sha256=digest)
         records.append(record)
+        write_report(out_dir / "result.json", report)
         print(f"[example] {relative}: {record['status']}", flush=True)
+        if error:
+            print(f"  {error}; see {log_dir / (name + '.stderr.log')}", file=sys.stderr)
 
     failed = [record["example"] for record in records if record["status"] != "pass"]
-    report = {
-        "schema": REPORT_SCHEMA,
+    report.update({
         "status": "fail" if failed else "pass",
         "duration_ms": round((time.perf_counter() - started) * 1000, 3),
         "perry": subprocess.run(
             [perry, "--version"],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
         ).stdout.strip(),
-        "examples": records,
         "failures": failed,
-    }
+    })
     write_report(out_dir / "result.json", report)
     if failed:
         print(f"FAIL: {len(failed)} canonical example(s) failed: {failed}", file=sys.stderr)
         return 1
-    print(f"PASS: all {len(records)} canonical examples compiled")
+    print(f"PASS: all {len(records)} selected canonical examples compiled and linked")
     return 0
 
 

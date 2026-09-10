@@ -10,8 +10,8 @@ const read = (relative) =>
   fs.readFileSync(path.join(root, relative), "utf8").replace(/\r\n/g, "\n");
 
 const expectedLanes = new Map([
-  ["quick", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "example-inventory"]],
-  ["full", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "example-inventory", "host-build", "wasm-build"]],
+  ["quick", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "example-inventory", "example-compile"]],
+  ["full", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "example-inventory", "host-build", "example-compile", "wasm-build"]],
   ["web", ["wasm-check", "wasm-build", "browser-smoke"]],
   ["cross", ["target-check"]],
   ["hardware", ["example-compile", "quality-check", "quality-faults", "quality-run", "fractional-native-throughput", "virtual-geometry-stress"]],
@@ -50,7 +50,7 @@ if (!/^defaults:\n  run:\n(?:    #[^\n]*\n)*    shell: bash$/m.test(testWorkflow
   console.error("FAIL  Tests must execute the shared Bash entry point with an explicit Bash shell on Windows");
   failures += 1;
 }
-for (const summary of ["target/ci/quick-shared-tests.json", "target/ci/full-host-build.json"]) {
+for (const summary of ["target/ci/quick-shared-tests.json", "target/ci/full-host-build.json", "target/ci/full-example-compile.json"]) {
   if (!testWorkflow.includes(`path: ${summary}\n          if-no-files-found: error`)) {
     console.error(`FAIL  Tests must reject missing execution evidence: ${summary}`);
     failures += 1;
@@ -61,6 +61,7 @@ const workflowCommands = [
   "./scripts/ci-check.sh --quick --component contracts",
   "./scripts/ci-check.sh --quick --component lint",
   "./scripts/ci-check.sh --full --component host-build",
+  "./scripts/ci-check.sh --full --component example-compile",
   "./scripts/ci-check.sh --web --component wasm-check",
   "./scripts/ci-check.sh --web --component wasm-build",
   "./scripts/ci-check.sh --web --component browser-smoke",

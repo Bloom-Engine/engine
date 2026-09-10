@@ -54,16 +54,18 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
 
 ## Current next steps
 
-1. Verify actual hosted Windows test and build execution. The
+1. Complete hosted Windows test and build execution. The
    [CI and example correction](evidence/windows-example-ci-v1.md) explicitly
-   selects Bash and requires execution-summary artifacts. Its hosted run must
-   show Cargo output and successful summary contents before this gap is closed.
+   selects Bash, restores the MSVC linker ahead of Git's tools, and requires
+   execution-summary artifacts. The hosted native build passes at `636b69a`.
+   The shared suite exposes two DX12 GPU failures and a process crash; both
+   focused GPU failures also reproduce locally under DX12 and remain open.
 2. Finish all-example native linking, real starter/example startup, and clean
-   Windows installation. Six palette corrections bring the local link audit
-   from 13 to 19 successful examples out of 20. The embedded-view example needs
-   a newer Perry API, and both available newer Windows bundles have an
-   independent standard-library link failure that still needs resolution.
-   All-example compilation must become a required PR check.
+   Windows installation. The [native example gate](evidence/windows-example-gate-v1.md)
+   passes all 20 links locally using Perry 0.5.1220 and one matching source-built
+   runtime profile. It adds required full-lane Windows PR compilation and
+   rejects missing or stale executable outputs. Hosted example validation,
+   actual startup, and clean package installation remain required.
 3. Complete the wider temporal/geometry, performance, memory, resize, and
    capability corpus. The
    [HD surface correction](evidence/windows-ssgi-surface-v1.md) and two valid

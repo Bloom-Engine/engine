@@ -179,14 +179,34 @@ dependencies listed in `.github/workflows/test.yml` (CMake and a C++ compiler
 everywhere, X11/audio development packages on Linux, and the MSVC developer
 environment on Windows).
 
-Run the platform-independent PR gates while iterating:
+Example checks require Perry on `PATH`. Windows CI pins Perry 0.5.1220 and its
+matching source because the release's prebuilt standard library has unresolved
+HTTP extension symbols. Prepare that same toolchain from PowerShell:
+
+```powershell
+python tools/ci/setup_windows_perry.py --out "$env:LOCALAPPDATA/Bloom/perry-ci-0.5.1220"
+$env:PATH = "$env:LOCALAPPDATA/Bloom/perry-ci-0.5.1220/bin;$env:PATH"
+$env:PERRY_WORKSPACE_ROOT = "$env:LOCALAPPDATA/Bloom/perry-ci-0.5.1220/source"
+$env:PERRY_RUNTIME_DIR = "$env:LOCALAPPDATA/Bloom/perry-ci-0.5.1220/runtime-build/release"
+$env:PERRY_NO_AUTO_OPTIMIZE = '1'
+```
+
+Setup builds matching runtime libraries once, with the feature set used by the
+examples and the same unwind profile as Bloom's Rust library. Reusing that
+profile avoids Windows linker collisions with per-app panic-abort libraries.
+Other hosts also need a compiler supporting `bloomViewGetNativeHandle` for the
+embedded-view example; the complete Windows matrix uses the pinned toolchain
+above. Native compilation does not establish browser or rendered-frame startup.
+
+Run the quick gates while iterating, including a native compile and link of Pong:
 
 ```bash
 ./scripts/ci-check.sh --quick
 ```
 
 Before handing off a change, run the complete suite for the current host,
-including its native crate and the packaged WebAssembly build:
+including its native crate, all 20 canonical example links, and the packaged
+WebAssembly build:
 
 ```bash
 ./scripts/ci-check.sh --full
