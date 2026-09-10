@@ -36,6 +36,14 @@ failure. The CI command contract checks both the shell and required evidence.
 Hosted execution on this correction still needs verification from actual Cargo
 output and summary contents.
 
+The first hosted run at `88bc633` executes Cargo and uploads both failure
+summaries. It exposes a second setup defect: Git Bash prepends its own
+`/usr/bin/link.exe` ahead of the MSVC linker. Cargo then invokes the hard-link
+utility with Microsoft linker arguments. The shared CI entry point now restores
+the active Visual Studio developer toolchain ahead of Git's tools and fails
+with an actionable message if that configured linker is missing. The next
+hosted run must verify the build and shared suite with that correction.
+
 Audit commands, original failure logs, compiler-release metadata, source patch,
 and the six corrected executable hashes are retained under
 `tools/quality/out/windows-engine-plan/all-examples/`. The original audit is also
