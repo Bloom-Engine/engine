@@ -37,7 +37,7 @@ CPU/GPU frame p95 ranges below span the two final runs, in milliseconds. These a
 - **Sponza:** SSIM `0.972333014`, required `>= 0.975000024`. Other visual metrics pass. Differences are concentrated around vegetation and lighting detail; the responsible renderer path has not yet been isolated.
 - **Skinned/alpha motion:** SSIM `0.931997895`, required `>= 0.970000029`; luminance RMSE `0.047519531`, allowed `<= 0.039999999`. The largest visible differences are in the alpha-tested foliage surrounding the animated model. Repeat captures are identical, so this is reproducible rather than run-to-run timing noise.
 
-The next useful renderer investigation is an owner-isolation comparison of alpha-tested foliage and its GI/shadow contribution in these two scenes, retaining the same assets, cameras, and thresholds. This evidence does not justify replacing the approved images.
+A subsequent [owner-isolation investigation](issue-153-radeon760m-owner-isolation.md) reproduced both images byte-for-byte using the renderer revision that created the approved baselines. Software GI, bound materials, and DirectX controls do not remove the failures. Reduced anisotropy worsens them and was reverted. The remaining portability difference predates the intervening renderer changes in this tested configuration; its precise cause is still unisolated. This evidence does not justify replacing the approved images.
 
 ## Fixes made while measuring
 
@@ -52,6 +52,7 @@ The next useful renderer investigation is an owner-isolation comparison of alpha
 
 - Asset/baseline check: PASS for all nine cases.
 - Python qualification tests: 23 passed.
+- All five governed seeded negative controls detected their injected regressions.
 - Rust PNG round-trip test: passed for RGBA/BGRA, linear/sRGB formats and padded rows.
 - Release native library and all eight unique scene executables built successfully.
 - Two complete final runs, unchanged image checks: 7 pass / 2 fail each; no capture or telemetry errors.
