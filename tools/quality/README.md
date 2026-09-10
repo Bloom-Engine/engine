@@ -48,6 +48,15 @@ hard performance budget. `--report-only` records those same failures in
 `result.json`; it only makes the process exit zero for local investigation.
 It never turns a failure into a recorded pass.
 
+The `Portable image diagnostics` GitHub workflow captures Sponza and skinned/alpha
+motion on hosted Metal with the canonical commands and a SHA-256-pinned Perry
+0.5.1182 toolchain. It uploads final images, required intermediates, telemetry,
+diff metrics, and source/toolchain identity on success and failure. It uses
+`--report-only` to retain visual failures for backend investigation, then rejects
+incomplete captures separately. A green diagnostic job proves capture
+completeness; inspect `result.json` for visual results. Shared-runner timing does
+not qualify the Apple M1 Max or RTX 4080 budgets.
+
 The Radeon 760M profile selects Vulkan, opts into hardware GI, verifies the
 reported adapter, and records host preflight/postflight CPU load. Visual,
 intermediate-image, and telemetry contracts remain strict. Performance is

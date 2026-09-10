@@ -1,0 +1,127 @@
+name: Portable image diagnostics
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/image-portability.yml
+      - native/shared/**
+      - native/macos/**
+      - src/**
+      - examples/quality-motion/**
+      - examples/sponza/**
+      - tools/quality/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-portability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  metal:
+    name: Canonical image captures / Metal
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      BLOOM_WGPU_BACKEND: metal
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/macos/target
+          key: ${{ runner.os }}-macos-crate-${{ hashFiles('native/macos/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-macos-crate-
+      - name: Install the same Perry release used by the Windows captures
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/perry-macos-aarch64.tar.gz"
+          toolchain="$RUNNER_TEMP/bloom-perry-0.5.1182"
+          curl --fail --location --retry 3 \
+            https://github.com/PerryTS/perry/releases/download/v0.5.1182/perry-macos-aarch64.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' \
+            5a1682060342e73f94d74c1f4f8a6d6a14caac3c43c81e8f657ced1190fa04af \
+            "$archive" | shasum -a 256 --check
+          mkdir -p "$toolchain"
+          tar -xzf "$archive" -C "$toolchain" \
+            --exclude '*_ios*' --exclude '*_tvos*' \
+            --exclude '*_visionos*' --exclude '*_watchos*'
+          "$toolchain/perry" --version
+          echo "$toolchain" >> "$GITHUB_PATH"
+          mkdir -p target/ci
+          {
+            git rev-parse HEAD
+            shasum -a 256 "$archive"
+            "$toolchain/perry" --version
+          } > target/ci/image-portability-toolchain.txt
+      - name: Build the native library
+        run: ./scripts/ci-check.sh --full --component host-build
+      - name: Capture the canonical scenes and all required intermediates
+        run: |
+          python3 tools/quality/run.py run full \
+            --case sponza-interior --case skinned-alpha-motion \
+            --report-only --out tools/quality/out/ci-image-portability-metal
+      - name: Reject incomplete diagnostic captures
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import tomllib
+          from pathlib import Path
+
+          out = Path("tools/quality/out/ci-image-portability-metal")
+          result = json.loads((out / "result.json").read_text())
+          manifest = tomllib.loads(Path("tools/quality/scenes.toml").read_text())
+          cases = {case["id"]: case for case in result["cases"]}
+          assert set(cases) == {"sponza-interior", "skinned-alpha-motion"}
+          for spec in manifest["case"]:
+              if spec["id"] not in cases:
+                  continue
+              case = cases[spec["id"]]
+              assert case["status"] in {"pass", "fail"}, case
+              capture = next(c for c in case["commands"] if c["kind"] == "capture")
+              assert capture["returncode"] == 0, capture
+              case_dir = out / "cases" / spec["id"]
+              telemetry = json.loads((case_dir / "telemetry.json").read_text())
+              assert telemetry["adapter"]["backend"].lower() == "metal", telemetry
+              assert (case_dir / "final.png").is_file(), case
+              for name in spec.get("required_intermediates", []):
+                  assert (case_dir / "intermediates" / f"{name}.png").is_file(), name
+          print("Both Metal captures are complete. Visual differences remain in result.json.")
+          PY
+      - name: Publish diagnostic summary
+        if: always()
+        shell: bash
+        run: |
+          echo 'Image diagnostics only; shared-runner timing does not qualify hardware budgets.' >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f tools/quality/out/ci-image-portability-metal/summary.md ]]; then
+            cat tools/quality/out/ci-image-portability-metal/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain success and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-portability-metal-${{ github.run_attempt }}
+          path: |
+            tools/quality/out/ci-image-portability-metal
+            target/ci
+          if-no-files-found: warn
+          retention-days: 30

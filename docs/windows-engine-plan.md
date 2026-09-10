@@ -66,10 +66,15 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    frames. Hosted Metal also passes the profiler regression. Its colored-shadow
    failure exposed an [inverse-matrix upload defect](evidence/windows-transmitted-shadow-inverse-vp-v1.md);
    the correction passes the isolated local check and rejects the wrong-color
-   control. Hosted CI must qualify this follow-up's exact source before integration.
+   control. At follow-up source `fa93690`, all 23 hosted checks and the complete
+   local shared suite pass. Both regressions pass on Metal. The shadow archive
+   and CI receipt are published alongside the immutable profiler archive.
 3. Diagnose Sponza and skinned/alpha against the portable baselines, then repair
    HD temporal stability and complete the representative temporal/geometry
    corpus. Recapture affected timing evidence with explicit coverage fields.
+   Disabling foliage shadow casting retains the Windows skinned/alpha mismatch;
+   the next diagnostic captures the same canonical scenes and intermediates on
+   hosted Metal. Shared-runner timing cannot qualify hardware budgets.
 4. Continue starter/all-example and release-install checks, asset/world streaming,
    schema-generated APIs, components, and runtime UI against each issue's full
    acceptance criteria. Hardware-specific acceptance remains open while local
