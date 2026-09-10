@@ -1,3 +1,9 @@
 # Qualification fixtures are hashed byte-for-byte on every host.
 examples/quality-transparency/assets/transparent-quad.gltf text eol=lf
 examples/quality-masked/assets/masked-card.gltf text eol=lf
+
+# Embedded shader text, generated documentation contracts, and executable shell
+# scripts must have the same bytes on Windows and Unix checkouts.
+*.wgsl text eol=lf
+*.md text eol=lf
+*.sh text eol=lf

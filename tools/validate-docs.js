@@ -21,10 +21,11 @@ function walkMarkdown(relative = "") {
   const entries = fs.readdirSync(absolute, { withFileTypes: true });
   const result = [];
   for (const entry of entries) {
-    const child = path.join(relative, entry.name);
+    const child = path.posix.join(relative, entry.name);
     if (entry.isDirectory()) {
       if ([".git", "node_modules", "target"].includes(entry.name)) continue;
       if (child === "native/third_party" || child === "native/tvos/metal-patched") continue;
+      if (child === "tools/quality/out") continue;
       result.push(...walkMarkdown(child));
     } else if (entry.name.endsWith(".md")) {
       result.push(child);
@@ -126,12 +127,27 @@ if (pack.status !== 0) {
   }
 }
 
-const help = spawnSync("bash", ["native/web/build.sh", "--help"], {
+function bashExecutable() {
+  if (process.env.BLOOM_BASH) return process.env.BLOOM_BASH;
+  if (process.platform === "win32") {
+    // Git for Windows normally exposes git.exe through cmd/, while its Bash
+    // executable is deliberately absent from PATH. Use that same installation.
+    const gitPaths = spawnSync("where.exe", ["git"], { encoding: "utf8" });
+    for (const gitPath of (gitPaths.stdout || "").trim().split(/\r?\n/)) {
+      if (!gitPath) continue;
+      const candidate = path.resolve(path.dirname(gitPath), "..", "bin", "bash.exe");
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return "bash";
+}
+
+const help = spawnSync(bashExecutable(), ["native/web/build.sh", "--help"], {
   cwd: root,
   encoding: "utf8",
 });
 if (help.status !== 0 || !help.stdout.includes("--output")) {
-  fail("bloom-web help/argument parsing is not usable");
+  fail(`bloom-web help/argument parsing is not usable: ${help.error?.message || help.stderr?.trim() || `exit ${help.status}`}`);
 }
 
 console.log(`${markdownFiles.length} Markdown files checked; ${failures} failures`);
