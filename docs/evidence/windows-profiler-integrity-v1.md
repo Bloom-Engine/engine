@@ -69,6 +69,13 @@ passes on the Radeon through DX12. The regression compares actual query
 events instead of imposing a GPU-duration threshold. The new SSGI measurement
 assertion requires all 120 measured GPU frames to be complete.
 
+The hosted macOS shared lane is green, but its timestamp regression's `ok`
+status alone does not prove GPU execution: the fixture returns early when
+timestamps are unavailable. A subsequent native capture on the hosted Apple
+Paravirtual device reports no timestamp capability. Metal GPU timestamp
+qualification remains unproven. The initial release notes and shadow archive
+README overstated that coverage; this clarification supersedes those claims.
+
 ## Corrected SSGI comparison
 
 Both frozen executables use the corrected profiler and identical fixture code.
