@@ -30,7 +30,10 @@ fn cs_resolve_support(@builtin(global_invocation_id) gid: vec3<u32>) {
     let coord = vec2<i32>(gid.xy);
     let half_w = f32(u.size.x);
     let half_h = f32(u.size.y);
-    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / vec2<f32>(half_w, half_h);
+    let uv = probe_depth_uv(
+        (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / vec2<f32>(half_w, half_h),
+        textureDimensions(hiz0),
+    );
     let hiz_dimensions = vec2<i32>(textureDimensions(hiz0));
     let hiz_coord = clamp(
         vec2<i32>(uv * vec2<f32>(hiz_dimensions)),
@@ -77,10 +80,7 @@ fn cs_resolve_support(@builtin(global_invocation_id) gid: vec3<u32>) {
     let zu = textureLoad(hiz0, up_coord, 0).r;
     let Pr = view_pos_from_linear(uv + vec2<f32>(texel.x, 0.0), zr, p00, p11, p20, p21);
     let Pu = view_pos_from_linear(uv + vec2<f32>(0.0, -texel.y), zu, p00, p11, p20, p21);
-    let N_vs = safe_probe_direction(
-        cross(Pr - P_vs, Pu - P_vs),
-        vec3<f32>(0.0, 0.0, 1.0),
-    );
+    let N_vs = probe_surface_normal(Pr - P_vs, Pu - P_vs);
     let N_ws = safe_probe_direction(
         (u.inv_view * vec4<f32>(N_vs, 0.0)).xyz,
         vec3<f32>(0.0, 1.0, 0.0),

@@ -680,10 +680,22 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
 
 #[test]
 fn ssgi_hiz_stationary_taa_bounds_subpixel_variation() {
+    assert_hiz_stationary_taa_bounds_subpixel_variation(false);
+}
+
+#[test]
+fn ssgi_hiz_hd_stationary_taa_bounds_subpixel_variation() {
+    assert_hiz_stationary_taa_bounds_subpixel_variation(true);
+}
+
+fn assert_hiz_stationary_taa_bounds_subpixel_variation(hd: bool) {
     let Some(mut eng) = hiz_immediate_engine() else {
         eprintln!("skip: no GPU adapter");
         return;
     };
+    if hd {
+        eng.renderer.resize(1280, 720, 1280, 720);
+    }
     let capture = capture_hiz_immediate;
 
     // TAA jitters the primary projection even at a stationary camera. SSGI's
@@ -696,9 +708,11 @@ fn ssgi_hiz_stationary_taa_bounds_subpixel_variation() {
         capture(&mut eng);
     }
     let taa_directory =
-        std::env::temp_dir().join(format!("bloom-ssgi-hiz-taa-{}", std::process::id()));
-    let taa_next_directory =
-        std::env::temp_dir().join(format!("bloom-ssgi-hiz-taa-next-{}", std::process::id()));
+        std::env::temp_dir().join(format!("bloom-ssgi-hiz-taa-{hd}-{}", std::process::id()));
+    let taa_next_directory = std::env::temp_dir().join(format!(
+        "bloom-ssgi-hiz-taa-next-{hd}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&taa_directory);
     let _ = std::fs::remove_dir_all(&taa_next_directory);
     eng.renderer.pending_quality_capture_dir = Some(taa_directory.to_string_lossy().into_owned());
