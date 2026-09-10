@@ -63,7 +63,10 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    lane, and the complete shared suite. Its current-frame regression rejects
    all 12 old Vulkan samples and passes with the correction on Vulkan and DX12.
    Corrected SSGI timing covers 20 isolated runs, each with 120 complete GPU
-   frames. Hosted CI must qualify this follow-up's exact source before integration.
+   frames. Hosted Metal also passes the profiler regression. Its colored-shadow
+   failure exposed an [inverse-matrix upload defect](evidence/windows-transmitted-shadow-inverse-vp-v1.md);
+   the correction passes the isolated local check and rejects the wrong-color
+   control. Hosted CI must qualify this follow-up's exact source before integration.
 3. Diagnose Sponza and skinned/alpha against the portable baselines, then repair
    HD temporal stability and complete the representative temporal/geometry
    corpus. Recapture affected timing evidence with explicit coverage fields.

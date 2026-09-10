@@ -1123,6 +1123,9 @@ fn physical_transmission_casts_a_bounded_colored_directional_shadow() {
         return;
     };
     eng.renderer.set_shadows_enabled(true);
+    // Compare direct-light attenuation. A background SDF bake can switch GI
+    // backends between these short captures and change unrelated RGB lighting.
+    eng.renderer.set_ssgi_enabled(false);
 
     let transform = |scale: [f32; 3], translation: [f32; 3]| -> [[f32; 4]; 4] {
         [
@@ -1190,13 +1193,19 @@ fn physical_transmission_casts_a_bounded_colored_directional_shadow() {
         green_loss += u64::from(green);
         blue_loss += u64::from(blue);
     }
+    let sufficient_receiver = affected > 50;
+    let correct_tint = red_loss > green_loss && green_loss > blue_loss.saturating_mul(2);
+    if diagnostics_enabled() || !sufficient_receiver || !correct_tint {
+        write_diagnostic_capture("physical-colored-shadow", "unshadowed", W, H, &unshadowed);
+        write_diagnostic_capture("physical-colored-shadow", "colored", W, H, &colored);
+    }
     assert!(
-        affected > 50,
+        sufficient_receiver,
         "enabling the glass caster did not produce a bounded receiver region \
          (affected={affected})"
     );
     assert!(
-        red_loss > green_loss && green_loss > blue_loss.saturating_mul(2),
+        correct_tint,
         "shadow did not preserve authored cyan transmittance: \
          losses rgb=({red_loss},{green_loss},{blue_loss})"
     );
