@@ -321,12 +321,16 @@ fn mask_coverage_threshold(
     // instead. Quantising the phase LOD keeps it fixed between mip boundaries;
     // TAA only has to absorb the occasional boundary transition, not a new
     // decision on every subpixel camera step.
-    let phase_lod = max(floor(lod), 1.0);
-    let mip_scale = exp2(-phase_lod);
-    let mip_dimensions = max(
-        floor(vec2<f32>(dimensions) * mip_scale),
-        vec2<f32>(1.0),
-    );
+    // Preserve the phase extent in the approved Metal captures: the final
+    // source texel index reduced to the owning mip. exp2 followed by floor
+    // made that extent one texel larger on Vulkan when its power-of-two result
+    // was exact. Integer arithmetic fixes the phase on every backend, including
+    // non-power-of-two textures, without changing the sampled alpha mip.
+    let phase_lod = u32(clamp(floor(lod), 1.0, 31.0));
+    let mip_dimensions = vec2<f32>(max(
+        (dimensions - vec2<u32>(1u)) >> vec2<u32>(phase_lod),
+        vec2<u32>(1u),
+    ));
     let texel = vec2<u32>(floor(wrapped_uv * mip_dimensions));
     let x = texel.x & 3u;
     let y = texel.y & 3u;

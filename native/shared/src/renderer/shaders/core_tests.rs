@@ -74,7 +74,7 @@ fn selected_shadow_cascade_miss_hands_off_instead_of_punching_a_lit_hole() {
 fn masked_coverage_phase_follows_authored_texture_coordinates() {
     wgpu::naga::front::wgsl::parse_str(SCENE_SHADER)
         .unwrap_or_else(|error| panic!("ordinary scene WGSL failed: {error:?}"));
-    assert!(SCENE_SHADER.contains("let phase_lod = max(floor(lod), 1.0);"));
+    assert!(SCENE_SHADER.contains("let phase_lod = u32(clamp(floor(lod), 1.0, 31.0));"));
     assert!(SCENE_SHADER.contains("wrapped_uv * mip_dimensions"));
     assert!(!SCENE_SHADER.contains("mask_coverage_threshold(in.clip_position.xy"));
 }

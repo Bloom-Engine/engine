@@ -32,6 +32,8 @@ use golden_device::{requested_backends, try_engine, try_isolated_engine};
 #[path = "golden_render/metrics.rs"]
 mod metrics;
 use metrics::{calculate_diff_metrics, select_outlier_gate};
+#[path = "golden_render/alpha_coverage_phase.rs"]
+mod alpha_coverage_phase;
 #[path = "golden_render/fractional_dynamic.rs"]
 mod fractional_dynamic;
 #[path = "golden_render/layered_pbr_motion.rs"]
