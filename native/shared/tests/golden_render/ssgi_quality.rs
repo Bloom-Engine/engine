@@ -559,6 +559,23 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
     for _ in 0..120 {
         capture(&mut eng);
     }
+    let timing_report: serde_json::Value = serde_json::from_str(&eng.profiler.quality_report_json(
+        3,
+        24,
+        120,
+        1.0 / 60.0,
+        3,
+        1.0,
+        0.0,
+        "{}",
+        "{}",
+    ))
+    .expect("SSGI fixture timing statistics");
+    if eng.profiler.has_gpu() {
+        assert_eq!(timing_report["gpu_timing_valid"], true);
+        assert_eq!(timing_report["gpu_timing_valid_frames"], 120);
+        eprintln!("ssgi-profile complete_gpu_frames=120");
+    }
     let probe_gpu_us = eng
         .profiler
         .snapshot()

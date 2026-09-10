@@ -228,6 +228,18 @@ on Retina/window scaling, desktop compositing, or vsync. The engine reports
 and GPU timestamp availability. Hard performance runners reject telemetry
 that cannot prove these properties.
 
+GPU timing reports distinguish adapter support (`gpu_timestamps_available`)
+from complete measurements (`gpu_timing_valid`). `timing_window_frames` is the
+number of retained frame samples, up to the profiler's 120-frame window;
+`gpu_timing_valid_frames` counts frames whose reserved queries were all resolved
+and read successfully without exhausting the query budget. A missing resolve,
+failed readback, backwards timestamp pair, or invalid timestamp period makes
+that frame incomplete. Incomplete frames are excluded from GPU aggregate
+statistics, and qualification rejects an incomplete or unverified window.
+CPU/GPU timings, timestep, render scale, and hard-budget measurements must be
+finite numbers. Existing reports without the GPU validity fields need a new
+capture before they can serve as timing qualification.
+
 The measured window is intentionally sustained (240–300 frames after
 120–180 warm-up frames). Shorter windows were rejected because scheduler
 spikes dominated p95. Capture and PNG encoding happen after measurement.

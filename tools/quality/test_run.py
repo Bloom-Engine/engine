@@ -613,6 +613,49 @@ class ReproducibilityTests(unittest.TestCase):
         self.assertTrue(any("measured_frames" in item for item in failures))
         self.assertTrue(any("uncapped" in item for item in failures))
 
+    def test_telemetry_rejects_incomplete_gpu_windows_and_nonfinite_times(self) -> None:
+        case = {"fixed_timestep": 1 / 60, "warmup_frames": 60,
+                "measured_frames": 120, "render_scale": 1.0}
+        telemetry = {
+            "schema": "bloom-quality-telemetry-v1", **case,
+            "uncapped": True, "warmup_excluded": True,
+            "shader_compilation_excluded": True,
+            "gpu_timestamps_available": True,
+            "timing_window_frames": 120, "gpu_timing_valid_frames": 120,
+            "gpu_timing_valid": True,
+            "adapter": {"availability": "reported"}, "renderer_paths": {},
+            "cpu_frame_mean_ms": 1.0, "cpu_frame_p95_ms": 1.2,
+            "gpu_frame_mean_ms": 2.0, "gpu_frame_p95_ms": 2.4,
+            "measurement_wall_ms": 300.0, "passes": [{"label": "render"}],
+        }
+        with (mock.patch.object(quality, "capability_snapshot_failures", return_value=[]),
+              mock.patch.object(quality, "steady_state_renderer_failures", return_value=[])):
+            self.assertEqual(quality.telemetry_contract_failures(case, telemetry), [])
+            for updates in (
+                {"gpu_timing_valid": False},
+                {"gpu_timing_valid": None},
+                {"gpu_timing_valid_frames": 119},
+                {"timing_window_frames": 0, "gpu_timing_valid_frames": 0},
+                {"timing_window_frames": True, "gpu_timing_valid_frames": True},
+            ):
+                with self.subTest(updates=updates):
+                    failures = quality.telemetry_contract_failures(case, telemetry | updates)
+                    self.assertIn("telemetry GPU timing window is incomplete or unverified", failures)
+            for key in ("cpu_frame_mean_ms", "cpu_frame_p95_ms", "measurement_wall_ms",
+                        "gpu_frame_mean_ms", "gpu_frame_p95_ms", "fixed_timestep", "render_scale"):
+                for invalid in (float("nan"), float("inf"), -1.0, True):
+                    with self.subTest(key=key, invalid=invalid):
+                        failures = quality.telemetry_contract_failures(case, telemetry | {key: invalid})
+                        self.assertTrue(any(key in failure for failure in failures))
+
+    def test_hard_budget_rejects_nonfinite_measurements(self) -> None:
+        case = {"budgets": {"machine_class": "test", "max_gpu_frame_p95_ms": 10.0}}
+        machine = {"id": "test", "hard_gate": True, "hard_metrics": ["gpu"]}
+        for value in (float("nan"), float("inf"), -1.0, True, "5"):
+            with self.subTest(value=value):
+                failures = quality.performance_failures(case, {"gpu_frame_p95_ms": value}, machine)
+                self.assertIn("gpu_frame_p95_ms unavailable for hard budget max_gpu_frame_p95_ms", failures)
+
 
 class QualificationFailureOrderingTests(unittest.TestCase):
     def test_missing_baseline_does_not_suppress_runtime_contracts(self) -> None:

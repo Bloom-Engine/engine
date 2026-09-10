@@ -1354,7 +1354,8 @@ impl Renderer {
             return;
         };
         let uniforms = TransmittedShadowResolveUniforms {
-            inv_vp: self.current_inv_vp_matrix,
+            // Match SSR/PT: the CPU inverse is transposed relative to WGSL M*v.
+            inv_vp: mat4_transpose(self.current_inv_vp_matrix),
             cascade_vps: self.shadow_map.light_vps,
             camera_pos: [
                 self.current_camera_pos[0],
