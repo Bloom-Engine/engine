@@ -1,0 +1,234 @@
+{
+  "schema": "bloom-issue-153-radeon-measurement-v1",
+  "date": "2026-09-10",
+  "source_commit": "8309985bf9f5358c38e5dd2cbc0e328d2bccb6f8",
+  "base_commit": "4508eaff082b849203ac60f9d8f3a327b71d95c9",
+  "manifest_sha256": "95ef665ecd2734d527bd55738f69c9ab16bd472ad2239ab861c1bcc8a61ef320",
+  "host": {
+    "captured_at": "2026-09-10T15:27:31.5714756Z",
+    "os": {
+      "Caption": "Microsoft Windows 11 Pro",
+      "Version": "10.0.26200",
+      "BuildNumber": "26200",
+      "OSArchitecture": "64-bit"
+    },
+    "cpu": {
+      "Name": "AMD Ryzen 5 7640HS w/ Radeon 760M Graphics     ",
+      "NumberOfCores": 6,
+      "NumberOfLogicalProcessors": 12
+    },
+    "memory_bytes": 27704946688,
+    "display_adapters": [
+      {
+        "Name": "AMD Radeon 760M Graphics",
+        "DriverVersion": "32.0.12033.1030",
+        "DriverDate": "/Date(1732665600000)/"
+      }
+    ],
+    "base_commit": "4508eaff082b849203ac60f9d8f3a327b71d95c9",
+    "measured_commit": "8309985bf9f5358c38e5dd2cbc0e328d2bccb6f8",
+    "perry_version": "0.5.1182",
+    "perry_archive_sha256": "961d0789a50043b3e441c8826cfb8cc0106b3c4124d8fb9ca2381880961405d9",
+    "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+    "python": "Python 3.12.10",
+    "node": "v24.21.0",
+    "unrelated_process_monitoring": "CPU snapshots before and after capture; no continuous background GPU or process-start monitoring"
+  },
+  "strict_run_exit_codes": [
+    1,
+    1
+  ],
+  "performance_budget_mode": "measurement-only",
+  "pass_count": 7,
+  "fail_count": 2,
+  "host_checks_all_passed": true,
+  "repro_passed": true,
+  "repro_metadata_identical": true,
+  "repro_identical_artifacts": 257,
+  "cases": [
+    {
+      "id": "pbr-spheres-high",
+      "resolution": [
+        512,
+        512
+      ],
+      "render_scale": 1.0,
+      "status": "pass",
+      "failures": [],
+      "cpu_frame_p95_ms": [
+        1.3251,
+        1.4304
+      ],
+      "gpu_frame_p95_ms": [
+        1.82872,
+        2.38584
+      ],
+      "ssim": 0.998786986,
+      "gi_path": "hw-ray-query"
+    },
+    {
+      "id": "pbr-spheres-constrained",
+      "resolution": [
+        512,
+        512
+      ],
+      "render_scale": 0.75,
+      "status": "pass",
+      "failures": [],
+      "cpu_frame_p95_ms": [
+        0.8891,
+        0.5481
+      ],
+      "gpu_frame_p95_ms": [
+        0.94148,
+        0.64516
+      ],
+      "ssim": 0.999385297,
+      "gi_path": "hw-ray-query-pending"
+    },
+    {
+      "id": "damaged-helmet",
+      "resolution": [
+        512,
+        512
+      ],
+      "render_scale": 1.0,
+      "status": "pass",
+      "failures": [],
+      "cpu_frame_p95_ms": [
+        1.2616,
+        1.3202
+      ],
+      "gpu_frame_p95_ms": [
+        2.20392,
+        2.01828
+      ],
+      "ssim": 0.998638809,
+      "gi_path": "hw-ray-query"
+    },
+    {
+      "id": "sponza-interior",
+      "resolution": [
+        800,
+        450
+      ],
+      "render_scale": 1.0,
+      "status": "fail",
+      "failures": [
+        "visual thresholds failed (exit 1)"
+      ],
+      "cpu_frame_p95_ms": [
+        1.7121,
+        1.7501
+      ],
+      "gpu_frame_p95_ms": [
+        3.4954,
+        3.4564
+      ],
+      "ssim": 0.972333014,
+      "gi_path": "hw-ray-query"
+    },
+    {
+      "id": "bistro-exterior",
+      "resolution": [
+        800,
+        450
+      ],
+      "render_scale": 1.0,
+      "status": "pass",
+      "failures": [],
+      "cpu_frame_p95_ms": [
+        2.395,
+        2.3341
+      ],
+      "gpu_frame_p95_ms": [
+        7.82228,
+        7.8018
+      ],
+      "ssim": 0.987192452,
+      "gi_path": "hw-ray-query"
+    },
+    {
+      "id": "skinned-alpha-motion",
+      "resolution": [
+        800,
+        450
+      ],
+      "render_scale": 1.0,
+      "status": "fail",
+      "failures": [
+        "visual thresholds failed (exit 1)"
+      ],
+      "cpu_frame_p95_ms": [
+        1.8231,
+        1.8414
+      ],
+      "gpu_frame_p95_ms": [
+        1.63108,
+        1.62324
+      ],
+      "ssim": 0.931997895,
+      "gi_path": "hw-ray-query"
+    },
+    {
+      "id": "draw-light-stress",
+      "resolution": [
+        1280,
+        720
+      ],
+      "render_scale": 1.0,
+      "status": "pass",
+      "failures": [],
+      "cpu_frame_p95_ms": [
+        9.8948,
+        9.4298
+      ],
+      "gpu_frame_p95_ms": [
+        11.7286,
+        11.63692
+      ],
+      "ssim": 0.999032915,
+      "gi_path": "hw-ray-query"
+    },
+    {
+      "id": "weighted-transparency",
+      "resolution": [
+        960,
+        540
+      ],
+      "render_scale": 1.0,
+      "status": "pass",
+      "failures": [],
+      "cpu_frame_p95_ms": [
+        2.695,
+        1.9926
+      ],
+      "gpu_frame_p95_ms": [
+        5.94512,
+        5.94484
+      ],
+      "ssim": 0.999737084,
+      "gi_path": "hiz-screen"
+    },
+    {
+      "id": "masked-alpha-coverage",
+      "resolution": [
+        960,
+        540
+      ],
+      "render_scale": 1.0,
+      "status": "pass",
+      "failures": [],
+      "cpu_frame_p95_ms": [
+        1.9706,
+        1.9333
+      ],
+      "gpu_frame_p95_ms": [
+        4.10788,
+        4.09928
+      ],
+      "ssim": 0.983674943,
+      "gi_path": "hiz-screen"
+    }
+  ]
+}
