@@ -17,6 +17,7 @@ struct LiveGpuObjects {
     fences: isize,
     buffer_memory: isize,
     texture_memory: isize,
+    texture_memory_available: bool,
     acceleration_structure_memory: isize,
     memory_allocations: isize,
 }
@@ -47,6 +48,12 @@ fn live_gpu_objects(device: &wgpu::Device, instance: &wgpu::Instance) -> LiveGpu
         fences: hal.fences.read(),
         buffer_memory: hal.buffer_memory.read(),
         texture_memory: hal.texture_memory.read(),
+        // wgpu-hal 29.0.1 implements texture allocation bytes only on these
+        // backends. Metal/GLES still expose live object counts, not byte usage.
+        texture_memory_available: matches!(
+            device.adapter_info().backend,
+            wgpu::Backend::Vulkan | wgpu::Backend::Dx12
+        ),
         acceleration_structure_memory: hal.acceleration_structure_memory.read(),
         memory_allocations: hal.memory_allocations.read(),
     }
@@ -245,7 +252,21 @@ fn texture_accounting_detects_live_allocations_and_releases() {
     });
     let live = live_gpu_objects(device, &instance);
     assert_eq!(live.textures, before.textures + 1);
-    assert!(live.texture_memory > before.texture_memory);
+    if live.texture_memory_available {
+        assert!(live.texture_memory > before.texture_memory);
+    } else {
+        assert_eq!(before.texture_memory, 0);
+        assert_eq!(live.texture_memory, 0);
+        eprintln!(
+            "memory-counter-availability: {}",
+            serde_json::json!({
+                "backend": format!("{:?}", device.adapter_info().backend),
+                "texture_bytes": false,
+                "texture_count": true,
+                "reason": "wgpu-hal-29.0.1-backend-byte-counter-unimplemented",
+            })
+        );
+    }
     drop(texture);
     wait_for_gpu(device);
     let released = live_gpu_objects(device, &instance);
