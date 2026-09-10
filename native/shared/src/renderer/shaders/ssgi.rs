@@ -35,7 +35,8 @@ struct ProbeHeader {
     diffuse: vec4<f32>,
     // Unfiltered current-frame estimate. Spatial reconstruction uses this to
     // bound temporal history without feeding neighboring writes back into the
-    // same dispatch.
+    // same dispatch. W marks a complete stationary phase ring, whose converged
+    // radiance must not be clipped to one noisy eight-ray realization.
     current_diffuse: vec4<f32>,
     // Prior placement at this screen-probe slot. Temporal history is only
     // retained when both placements describe the same surface.

@@ -4,7 +4,8 @@
 /// the current frame. Sixteen complete phase estimates are retained after
 /// world-surface reprojection and averaged as a finite ring, so changing the
 /// angular sampling phase cannot reinterpret old radiance as a different
-/// direction and a static scene becomes stationary after one complete cycle.
+/// direction. Repeated complete phases establish a stationary estimate without
+/// clamping it to a noisy current-frame neighborhood.
 pub(in crate::renderer) const SSGI_PROBE_TEMPORAL_WGSL: &str = "
 struct TemporalParams {
     // x = phase-ring reciprocal (1/16),
@@ -315,17 +316,46 @@ fn cs_main(
         let phase_slot = lane;
         let current_phase = u32(u.confidence.y) & 15u;
         var phase_integrated = current_integrated_shared;
+        if (u.confidence.x < 0.5) {
+            // Match the retained phases' precision before comparison and
+            // reduction. Texture stores may round differently from pack on
+            // different adapters; an already representable value is exact.
+            phase_integrated = vec3<f32>(
+                unpack2x16float(pack2x16float(phase_integrated.xy)),
+                unpack2x16float(pack2x16float(vec2<f32>(phase_integrated.z, 0.0))).x,
+            );
+        }
         // A seeded slot supplies stable first-frame output but is not a real
         // sample of this angular phase. Its owner.w remains zero until that
         // phase is traced at the current surface.
-        var phase_owner = vec4<f32>(0.0);
-        if (u.world_cache.x > 0u) {
-            phase_owner = vec4<f32>(probes[probe_index].world_pos.xyz, 0.0);
-            if (phase_slot == current_phase) {
+        var phase_owner = vec4<f32>(probes[probe_index].world_pos.xyz, 0.0);
+        if (phase_slot == current_phase && probes[probe_index].world_pos.w >= 0.5) {
+            if (u.confidence.x > 0.5) {
                 // A hardware phase becomes publishable only after the
                 // TLAS/card-light field is coherent. Existing pre-coherence
                 // slots age out over the following complete 16-phase cycle.
                 phase_owner.w = select(0.0, 1.0, u.world_cache.w != 0u);
+            } else {
+                // A software phase is stationary only after the same surface
+                // reproduces its previous complete estimate at rgba16float
+                // storage precision. A changed phase immediately revokes that
+                // state, retaining the responsive current-neighborhood clamp.
+                phase_owner.w = 1.0;
+                if (u.params.y <= 0.5 && reprojected_history_valid != 0u) {
+                    let history_xy = vec2<i32>(
+                        i32(reprojected_history_probe % grid_w),
+                        i32(reprojected_history_probe / grid_w),
+                    );
+                    let old_phase = textureLoad(history_in,
+                        vec3<i32>(history_xy, i32(32u + phase_slot)), 0);
+                    let old_owner = textureLoad(history_in,
+                        vec3<i32>(history_xy, i32(48u + phase_slot)), 0);
+                    let same_radiance = all(old_phase.rgb == phase_integrated);
+                    if (old_owner.w >= 1.0 && same_radiance &&
+                        distance(old_owner.xyz, phase_owner.xyz) <= 0.05) {
+                        phase_owner.w = 2.0;
+                    }
+                }
             }
         }
         if (u.params.y <= 0.5 && reprojected_history_valid != 0u &&
@@ -338,13 +368,11 @@ fn cs_main(
                 vec3<i32>(history_x, history_y, history_layer),
                 0,
             ).rgb);
-            if (u.world_cache.x > 0u) {
-                phase_owner = textureLoad(
-                    history_in,
-                    vec3<i32>(history_x, history_y, i32(48u + phase_slot)),
-                    0,
-                );
-            }
+            phase_owner = textureLoad(
+                history_in,
+                vec3<i32>(history_x, history_y, i32(48u + phase_slot)),
+                0,
+            );
         }
         diffuse_radiance[32u + phase_slot] = phase_integrated;
         // The luminance reduction is dead after current integration. Reuse
@@ -363,34 +391,31 @@ fn cs_main(
     }
     workgroupBarrier();
 
-    if (u.world_cache.x > 0u) {
-        if (lane == 0u) {
-            phase_ring_settled_shared = 1u;
-            let current_world_pos = probes[probe_index].world_pos;
-            if (current_world_pos.w < 0.5) {
-                phase_ring_settled_shared = 0u;
-            } else {
-                for (var phase = 0u; phase < 16u; phase = phase + 1u) {
-                    let owner_base = phase * 4u;
-                    let owner = vec4<f32>(
-                        diffuse_luminance[owner_base],
-                        diffuse_luminance[owner_base + 1u],
-                        diffuse_luminance[owner_base + 2u],
-                        diffuse_luminance[owner_base + 3u],
-                    );
-                    // Owner positions are stored in rgba16float, whose absolute
-                    // precision is about 1.6 cm around a 20 m Bistro coordinate.
-                    if (owner.w < 0.5 ||
-                        distance(owner.xyz, current_world_pos.xyz) > 0.05) {
-                        phase_ring_settled_shared = 0u;
-                    }
+    if (lane == 0u) {
+        phase_ring_settled_shared = 1u;
+        let current_world_pos = probes[probe_index].world_pos;
+        if (current_world_pos.w < 0.5) {
+            phase_ring_settled_shared = 0u;
+        } else {
+            for (var phase = 0u; phase < 16u; phase = phase + 1u) {
+                let owner_base = phase * 4u;
+                let owner = vec4<f32>(
+                    diffuse_luminance[owner_base],
+                    diffuse_luminance[owner_base + 1u],
+                    diffuse_luminance[owner_base + 2u],
+                    diffuse_luminance[owner_base + 3u],
+                );
+                // Owner positions are stored in rgba16float, whose absolute
+                // precision is about 1.6 cm around a 20 m Bistro coordinate.
+                let required_owner = select(1.5, 0.5, u.confidence.x > 0.5);
+                if (owner.w < required_owner ||
+                    distance(owner.xyz, current_world_pos.xyz) > 0.05) {
+                    phase_ring_settled_shared = 0u;
                 }
             }
         }
-        workgroupBarrier();
-    } else if (lane == 0u) {
-        phase_ring_settled_shared = 0u;
     }
+    workgroupBarrier();
 
     if (lane == 0u) {
         var phase_sum = vec3<f32>(0.0);
@@ -399,8 +424,9 @@ fn cs_main(
         }
         let phase_integrated = bounded_probe_history(phase_sum * u.params.x);
         var integrated = phase_integrated;
+        probes[probe_index].current_diffuse.w = f32(phase_ring_settled_shared);
         if (u.confidence.x < 0.5 && u.params.y <= 0.5 &&
-            reprojected_history_valid != 0u) {
+            reprojected_history_valid != 0u && phase_ring_settled_shared == 0u) {
             // Screen/SDF traces can still change at Hi-Z silhouettes even
             // after their angular ring is complete. Preserve the established
             // short output blend on those approximate backends. Hardware
@@ -648,7 +674,7 @@ fn cs_spatial(@builtin(global_invocation_id) gid: vec3<u32>) {
     // complete indirect signal on many Bistro facade probes and therefore
     // admitted old path-dependent light without clipping it at all.
     var history_clamped = center.diffuse.rgb;
-    if (u.confidence.x < 0.5 && weight_sum > 0.0001) {
+    if (u.confidence.x < 0.5 && center.current_diffuse.w < 0.5 && weight_sum > 0.0001) {
         let current_mean = current_first / weight_sum;
         let current_sigma = sqrt(max(
             current_second / weight_sum - current_mean * current_mean,

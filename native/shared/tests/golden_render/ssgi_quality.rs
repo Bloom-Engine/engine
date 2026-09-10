@@ -1,5 +1,11 @@
 use super::super::*;
 
+#[path = "ssgi_phase_diagnostics.rs"]
+mod phase_diagnostics;
+
+#[path = "ssgi_stationary.rs"]
+mod stationary;
+
 #[test]
 fn two_sided_mesh_cards_do_not_light_the_hidden_face_with_the_front_normal() {
     let _guard = lock_rt_goldens();
@@ -506,12 +512,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     staging.unmap();
 }
 
-#[test]
-fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
-    let Some(mut eng) = try_engine() else {
-        eprintln!("skip: no GPU adapter");
-        return;
-    };
+fn hiz_immediate_engine() -> Option<EngineState> {
+    let mut eng = try_engine()?;
     let r = &mut eng.renderer;
     if std::env::var_os("BLOOM_SSGI_PROFILE_HD").is_some() {
         r.resize(1280, 720, 1280, 720);
@@ -524,22 +526,30 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
     r.set_auto_exposure(false);
     r.set_shadows_enabled(false);
 
-    let draw = |eng: &mut EngineState| {
-        let r = &mut eng.renderer;
-        r.set_clear_color(6.0, 8.0, 15.0, 255.0);
-        r.begin_mode_3d(4.0, 3.0, 6.0, 0.0, 0.6, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
-        r.set_ambient_light(15.0, 18.0, 28.0, 0.2);
-        r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.85, 0.7, 1.8);
-        r.draw_cube(0.0, -0.1, 0.0, 12.0, 0.2, 12.0, 90.0, 96.0, 107.0, 255.0);
-        r.draw_cube(0.0, 2.0, -3.0, 8.0, 4.0, 0.2, 230.0, 166.0, 31.0, 255.0);
-        r.draw_cube(-1.1, 1.0, 0.0, 1.8, 2.0, 1.8, 230.0, 45.0, 25.0, 255.0);
-        r.draw_sphere(1.1, 0.9, -0.8, 0.9, 30.0, 110.0, 240.0, 255.0);
+    Some(eng)
+}
+
+fn capture_hiz_immediate(eng: &mut EngineState) {
+    eng.begin_frame();
+    let r = &mut eng.renderer;
+    r.set_clear_color(6.0, 8.0, 15.0, 255.0);
+    r.begin_mode_3d(4.0, 3.0, 6.0, 0.0, 0.6, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+    r.set_ambient_light(15.0, 18.0, 28.0, 0.2);
+    r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.85, 0.7, 1.8);
+    r.draw_cube(0.0, -0.1, 0.0, 12.0, 0.2, 12.0, 90.0, 96.0, 107.0, 255.0);
+    r.draw_cube(0.0, 2.0, -3.0, 8.0, 4.0, 0.2, 230.0, 166.0, 31.0, 255.0);
+    r.draw_cube(-1.1, 1.0, 0.0, 1.8, 2.0, 1.8, 230.0, 45.0, 25.0, 255.0);
+    r.draw_sphere(1.1, 0.9, -0.8, 0.9, 30.0, 110.0, 240.0, 255.0);
+    eng.end_frame();
+}
+
+#[test]
+fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
+    let Some(mut eng) = hiz_immediate_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
     };
-    let capture = |eng: &mut EngineState| {
-        eng.begin_frame();
-        draw(eng);
-        eng.end_frame();
-    };
+    let capture = capture_hiz_immediate;
 
     eng.renderer.reset_temporal_history();
     for _ in 0..24 {
@@ -556,6 +566,9 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
         .filter_map(|(label, _, gpu)| label.starts_with("probe_").then_some((label, gpu?)))
         .collect::<Vec<_>>();
     let probe_total_gpu_us = probe_gpu_us.iter().map(|(_, gpu)| gpu).sum::<f64>();
+    eprintln!(
+        "ssgi-profile probe_total_gpu_us={probe_total_gpu_us:.3} probe_gpu_us={probe_gpu_us:?}"
+    );
     eng.profiler.set_enabled(false);
     let directory = std::env::temp_dir().join(format!("bloom-ssgi-hiz-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -572,8 +585,19 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
     let next_directory =
         std::env::temp_dir().join(format!("bloom-ssgi-hiz-next-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&next_directory);
+    let phase_dump = std::env::var_os("BLOOM_SSGI_PHASE_DUMP_DIR").map(PathBuf::from);
+    if let Some(root) = &phase_dump {
+        phase_diagnostics::capture(&eng, root);
+    }
     eng.renderer.pending_quality_capture_dir = Some(next_directory.to_string_lossy().into_owned());
     capture(&mut eng);
+    if let Some(root) = &phase_dump {
+        phase_diagnostics::capture(&eng, root);
+        for _ in 0..32 {
+            capture(&mut eng);
+            phase_diagnostics::capture(&eng, root);
+        }
+    }
     let current_radiance = std::fs::read(directory.join("ssgi-current-radiance.png"))
         .expect("Hi-Z SSGI capture did not emit current radiance");
     let next_current_radiance = std::fs::read(next_directory.join("ssgi-current-radiance.png"))
@@ -594,6 +618,7 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
         settled_ssgi.width(),
         settled_ssgi.height(),
     );
+    eprintln!("hiz-corpus settled SSGI={settled_metrics:?}");
     assert!(
         settled_metrics.ssim >= 0.9985,
         "temporally rotated rays destabilized settled SSGI: {settled_metrics:?}"
@@ -627,6 +652,22 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
         "Hi-Z SSGI produced no usable indirect radiance: current={current}, \
          retained={retained}, max_luma={max_luminance:.6}"
     );
+
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept Hi-Z SSGI diagnostics at {directory:?} and {next_directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+        let _ = std::fs::remove_dir_all(next_directory);
+    }
+}
+
+#[test]
+fn ssgi_hiz_stationary_taa_bounds_subpixel_variation() {
+    let Some(mut eng) = hiz_immediate_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let capture = capture_hiz_immediate;
 
     // TAA jitters the primary projection even at a stationary camera. SSGI's
     // world-owned angular phase must respond continuously to that subpixel
@@ -665,9 +706,8 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
     // Halton phases correctly move geometric silhouettes by a subpixel, so a
     // near-identity whole-image SSIM would reject the intended sampling
     // aperture rather than GI instability. Bound the low-frequency color
-    // change, edge change, and affected-pixel footprint; the non-jittered
-    // settled-radiance comparison above remains the strict 0.999 angular-
-    // stability gate.
+    // change, edge change, and affected-pixel footprint. The separate
+    // non-jittered test retains the strict 0.9985 angular-stability gate.
     assert!(
         taa_metrics.mean_rgb <= 0.75
             && taa_metrics.mean_edge_delta <= 0.004
@@ -678,13 +718,8 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
     );
 
     if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "kept Hi-Z SSGI diagnostics at {directory:?}, {next_directory:?}, \
-             {taa_directory:?}, and {taa_next_directory:?}"
-        );
+        eprintln!("kept TAA SSGI diagnostics at {taa_directory:?} and {taa_next_directory:?}");
     } else {
-        let _ = std::fs::remove_dir_all(directory);
-        let _ = std::fs::remove_dir_all(next_directory);
         let _ = std::fs::remove_dir_all(taa_directory);
         let _ = std::fs::remove_dir_all(taa_next_directory);
     }
