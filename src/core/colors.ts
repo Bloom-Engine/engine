@@ -1,9 +1,7 @@
 import { Color as ColorType } from './types';
 
-// Canonical color palette. Re-exported as `Color` from `bloom/core` and
-// declared as a real top-level binding (not an alias re-export) so Perry
-// emits a `_perry_fn_src_core_colors_ts__Color` symbol that examples
-// importing `Color` from `bloom/core` can link against.
+// Canonical color palette, exposed as `Colors` and `ColorConstants` from
+// `bloom/core`. `Color` there is the RGBA type, not a runtime palette value.
 export const Color: Record<string, ColorType> = {
   Snow:       { r: 245, g: 245, b: 245, a: 255 },
   White:      { r: 255, g: 255, b: 255, a: 255 },

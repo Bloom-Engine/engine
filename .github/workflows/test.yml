@@ -14,6 +14,12 @@ concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    # The shared entry point is Bash. PowerShell can return success after
+    # opening a .sh file without executing or waiting for its commands.
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
   # Pin macOS deployment target so cached object files carry a stable
@@ -72,6 +78,14 @@ jobs:
         env:
           RUST_TEST_NOCAPTURE: "1"
         run: ./scripts/ci-check.sh --quick --component shared-tests
+
+      - name: Retain executed shared-check summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-check-summary-${{ matrix.os }}
+          path: target/ci/quick-shared-tests.json
+          if-no-files-found: error
 
       - name: Upload failure evidence
         if: failure()
@@ -234,6 +248,14 @@ jobs:
 
       - name: full / host-build
         run: ./scripts/ci-check.sh --full --component host-build
+
+      - name: Retain executed Windows-build summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-summary
+          path: target/ci/full-host-build.json
+          if-no-files-found: error
 
       - name: Upload failure evidence
         if: failure()
