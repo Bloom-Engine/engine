@@ -6,6 +6,10 @@
 
 use std::sync::mpsc;
 
+#[path = "capture_pixels.rs"]
+mod capture_pixels;
+use capture_pixels::{frame_rgb, rgba8_rgb};
+
 use super::util::encode_png_simple;
 use super::weighted_transparency::WEIGHTED_TRANSPARENCY_AUTO_DRAW_THRESHOLD;
 use super::Renderer;
@@ -40,6 +44,7 @@ pub(super) struct MrtReadback {
 
 pub(super) struct FrameReadback {
     staging: wgpu::Buffer,
+    format: wgpu::TextureFormat,
     width: u32,
     height: u32,
     padded_bytes_per_row: u32,
@@ -266,18 +271,6 @@ fn depth_rgb(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) ->
             };
             let gray = (normalized * 255.0 + 0.5) as u8;
             rgb.extend_from_slice(&[gray, gray, gray]);
-        }
-    }
-    rgb
-}
-
-fn rgba8_rgb(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) -> Vec<u8> {
-    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-    for row in 0..height {
-        let row_start = (row * padded_bytes_per_row) as usize;
-        for column in 0..width {
-            let offset = row_start + (column * 4) as usize;
-            rgb.extend_from_slice(&data[offset..offset + 3]);
         }
     }
     rgb
@@ -652,6 +645,7 @@ impl Renderer {
             .map(|_| self.record_mrt_readback(encoder));
         FrameReadback {
             staging,
+            format: output.format(),
             width,
             height,
             padded_bytes_per_row,
@@ -772,11 +766,13 @@ impl Renderer {
             }
             drop(data);
             if let Some(path) = self.pending_screenshot_path.take() {
-                let mut rgb = Vec::with_capacity((readback.width * readback.height * 3) as usize);
-                for chunk in rgba.chunks_exact(4) {
-                    // Native surface captures are BGRA; the PNG contract is RGB.
-                    rgb.extend_from_slice(&[chunk[2], chunk[1], chunk[0]]);
-                }
+                let rgb = frame_rgb(
+                    &rgba,
+                    readback.width,
+                    readback.height,
+                    readback.width * 4,
+                    readback.format,
+                );
                 match encode_png_simple(readback.width, readback.height, &rgb) {
                     Some(png) => {
                         if let Err(error) = std::fs::write(&path, png) {

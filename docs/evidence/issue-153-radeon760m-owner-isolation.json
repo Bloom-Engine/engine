@@ -1,0 +1,143 @@
+{
+  "schema": "bloom-issue153-windows-owner-isolation-v1",
+  "baseline_source_commit": "09ad0b755af9f10083712327d7f0edb1d88f228b",
+  "current_renderer_commit": "8309985bf9f5358c38e5dd2cbc0e328d2bccb6f8",
+  "baseline_source_images_identical_to_current": true,
+  "negative_controls_passed": true,
+  "negative_control_count": 5,
+  "runs": [
+    {
+      "run": "windows-radeon760m-vulkan-corrected",
+      "git_commit": "8309985bf9f5358c38e5dd2cbc0e328d2bccb6f8",
+      "git_dirty": false,
+      "backend": "vulkan",
+      "cases": [
+        {
+          "id": "sponza-interior",
+          "ssim": 0.972333014,
+          "rmse_luminance": 0.012245284,
+          "image_sha256": "a02b5309c5b346d26b85cc599a9b50a423a8ec79bf8c27089a0206f30bfa01ca",
+          "status": "fail"
+        },
+        {
+          "id": "skinned-alpha-motion",
+          "ssim": 0.931997895,
+          "rmse_luminance": 0.047519531,
+          "image_sha256": "dabb8e43ccbfd606d8e4fe8f5f5f9cb2e0ec4f59f9da4a6b16c2fe12c7ccd8df",
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "run": "radeon-owner-software-gi",
+      "git_commit": "2c4af1948ab4a408b9c28f9aa568a372fd630b52",
+      "git_dirty": false,
+      "backend": "vulkan",
+      "cases": [
+        {
+          "id": "sponza-interior",
+          "ssim": 0.969276249,
+          "rmse_luminance": 0.01358667,
+          "image_sha256": "b67f7e5d40875f1fff630525fd696e458e1ff974dea387765f49bee74e3db2a9",
+          "status": "fail"
+        },
+        {
+          "id": "skinned-alpha-motion",
+          "ssim": 0.931530952,
+          "rmse_luminance": 0.047676153,
+          "image_sha256": "78fc7ad35a89a1c256a2b8fece63b0474459c3249f5c556afd3f94ff7655832b",
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "run": "radeon-owner-bound-materials",
+      "git_commit": "2c4af1948ab4a408b9c28f9aa568a372fd630b52",
+      "git_dirty": false,
+      "backend": "vulkan",
+      "cases": [
+        {
+          "id": "sponza-interior",
+          "ssim": 0.972333014,
+          "rmse_luminance": 0.012245284,
+          "image_sha256": "a02b5309c5b346d26b85cc599a9b50a423a8ec79bf8c27089a0206f30bfa01ca",
+          "status": "fail"
+        },
+        {
+          "id": "skinned-alpha-motion",
+          "ssim": 0.931997895,
+          "rmse_luminance": 0.047519531,
+          "image_sha256": "dabb8e43ccbfd606d8e4fe8f5f5f9cb2e0ec4f59f9da4a6b16c2fe12c7ccd8df",
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "run": "radeon-owner-dx12-software-gi",
+      "git_commit": "2c4af1948ab4a408b9c28f9aa568a372fd630b52",
+      "git_dirty": false,
+      "backend": "dx12",
+      "cases": [
+        {
+          "id": "sponza-interior",
+          "ssim": 0.970000505,
+          "rmse_luminance": 0.013674281,
+          "image_sha256": "075b3df8d0a253391f1a1f8ff9534fb84ac4dd63d5757cba0b3a8cad8667ade2",
+          "status": "fail"
+        },
+        {
+          "id": "skinned-alpha-motion",
+          "ssim": 0.931594729,
+          "rmse_luminance": 0.047674358,
+          "image_sha256": "02e6e354ba286b80e6d0b4dc67748fa5795c24d08e8d519f571704d0966ea61d",
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "run": "radeon-owner-anisotropy-1",
+      "git_commit": "2c4af1948ab4a408b9c28f9aa568a372fd630b52",
+      "git_dirty": true,
+      "backend": "vulkan",
+      "cases": [
+        {
+          "id": "sponza-interior",
+          "ssim": 0.95216471,
+          "rmse_luminance": 0.014432787,
+          "image_sha256": "4c829636947bfa841b38873b14e162f9565cbeddeb2f2127222bb46c436f6758",
+          "status": "fail"
+        },
+        {
+          "id": "skinned-alpha-motion",
+          "ssim": 0.923400104,
+          "rmse_luminance": 0.048658907,
+          "image_sha256": "d0d90bf6c5ada752e4e181baf812f274c46bf196dd8eb56c6f225da4dfbd1a9c",
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "run": "radeon-owner-baseline-source",
+      "git_commit": "09ad0b755af9f10083712327d7f0edb1d88f228b",
+      "git_dirty": true,
+      "backend": "vulkan",
+      "cases": [
+        {
+          "id": "sponza-interior",
+          "ssim": 0.972333014,
+          "rmse_luminance": 0.012245284,
+          "image_sha256": "a02b5309c5b346d26b85cc599a9b50a423a8ec79bf8c27089a0206f30bfa01ca",
+          "status": "fail"
+        },
+        {
+          "id": "skinned-alpha-motion",
+          "ssim": 0.931997895,
+          "rmse_luminance": 0.047519531,
+          "image_sha256": "dabb8e43ccbfd606d8e4fe8f5f5f9cb2e0ec4f59f9da4a6b16c2fe12c7ccd8df",
+          "status": "fail"
+        }
+      ]
+    }
+  ],
+  "conclusion": "Both failures predate changes since the approved baseline source, under the tested Windows/Radeon/compiler configuration. The precise cause of the cross-platform baseline discrepancy is not isolated."
+}

@@ -84,6 +84,19 @@ gpu = "Apple M1"
 max_host_cpu_fraction = 0.20
 max_host_process_cpu_percent = 75.0
 
+[[machine_class]]
+id = "amd-radeon760m-windows-vulkan"
+description = "Radeon 760M integrated GPU measurement profile; performance budgets not yet qualified"
+hard_gate = false
+hard_metrics = []
+check_host_load = true
+os = "windows"
+backend = "vulkan"
+gpu = "AMD Radeon 760M Graphics"
+hardware_gi = true
+max_host_cpu_fraction = 0.20
+max_host_process_cpu_percent = 75.0
+
 [[case]]
 id = "pbr-spheres-high"
 description = "BRDF energy, Fresnel, metallic/roughness lobes, and IBL orientation"
