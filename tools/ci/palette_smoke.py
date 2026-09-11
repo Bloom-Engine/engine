@@ -15,6 +15,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from tools.ci.native_package_smoke import npm_command
+from tools.ci.compile_examples import reject_duplicate_module_globals
 
 PREFIX = 'BLOOM_PALETTE_RESULT:'
 # Public palette compatibility reference; both aliases must retain all channels.
@@ -56,7 +57,10 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     if (out / 'result.json').exists(): parser.error('choose a fresh palette evidence directory')
     report = dict(schema='bloom-palette-v1', status='running', commands=[], cases=[])
-    parent = Path(tempfile.gettempdir()).resolve()
+    # The linked engine and fixture must share a drive. Perry 0.5.1220 falls
+    # back to colliding index.ts module names when no common ancestor exists.
+    parent = (ROOT / 'target/ci').resolve()
+    parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix='bpc-', dir=parent)).resolve()
     env = os.environ.copy()
     env.pop('CARGO_TARGET_DIR', None)
@@ -72,6 +76,7 @@ def main():
                 process = subprocess.run(command, cwd=temporary, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=1800)
             record['exit_code'] = process.returncode
             text = (out / (name + '.log')).read_text(encoding='utf-8', errors='replace')
+            reject_duplicate_module_globals(text)
             if expected_error:
                 if process.returncode == 0 or expected_error not in text: raise RuntimeError(f'{name}: expected guard failure was not observed')
             elif process.returncode or 'Could not resolve import' in text: raise RuntimeError(f'{name}: execution or import resolution failed')
@@ -87,7 +92,7 @@ def main():
         report['compiler_sha256'] = hashlib.sha256(Path(args.perry).read_bytes()).hexdigest()
         report['source_sha256'] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in [
             'src/index.ts', 'src/core/index.ts', 'src/core/colors.ts', 'src/core/keys.ts', 'tools/ci/fixtures/palette.ts', 'tools/ci/palette_smoke.py',
-            'tools/ci/perry_wasm_console.cjs', 'native/web/splice_game.cjs']}
+            'tools/ci/perry_wasm_console.cjs', 'tools/ci/compile_examples.py', 'native/web/splice_game.cjs']}
         manifest = dict(name='bloom-palette-contract', private=True, dependencies={'bloom': 'file:' + ROOT.as_posix()},
                         perry={'allow': {'nativeLibrary': ['bloom', 'bloom/*']}})
         (temporary / 'package.json').write_text(json.dumps(manifest) + '\n', encoding='utf-8')

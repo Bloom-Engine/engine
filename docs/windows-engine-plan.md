@@ -54,24 +54,20 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
 
 ## Current next steps
 
-1. **Complete the starter and example runtime experience (#142/#74).**
-   [#170's real compiled game](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-compiled-web-20260911)
-   passes exact browser pixels, eight frames, one cleanup and its explicit startup
-   fault control. [#171's installed commands](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-starter-cli-20260911)
-   pass default project creation and setup-error controls in hosted CI. The full
-   starter's assets/text browser rendering and canonical example runtime matrix
-   remain open. All 20 native examples compile and link.
-   The [complete starter browser candidate](evidence/installed-starter-browser-v1.md)
-   now runs the installed web command, verifies its served files and retains the
-   unchanged site for hosted asset/text/render acceptance. Executing its real WASM
-   found a named-void-callback return conversion failure; the production bootstrap
-   bridge and expanded named-hook contracts pass locally. The first hosted full
-   starter check rejected an omitted hidden website file before launch; #173's
-   scoped upload correction preserves the exact receipt. The next run exposed
-   undefined palette channels at the first rendered frame. Explicit starter
-   RGBA literals and stronger argument checks correct that path; #173 at
-   `955ac5b` passes all 22 Tests jobs, including the full asset/text/square browser
-   render in eight frames and one cleanup.
+1. **Complete the example runtime experience (#142/#74).**
+   The installed one-command starter is qualified through #173 at `955ac5b`:
+   all 22 Tests jobs pass, including real asset/text/square browser rendering,
+   eight frames and one cleanup. #174's six native game-content/cleanup checks
+   and all 20 native links pass locally. Hosted run 34580890147 qualifies five
+   browser games; Voxel Sandbox stops on a rejected pointer-lock request. The
+   native public-constant fixture exposes colliding module names across `C:`
+   and `D:`. The follow-up handles pointer-lock denial, creates linked compiler
+   projects beside the checkout and rejects duplicate generated globals. Its
+   local native/WASM constants, six native games, six browser builds and all
+   20 native links pass; the new hosted run is still required. Full gameplay,
+   input interaction and the broader canonical runtime matrix remain open.
+   A separate local grid-line candidate restores visibility on DX12/Vulkan,
+   but ten existing reconstruction/quality tests fail. It remains incomplete.
 2. **Finish and qualify fixed lifecycle integration.**
    The [fixed lifecycle candidate](evidence/fixed-game-lifecycle-v1.md) passes pure
    native/WASM timing and hook-order contracts, plus exact installed rendering
@@ -125,6 +121,13 @@ games then pass recording-FFI argument checks. Real browser content/cleanup
 acceptance is now required in CI. #174's initial hosted native checks all fail
 before capture with a numeric-argument TypeError; that failure is preserved and
 the shared-binding correction still requires hosted qualification.
+
+At `da31009`, hosted run 34580890147 qualifies five actual browser games;
+voxel-sandbox stops on a rejected pointer-lock request. Its native constant
+fixture exposes merged module globals when a temporary project on `C:` links
+the checkout on `D:`. The follow-up keeps linked test projects beside the
+checkout, rejects duplicate generated globals, and handles pointer-lock denial
+without stopping rendering. Those corrections still need hosted acceptance.
 
 Local work continues on the Radeon 760M. An RTX 4080 is not a prerequisite for
 this implementation work. RTX-specific and physical constrained-adapter evidence

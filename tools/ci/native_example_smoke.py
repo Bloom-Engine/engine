@@ -15,7 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from tools.ci.compile_examples import load_inventory
+from tools.ci.compile_examples import load_inventory, reject_duplicate_module_globals
 from tools.ci.example_runtime import EXAMPLES, bounded_native_source, check_frame, validate_native_state
 from tools.ci.native_package_smoke import npm_command
 
@@ -32,7 +32,10 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     report = dict(schema='bloom-native-examples-v1', status='running', commands=[], examples=[],
                   scope='Six portable examples: unchanged update/draw and cleanup bodies with bounded native capture instrumentation. Content checks do not replace quality goldens, presentation or gameplay acceptance.')
-    parent = Path(tempfile.gettempdir()).resolve()
+    # Keep linked source and fixture on one drive so Perry's module prefixes
+    # retain their full relative paths instead of colliding index.ts names.
+    parent = (ROOT / 'target/ci').resolve()
+    parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix='bne-', dir=parent)).resolve()
     env = os.environ.copy()
     env.pop('CARGO_TARGET_DIR', None)
@@ -53,6 +56,7 @@ def main():
             record['exit_code'] = process.returncode
             text = (out / f'{name}.stdout.log').read_text(encoding='utf-8', errors='replace')
             error_text = (out / f'{name}.stderr.log').read_text(encoding='utf-8', errors='replace')
+            reject_duplicate_module_globals(text + error_text)
             if process.returncode or 'Could not resolve import' in text + error_text:
                 raise RuntimeError(f'{name}: process or import resolution failed; see retained logs')
             return text
@@ -74,7 +78,8 @@ def main():
         if run('compiler-version', [args.perry, '--version'], ROOT, env, 30).strip() != 'perry 0.5.1220':
             raise RuntimeError('native examples require Perry 0.5.1220')
         report['runtime_source_sha256'] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in [
-            'src/math/index.ts', 'src/core/index.ts', 'tools/ci/example_runtime.py', 'tools/ci/native_example_smoke.py']}
+            'src/index.ts', 'src/math/index.ts', 'src/core/index.ts', 'tools/ci/example_runtime.py',
+            'tools/ci/compile_examples.py', 'tools/ci/native_example_smoke.py']}
         manifest = dict(name='bloom-native-example-smoke', private=True,
                         dependencies={'bloom': 'file:' + ROOT.as_posix()},
                         perry={'allow': {'nativeLibrary': ['bloom', 'bloom/*']}})

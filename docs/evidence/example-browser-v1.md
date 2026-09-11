@@ -59,7 +59,30 @@ capture/cleanup. Its logs and reports remain retained. Local native success does
 not replace this failed hosted requirement; the expanded public binding
 correction and runtime gates require a fresh hosted run.
 
-The corrected source still needs actual hosted example browser acceptance.
+Hosted run 34580890147 at `da31009` passes all six browser compilations and
+actual browser content/cleanup for five games. Voxel-sandbox stops after two
+frames because an initial pointer-lock request rejects with `WrongDocumentError`.
+The bridge now handles both synchronous denial and promise rejection, preserves
+intent for a later canvas click, and releases a late grant after cursor cleanup.
+Three production-bridge unit controls cover rejection/retry, legacy behavior
+and a grant arriving after cleanup.
+
+The same run's native public-constant fixture fails before output. Its retained
+linker log shows multiple `perry_global_index_ts__*` and `index_ts__init` symbols
+merged by MSVC despite a zero compiler exit. The fixture is on `C:` while its
+linked engine is on `D:`. Perry's common-project-root calculation cannot find
+a shared ancestor across drives and its module-name fallback collapses distinct
+`index.ts` paths. Replaying the hosted executable locally reproduces the failure;
+locally rebuilding with MSVC succeeds, so changing the linker alone is not a
+demonstrated remedy. Test projects now live under the checkout's `target/ci`,
+and native compilation rejects duplicate Perry module globals. The new check
+rejects the actual hosted log while accepting both earlier local linker logs.
+Both linker formats also have zero-exit failure controls.
+The same duplicate-global pattern is present in all six compile logs from the
+initial native failure. The revised local native/WASM constant contract and
+all six native content/cleanup checks pass with the new project location.
+
+The same-drive and pointer-lock corrections require a fresh hosted run.
 Eight startup frames do not qualify full gameplay or input interaction, pause/
 focus policy, resize/device loss, quality goldens or performance. The missing
 test3d grid lines, broad generated API/export audit and general compiler

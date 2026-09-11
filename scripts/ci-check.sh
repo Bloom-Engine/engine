@@ -234,6 +234,7 @@ run_component() {
       node --test tools/ci/test_web_build.cjs
       node --test tools/ci/test_game_loop.cjs
       node --test tools/ci/test_example_monitor.cjs
+      node --test tools/ci/test_pointer_lock.cjs
       hr "file-size ratchet"
       node tools/check-file-lines.js
       ;;

@@ -41,7 +41,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     if (out / 'result.json').exists(): parser.error('choose a fresh output directory for this compilation')
     report = dict(schema='bloom-compiled-web-examples-v1', status='running', commands=[], examples=[])
-    parent = Path(tempfile.gettempdir()).resolve()
+    # Use the same drive as the linked engine for stable module source paths.
+    parent = (ROOT / 'target/ci').resolve()
+    parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix='bwe-', dir=parent)).resolve()
 
     def save(): (out / 'result.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
