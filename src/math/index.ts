@@ -128,8 +128,12 @@ export function vec4Normalize(v: Vec4): Vec4 {
 
 // Scalar utilities
 
+// Perry 0.5.1220 incorrectly specializes arithmetic-only number functions as
+// i64, truncating fractional arguments. An identity division keeps these
+// functions on its f64 path; LLVM can remove the division after lowering.
+// Keep this until the actual native/WASM scalar contract qualifies its removal.
 export function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
+  return (a + (b - a) * t) / 1;
 }
 
 export function clamp(value: number, min: number, max: number): number {
@@ -152,24 +156,16 @@ export function randomInt(min: number, max: number): number {
 
 // Easing functions
 
-export function easeInQuad(t: number): number { return t * t; }
-export function easeOutQuad(t: number): number { return t * (2 - t); }
-// BROKEN under Perry — EN-051. The parameter never arrives: `t < 0.5` is false
-// for every input, so this returns a constant. Adding a `console.log(t)` to the
-// body makes it correct, which is the signature of a codegen bug, not a logic
-// one. Rewriting with `if`, reordering the expression, and binding `t` to a
-// local were all tried and none of them fix it. `easeInOutCubic` below is the
-// same shape and is fine, so the shape is not the trigger.
-//
-// Left in its honest form rather than contorted around a bug I cannot explain.
-// Nothing in the shooter or the editor calls it. See shooter
-// docs/perry-quirks.md #8, Case B.
+export function easeInQuad(t: number): number { return (t * t) / 1; }
+export function easeOutQuad(t: number): number { return (t * (2 - t)) / 1; }
+// EN-051 had the same integer-specialization cause as lerp. Both branches
+// need the f64 lowering constraint; changing control-flow shape is insufficient.
 export function easeInOutQuad(t: number): number {
-  if (t < 0.5) return 2 * t * t;
-  return (4 - 2 * t) * t - 1;
+  if (t < 0.5) return (2 * t * t) / 1;
+  return ((4 - 2 * t) * t - 1) / 1;
 }
-export function easeInCubic(t: number): number { return t * t * t; }
-export function easeOutCubic(t: number): number { const t1 = t - 1; return t1 * t1 * t1 + 1; }
+export function easeInCubic(t: number): number { return (t * t * t) / 1; }
+export function easeOutCubic(t: number): number { const t1 = t - 1; return (t1 * t1 * t1 + 1) / 1; }
 export function easeInOutCubic(t: number): number {
   if (t < 0.5) return 4 * t * t * t;
   return 1 - Math.pow(-2 * t + 2, 3) / 2;

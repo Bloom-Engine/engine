@@ -317,6 +317,19 @@ jobs:
         shell: pwsh
         run: python tools/ci/fixed_step_smoke.py
 
+      - name: Native and WASM scalar math contract
+        shell: pwsh
+        run: python tools/ci/scalar_math_smoke.py
+
+      - name: Retain scalar math evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scalar-math
+          path: target/ci/scalar-math
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Retain fixed lifecycle evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -383,6 +396,21 @@ jobs:
         env:
           CARGO_BUILD_JOBS: '2'
         run: ./scripts/ci-check.sh --full --component example-compile
+
+      - name: Windows / portable example startup
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: python tools/ci/native_example_smoke.py
+
+      - name: Retain portable example startup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-examples
+          path: target/ci/native-examples
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Retain executed example-check summary
         if: always()

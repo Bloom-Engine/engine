@@ -1,6 +1,5 @@
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing,
-  clearBackground, setTargetFPS, getDeltaTime, isKeyPressed, isKeyDown,
+  initWindow, runGame, clearBackground, setTargetFPS, isKeyPressed, isKeyDown,
   getScreenWidth, getScreenHeight, closeWindow,
   getMouseX, getMouseY, isMouseButtonPressed,
   writeFile, fileExists,
@@ -41,8 +40,6 @@ const ITEM_COIN = 4;
 interface Entity {
   mapX: number;
   mapY: number;
-  screenX: number;
-  screenY: number;
   name: string;
   hp: number;
   maxHp: number;
@@ -81,7 +78,7 @@ const map: number[] = [];
 for (let i = 0; i < MAP_W * MAP_H; i++) map.push(T_GRASS);
 
 const player: Entity = {
-  mapX: 5, mapY: 5, screenX: 0, screenY: 0,
+  mapX: 5, mapY: 5,
   name: "Hero", hp: 30, maxHp: 30, attack: 8, defense: 3,
   friendly: true, dialogue: [], dialogueIndex: 0,
 };
@@ -188,7 +185,7 @@ function generateWorld(): void {
 
   // NPCs
   npcs.push({
-    mapX: 4, mapY: 4, screenX: 0, screenY: 0,
+    mapX: 4, mapY: 4,
     name: "Elder", hp: 20, maxHp: 20, attack: 0, defense: 0,
     friendly: true,
     dialogue: [
@@ -199,24 +196,24 @@ function generateWorld(): void {
     dialogueIndex: 0,
   });
   npcs.push({
-    mapX: 12, mapY: 8, screenX: 0, screenY: 0,
+    mapX: 12, mapY: 8,
     name: "Merchant", hp: 15, maxHp: 15, attack: 0, defense: 0,
     friendly: true,
     dialogue: ["I sell potions and shields!", "Come back when you have gold."],
     dialogueIndex: 0,
   });
   npcs.push({
-    mapX: 16, mapY: 5, screenX: 0, screenY: 0,
+    mapX: 16, mapY: 5,
     name: "Goblin", hp: 12, maxHp: 12, attack: 5, defense: 1,
     friendly: false, dialogue: ["Grrrr!"], dialogueIndex: 0,
   });
   npcs.push({
-    mapX: 18, mapY: 7, screenX: 0, screenY: 0,
+    mapX: 18, mapY: 7,
     name: "Goblin", hp: 12, maxHp: 12, attack: 5, defense: 1,
     friendly: false, dialogue: ["Grrrr!"], dialogueIndex: 0,
   });
   npcs.push({
-    mapX: 17, mapY: 3, screenX: 0, screenY: 0,
+    mapX: 17, mapY: 3,
     name: "Goblin Chief", hp: 25, maxHp: 25, attack: 8, defense: 3,
     friendly: false, dialogue: ["You dare challenge me?!"], dialogueIndex: 0,
   });
@@ -311,8 +308,7 @@ const camera: Camera2D = {
   zoom: 1.0,
 };
 
-while (!windowShouldClose()) {
-  const dt = getDeltaTime();
+runGame((dt) => {
 
   if (showDialogue) {
     if (isKeyPressed(Key.SPACE) || isKeyPressed(Key.ENTER)) {
@@ -346,23 +342,16 @@ while (!windowShouldClose()) {
 
   // Smooth camera
   const playerScreen = isoToScreen(player.mapX, player.mapY);
-  camera.target.x = lerp(camera.target.x, playerScreen.x, 6 * dt);
-  camera.target.y = lerp(camera.target.y, playerScreen.y, 6 * dt);
+  // Materialize call results before writing nested camera fields. The pinned
+  // native compiler corrupts this read/call/write expression when combined.
+  const targetX = lerp(camera.target.x, playerScreen.x, 6 * dt);
+  const targetY = lerp(camera.target.y, playerScreen.y, 6 * dt);
+  camera.target.x = targetX;
+  camera.target.y = targetY;
 
   if (messageTimer > 0) messageTimer = messageTimer - dt;
 
-  // Update NPC screen positions
-  for (let i = 0; i < npcs.length; i++) {
-    const s = isoToScreen(npcs[i].mapX, npcs[i].mapY);
-    npcs[i].screenX = s.x;
-    npcs[i].screenY = s.y;
-  }
-  const ps = isoToScreen(player.mapX, player.mapY);
-  player.screenX = ps.x;
-  player.screenY = ps.y;
-
   // Drawing
-  beginDrawing();
   clearBackground({ r: 20, g: 25, b: 30, a: 255 });
 
   // Use camera for world rendering
@@ -401,8 +390,10 @@ while (!windowShouldClose()) {
   // Draw NPCs
   for (let i = 0; i < npcs.length; i++) {
     if (npcs[i].hp <= 0) continue;
-    const sx = npcs[i].screenX * camera.zoom + ox;
-    const sy = npcs[i].screenY * camera.zoom + oy;
+    // Screen coordinates are derived for drawing, not persisted on entities.
+    const screen = isoToScreen(npcs[i].mapX, npcs[i].mapY);
+    const sx = screen.x * camera.zoom + ox;
+    const sy = screen.y * camera.zoom + oy;
     const size = 12 * camera.zoom;
     const bodyColor = npcs[i].friendly ? { r: 50, g: 150, b: 50, a: 255 } : { r: 200, g: 50, b: 50, a: 255 };
     drawRect(sx - size / 2, sy - size + TILE_H * camera.zoom * 0.3, size, size * 1.5, bodyColor);
@@ -414,8 +405,9 @@ while (!windowShouldClose()) {
 
   // Draw player
   {
-    const sx = player.screenX * camera.zoom + ox;
-    const sy = player.screenY * camera.zoom + oy;
+    const screen = isoToScreen(player.mapX, player.mapY);
+    const sx = screen.x * camera.zoom + ox;
+    const sy = screen.y * camera.zoom + oy;
     const size = 14 * camera.zoom;
     drawRect(sx - size / 2, sy - size + TILE_H * camera.zoom * 0.3, size, size * 1.5, { r: 50, g: 100, b: 255, a: 255 });
     // Head
@@ -470,8 +462,6 @@ while (!windowShouldClose()) {
 
   // Controls hint
   drawText("WASD/Arrows: Move | +/-: Zoom", SCREEN_WIDTH - 310, SCREEN_HEIGHT - 20, 12, { r: 150, g: 150, b: 150, a: 150 });
-
-  endDrawing();
-}
-
-closeWindow();
+}, () => {
+  closeWindow();
+});

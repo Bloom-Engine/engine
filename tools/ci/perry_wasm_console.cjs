@@ -8,12 +8,14 @@ const vm = require("node:vm");
 const { installPerryVoidReturnCompatibility } = require("../../native/web/splice_game.cjs");
 
 async function main() {
-  if (process.argv.length !== 3) throw new Error("Usage: perry_wasm_console.cjs <compiled-fixture.html>");
+  if (process.argv.length < 3 || process.argv.length > 4) throw new Error("Usage: perry_wasm_console.cjs <compiled-fixture.html> [RESULT_PREFIX:]");
+  const prefix = process.argv[3] || "BLOOM_FIXED_STEP_RESULT:";
+  if (!/^[A-Z_]+:$/.test(prefix)) throw new Error("Contract result prefix must be an uppercase identifier followed by a colon");
   const html = fs.readFileSync(process.argv[2], "utf8");
   const encoded = html.match(/window\.__perryWasmB64\s*=\s*"([A-Za-z0-9+/=]+)"/);
   if (!encoded) throw new Error("Perry output has no embedded WASM");
   const imports = WebAssembly.Module.imports(new WebAssembly.Module(Buffer.from(encoded[1], "base64")));
-  if (imports.some(item => item.module === "ffi")) throw new Error("Pure timing fixture unexpectedly requires engine FFI");
+  if (imports.some(item => item.module === "ffi")) throw new Error("Pure contract fixture unexpectedly requires engine FFI");
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
   if (scripts.length !== 2) throw new Error("Unexpected Perry runtime/boot script shape");
   let timer;
@@ -25,7 +27,7 @@ async function main() {
       console: {
         log(...args) {
           const line = args.map(String).join(" ");
-          if (line.startsWith("BLOOM_FIXED_STEP_RESULT:")) results.push(line);
+          if (line.startsWith(prefix)) results.push(line);
         },
         warn() {},
         error(...args) { errors.push(args.map(String).join(" ")); },

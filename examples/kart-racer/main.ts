@@ -1,6 +1,5 @@
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing,
-  clearBackground, setTargetFPS, getDeltaTime, isKeyDown, isKeyPressed,
+  initWindow, runGame, clearBackground, setTargetFPS, isKeyDown, isKeyPressed,
   closeWindow, beginMode3D, endMode3D,
 } from "bloom/core";
 import { Color, Colors, Key, Camera3D } from "bloom/core";
@@ -208,8 +207,7 @@ const camera: Camera3D = {
   projection: "perspective",
 };
 
-while (!windowShouldClose()) {
-  const dt = getDeltaTime();
+runGame((dt) => {
   const player = karts[0];
 
   // Countdown
@@ -266,16 +264,22 @@ while (!windowShouldClose()) {
   const camHeight = 10;
   const behindX = player.x - Math.cos(player.angle) * camDist;
   const behindZ = player.z - Math.sin(player.angle) * camDist;
-  camera.position.x = lerp(camera.position.x, behindX, 4 * dt);
-  camera.position.y = lerp(camera.position.y, camHeight, 4 * dt);
-  camera.position.z = lerp(camera.position.z, behindZ, 4 * dt);
+  // Keep interpolation calls separate from nested property writes for Perry's
+  // native read/call/write lowering, as in the isometric camera.
+  const cameraX = lerp(camera.position.x, behindX, 4 * dt);
+  const cameraY = lerp(camera.position.y, camHeight, 4 * dt);
+  const cameraZ = lerp(camera.position.z, behindZ, 4 * dt);
   const lookAhead = 8;
-  camera.target.x = lerp(camera.target.x, player.x + Math.cos(player.angle) * lookAhead, 6 * dt);
+  const targetX = lerp(camera.target.x, player.x + Math.cos(player.angle) * lookAhead, 6 * dt);
+  const targetZ = lerp(camera.target.z, player.z + Math.sin(player.angle) * lookAhead, 6 * dt);
+  camera.position.x = cameraX;
+  camera.position.y = cameraY;
+  camera.position.z = cameraZ;
+  camera.target.x = targetX;
   camera.target.y = 1;
-  camera.target.z = lerp(camera.target.z, player.z + Math.sin(player.angle) * lookAhead, 6 * dt);
+  camera.target.z = targetZ;
 
   // Drawing
-  beginDrawing();
   clearBackground({ r: 100, g: 180, b: 255, a: 255 });
 
   beginMode3D(camera);
@@ -396,8 +400,6 @@ while (!windowShouldClose()) {
   if (raceTime < 5 && raceStarted) {
     drawText("WASD/Arrows to drive", 10, SCREEN_HEIGHT - 25, 16, { r: 200, g: 200, b: 200, a: 180 });
   }
-
-  endDrawing();
-}
-
-closeWindow();
+}, () => {
+  closeWindow();
+});

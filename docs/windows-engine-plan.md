@@ -65,16 +65,24 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    now runs the installed web command, verifies its served files and retains the
    unchanged site for hosted asset/text/render acceptance. Executing its real WASM
    found a named-void-callback return conversion failure; the production bootstrap
-   bridge and expanded named-hook contracts pass locally. Hosted rendering is pending.
+   bridge and expanded named-hook contracts pass locally. The first hosted full
+   starter check rejected an omitted hidden website file before launch; #173's
+   scoped upload correction preserves the exact receipt. Its retry is pending.
 2. **Finish and qualify fixed lifecycle integration.**
    The [fixed lifecycle candidate](evidence/fixed-game-lifecycle-v1.md) passes pure
    native/WASM timing and hook-order contracts, plus exact installed rendering
    and cleanup on Radeon DX12/Vulkan. Its revised installed starter passes native
    build/render/asset/cleanup and the full web build locally.
-   New hosted checks require the lifecycle counters in native and browser games.
+   [#172's published evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-fixed-lifecycle-20260911)
+   now includes all 22 passing hosted Tests jobs, the pure native/WASM contract,
+   three exact installed native images and the eight-frame compiled browser
+   lifecycle with one cleanup. The native package report preserves its dirty
+   checkout flag and seven verified installed runtime hashes. Later full starter
+   execution found a named-void callback failure addressed by #173; #172's web
+   build alone does not establish successful full starter browser execution.
    Pause/focus policy and device-loss recovery remain separate.
 3. **Continue Windows integration and packaging (#140/#145).**
-   Both #170 and #171 pass all 22 hosted Tests jobs with a serial Windows harness.
+   #170, #171 and #172 pass all 22 hosted Tests jobs with a serial Windows harness.
    The original access violations remain retained and their root cause unresolved.
    Installed headless scene/direct-2D modes render exact frames, simulate Jolt and
    clean up once. Visible presentation, packaged DXC/DXIL, clean-machine starter
@@ -87,9 +95,23 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    temporal/geometry scenes, fractional/native and frozen A/B timing, memory,
    resize and constrained-adapter checks. Hosted Metal without timestamp queries
    cannot qualify GPU timing. Named discrete hardware acceptance stays open.
-5. **Finish API generation, streaming, components, runtime UI and packaging**, then
-   prepare the draft stack for review and integration. The full issue requirements
-   in the table above govern completion; each subsystem already has some code.
+5. **Finish the remaining engine systems in dependency order.** Establish the
+   safe generated API/UTF-8/ownership contracts (#141), then bounded asynchronous
+   asset streaming and cancellation (#137). Use those contracts to finish
+   component/prefab lifecycle and destruction safety (#143). Complete runtime UI
+   input/layout/accessibility (#144) and platform packaging (#145), then prepare
+   the draft stack for review and integration. The full issue requirements in
+   the table above govern completion; each subsystem already has some code.
+
+The [current example-loop candidate](evidence/example-loops-v1.md) migrates
+test3d, dungeon-crawl, isometric-rpg, kart-racer, space-blaster and voxel-sandbox
+onto the shared loop and cleanup. Native execution exposed fractional math,
+voxel indexing and camera/derived-coordinate failures. Their corrections pass
+the public scalar contract in native/WASM and six actual native render/content/
+cleanup checks. Earlier missing-content images are rejected by the new gate.
+The all-20 native compile/link gate remains required. Hosted candidate acceptance,
+actual example browser runtime, gameplay/input and the missing test3d grid lines
+remain open; a nonblank startup image does not complete those requirements.
 
 Local work continues on the Radeon 760M. An RTX 4080 is not a prerequisite for
 this implementation work. RTX-specific and physical constrained-adapter evidence

@@ -289,6 +289,11 @@ run_component() {
         tools/ci/test_compiled_web_smoke.py \
         tools/ci/fixed_step_smoke.py \
         tools/ci/test_fixed_step_smoke.py \
+        tools/ci/scalar_math_smoke.py \
+        tools/ci/test_scalar_math_smoke.py \
+        tools/ci/example_runtime.py \
+        tools/ci/native_example_smoke.py \
+        tools/ci/test_example_runtime.py \
         tools/ci/starter_package_smoke.py \
         tools/ci/starter_web_run.py \
         tools/ci/starter_browser_smoke.py \
@@ -308,6 +313,8 @@ run_component() {
         tools/ci/test_compile_examples.py \
         tools/ci/test_compiled_web_smoke.py \
         tools/ci/test_fixed_step_smoke.py \
+        tools/ci/test_scalar_math_smoke.py \
+        tools/ci/test_example_runtime.py \
         tools/ci/test_starter_browser_smoke.py \
         -v
       hr "visual metric and fault-engine tests"

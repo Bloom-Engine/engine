@@ -1,6 +1,5 @@
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing,
-  clearBackground, setTargetFPS, getDeltaTime, isKeyDown, isKeyPressed,
+  initWindow, runGame, clearBackground, setTargetFPS, isKeyDown, isKeyPressed,
   getScreenWidth, getScreenHeight, closeWindow,
 } from "bloom/core";
 import { Color, Colors, Key } from "bloom/core";
@@ -181,8 +180,7 @@ setTargetFPS(60);
 initAudioDevice();
 
 // Main game loop
-while (!windowShouldClose()) {
-  const dt = getDeltaTime();
+runGame((dt) => {
 
   if (gameOver) {
     if (isKeyPressed(Key.ENTER)) {
@@ -321,7 +319,6 @@ while (!windowShouldClose()) {
   }
 
   // Drawing
-  beginDrawing();
   clearBackground({ r: 5, g: 5, b: 15, a: 255 });
 
   // Stars
@@ -408,9 +405,7 @@ while (!windowShouldClose()) {
     const restartText = "Press ENTER to restart";
     drawText(restartText, SCREEN_WIDTH / 2 - measureText(restartText, 20) / 2, SCREEN_HEIGHT / 2 + 60, 20, Colors.LIGHTGRAY);
   }
-
-  endDrawing();
-}
-
-closeAudioDevice();
-closeWindow();
+}, () => {
+  closeAudioDevice();
+  closeWindow();
+});
