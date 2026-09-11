@@ -35,6 +35,8 @@ def validate_state(state):
     if not any(item.get('path', '').endswith('/assets/welcome.txt') and item.get('status') == 200 for item in state.get('fetches', [])):
         raise RuntimeError('starter did not fetch its welcome asset successfully')
     texts, rects = state.get('texts', []), state.get('rects', [])
+    if state.get('clears') != [[0, 0, 0, 255] for _ in range(8)]:
+        raise RuntimeError('each starter frame must clear to opaque black')
     if len(texts) != 8 or len(rects) != 8:
         raise RuntimeError('each starter frame must draw its text and square')
     for text in texts:

@@ -2,7 +2,7 @@
 // The sole control action is a normal engine stop after eight successful frames.
 (() => {
   const state = globalThis.__starterProbe = {
-    frames: 0, cleanups: 0, registrations: 0, reads: [], texts: [], rects: [],
+    frames: 0, cleanups: 0, registrations: 0, reads: [], texts: [], rects: [], clears: [],
     errors: [], logs: [], fetches: [], stopped: false,
   };
   const describe = value => String(value?.stack || value).slice(0, 16384);
@@ -45,7 +45,7 @@
         if (state.reads.length < 32) state.reads.push({ path: String(args[0]), value: String(result).slice(0, 4096) });
         return result;
       };
-      for (const [name, destination] of [['bloom_draw_text', 'texts'], ['bloom_draw_rect', 'rects']]) {
+      for (const [name, destination] of [['bloom_draw_text', 'texts'], ['bloom_draw_rect', 'rects'], ['bloom_clear_background', 'clears']]) {
         const original = value[name];
         value[name] = (...args) => {
           const result = original(...args);

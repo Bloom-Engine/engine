@@ -8,6 +8,7 @@ def valid_state():
     return dict(frames=8, cleanups=1, registrations=1, stopped=True, errors=[],
                 reads=[dict(path='assets/welcome.txt', value='Hello, Bloom!\n')],
                 fetches=[dict(path='/assets/welcome.txt', status=200)],
+                clears=[[0, 0, 0, 255] for _ in range(8)],
                 texts=[['Hello, Bloom!\n', 24, 24, 24, 255, 255, 255, 255] for _ in range(8)],
                 rects=[[368, 193, 64, 64, 255, 255, 255, 255] for _ in range(8)])
 
@@ -18,12 +19,16 @@ class StarterBrowserAcceptanceTests(unittest.TestCase):
         validate_state(state)
         for change in (dict(frames=7), dict(cleanups=2), dict(registrations=True), dict(stopped=False),
                        dict(errors=['startup failed']), dict(reads=[]), dict(fetches=[]), dict(texts=[]),
-                       dict(rects=[]), dict(reads=[dict(path='assets/welcome.txt', value='')])):
+                       dict(rects=[]), dict(clears=[]), dict(reads=[dict(path='assets/welcome.txt', value='')])):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 validate_state({**state, **change})
         for field, position, value in [('texts', 0, 'wrong asset'), ('rects', 0, float('nan')), ('rects', 2, 0)]:
             wrong = copy.deepcopy(state)
             wrong[field][0][position] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError): validate_state(wrong)
+        for field in ['texts', 'rects', 'clears']:
+            wrong = copy.deepcopy(state)
+            wrong[field][0][-4:] = [None, None, None, None]
             with self.subTest(field=field), self.assertRaises(RuntimeError): validate_state(wrong)
 
     def test_pixels_reject_empty_missing_text_and_unexpected_background(self):
