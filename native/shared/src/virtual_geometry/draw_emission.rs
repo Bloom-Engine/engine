@@ -217,10 +217,8 @@ impl GpuVirtualDrawEmitter {
             compilation_options: Default::default(),
             cache: None,
         });
-        let counted = device
-            .features()
-            .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
-            && !force_binned_fallback;
+        let counted =
+            crate::renderer::gpu_driven::supports_indirect_count(device) && !force_binned_fallback;
         let binned_fallback = (!counted)
             .then(|| create_binned_fallback(device, selector, &state_buffer, draw_capacity));
         Ok(Self {

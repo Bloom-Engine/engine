@@ -157,12 +157,16 @@ fn large_vertex_arenas_split_at_aligned_storage_binding_boundaries() {
 #[cfg(not(target_arch = "wasm32"))]
 fn try_device(required_features: wgpu::Features) -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
+        backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all()),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        force_fallback_adapter: std::env::var_os("BLOOM_TEST_FORCE_FALLBACK_ADAPTER").is_some(),
+        ..Default::default()
+    }))
+    .ok()?;
+    eprintln!("GPU oracle adapter: {:?}", adapter.get_info());
     if !adapter.features().contains(required_features) {
         eprintln!("adapter lacks required visibility-oracle features");
         return None;
@@ -218,10 +222,17 @@ fn gpu_raster_ids_faces_and_reconstruction_match_the_cpu_oracle() {
         [2.0, 3.2, 2.0, 4.0],
         [1.8, -1.6, 1.0, 2.0],
     ];
+    // wgpu 29's DX12 HLSL interface cannot link fragment Position together
+    // with PrimitiveIndex. Carry linear NDC instead, then recover the exact
+    // pixel center: raster interpolation has subpixel precision and must not
+    // add coordinate error to the production reconstruction being checked.
     let shader_source = format!(
         "enable primitive_index;\n\
              {RECONSTRUCTION_WGSL}\n\
-             struct VertexOut {{ @builtin(position) position: vec4<f32>, }};\n\
+             struct VertexOut {{\n\
+               @builtin(position) position: vec4<f32>,\n\
+               @location(0) @interpolate(linear) ndc: vec2<f32>,\n\
+             }};\n\
              struct FragmentOut {{\n\
                @location(0) visibility: vec2<u32>,\n\
                @location(1) barycentrics: vec4<f32>,\n\
@@ -240,17 +251,22 @@ fn gpu_raster_ids_faces_and_reconstruction_match_the_cpu_oracle() {
              @vertex fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {{\n\
                var out: VertexOut;\n\
                out.position = clip_position(index);\n\
+               out.ndc = out.position.xy / out.position.w;\n\
                return out;\n\
              }}\n\
              @fragment fn fs_main(\n\
-               in: VertexOut,\n\
+               @location(0) @interpolate(linear) ndc: vec2<f32>,\n\
                @builtin(primitive_index) primitive_id: u32,\n\
                @builtin(front_facing) front_facing: bool,\n\
              ) -> FragmentOut {{\n\
                let first = primitive_id * 3u;\n\
+               let pixel_center = floor(vec2<f32>(\n\
+                 (ndc.x + 1.0) * 0.5 * {WIDTH}.0,\n\
+                 (1.0 - ndc.y) * 0.5 * {HEIGHT}.0,\n\
+               )) + vec2<f32>(0.5);\n\
                let point_ndc = vec2<f32>(\n\
-                 in.position.x / {WIDTH}.0 * 2.0 - 1.0,\n\
-                 1.0 - in.position.y / {HEIGHT}.0 * 2.0,\n\
+                 pixel_center.x / {WIDTH}.0 * 2.0 - 1.0,\n\
+                 1.0 - pixel_center.y / {HEIGHT}.0 * 2.0,\n\
                );\n\
                let barycentrics = bloom_perspective_barycentrics(\n\
                  point_ndc,\n\

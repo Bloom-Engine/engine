@@ -39,7 +39,12 @@ old output or object-only compilation cannot count as success. Failures and
 timeouts do not hide later example results.
 
 Three orchestration regressions, the full quality-contract component, and
-repository contracts pass locally. Hosted example execution is pending.
+repository contracts pass locally. At exact source `59244b9`, the local full
+CI component passes all 20 links in 87.703 seconds; quick links Pong in 4.703
+seconds. Hosted [Tests run 34544031931](https://github.com/Bloom-Engine/engine/actions/runs/34544031931)
+passes the native engine build and all 20 links in 194.778 seconds. Its merge
+checkout `962f8b4` has the same Git tree as the tested PR head. These build times
+are observations. Source receipts and per-example hashes are retained.
 
 The preceding [Windows CI correction](windows-example-ci-v1.md) now proves an
 actual hosted native build at `636b69a`. Its shared suite exposes two DX12 GPU
@@ -51,3 +56,8 @@ No broader CI, startup, packaging, or hardware issue is closed by this report.
 Commands, failed profiles, successful executable hashes, setup receipts, and
 logs are retained under
 `tools/quality/out/windows-engine-plan/all-examples/`.
+
+The [published report and ZIP](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-windows-examples-20260911)
+contain 287 verified payloads, including failures and successful local/hosted
+receipts. The archive is 9,940,053 bytes with SHA-256
+`2ebcb258a72e473723331dcd9fbaad1781b36d0ea70b0e95a3bcfd90fcf0a9b9`.
