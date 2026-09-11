@@ -118,6 +118,7 @@ if (pack.status !== 0) {
     "native/web/build.sh",
     "native/web/build.cjs",
     "native/web/splice_game.cjs",
+    "native/web/game_loop.mjs",
     "native/web/splice_game.py",
     "crates/bloom-geometry-format/Cargo.toml",
     "crates/bloom-scene-format/Cargo.toml",

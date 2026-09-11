@@ -1,6 +1,6 @@
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing,
-  clearBackground, setTargetFPS, getDeltaTime, isKeyDown,
+  initWindow, runGame,
+  clearBackground, setTargetFPS, isKeyDown, isKeyPressed,
   getScreenWidth, getScreenHeight, closeWindow,
 } from "bloom/core";
 import { Colors, Key } from "bloom/core";
@@ -44,11 +44,9 @@ setTargetFPS(60);
 initAudioDevice();
 
 // Main game loop
-while (!windowShouldClose()) {
-  const dt = getDeltaTime();
-
+runGame((dt) => {
   // Pause toggle
-  if (isKeyDown(Key.P)) {
+  if (isKeyPressed(Key.P)) {
     paused = !paused;
   }
 
@@ -129,8 +127,7 @@ while (!windowShouldClose()) {
   }
 
   // Drawing
-  beginDrawing();
-  clearBackground(Colors.Black);
+  clearBackground(Colors.BLACK);
 
   // Center line
   const segments = 20;
@@ -141,31 +138,30 @@ while (!windowShouldClose()) {
       i * segHeight * 2,
       2,
       segHeight,
-      Colors.DarkGray,
+      Colors.DARKGRAY,
     );
   }
 
   // Paddles
-  drawRect(PADDLE_MARGIN, leftPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Colors.White);
-  drawRect(SCREEN_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH, rightPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Colors.White);
+  drawRect(PADDLE_MARGIN, leftPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Colors.WHITE);
+  drawRect(SCREEN_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH, rightPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Colors.WHITE);
 
   // Ball
-  drawCircle(ballX, ballY, BALL_RADIUS, Colors.White);
+  drawCircle(ballX, ballY, BALL_RADIUS, Colors.WHITE);
 
   // Scores
   const leftScoreText = leftScore.toString();
   const rightScoreText = rightScore.toString();
-  drawText(leftScoreText, SCREEN_WIDTH / 4 - measureText(leftScoreText, 40) / 2, 20, 40, Colors.White);
-  drawText(rightScoreText, 3 * SCREEN_WIDTH / 4 - measureText(rightScoreText, 40) / 2, 20, 40, Colors.White);
+  drawText(leftScoreText, SCREEN_WIDTH / 4 - measureText(leftScoreText, 40) / 2, 20, 40, Colors.WHITE);
+  drawText(rightScoreText, 3 * SCREEN_WIDTH / 4 - measureText(rightScoreText, 40) / 2, 20, 40, Colors.WHITE);
 
   // Pause text
   if (paused) {
     const pauseText = "PAUSED";
-    drawText(pauseText, SCREEN_WIDTH / 2 - measureText(pauseText, 30) / 2, SCREEN_HEIGHT / 2 - 15, 30, Colors.LightGray);
+    drawText(pauseText, SCREEN_WIDTH / 2 - measureText(pauseText, 30) / 2, SCREEN_HEIGHT / 2 - 15, 30, Colors.LIGHTGRAY);
   }
 
-  endDrawing();
-}
-
-closeAudioDevice();
-closeWindow();
+}, () => {
+  closeAudioDevice();
+  closeWindow();
+});

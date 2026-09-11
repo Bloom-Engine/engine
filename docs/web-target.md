@@ -84,6 +84,19 @@ runGame((dt) => {
 
 On native, `runGame()` enters a blocking loop. On web, it passes the callback to the JS runtime which drives it via `requestAnimationFrame`.
 
+An optional second callback disposes game resources after the final frame:
+
+```typescript
+runGame(updateAndDraw, () => {
+  unloadTexture(playerTexture);
+  closeWindow();
+});
+```
+
+Do not put cleanup after `runGame()`; that code executes immediately on web.
+`closeWindow()` during a frame requests a stop, and browser cleanup waits until
+`endDrawing()` finishes. See the [game-loop contract](game-loop.md).
+
 The traditional `while (!windowShouldClose())` pattern still works on native but is not supported on web.
 
 ## Asset Loading

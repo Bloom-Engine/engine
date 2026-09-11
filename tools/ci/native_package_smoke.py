@@ -60,7 +60,7 @@ def main() -> int:
         parser.error("this installed-package smoke currently supports Windows")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    report = {"schema": "bloom-native-package-smoke-v2", "status": "running", "commands": [], "frames": [], "binaries": [],
+    report = {"schema": "bloom-native-package-smoke-v3", "status": "running", "commands": [], "frames": [], "binaries": [],
               "scope": "Installed source package, native headless renderer and Jolt; window presentation and packaged DXC remain separate."}
 
     def save() -> None:
@@ -152,12 +152,16 @@ def main() -> int:
                 runtime = env.copy()
                 runtime.update(BLOOM_HEADLESS="1", BLOOM_HEADLESS_PIXEL_EXACT="1", BLOOM_WGPU_BACKEND=backend)
                 run(name, [str(binary)], run_dir, runtime, 180)
+                cleanup_path = run_dir / "native-cleanup.txt"
+                if not cleanup_path.is_file() or cleanup_path.read_text(encoding="utf-8") != "1":
+                    raise RuntimeError("native game did not complete exactly one cleanup callback")
+                shutil.copyfile(cleanup_path, out / f"{name}.cleanup.txt")
                 png = run_dir / "native-startup.png"
                 if not png.is_file():
                     raise RuntimeError("native startup exited without its required frame capture")
                 capture = out / f"{name}.png"
                 shutil.copyfile(png, capture)
-                report["frames"].append({"mode": mode, "backend": backend, **check_frame(capture)})
+                report["frames"].append({"mode": mode, "backend": backend, "cleanup_count": 1, **check_frame(capture)})
                 save()
         report["status"] = "pass"
         print("PASS: installed native package links, simulates Jolt, and renders its exact frame.")

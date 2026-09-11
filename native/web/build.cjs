@@ -126,7 +126,7 @@ async function build(options, { execute = spawnSync, webDir = __dirname, env = p
     // Use the asynchronous copy implementation: Node's synchronous native
     // directory-copy path has Windows failures with Unicode paths (#59636).
     await fs.promises.cp(pkg, path.join(options.output, "pkg"), { recursive: true });
-    for (const file of ["bloom_glue.js", "jolt_bridge.js"]) {
+    for (const file of ["bloom_glue.js", "game_loop.mjs", "jolt_bridge.js"]) {
       fs.copyFileSync(path.join(webDir, file), path.join(options.output, file));
     }
     if (options.game) {

@@ -231,6 +231,7 @@ run_component() {
       hr "documentation and package contracts"
       node tools/validate-docs.js
       node --test tools/ci/test_web_build.cjs
+      node --test tools/ci/test_game_loop.cjs
       hr "file-size ratchet"
       node tools/check-file-lines.js
       ;;

@@ -59,15 +59,21 @@ while (!windowShouldClose()) {
 Use `runGame()` for code that works on both native and web:
 
 ```typescript
-import { initWindow, runGame, clearBackground, drawText, Colors } from "@bloomengine/engine";
+import { initWindow, runGame, clearBackground, drawText, closeWindow, Colors } from "@bloomengine/engine";
 
 initWindow(800, 450, "My Game");
 
 runGame((dt) => {
   clearBackground(Colors.SNOW);
   drawText("Hello, Bloom!", 190, 200, 20, Colors.DARKGRAY);
+}, () => {
+  closeWindow();
 });
 ```
+
+Put resource disposal in the optional cleanup callback. It runs after the final
+frame on native and web; code following `runGame()` runs immediately on web.
+See the [game-loop contract](docs/game-loop.md) for timing and shutdown behavior.
 
 Build for web:
 

@@ -383,7 +383,7 @@ while (!windowShouldClose()) {
     );
     // HP bar
     const hpRatio = enemies[i].hp / enemies[i].maxHp;
-    drawRect(enemies[i].x * TILE_SIZE, enemies[i].y * TILE_SIZE - 4, Math.floor(TILE_SIZE * hpRatio), 3, Colors.Red);
+    drawRect(enemies[i].x * TILE_SIZE, enemies[i].y * TILE_SIZE - 4, Math.floor(TILE_SIZE * hpRatio), 3, Colors.RED);
   }
 
   // Draw player
@@ -398,9 +398,9 @@ while (!windowShouldClose()) {
 
   // HUD
   drawRect(0, 0, SCREEN_WIDTH, 35, { r: 0, g: 0, b: 0, a: 180 });
-  drawText("HP: " + player.hp.toString() + "/" + player.maxHp.toString(), 10, 8, 20, player.hp > player.maxHp / 3 ? Colors.Green : Colors.Red);
-  drawText("Floor: " + floor.toString(), 200, 8, 20, Colors.White);
-  drawText("Turns: " + turnCount.toString(), 350, 8, 20, Colors.LightGray);
+  drawText("HP: " + player.hp.toString() + "/" + player.maxHp.toString(), 10, 8, 20, player.hp > player.maxHp / 3 ? Colors.GREEN : Colors.RED);
+  drawText("Floor: " + floor.toString(), 200, 8, 20, Colors.WHITE);
+  drawText("Turns: " + turnCount.toString(), 350, 8, 20, Colors.LIGHTGRAY);
 
   // Message log
   if (messageTimer > 0) {
@@ -412,9 +412,9 @@ while (!windowShouldClose()) {
   if (player.hp <= 0) {
     drawRect(0, SCREEN_HEIGHT / 2 - 50, SCREEN_WIDTH, 100, { r: 0, g: 0, b: 0, a: 200 });
     const deathMsg = "You have perished on floor " + floor.toString();
-    drawText(deathMsg, SCREEN_WIDTH / 2 - measureText(deathMsg, 24) / 2, SCREEN_HEIGHT / 2 - 20, 24, Colors.Red);
+    drawText(deathMsg, SCREEN_WIDTH / 2 - measureText(deathMsg, 24) / 2, SCREEN_HEIGHT / 2 - 20, 24, Colors.RED);
     const restartMsg = "Press ENTER to try again";
-    drawText(restartMsg, SCREEN_WIDTH / 2 - measureText(restartMsg, 18) / 2, SCREEN_HEIGHT / 2 + 15, 18, Colors.LightGray);
+    drawText(restartMsg, SCREEN_WIDTH / 2 - measureText(restartMsg, 18) / 2, SCREEN_HEIGHT / 2 + 15, 18, Colors.LIGHTGRAY);
   }
 
   endDrawing();

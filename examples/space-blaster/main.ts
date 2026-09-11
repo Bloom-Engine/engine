@@ -86,7 +86,7 @@ for (let i = 0; i < MAX_ENEMIES; i++) {
 
 const particles: Particle[] = [];
 for (let i = 0; i < MAX_PARTICLES; i++) {
-  particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 0, color: Colors.White, active: false });
+  particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 0, color: Colors.WHITE, active: false });
 }
 
 // Scrolling star background
@@ -381,8 +381,8 @@ while (!windowShouldClose()) {
   }
 
   // HUD
-  drawText("SCORE: " + score.toString(), 10, 10, 20, Colors.White);
-  drawText("WAVE: " + wave.toString(), SCREEN_WIDTH / 2 - 40, 10, 20, Colors.White);
+  drawText("SCORE: " + score.toString(), 10, 10, 20, Colors.WHITE);
+  drawText("WAVE: " + wave.toString(), SCREEN_WIDTH / 2 - 40, 10, 20, Colors.WHITE);
 
   // Lives
   for (let i = 0; i < lives; i++) {
@@ -397,16 +397,16 @@ while (!windowShouldClose()) {
   // Wave announcement
   if (waveTimer < 0) {
     const waveText = "WAVE " + wave.toString();
-    drawText(waveText, SCREEN_WIDTH / 2 - measureText(waveText, 40) / 2, SCREEN_HEIGHT / 2 - 20, 40, Colors.Yellow);
+    drawText(waveText, SCREEN_WIDTH / 2 - measureText(waveText, 40) / 2, SCREEN_HEIGHT / 2 - 20, 40, Colors.YELLOW);
   }
 
   // Game over screen
   if (gameOver) {
-    drawText("GAME OVER", SCREEN_WIDTH / 2 - measureText("GAME OVER", 60) / 2, SCREEN_HEIGHT / 2 - 60, 60, Colors.Red);
+    drawText("GAME OVER", SCREEN_WIDTH / 2 - measureText("GAME OVER", 60) / 2, SCREEN_HEIGHT / 2 - 60, 60, Colors.RED);
     const finalScore = "Score: " + score.toString();
-    drawText(finalScore, SCREEN_WIDTH / 2 - measureText(finalScore, 30) / 2, SCREEN_HEIGHT / 2 + 10, 30, Colors.White);
+    drawText(finalScore, SCREEN_WIDTH / 2 - measureText(finalScore, 30) / 2, SCREEN_HEIGHT / 2 + 10, 30, Colors.WHITE);
     const restartText = "Press ENTER to restart";
-    drawText(restartText, SCREEN_WIDTH / 2 - measureText(restartText, 20) / 2, SCREEN_HEIGHT / 2 + 60, 20, Colors.LightGray);
+    drawText(restartText, SCREEN_WIDTH / 2 - measureText(restartText, 20) / 2, SCREEN_HEIGHT / 2 + 60, 20, Colors.LIGHTGRAY);
   }
 
   endDrawing();

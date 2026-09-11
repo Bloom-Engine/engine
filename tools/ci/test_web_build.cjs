@@ -29,7 +29,7 @@ function fixture(t, behavior = {}) {
   fs.mkdirSync(webDir);
   fs.writeFileSync(path.join(gameDir, "main.ts"), "// fixture game");
   fs.writeFileSync(path.join(gameDir, "assets", "hello.txt"), "fixture asset");
-  for (const name of ["bloom_glue.js", "jolt_bridge.js", "index.html"]) {
+  for (const name of ["bloom_glue.js", "game_loop.mjs", "jolt_bridge.js", "index.html"]) {
     fs.writeFileSync(path.join(webDir, name), `fixture ${name}`);
   }
   const fakeTool = path.join(root, "fixture-tool.cjs");

@@ -15,6 +15,26 @@ from tools.ci import compile_examples
 
 
 class NativeExampleGateTests(unittest.TestCase):
+    def test_inventory_rejects_palette_names_that_link_but_fail_at_runtime(self):
+        palette = (compile_examples.REPO_ROOT / "src/core/colors.ts").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory(prefix="bloom-palette-gate-") as directory:
+            root = Path(directory).resolve()
+            (root / "src/core").mkdir(parents=True)
+            (root / "src/core/colors.ts").write_text(palette, encoding="utf-8")
+            example = root / "examples/pong"
+            example.mkdir(parents=True)
+            (example / "package.json").write_text("{}")
+            manifest = root / "examples.json"
+            manifest.write_text(json.dumps({"schema": "bloom-canonical-examples-v1", "examples": ["examples/pong"]}))
+            with mock.patch.object(compile_examples, "REPO_ROOT", root), \
+                 mock.patch.object(compile_examples, "MANIFEST_PATH", manifest):
+                (example / "main.ts").write_text("clearBackground(Colors.Black); drawRect(Colors.White);")
+                _, failures = compile_examples.load_inventory()
+                self.assertEqual(len(failures), 1)
+                self.assertIn("['Black', 'White']", failures[0])
+                (example / "main.ts").write_text("clearBackground(Colors.BLACK); drawRect(Colors.WHITE);")
+                self.assertEqual(compile_examples.load_inventory()[1], [])
+
     def exercise(self, outcomes):
         with tempfile.TemporaryDirectory(prefix="bloom-example-gate-") as directory:
             root = Path(directory).resolve()
