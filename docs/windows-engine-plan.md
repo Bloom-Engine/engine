@@ -19,7 +19,7 @@ first nine-scene Radeon evidence are in draft PR #154. Follow-up work starts at
 | #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device/resource, stationary SSGI, and profiler fixes are retained. The surface correction passes original HD startup limits and 154,720 analytic receiver checks on Vulkan, DX12, and hosted Metal; 93 local goldens pass, including lighting recovery. The full Radeon corpus passes twice. Wider representative scenes, frozen A/B performance, memory/resize, and platform acceptance remain open |
 | #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | #160 fixes silent Windows CI non-execution and MSVC PATH ordering. #161 passes the actual native engine build and all 20 native links locally and in hosted CI. #162 fixes the focused DX12 failures; #163 fixes camera-history reset. #164 passes all 22 hosted Tests jobs using an explicit FXC Windows lane. The underlying WARP/DXIL crash remains open. A separate layered-material correction passes the full local FXC shared suite and all 93 DXC/Vulkan goldens. Release startup/install acceptance remains open |
 | #138 capability fallback | Actual constrained-adapter startup and relevant forced-tier corpus, truthful capability outputs | Existing implementation/evidence preserved; physical constrained-limit acceptance still needs proof |
-| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#164 remain drafts; no merge performed |
+| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#166 remain drafts; no merge performed |
 
 ## Engine work retained in scope
 
@@ -74,7 +74,7 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    exposed four layered-material compiler failures. A [level-zero LUT correction](evidence/windows-fxc-layered-lut-v1.md)
    restores the complete local FXC shared component, including all 93 goldens;
    all 93 DXC and Vulkan regression goldens also pass. Hosted checks for that
-   correction are pending. The underlying WARP/DXIL
+   correction pass all 22 Tests jobs at #165, with [published evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-fxc-layered-20260911). The underlying WARP/DXIL
    defect remains open.
 2. Finish all-example native linking, real starter/example startup, and clean
    Windows installation. The [native example gate](evidence/windows-example-gate-v1.md)
@@ -89,7 +89,16 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    and native/browser startup acceptance. The [portable web command](evidence/windows-portable-web-cli-v1.md)
    now passes its clean installed help command, nine failure/assembly regression
    checks, and a complete installed Perry-plus-engine WASM build on Windows.
-   Real starter rendering and native startup remain open.
+   Its asynchronous-copy follow-up also passes the hosted Windows pack/install
+   check and a fresh local installed web build; remaining hosted jobs are running.
+   The [native package correction](evidence/windows-installed-native-v1.md)
+   fixes Jolt directory lookup and redundant final-link metadata. A diagnostic
+   installed fixture simulates Jolt and renders an exact frame on DX12 and
+   Vulkan. The complete fresh-package checker also passes both backends with
+   all 16,384 pixels matching and no CMake fallback. Hosted startup checks are
+   pending. Browser starter
+   rendering, visible native presentation, shared lifecycle, general long-path
+   support and direct-2D frame capture remain open.
 3. Complete the wider temporal/geometry, performance, memory, resize, and
    capability corpus. The
    [HD surface correction](evidence/windows-ssgi-surface-v1.md) and two valid

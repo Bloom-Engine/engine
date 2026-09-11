@@ -4499,12 +4499,7 @@
             "dxguid",
             "xinput",
             "opengl32",
-            "d3dcompiler",
-            "Jolt",
-            "bloom_jolt"
-          ],
-          "libDirs": [
-            "native/third_party/bloom_jolt/build/windows-x86_64/lib"
+            "d3dcompiler"
           ]
         },
         "linux": {
