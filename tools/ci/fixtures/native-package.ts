@@ -1,6 +1,7 @@
 import {
   initWindow, runGame, clearBackground, closeWindow,
   captureFrameToPng, isFrameCaptureReady,
+  setDirect2DMode,
 } from "@bloomengine/engine/core";
 import { drawRect } from "@bloomengine/engine/shapes";
 import {
@@ -11,6 +12,8 @@ import {
 // Native installed-package acceptance: a real Jolt body must fall before the
 // renderer produces the white square checked by the host. No random inputs.
 initWindow(128, 128, "Bloom installed native startup");
+const BLOOM_SMOKE_DIRECT_2D = false;
+setDirect2DMode(BLOOM_SMOKE_DIRECT_2D);
 const world = createWorld({ gravity: { x: 0, y: -9.81, z: 0 }, maxBodies: 64, numThreads: 1 });
 const shape = sphereShape(0.5);
 const body = createBody(world, shape, { motionType: 2, position: { x: 0, y: 4, z: 0 } });

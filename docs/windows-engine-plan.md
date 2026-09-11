@@ -90,15 +90,19 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    now passes its clean installed help command, nine failure/assembly regression
    checks, and a complete installed Perry-plus-engine WASM build on Windows.
    Its asynchronous-copy follow-up also passes the hosted Windows pack/install
-   check and a fresh local installed web build; remaining hosted jobs are running.
+   check and a fresh local installed web build. All 22 hosted Tests jobs pass
+   at #166, with [published evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-portable-web-20260911).
    The [native package correction](evidence/windows-installed-native-v1.md)
    fixes Jolt directory lookup and redundant final-link metadata. A diagnostic
    installed fixture simulates Jolt and renders an exact frame on DX12 and
    Vulkan. The complete fresh-package checker also passes both backends with
    all 16,384 pixels matching and no CMake fallback. Hosted startup checks are
-   pending. Browser starter
+   pending. The [direct-frame capture correction](evidence/windows-direct-frame-capture-v1.md)
+   also passes the installed physics/image fixture in both scene and direct-2D
+   modes on DX12 and Vulkan. A render-target regression checks capture deferral
+   and fresh output pixels. Browser starter
    rendering, visible native presentation, shared lifecycle, general long-path
-   support and direct-2D frame capture remain open.
+   support remain open.
 3. Complete the wider temporal/geometry, performance, memory, resize, and
    capability corpus. The
    [HD surface correction](evidence/windows-ssgi-surface-v1.md) and two valid
