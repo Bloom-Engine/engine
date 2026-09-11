@@ -87,27 +87,27 @@ test("compiler exit code is retained", () => {
   );
 });
 
-test("failed wasm-pack cannot reuse old output or assemble a false success", (t) => {
+test("failed wasm-pack cannot reuse old output or assemble a false success", async (t) => {
   const f = fixture(t, { failTool: "wasm-pack" });
   fs.mkdirSync(path.join(f.output, "pkg"), { recursive: true });
   const previous = path.join(f.output, "pkg", "bloom_web_bg.wasm");
   fs.writeFileSync(previous, "previous distribution");
-  assert.throws(() => build(f.options, f.dependencies), (error) => error.exitCode === 23);
+  await assert.rejects(() => build(f.options, f.dependencies), (error) => error.exitCode === 23);
   assert.equal(fs.readFileSync(previous, "utf8"), "previous distribution");
   assert.equal(fs.existsSync(path.join(f.output, "index.html")), false);
   assert.equal(f.calls.some((call) => call.tool === "wasm-opt"), false);
 });
 
-test("a zero exit with missing artifacts still fails", (t) => {
+test("a zero exit with missing artifacts still fails", async (t) => {
   const f = fixture(t, { omitWasm: true });
-  assert.throws(() => build(f.options, f.dependencies), /did not produce a non-empty file/);
+  await assert.rejects(() => build(f.options, f.dependencies), /did not produce a non-empty file/);
   assert.equal(fs.existsSync(f.output), false);
 });
 
-test("fresh assembly supports spaces, assets and repeated builds without pkg nesting", (t) => {
+test("fresh assembly supports spaces, assets and repeated builds without pkg nesting", async (t) => {
   const f = fixture(t, { missingOptimizer: true });
-  build(f.options, f.dependencies);
-  build(f.options, f.dependencies);
+  await build(f.options, f.dependencies);
+  await build(f.options, f.dependencies);
   const call = f.calls.find((item) => item.tool === "perry" && item.args[0] === "compile");
   assert.equal(call.args[1], f.options.game);
   assert.equal(call.options.cwd, f.gameDir);
@@ -118,22 +118,22 @@ test("fresh assembly supports spaces, assets and repeated builds without pkg nes
   assert.match(fs.readFileSync(path.join(f.output, "index.html"), "utf8"), /__bloomReady.then/);
 });
 
-test("an installed optimizer failure stops assembly", (t) => {
+test("an installed optimizer failure stops assembly", async (t) => {
   const f = fixture(t, { failTool: "wasm-opt" });
-  assert.throws(() => build(f.options, f.dependencies), (error) => error.exitCode === 23);
+  await assert.rejects(() => build(f.options, f.dependencies), (error) => error.exitCode === 23);
   assert.equal(fs.existsSync(f.output), false);
 });
 
-test("explicitly configured optimizer is required", (t) => {
+test("explicitly configured optimizer is required", async (t) => {
   const f = fixture(t, { missingOptimizer: true });
   f.dependencies.env.BLOOM_WASM_OPT = "wasm-opt";
-  assert.throws(() => build(f.options, f.dependencies), /executable not found/);
+  await assert.rejects(() => build(f.options, f.dependencies), /executable not found/);
   assert.equal(fs.existsSync(f.output), false);
 });
 
-test("engine-only builds do not require Perry", (t) => {
+test("engine-only builds do not require Perry", async (t) => {
   const f = fixture(t);
-  build({ output: f.output }, f.dependencies);
+  await build({ output: f.output }, f.dependencies);
   assert.equal(f.calls.some((call) => call.tool === "perry"), false);
   assert.equal(fs.readFileSync(path.join(f.output, "index.html"), "utf8"), "fixture index.html");
 });

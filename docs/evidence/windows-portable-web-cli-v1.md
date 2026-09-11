@@ -48,7 +48,17 @@ Commands, exact candidate patch, package and artifact hashes, full build logs,
 and install receipts are retained under
 `tools/quality/out/windows-engine-plan/portable-web-cli/`.
 
-Hosted validation is pending. The local browser connection is unavailable, so
+The first hosted run passes the Linux contracts but its Windows regression
+process exits with 3221226505 during directory assembly. The runner image uses
+Node 22.23.2; local checks use Node 24.21.0. Node tracks a matching Unicode-path
+failure in its synchronous directory copy implementation
+([upstream report](https://github.com/nodejs/node/issues/59636)). This is a likely
+match, not a captured native stack proving the same root cause. The command now
+awaits asynchronous directory copies, and the same nine local checks plus the
+actual Windows pack/install command pass. The original hosted failure is retained.
+Full installed-build and hosted revalidation of this follow-up are pending.
+
+The local browser connection is unavailable, so
 no browser frame or runtime startup result is claimed here. Native startup,
 the one-command starter, shared lifecycle, wider example runtime matrix and
 packaged shader-runtime acceptance remain open under #142, #74 and #145.

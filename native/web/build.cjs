@@ -76,7 +76,7 @@ function requireFile(file, label) {
   }
 }
 
-function build(options, { execute = spawnSync, webDir = __dirname, env = process.env } = {}) {
+async function build(options, { execute = spawnSync, webDir = __dirname, env = process.env } = {}) {
   if (options.game) requireFile(options.game, "game entry");
   const wasmPack = env.BLOOM_WASM_PACK || "wasm-pack";
   const perry = env.BLOOM_PERRY || "perry";
@@ -123,14 +123,16 @@ function build(options, { execute = spawnSync, webDir = __dirname, env = process
     // Build in a unique staging directory. Failed commands cannot reuse an old
     // pkg/ or overwrite the caller's previous successful distribution.
     fs.mkdirSync(options.output, { recursive: true });
-    fs.cpSync(pkg, path.join(options.output, "pkg"), { recursive: true });
+    // Use the asynchronous copy implementation: Node's synchronous native
+    // directory-copy path has Windows failures with Unicode paths (#59636).
+    await fs.promises.cp(pkg, path.join(options.output, "pkg"), { recursive: true });
     for (const file of ["bloom_glue.js", "jolt_bridge.js"]) {
       fs.copyFileSync(path.join(webDir, file), path.join(options.output, file));
     }
     if (options.game) {
       const assets = path.join(path.dirname(options.game), "assets");
       if (fs.existsSync(assets)) {
-        fs.cpSync(assets, path.join(options.output, "assets"), { recursive: true });
+        await fs.promises.cp(assets, path.join(options.output, "assets"), { recursive: true });
       }
     }
     fs.copyFileSync(index, path.join(options.output, "index.html"));
@@ -146,11 +148,11 @@ function build(options, { execute = spawnSync, webDir = __dirname, env = process
   }
 }
 
-function main(args = process.argv.slice(2)) {
+async function main(args = process.argv.slice(2)) {
   try {
     const options = parseArgs(args);
     if (options.help) console.log(HELP);
-    else build(options);
+    else await build(options);
     return 0;
   } catch (error) {
     console.error(`bloom-web: ${error.message}`);
@@ -159,4 +161,4 @@ function main(args = process.argv.slice(2)) {
 }
 
 module.exports = { BuildError, parseArgs, runTool, build, main };
-if (require.main === module) process.exitCode = main();
+if (require.main === module) main().then((code) => { process.exitCode = code; });

@@ -54,6 +54,7 @@ Push-Location $repoRoot
 try {
     $npmCommand = (Get-Command npm -ErrorAction Stop).Source
     $nodeCommand = (Get-Command node -ErrorAction Stop).Source
+    $report.node_version = (Invoke-Checked $nodeCommand @("--version") "node-version").Trim()
     Invoke-Checked $nodeCommand @("--test", "tools/ci/test_web_build.cjs") "regressions" | Out-Null
     $packedText = Invoke-Checked $npmCommand @("pack", "--json", "--ignore-scripts", "--pack-destination", $workDir) "pack"
     $packed = @($packedText | ConvertFrom-Json)[0]
