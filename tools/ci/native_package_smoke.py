@@ -54,12 +54,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, default=ROOT / "target/ci/native-package")
     parser.add_argument("--backend", choices=["dx12", "vulkan"], action="append")
+    parser.add_argument("--mode", choices=["scene", "direct-2d"], action="append")
     args = parser.parse_args()
     if os.name != "nt":
         parser.error("this installed-package smoke currently supports Windows")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    report = {"schema": "bloom-native-package-smoke-v1", "status": "running", "commands": [], "frames": [],
+    report = {"schema": "bloom-native-package-smoke-v2", "status": "running", "commands": [], "frames": [], "binaries": [],
               "scope": "Installed source package, native headless renderer and Jolt; window presentation and packaged DXC remain separate."}
 
     def save() -> None:
@@ -117,34 +118,47 @@ def main() -> int:
         report["fixture_sha256"] = hashlib.sha256(fixture.read_bytes()).hexdigest()
         run("install", npm + ["install", "--ignore-scripts", "--no-audit", "--no-fund", str(archive)], project, env, 240)
         installed = project / "node_modules/@bloomengine/engine"
+        report["installed_source_sha256"] = {
+            name: hashlib.sha256((installed / name).read_bytes()).hexdigest()
+            for name in ("native/shared/src/renderer/mod.rs", "native/shared/src/renderer/direct_frame.rs",
+                         "native/shared/src/renderer/quality_capture.rs")
+        }
         jolt = project / "node_modules/@bloomengine/jolt-prebuilt"
         report["jolt_version"] = json.loads((jolt / "package.json").read_text())["version"]
         report["jolt_archives"] = [{"name": name, "sha256": hashlib.sha256((jolt / "lib/win32-x64" / name).read_bytes()).hexdigest()}
                                    for name in ("Jolt.lib", "bloom_jolt.lib")]
-        binary = temporary / "native-smoke.exe"
-        run("compile", [compiler, "compile", "main.ts", "-o", str(binary)], project, env, 1800)
-        with binary.open("rb") as stream:
-            if stream.read(2) != b"MZ":
-                raise RuntimeError("Perry did not produce a native Windows executable")
-        report["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
-        report["binary_bytes"] = binary.stat().st_size
-        report["used_cmake_fallback"] = (installed / "native/third_party/bloom_jolt/build").exists()
-        if report["used_cmake_fallback"]:
-            raise RuntimeError("installed prebuilt package was ignored; CMake fallback was used")
+        fixture_text = fixture.read_text(encoding="utf-8")
+        mode_marker = "const BLOOM_SMOKE_DIRECT_2D = false;"
+        if fixture_text.count(mode_marker) != 1:
+            raise RuntimeError("native fixture must have exactly one render-mode marker")
         ctypes.windll.kernel32.SetErrorMode(0x0002 | 0x8000)
-        for backend in args.backend or ["dx12"]:
-            run_dir = temporary / backend
-            run_dir.mkdir()
-            runtime = env.copy()
-            runtime.update(BLOOM_HEADLESS="1", BLOOM_HEADLESS_PIXEL_EXACT="1", BLOOM_WGPU_BACKEND=backend)
-            run("startup-" + backend, [str(binary)], run_dir, runtime, 180)
-            png = run_dir / "native-startup.png"
-            if not png.is_file():
-                raise RuntimeError("native startup exited without its required frame capture")
-            capture = out / f"startup-{backend}.png"
-            shutil.copyfile(png, capture)
-            report["frames"].append({"backend": backend, **check_frame(capture)})
-            save()
+        for mode in args.mode or ["scene", "direct-2d"]:
+            entry = fixture_text.replace(mode_marker, "const BLOOM_SMOKE_DIRECT_2D = " + ("true;" if mode == "direct-2d" else "false;"))
+            (project / "main.ts").write_text(entry, encoding="utf-8")
+            binary = temporary / f"native-smoke-{mode}.exe"
+            run("compile-" + mode, [compiler, "compile", "main.ts", "-o", str(binary)], project, env, 1800)
+            with binary.open("rb") as stream:
+                if stream.read(2) != b"MZ":
+                    raise RuntimeError("Perry did not produce a native Windows executable")
+            report["binaries"].append({"mode": mode, "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                                       "bytes": binary.stat().st_size, "entry_sha256": hashlib.sha256((project / "main.ts").read_bytes()).hexdigest()})
+            report["used_cmake_fallback"] = (installed / "native/third_party/bloom_jolt/build").exists()
+            if report["used_cmake_fallback"]:
+                raise RuntimeError("installed prebuilt package was ignored; CMake fallback was used")
+            for backend in args.backend or ["dx12"]:
+                name = f"startup-{mode}-{backend}"
+                run_dir = temporary / name
+                run_dir.mkdir()
+                runtime = env.copy()
+                runtime.update(BLOOM_HEADLESS="1", BLOOM_HEADLESS_PIXEL_EXACT="1", BLOOM_WGPU_BACKEND=backend)
+                run(name, [str(binary)], run_dir, runtime, 180)
+                png = run_dir / "native-startup.png"
+                if not png.is_file():
+                    raise RuntimeError("native startup exited without its required frame capture")
+                capture = out / f"{name}.png"
+                shutil.copyfile(png, capture)
+                report["frames"].append({"mode": mode, "backend": backend, **check_frame(capture)})
+                save()
         report["status"] = "pass"
         print("PASS: installed native package links, simulates Jolt, and renders its exact frame.")
         return 0

@@ -49,9 +49,10 @@ stock-Perry usability, packaged DXC, a clean machine or window presentation.
   That audit harness override was removed before the normal startup checks.
 - Very long native project paths can still fail in MSVC's build-script linker;
   the resolver correction does not fix general Windows path-length support.
-- Direct-2D mode currently does not service the queued PNG capture. That initial
-  probe exited without an image and failed. The accepted fixture exercises the
-  normal scene path; direct-2D capture remains separate work.
+- The initial direct-2D probe exited without its queued PNG and failed. The
+  accepted fixture in this report exercises the normal scene path. A subsequent
+  [direct-frame capture correction](windows-direct-frame-capture-v1.md) adds
+  both rendering modes to the installed-package check.
 - Native headless startup does not prove browser startup or visible native
   presentation. #142/#74's complete starter and lifecycle remain open.
 

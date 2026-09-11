@@ -248,3 +248,46 @@ fn deferred_frame_writes_render_target_override() {
         px
     );
 }
+
+#[test]
+fn direct_frame_capture_waits_for_output_and_returns_current_pixels() {
+    let Some(mut r) = try_renderer() else {
+        assert_ne!(std::env::var("BLOOM_REQUIRE_GPU").as_deref(), Ok("1"));
+        eprintln!("no GPU adapter - skipping");
+        return;
+    };
+
+    // Ordinary direct frames do not create a readback.
+    r.begin_frame();
+    r.set_clear_color(255.0, 0.0, 255.0, 255.0);
+    r.end_frame();
+    assert!(r.screenshot_data.is_none());
+
+    // A smaller render texture must neither consume the output request nor
+    // become its image. This also exercises the direct path's RT view restore.
+    let (_, texture_index) = r.create_render_texture(64, 64);
+    let texture = r.get_texture_ref(texture_index).unwrap().clone();
+    r.begin_texture_mode(&texture, 64, 64);
+    r.screenshot_requested = true;
+    r.begin_frame();
+    r.set_clear_color(255.0, 0.0, 255.0, 255.0);
+    r.end_frame();
+    assert!(r.screenshot_requested);
+    assert!(r.screenshot_data.is_none());
+    assert!(r.rt_color_view.is_some());
+    r.end_texture_mode();
+
+    for channel in [255u8, 0u8] {
+        r.screenshot_requested = true;
+        r.begin_frame();
+        r.set_clear_color(channel.into(), channel.into(), channel.into(), 255.0);
+        r.end_frame();
+        assert!(!r.screenshot_requested);
+        let (width, height, rgba) = r.screenshot_data.take().expect("direct output capture");
+        assert_eq!((width, height), (256, 256));
+        assert_eq!(rgba.len(), 256 * 256 * 4);
+        assert!(rgba
+            .chunks_exact(4)
+            .all(|pixel| pixel == [channel, channel, channel, 255]));
+    }
+}
