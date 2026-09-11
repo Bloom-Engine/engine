@@ -38,6 +38,7 @@ fn create_context() -> Result<Option<RasterContext>, String> {
     let backends = requested_backends();
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends,
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let mut adapters = pollster::block_on(instance.enumerate_adapters(backends));

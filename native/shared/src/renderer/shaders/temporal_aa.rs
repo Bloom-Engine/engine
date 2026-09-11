@@ -331,7 +331,11 @@ fn fs_main(in: VsOut) -> TaaOut {
     let history_in_bounds =
         prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
         prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
-    if (history_in_bounds) {
+    // Reset/bootstrapping frames must not sample old color or provenance.
+    // Even a final blend weight of one cannot make stale inputs harmless:
+    // floating-point interpolation and confidence locks can retain their effect.
+    let history_usable = history_in_bounds && current_weight < 0.999;
+    if (history_usable) {
         let h_sample = sample_history_reprojected(prev_uv, camera_moving);
         history = h_sample.rgb;
         history_w = h_sample.a;
@@ -567,7 +571,6 @@ fn fs_main(in: VsOut) -> TaaOut {
     // motion the established motion policy already bounds stale history, so
     // disable bootstrap before 0.04 output pixels/frame rather than turning a
     // safe resolve into visibly noisier current samples during a slow pan.
-    let history_usable = history_in_bounds && current_weight < 0.999;
     let history_sample_count = history_confidence * 16.0;
     let bootstrap_running_alpha = select(
         1.0,
