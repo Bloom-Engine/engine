@@ -312,6 +312,19 @@ jobs:
           CARGO_BUILD_JOBS: '2'
         run: python tools/ci/setup_windows_perry.py --out "$env:RUNNER_TEMP/bloom-perry" --github-env
 
+      - name: Native and WASM fixed lifecycle contract
+        shell: pwsh
+        run: python tools/ci/fixed_step_smoke.py
+
+      - name: Retain fixed lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixed-game-lifecycle
+          path: target/ci/fixed-step
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Compile real browser startup fixture
         shell: pwsh
         run: python tools/ci/compile_web_game.py

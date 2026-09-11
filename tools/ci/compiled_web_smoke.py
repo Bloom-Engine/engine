@@ -81,6 +81,8 @@ def validate_state(name, state):
     if name == "game":
         if state["errors"] or state["frames"] != "8" or state["cleanups"] != "1":
             raise RuntimeError(f"compiled game failed startup/frame/cleanup acceptance: {state}")
+        from tools.ci.fixed_step_smoke import validate_game_lifecycle
+        validate_game_lifecycle(state.get("lifecycle"), expected_frames=8)
     elif state["expectedFault"] != "BLOOM_EXPECTED_STARTUP_FAILURE" or not any("RuntimeError: BLOOM_EXPECTED_STARTUP_FAILURE" in error for error in state["errors"]) or state["frames"] is not None or state["cleanups"] is not None:
         raise RuntimeError(f"intentional compiled startup failure was not rejected: {state}")
 
@@ -163,6 +165,7 @@ def main() -> int:
                                  " || !Array.isArray(globalThis.__compiledGameErrors)) return null; return ({" + """
                   frames: localStorage.getItem('bloom_fs:compiled-web-frames'),
                   cleanups: localStorage.getItem('bloom_fs:compiled-web-cleanups'),
+                  lifecycle: localStorage.getItem('bloom_fs:compiled-web-lifecycle'),
                   expectedFault: localStorage.getItem('bloom_fs:compiled-web-expected-fault'),
                   errors: globalThis.__compiledGameErrors || [],
                   logs: globalThis.__compiledGameLog || [],

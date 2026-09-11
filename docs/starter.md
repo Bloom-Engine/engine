@@ -59,20 +59,25 @@ executable. General long Windows project paths remain unqualified.
 
 ## Development and validation
 
-The template separates init, variable update, draw and cleanup while using
-`runGame` on both targets. See the [game-loop contract](game-loop.md). Edit,
-stop and rerun to rebuild; automatic hot reload, fixed update and device-loss
-recovery are not implemented by this command.
+The template uses `runGameLifecycle` on both targets, with init, 60 Hz fixed
+update, variable update, interpolated draw and cleanup. See the
+[game-loop contract](game-loop.md). Edit, stop and rerun to rebuild; automatic
+hot reload and device-loss recovery are not implemented by this command.
 
-Local installed-package acceptance creates the project through the installed
+The original #171 installed-package acceptance creates the project through the installed
 npm command, builds the unmodified template natively, and completes the full
 web build from that same source. A bounded copy adds capture/state/cleanup
 observations for native execution. It renders the 800x450 greeting and square,
 loads `assets/welcome.txt` and cleans up once on Radeon DX12. This does not prove
-visible presentation, compiled-starter browser rendering or a clean machine's
+visible presentation, the new fixed-lifecycle template, compiled-starter browser rendering or a clean machine's
 shader DLL packaging.
 
 The installed-package CI check verifies default creation from the exact packed
 engine and rejects missing compilers and unsupported targets. Unit tests cover
 manifest drift, existing-project preservation, asset inventory and the local
 server. See [the retained acceptance report](evidence/windows-starter-cli-v1.md).
+
+The fixed-lifecycle follow-up repeats fresh installed default creation, native
+build and the bounded greeting/asset/cleanup run using the revised template,
+then completes its full web build. See [the lifecycle evidence](evidence/fixed-game-lifecycle-v1.md).
+The browser runtime still needs to qualify this complete starter.

@@ -1,3 +1,4 @@
+import { isFiniteNumber } from '../core/numbers';
 /**
  * Bloom Scene Graph — Retained-mode 3D scene management.
  *
@@ -286,7 +287,7 @@ export const MATERIAL_TEXTURE_SLOT_EMISSIVE = 3;
 export const MATERIAL_TEXTURE_SLOT_OCCLUSION = 4;
 
 function finiteOr(value: number, fallback: number): number {
-  return Number.isFinite(value) ? value : fallback;
+  return isFiniteNumber(value) ? value : fallback;
 }
 
 function unitMaterialValue(value: number, fallback: number): number {

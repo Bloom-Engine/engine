@@ -16,9 +16,9 @@ class CompiledGameAcceptanceTests(unittest.TestCase):
             validate_compilation("Generating WebAssembly", [])
 
     def test_success_requires_render_progress_and_exactly_one_cleanup(self):
-        state = {"frames": "8", "cleanups": "1", "expectedFault": None, "errors": []}
+        state = {"frames": "8", "cleanups": "1", "lifecycle": "1,8,8,13,13,0.3", "expectedFault": None, "errors": []}
         validate_state("game", state)
-        for change in ({"frames": None}, {"cleanups": None}, {"cleanups": "2"}, {"errors": ["WASM Error: unreachable"]}):
+        for change in ({"frames": None}, {"cleanups": None}, {"cleanups": "2"}, {"errors": ["WASM Error: unreachable"]}, {"lifecycle": None}):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 validate_state("game", {**state, **change})
 

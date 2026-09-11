@@ -1,4 +1,10 @@
 import { Color, Camera2D, Camera3D } from './types';
+import { GameLifecycleDriver, GameLifecycle, GameLoopOptions } from './game_lifecycle';
+
+export { FixedStepClock } from './fixed_step';
+export type { GameLifecycle, GameLoopOptions } from './game_lifecycle';
+let lifecycleActive = false;
+let lifecycleStopRequested = false;
 
 export type { Color, Vec2, Vec3, Vec4, Rect, Camera2D, Camera3D, Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4, RayHit, FrustumPlanes } from './types';
 // GH #53 — `Color` is deliberately NOT re-exported from './colors' any more.
@@ -237,6 +243,7 @@ export function attachToSurface(handle: number, width: number, height: number): 
 }
 
 export function closeWindow(): void {
+  lifecycleStopRequested = true;
   bloom_close_window();
 }
 
@@ -1463,6 +1470,41 @@ export function runGame(update: (dt: number) => void, cleanup?: () => void): voi
     }
     if (cleanup !== undefined) cleanup();
   }
+}
+
+/** Shared init/fixed-update/update/draw/cleanup entry. Invalid setup returns false. */
+export function runGameLifecycle(game: GameLifecycle, options?: GameLoopOptions): boolean {
+  if (lifecycleActive) {
+    console.error('Bloom lifecycle is already active; stop it before starting another.');
+    return false;
+  }
+  const driver = new GameLifecycleDriver(game, options);
+  if (!driver.clock.valid) {
+    console.error('Bloom lifecycle requires positive finite timing values and an integer maxFixedSteps from 1 to 1000.');
+    return false;
+  }
+  lifecycleActive = true;
+  lifecycleStopRequested = false;
+  driver.initialize();
+  const shouldStop = (): boolean => {
+    if (lifecycleStopRequested) return true;
+    // The web windowShouldClose bridge guards unsupported blocking source
+    // loops. The shared lifecycle observes its explicit stop request instead.
+    if (bloom_get_platform() === 7) return false;
+    return windowShouldClose();
+  };
+  if (shouldStop()) {
+    lifecycleActive = false;
+    driver.dispose();
+    return true;
+  }
+  runGame((dt) => {
+    if (!driver.frame(dt, shouldStop)) closeWindow();
+  }, () => {
+    lifecycleActive = false;
+    driver.dispose();
+  });
+  return true;
 }
 
 // Pure TS camera helpers

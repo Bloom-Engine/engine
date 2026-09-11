@@ -17,9 +17,9 @@ first nine-scene Radeon evidence are in draft PR #154. Follow-up work starts at
 | #127 Vulkan PT correctness | Three deterministic progressive and motion runs, both negative controls, finite intermediates, reset/lighting/rigid-motion checks, retained report | Canonical hardware gate, all four focused temporal tests, and CPU reference sanity check pass on Radeon/Vulkan; [report](evidence/issue-127-windows-vulkan-v1.md) and [raw evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-155-windows-vulkan-20260910) published |
 | #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | Cutout and surface corrections pass all nine Radeon images. At #159 source `d610d6a`, full runs 2 and 3 pass every configured check and reproduce 257 artifacts byte-identically with matching metadata and timing differences inside existing noise bounds. Earlier invalid runs retain their failures; named hardware acceptance remains separate |
 | #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device/resource, stationary SSGI, and profiler fixes are retained. The surface correction passes original HD startup limits and 154,720 analytic receiver checks on Vulkan, DX12, and hosted Metal; 93 local goldens pass, including lighting recovery. The full Radeon corpus passes twice. Wider representative scenes, frozen A/B performance, memory/resize, and platform acceptance remain open |
-| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | #160 fixes silent Windows CI non-execution and MSVC PATH ordering. #161 passes the actual native engine build and all 20 native links locally and in hosted CI. #162 fixes the focused DX12 failures; #163 fixes camera-history reset. #164 passes all 22 hosted Tests jobs using an explicit FXC Windows lane. The underlying WARP/DXIL crash remains open. A separate layered-material correction passes the full local FXC shared suite and all 93 DXC/Vulkan goldens. Fresh installed headless scene/direct-2D rendering and cleanup pass through #169. Visible presentation and release packaging remain open. #170's initial Windows shared job again crashes despite FXC; serial mitigation awaits hosted qualification |
+| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | #160 fixes silent Windows CI non-execution and MSVC PATH ordering. #161 passes the actual native engine build and all 20 native links locally and in hosted CI. #162 fixes the focused DX12 failures; #163 fixes camera-history reset. #164 passes all 22 hosted Tests jobs using an explicit FXC Windows lane. The underlying WARP/DXIL crash remains open. A separate layered-material correction passes the full local FXC shared suite and all 93 DXC/Vulkan goldens. Fresh installed headless scene/direct-2D rendering and cleanup pass through #169. Visible presentation and release packaging remain open. #170's initial Windows shared job again crashes despite FXC; the serial follow-up and #171 each pass all 22 hosted Tests jobs. The driver root cause remains open |
 | #138 capability fallback | Actual constrained-adapter startup and relevant forced-tier corpus, truthful capability outputs | Existing implementation/evidence preserved; physical constrained-limit acceptance still needs proof |
-| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#170 remain drafts; no merge performed |
+| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#171 remain drafts; no merge performed |
 
 ## Engine work retained in scope
 
@@ -54,33 +54,27 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
 
 ## Current next steps
 
-1. **Finish real compiled-game browser acceptance (#74/#142).**
-   The [compiled-game gate](evidence/compiled-web-startup-v1.md) catches a gap
-   in the earlier JavaScript-driven renderer check: Perry returned success for
-   unresolved imports and emitted a game without the engine calls. The corrected
-   preparer installs the exact checkout as a dependency, rejects unresolved
-   imports and inspects the actual WASM import table. A local recording-FFI probe
-   passes callback/cleanup and explicit startup-fault controls; hosted rendering
-   must still produce the exact frame. Perry's plain throw propagation remains
-   a separate limitation found during this work.
-2. **Qualify the Windows CI mitigation (#140).**
-   All 22 Tests jobs passed through #169. #170's initial shared-library job then
-   hit an access violation despite FXC. The next attempt serializes the Windows
-   harness while retaining every assertion. The local serial library passes
-   489 tests with one existing ignored test; that does not establish the crash's
-   cause or qualify every helper on WARP. Physical Radeon DX12/DXC and Vulkan
-   image evidence remains distinct from hosted software rendering.
-3. **Complete the starter and example experience (#142/#145).**
-   The installed web command works on Windows. Fresh native packages render
-   exact scene/direct-2D frames and simulate Jolt locally and in hosted CI.
-   [Shared cleanup, corrected example palettes and Pong pause replay](evidence/windows-game-cleanup-v1.md)
-   are [published at #169](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-starter-lifecycle-20260911).
-   All 20 canonical native examples link. The [starter command](starter.md)
-   creates a project from an installed package; its unmodified native/web builds
-   and bounded native greeting/asset/cleanup run pass locally. Default creation
-   now carries the exact engine archive, with hosted packaging checks pending.
-   All-example web/runtime acceptance, fixed updates, visible native presentation,
-   packaged DXC/DXIL and general Windows long-path support remain incomplete.
+1. **Complete the starter and example runtime experience (#142/#74).**
+   [#170's real compiled game](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-compiled-web-20260911)
+   passes exact browser pixels, eight frames, one cleanup and its explicit startup
+   fault control. [#171's installed commands](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-starter-cli-20260911)
+   pass default project creation and setup-error controls in hosted CI. The full
+   starter's assets/text browser rendering and canonical example runtime matrix
+   remain open. All 20 native examples compile and link.
+2. **Finish and qualify fixed lifecycle integration.**
+   The [fixed lifecycle candidate](evidence/fixed-game-lifecycle-v1.md) passes pure
+   native/WASM timing and hook-order contracts, plus exact installed rendering
+   and cleanup on Radeon DX12/Vulkan. Its revised installed starter passes native
+   build/render/asset/cleanup and the full web build locally.
+   New hosted checks require the lifecycle counters in native and browser games.
+   Pause/focus policy and device-loss recovery remain separate.
+3. **Continue Windows integration and packaging (#140/#145).**
+   Both #170 and #171 pass all 22 hosted Tests jobs with a serial Windows harness.
+   The original access violations remain retained and their root cause unresolved.
+   Installed headless scene/direct-2D modes render exact frames, simulate Jolt and
+   clean up once. Visible presentation, packaged DXC/DXIL, clean-machine starter
+   setup and general Windows long paths remain incomplete. Physical Radeon
+   measurements and hosted software rendering remain distinct evidence.
 4. **Complete wider graphics and performance acceptance.**
    [Two strict full Radeon runs at #159](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-ssgi-surface-20260911)
    pass all nine images and reproduce 257 artifacts byte-identically. Rerun

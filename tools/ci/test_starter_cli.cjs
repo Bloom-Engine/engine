@@ -36,7 +36,7 @@ test("scaffold keeps pinned manifests, separate lifecycle and assets; refuses ex
   const config = readProject(directory);
   assert.equal(config.entry, fs.realpathSync(path.join(directory, "main.ts")));
   const source = fs.readFileSync(config.entry, "utf8");
-  assert.match(source, /runGame\(\(dt\) => \{ update\(dt\); draw\(\); \}, cleanup\)/);
+  assert.equal(source, fs.readFileSync(path.resolve(__dirname, "../cli/templates/main.ts"), "utf8"));
   assert.match(source, /readFile\("assets\/welcome.txt"\)/);
   assert.deepEqual(await assetManifest(path.join(directory, "assets")), ["assets/welcome.txt"]);
   await assert.rejects(() => createProject({ directory, install: false }), /already exists/);

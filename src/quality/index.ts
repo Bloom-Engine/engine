@@ -1,3 +1,4 @@
+import { isFiniteNumber } from '../core/numbers';
 /**
  * Deterministic qualification-window helper used by Bloom's versioned scene
  * corpus. It is inert unless an example receives `--quality-run`.
@@ -32,7 +33,7 @@ export interface QualityRunConfig {
 }
 
 function finitePositive(value: number, fallback: number): number {
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+  return isFiniteNumber(value) && value > 0 ? value : fallback;
 }
 
 /**
