@@ -17,9 +17,9 @@ first nine-scene Radeon evidence are in draft PR #154. Follow-up work starts at
 | #127 Vulkan PT correctness | Three deterministic progressive and motion runs, both negative controls, finite intermediates, reset/lighting/rigid-motion checks, retained report | Canonical hardware gate, all four focused temporal tests, and CPU reference sanity check pass on Radeon/Vulkan; [report](evidence/issue-127-windows-vulkan-v1.md) and [raw evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-155-windows-vulkan-20260910) published |
 | #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | Cutout and surface corrections pass all nine Radeon images. At #159 source `d610d6a`, full runs 2 and 3 pass every configured check and reproduce 257 artifacts byte-identically with matching metadata and timing differences inside existing noise bounds. Earlier invalid runs retain their failures; named hardware acceptance remains separate |
 | #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device/resource, stationary SSGI, and profiler fixes are retained. The surface correction passes original HD startup limits and 154,720 analytic receiver checks on Vulkan, DX12, and hosted Metal; 93 local goldens pass, including lighting recovery. The full Radeon corpus passes twice. Wider representative scenes, frozen A/B performance, memory/resize, and platform acceptance remain open |
-| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | #160 fixes silent Windows CI non-execution and MSVC PATH ordering. #161 passes the actual native engine build and all 20 native links locally and in hosted CI. #162 fixes the focused DX12 failures; #163 fixes camera-history reset. #164 passes all 22 hosted Tests jobs using an explicit FXC Windows lane. The underlying WARP/DXIL crash remains open. A separate layered-material correction passes the full local FXC shared suite and all 93 DXC/Vulkan goldens. Release startup/install acceptance remains open |
+| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | #160 fixes silent Windows CI non-execution and MSVC PATH ordering. #161 passes the actual native engine build and all 20 native links locally and in hosted CI. #162 fixes the focused DX12 failures; #163 fixes camera-history reset. #164 passes all 22 hosted Tests jobs using an explicit FXC Windows lane. The underlying WARP/DXIL crash remains open. A separate layered-material correction passes the full local FXC shared suite and all 93 DXC/Vulkan goldens. Fresh installed headless scene/direct-2D rendering and cleanup pass through #169. Visible presentation and release packaging remain open. #170's initial Windows shared job again crashes despite FXC; serial mitigation awaits hosted qualification |
 | #138 capability fallback | Actual constrained-adapter startup and relevant forced-tier corpus, truthful capability outputs | Existing implementation/evidence preserved; physical constrained-limit acceptance still needs proof |
-| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#166 remain drafts; no merge performed |
+| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#170 remain drafts; no merge performed |
 
 ## Engine work retained in scope
 
@@ -54,74 +54,41 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
 
 ## Current next steps
 
-1. Complete hosted Windows test and build execution. The
-   [CI and example correction](evidence/windows-example-ci-v1.md) explicitly
-   selects Bash, restores the MSVC linker ahead of Git's tools, and requires
-   execution-summary artifacts. The hosted native build passes at `636b69a`.
-   Draft #162 corrects the two focused DX12 failures and passes the complete
-   Vulkan shared component. Hosted Windows still hits an access violation.
-   The expanded local DX12 goldens expose a [camera-history reset defect](evidence/windows-camera-history-v1.md);
-   its read guard passes exact fresh/reset comparisons after eight and 40
-   history frames on Vulkan and DX12. Both complete local shared components
-   now pass, including all 93 goldens. Hosted #163 also passes all 93 macOS
-   goldens and the expanded cut check; its [evidence is published](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-camera-history-20260911).
-   The Windows library crash reproduces locally inside WARP's DXIL shader
-   optimizer during concurrent traversal tests. An [explicit FXC hosted lane](evidence/windows-warp-compiler-v1.md)
-   and consistent test compiler selection pass all 22 hosted Tests jobs at #164,
-   with [published evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-warp-compiler-20260911).
-   Hosted Windows goldens skip its CPU adapter; complete physical Radeon DX12/DXC
-   and Vulkan shared runs pass all 93 goldens. The expanded physical FXC run
-   exposed four layered-material compiler failures. A [level-zero LUT correction](evidence/windows-fxc-layered-lut-v1.md)
-   restores the complete local FXC shared component, including all 93 goldens;
-   all 93 DXC and Vulkan regression goldens also pass. Hosted checks for that
-   correction pass all 22 Tests jobs at #165, with [published evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-fxc-layered-20260911). The underlying WARP/DXIL
-   defect remains open.
-2. Finish all-example native linking, real starter/example startup, and clean
-   Windows installation. The [native example gate](evidence/windows-example-gate-v1.md)
-   passes all 20 links locally using Perry 0.5.1220 and one matching source-built
-   runtime profile. It adds required full-lane Windows PR compilation and
-   rejects missing or stale executable outputs. Hosted example validation also passes at `59244b9`; actual startup and clean
-   package installation remain required. Packing and installing the actual
-   package succeeds in a clean project, but its installed `bloom-web --help`
-   command fails on Windows because npm's shim tries `/bin/bash`. A bounded
-   starter compiles to WASM from that installed package; runtime rendering is
-   not yet proven. The next implementation work is portable command execution
-   and native/browser startup acceptance. The [portable web command](evidence/windows-portable-web-cli-v1.md)
-   now passes its clean installed help command, nine failure/assembly regression
-   checks, and a complete installed Perry-plus-engine WASM build on Windows.
-   Its asynchronous-copy follow-up also passes the hosted Windows pack/install
-   check and a fresh local installed web build. All 22 hosted Tests jobs pass
-   at #166, with [published evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-portable-web-20260911).
-   The [native package correction](evidence/windows-installed-native-v1.md)
-   fixes Jolt directory lookup and redundant final-link metadata. A diagnostic
-   installed fixture simulates Jolt and renders an exact frame on DX12 and
-   Vulkan. The complete fresh-package checker also passes both backends with
-   all 16,384 pixels matching and no CMake fallback. All 22 hosted Tests jobs at
-   #167 pass, including installed startup, with [published evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-installed-native-20260911).
-   The [direct-frame capture correction](evidence/windows-direct-frame-capture-v1.md)
-   also passes the installed physics/image fixture in both scene and direct-2D
-   modes on DX12 and Vulkan. A render-target regression checks capture deferral
-   and fresh output pixels. All 22 hosted Tests jobs at #168 pass, including
-   both installed rendering modes. The [game-loop cleanup](game-loop.md) adds an optional
-   final callback on native and web and moves Pong onto the shared loop with
-   edge-triggered pause input. [Native cleanup and Pong replay evidence](evidence/windows-game-cleanup-v1.md)
-   also verifies the corrected palette names and all 20 example links. The same
-   Pong source completes the real web build; its browser frame remains unproven.
-   Browser starter
-   rendering, visible native presentation, shared lifecycle, general long-path
-   support remain open.
-3. Complete the wider temporal/geometry, performance, memory, resize, and
-   capability corpus. The
-   [HD surface correction](evidence/windows-ssgi-surface-v1.md) and two valid
-   full Radeon runs are [published with #159](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-ssgi-surface-20260911).
-   All nine images pass; reproducibility retains 257 byte-identical artifacts.
-   The original 16-frame HD startup limits pass on Vulkan, DX12, and hosted
-   Metal. Earlier host-load failures remain invalid timing windows. Hosted
-   Metal lacks timestamp queries and cannot qualify GPU timing.
-4. Complete API generation, streaming, components, runtime UI, and packaging
-   against the full issue requirements above, then prepare the draft stack for
-   review and integration. These outcomes include both implementation work and
-   acceptance evidence; they do not imply that every subsystem is absent.
+1. **Finish real compiled-game browser acceptance (#74/#142).**
+   The [compiled-game gate](evidence/compiled-web-startup-v1.md) catches a gap
+   in the earlier JavaScript-driven renderer check: Perry returned success for
+   unresolved imports and emitted a game without the engine calls. The corrected
+   preparer installs the exact checkout as a dependency, rejects unresolved
+   imports and inspects the actual WASM import table. A local recording-FFI probe
+   passes callback/cleanup and explicit startup-fault controls; hosted rendering
+   must still produce the exact frame. Perry's plain throw propagation remains
+   a separate limitation found during this work.
+2. **Qualify the Windows CI mitigation (#140).**
+   All 22 Tests jobs passed through #169. #170's initial shared-library job then
+   hit an access violation despite FXC. The next attempt serializes the Windows
+   harness while retaining every assertion. The local serial library passes
+   489 tests with one existing ignored test; that does not establish the crash's
+   cause or qualify every helper on WARP. Physical Radeon DX12/DXC and Vulkan
+   image evidence remains distinct from hosted software rendering.
+3. **Complete the starter and example experience (#142/#145).**
+   The installed web command works on Windows. Fresh native packages render
+   exact scene/direct-2D frames and simulate Jolt locally and in hosted CI.
+   [Shared cleanup, corrected example palettes and Pong pause replay](evidence/windows-game-cleanup-v1.md)
+   are [published at #169](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-starter-lifecycle-20260911).
+   All 20 canonical native examples link. Project creation/build/run commands,
+   all-example web/runtime acceptance, fixed updates, visible native presentation,
+   packaged DXC/DXIL and general Windows long-path support remain incomplete.
+4. **Complete wider graphics and performance acceptance.**
+   [Two strict full Radeon runs at #159](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-ssgi-surface-20260911)
+   pass all nine images and reproduce 257 artifacts byte-identically. Rerun
+   current-source qualification after integration, and complete representative
+   temporal/geometry scenes, fractional/native and frozen A/B timing, memory,
+   resize and constrained-adapter checks. Hosted Metal without timestamp queries
+   cannot qualify GPU timing. Named discrete hardware acceptance stays open.
+5. **Finish API generation, streaming, components, runtime UI and packaging**, then
+   prepare the draft stack for review and integration. The full issue requirements
+   in the table above govern completion; each subsystem already has some code.
 
-Local work continues on the Radeon 760M. RTX-specific, physical constrained
-adapter, and other unavailable hardware acceptance remains explicitly open.
+Local work continues on the Radeon 760M. An RTX 4080 is not a prerequisite for
+this implementation work. RTX-specific and physical constrained-adapter evidence
+remain explicitly unperformed. No draft PR has been merged or npm package released.

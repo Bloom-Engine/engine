@@ -81,6 +81,9 @@ jobs:
           # physical DX12/DXC qualification remains a separate requirement.
           "WGPU_BACKEND=dx12" >> $env:GITHUB_ENV
           "WGPU_DX12_COMPILER=fxc" >> $env:GITHUB_ENV
+          # A later FXC run also crashed under concurrent unit tests. Keep
+          # every test and assertion, but serialize this hosted Windows lane.
+          "RUST_TEST_THREADS=1" >> $env:GITHUB_ENV
 
       - name: quick / shared-tests
         # Retain adapter identities and capability skips even when Rust reports
@@ -297,6 +300,19 @@ jobs:
           CARGO_BUILD_JOBS: '2'
         run: python tools/ci/setup_windows_perry.py --out "$env:RUNNER_TEMP/bloom-perry" --github-env
 
+      - name: Compile real browser startup fixture
+        shell: pwsh
+        run: python tools/ci/compile_web_game.py
+
+      - name: Retain compiled browser fixture
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloom-compiled-web-game-${{ github.run_id }}
+          path: target/ci/compiled-web-game
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Windows / installed native startup
         shell: pwsh
         env:
@@ -461,16 +477,26 @@ jobs:
   # image, so validate the exact Linux-built package in macOS Chrome, which has
   # a working hosted WebGPU presentation path.
   browser-smoke:
-    needs: build-web
+    needs: [build-web, build-windows]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Download qualified web package
         uses: actions/download-artifact@v4
         with:
           name: bloom-web-package-${{ github.run_id }}
           path: native/web/pkg
+
+      - name: Download compiled browser fixture
+        uses: actions/download-artifact@v4
+        with:
+          name: bloom-compiled-web-game-${{ github.run_id }}
+          path: target/ci/compiled-web-game
 
       - name: web / browser-smoke
         run: ./scripts/ci-check.sh --web --component browser-smoke
