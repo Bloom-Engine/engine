@@ -24,6 +24,7 @@ EXPECTED = {
     "overflowRejected": True, "hugeAlpha": 0.9, "tinyBounded": True,
     "finiteContract": True, "sparseStarted": True, "sparseDraws": 1,
     "updateStopEvents": "UC", "invalidDriverRejected": True, "invalidCalls": 0,
+    "namedEvents": "IFUDC",
 }
 
 
@@ -95,7 +96,8 @@ def main():
         report["source_sha256"] = {
             name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
             for name in ("src/core/fixed_step.ts", "src/core/game_lifecycle.ts", "src/core/numbers.ts",
-                         "tools/ci/fixtures/fixed-step.ts", "tools/ci/perry_wasm_console.cjs")
+                         "tools/ci/fixtures/fixed-step.ts", "tools/ci/perry_wasm_console.cjs",
+                         "native/web/splice_game.cjs")
         }
         for mode in ("native", "wasm"):
             artifact = out / ("fixed-step.html" if mode == "wasm" else "fixed-step.exe" if os.name == "nt" else "fixed-step")

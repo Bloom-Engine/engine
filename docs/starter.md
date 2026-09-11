@@ -81,3 +81,9 @@ The fixed-lifecycle follow-up repeats fresh installed default creation, native
 build and the bounded greeting/asset/cleanup run using the revised template,
 then completes its full web build. See [the lifecycle evidence](evidence/fixed-game-lifecycle-v1.md).
 The browser runtime still needs to qualify this complete starter.
+
+The [complete starter browser gate](evidence/installed-starter-browser-v1.md)
+now runs the installed web command and retains its unchanged generated website
+for hosted rendering, including the actual asset read, text draw and cleanup.
+It also covers the production bridge for named void callbacks in Perry WASM.
+Its hosted result is pending.

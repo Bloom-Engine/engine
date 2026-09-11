@@ -282,7 +282,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/windows/target
-          key: ${{ runner.os }}-windows-crate-${{ hashFiles('native/windows/Cargo.lock') }}
+            native/web/target
+          key: ${{ runner.os }}-windows-crate-web-${{ hashFiles('native/windows/Cargo.lock', 'native/web/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-windows-crate-
 
       - name: full / host-build
@@ -335,6 +336,28 @@ jobs:
           name: bloom-compiled-web-game-${{ github.run_id }}
           path: target/ci/compiled-web-game
           overwrite: true
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Prepare pinned Windows web build tool
+        shell: pwsh
+        run: |
+          python tools/ci/setup_windows_wasm_pack.py --out "$env:RUNNER_TEMP/bloom-wasm-pack" --github-env
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup target add wasm32-unknown-unknown
+
+      - name: Windows / installed starter web run
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: python tools/ci/starter_package_smoke.py --web --out target/ci/starter-web
+
+      - name: Retain complete installed starter website
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloom-starter-web-${{ github.run_id }}
+          path: target/ci/starter-web
           if-no-files-found: error
           retention-days: 1
 
@@ -522,6 +545,12 @@ jobs:
         with:
           name: bloom-compiled-web-game-${{ github.run_id }}
           path: target/ci/compiled-web-game
+
+      - name: Download installed starter website
+        uses: actions/download-artifact@v4
+        with:
+          name: bloom-starter-web-${{ github.run_id }}
+          path: target/ci/starter-web
 
       - name: web / browser-smoke
         run: ./scripts/ci-check.sh --web --component browser-smoke

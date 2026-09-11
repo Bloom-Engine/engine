@@ -19,7 +19,7 @@ first nine-scene Radeon evidence are in draft PR #154. Follow-up work starts at
 | #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device/resource, stationary SSGI, and profiler fixes are retained. The surface correction passes original HD startup limits and 154,720 analytic receiver checks on Vulkan, DX12, and hosted Metal; 93 local goldens pass, including lighting recovery. The full Radeon corpus passes twice. Wider representative scenes, frozen A/B performance, memory/resize, and platform acceptance remain open |
 | #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | #160 fixes silent Windows CI non-execution and MSVC PATH ordering. #161 passes the actual native engine build and all 20 native links locally and in hosted CI. #162 fixes the focused DX12 failures; #163 fixes camera-history reset. #164 passes all 22 hosted Tests jobs using an explicit FXC Windows lane. The underlying WARP/DXIL crash remains open. A separate layered-material correction passes the full local FXC shared suite and all 93 DXC/Vulkan goldens. Fresh installed headless scene/direct-2D rendering and cleanup pass through #169. Visible presentation and release packaging remain open. #170's initial Windows shared job again crashes despite FXC; the serial follow-up and #171 each pass all 22 hosted Tests jobs. The driver root cause remains open |
 | #138 capability fallback | Actual constrained-adapter startup and relevant forced-tier corpus, truthful capability outputs | Existing implementation/evidence preserved; physical constrained-limit acceptance still needs proof |
-| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#171 remain drafts; no merge performed |
+| PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#172 remain drafts; no merge performed |
 
 ## Engine work retained in scope
 
@@ -61,6 +61,11 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    pass default project creation and setup-error controls in hosted CI. The full
    starter's assets/text browser rendering and canonical example runtime matrix
    remain open. All 20 native examples compile and link.
+   The [complete starter browser candidate](evidence/installed-starter-browser-v1.md)
+   now runs the installed web command, verifies its served files and retains the
+   unchanged site for hosted asset/text/render acceptance. Executing its real WASM
+   found a named-void-callback return conversion failure; the production bootstrap
+   bridge and expanded named-hook contracts pass locally. Hosted rendering is pending.
 2. **Finish and qualify fixed lifecycle integration.**
    The [fixed lifecycle candidate](evidence/fixed-game-lifecycle-v1.md) passes pure
    native/WASM timing and hook-order contracts, plus exact installed rendering

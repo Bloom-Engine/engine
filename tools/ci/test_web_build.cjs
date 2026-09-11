@@ -7,7 +7,25 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { test } = require("node:test");
 const { build, parseArgs, runTool } = require("../../native/web/build.cjs");
-const { splice } = require("../../native/web/splice_game.cjs");
+const { splice, installPerryVoidReturnCompatibility } = require("../../native/web/splice_game.cjs");
+
+test("void callback compatibility preserves boxed values and unrelated decoder errors", () => {
+  const calls = [];
+  const runtime = { __bitsToJsValue(bits) {
+    calls.push(bits);
+    if (typeof bits !== "bigint") throw new TypeError("expected boxed i64");
+    if (bits === 9n) throw new Error("decoder failure");
+    return bits === 7n ? undefined : "decoded";
+  } };
+  installPerryVoidReturnCompatibility(runtime);
+  assert.equal(runtime.__bitsToJsValue(undefined), undefined);
+  assert.deepEqual(calls, []);
+  assert.equal(runtime.__bitsToJsValue(7n), undefined);
+  assert.equal(runtime.__bitsToJsValue(8n), "decoded");
+  assert.throws(() => runtime.__bitsToJsValue(9n), /decoder failure/);
+  assert.throws(() => runtime.__bitsToJsValue(1), /expected boxed/);
+  assert.throws(() => installPerryVoidReturnCompatibility({}), /no value decoder/);
+});
 
 const perryHtml = `<div id="perry-root"></div><script>
 function bootPerryWasm(wasmBase64) { return Promise.resolve(); }
