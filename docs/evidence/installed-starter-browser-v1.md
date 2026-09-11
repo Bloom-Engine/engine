@@ -17,7 +17,8 @@ markers or alternate logic to the starter source.
 
 Hosted macOS Chrome loads this exact website through its production bootstrap.
 The monitor observes actual asset fetch/read, text and rectangle FFI calls and
-the real Perry callback dispatcher. It requests normal engine stop after eight
+the real Perry callback dispatcher. It also verifies every clear's opaque-black
+RGBA arguments. It requests normal engine stop after eight
 successful frames and requires exactly one cleanup. The screenshot must contain
 the 800x450 viewport, the square's white interior at its actual interpolated
 position, a populated text region and the expected black background. Text
@@ -39,9 +40,10 @@ Bloom's production splicer now installs a compatibility bridge that preserves
 an actual void return and delegates every boxed value to the existing decoder.
 It does not suppress other decoder exceptions. Actual native/WASM lifecycle
 checks now cover named functions for all five hooks. A recording-FFI probe runs
-the real compiled starter and production scheduler, reads the asset text, draws
-eight frames and cleans up once with the correction. That probe does not load
-the engine renderer or claim browser/network acceptance.
+the real compiled starter and production scheduler, reads the asset text,
+records eight text/rectangle calls and cleans up once with the correction.
+That initial probe did not validate color channels, load the engine renderer
+or claim browser/network acceptance.
 
 The corrected installed `bloom run --web` command passes locally in 64.531
 seconds, including game/engine compilation, serving the four required resources
@@ -58,8 +60,34 @@ downloaded website before launch: upload-artifact omitted wasm-pack's
 `pkg/.gitignore`, while its build receipt correctly included all 11 files.
 All ten downloaded file hashes match. The scoped starter artifact upload now
 includes hidden files, preserving the complete site and the exact hash check.
-That failure remains retained; full starter browser execution still requires
-the corrected hosted run.
+That failure remains retained.
+
+The retry, 34574961654, passed those same 21 preceding jobs and both existing
+browser checks. The complete site passed its file-hash check, loaded the actual
+asset and reached drawing. The full starter then failed its first frame:
+`Colors.BLACK` and `Colors.WHITE` reached FFI with undefined RGBA channels, and
+WebGPU rejected the non-finite clear alpha. Its error, draw arguments and
+failure screenshot are retained. This demonstrates why call counts and a
+successful build are insufficient evidence of complete starter execution.
+
+The starter now defines its two colors as explicit typed RGBA literals, matching
+the qualified native examples. Its strengthened actual-WASM recording probe
+rejects the earlier site and accepts the fresh build's exact black clear and
+white text/square arguments in all eight frames, with one cleanup. The hosted
+monitor now retains clear arguments as well as text/rectangle arguments; the
+verifier rejects missing channels. Fresh installed `bloom run --web` passes in
+47.218 seconds with unchanged source, the complete website and exact served
+bytes retained. This correction qualifies the starter's color usage; general
+imported palette compatibility remains separate. Hosted rendering of the
+corrected starter remains pending.
+
+The corrected unmodified starter also compiles and links natively. A bounded
+copy on Radeon 760M / DX12 renders the expected 800x450 black background, white
+square and asset text (857 lit text pixels), exits after nine frames and runs
+cleanup once. The capture SHA-256 is
+`d89c3b30d0e472526d6a39869e0c9e3ae3e9c0943f87b2dbf87a34cc91ac0b3f`.
+This local native check uses a linked checkout and the SDK's shader dependencies;
+it does not qualify a clean Windows installation.
 
 General Perry exception propagation, browser physics acceptance, the complete
 canonical runtime matrix, visible native presentation and clean distribution
