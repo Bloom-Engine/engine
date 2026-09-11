@@ -233,6 +233,7 @@ run_component() {
       node tools/validate-docs.js
       node --test tools/ci/test_web_build.cjs
       node --test tools/ci/test_game_loop.cjs
+      node --test tools/ci/test_example_monitor.cjs
       hr "file-size ratchet"
       node tools/check-file-lines.js
       ;;
@@ -291,9 +292,14 @@ run_component() {
         tools/ci/test_fixed_step_smoke.py \
         tools/ci/scalar_math_smoke.py \
         tools/ci/test_scalar_math_smoke.py \
+        tools/ci/palette_smoke.py \
+        tools/ci/test_palette_smoke.py \
         tools/ci/example_runtime.py \
         tools/ci/native_example_smoke.py \
         tools/ci/test_example_runtime.py \
+        tools/ci/compile_web_examples.py \
+        tools/ci/web_example_smoke.py \
+        tools/ci/test_web_example_smoke.py \
         tools/ci/starter_package_smoke.py \
         tools/ci/starter_web_run.py \
         tools/ci/starter_browser_smoke.py \
@@ -314,7 +320,9 @@ run_component() {
         tools/ci/test_compiled_web_smoke.py \
         tools/ci/test_fixed_step_smoke.py \
         tools/ci/test_scalar_math_smoke.py \
+        tools/ci/test_palette_smoke.py \
         tools/ci/test_example_runtime.py \
+        tools/ci/test_web_example_smoke.py \
         tools/ci/test_starter_browser_smoke.py \
         -v
       hr "visual metric and fault-engine tests"

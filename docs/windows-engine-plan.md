@@ -67,7 +67,11 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    found a named-void-callback return conversion failure; the production bootstrap
    bridge and expanded named-hook contracts pass locally. The first hosted full
    starter check rejected an omitted hidden website file before launch; #173's
-   scoped upload correction preserves the exact receipt. Its retry is pending.
+   scoped upload correction preserves the exact receipt. The next run exposed
+   undefined palette channels at the first rendered frame. Explicit starter
+   RGBA literals and stronger argument checks correct that path; #173 at
+   `955ac5b` passes all 22 Tests jobs, including the full asset/text/square browser
+   render in eight frames and one cleanup.
 2. **Finish and qualify fixed lifecycle integration.**
    The [fixed lifecycle candidate](evidence/fixed-game-lifecycle-v1.md) passes pure
    native/WASM timing and hook-order contracts, plus exact installed rendering
@@ -112,6 +116,15 @@ cleanup checks. Earlier missing-content images are rejected by the new gate.
 The all-20 native compile/link gate remains required. Hosted candidate acceptance,
 actual example browser runtime, gameplay/input and the missing test3d grid lines
 remain open; a nonblank startup image does not complete those requirements.
+
+The [public constants and browser runtime follow-up](evidence/example-browser-v1.md)
+finds that WASM barrel re-exports lose palette and input bindings. Explicit
+initialized exports retain shared values through `bloom/core` and the package
+root, with actual native/WASM constant and alias contracts. All six compiled
+games then pass recording-FFI argument checks. Real browser content/cleanup
+acceptance is now required in CI. #174's initial hosted native checks all fail
+before capture with a numeric-argument TypeError; that failure is preserved and
+the shared-binding correction still requires hosted qualification.
 
 Local work continues on the Radeon 760M. An RTX 4080 is not a prerequisite for
 this implementation work. RTX-specific and physical constrained-adapter evidence

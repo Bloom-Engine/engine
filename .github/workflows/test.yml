@@ -359,6 +359,32 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustup target add wasm32-unknown-unknown
 
+      - name: Compile unchanged browser examples
+        shell: pwsh
+        run: python tools/ci/compile_web_examples.py
+
+      - name: Retain compiled browser examples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloom-web-examples-${{ github.run_id }}
+          path: target/ci/web-examples
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Native and WASM public constant contract
+        shell: pwsh
+        run: python tools/ci/palette_smoke.py
+
+      - name: Retain public constant evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-constants
+          path: target/ci/palette
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Windows / installed starter web run
         shell: pwsh
         env:
@@ -555,6 +581,9 @@ jobs:
   # a working hosted WebGPU presentation path.
   browser-smoke:
     needs: [build-web, build-windows]
+    # A later Windows native failure must not hide browser evidence for pages
+    # already compiled/uploaded. Missing or failed artifacts still fail here.
+    if: ${{ !cancelled() && needs.build-web.result == 'success' }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -583,6 +612,17 @@ jobs:
 
       - name: web / browser-smoke
         run: ./scripts/ci-check.sh --web --component browser-smoke
+
+      - name: Download compiled browser examples
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@v4
+        with:
+          name: bloom-web-examples-${{ github.run_id }}
+          path: target/ci/web-examples
+
+      - name: web / portable example runtime
+        if: ${{ !cancelled() }}
+        run: python tools/ci/web_example_smoke.py
 
       - name: Upload browser quality evidence
         if: always()
