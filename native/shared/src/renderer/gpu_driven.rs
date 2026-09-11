@@ -1816,7 +1816,8 @@ mod tests {
         use wgpu::util::DeviceExt as _;
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all()),
+            backend_options: wgpu::BackendOptions::from_env_or_default(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let Ok(adapter) =

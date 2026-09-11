@@ -72,6 +72,16 @@ jobs:
           key: ${{ runner.os }}-shared-${{ hashFiles('native/shared/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-shared-
 
+      - name: Select hosted Windows shader compiler
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          # WARP's DXIL optimizer can crash during concurrent traversal shader
+          # compilation. Keep this software-renderer lane on explicit FXC;
+          # physical DX12/DXC qualification remains a separate requirement.
+          "WGPU_BACKEND=dx12" >> $env:GITHUB_ENV
+          "WGPU_DX12_COMPILER=fxc" >> $env:GITHUB_ENV
+
       - name: quick / shared-tests
         # Retain adapter identities and capability skips even when Rust reports
         # an early-returning GPU test as "ok".
