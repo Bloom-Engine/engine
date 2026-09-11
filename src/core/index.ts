@@ -1,4 +1,6 @@
 import { Color, Camera2D, Camera3D } from './types';
+import { Colors as sharedColors, ColorConstants as sharedColorConstants } from './colors';
+import { Key as sharedKey, MouseButton as sharedMouseButton } from './keys';
 import { GameLifecycleDriver, GameLifecycle, GameLoopOptions } from './game_lifecycle';
 
 export { FixedStepClock } from './fixed_step';
@@ -19,8 +21,12 @@ export type { Color, Vec2, Vec3, Vec4, Rect, Camera2D, Camera3D, Texture, Font, 
 // reads the palette through the name `Color` (i.e. `Color.Red`). `jump` imports
 // `Color` from here, but only ever in TYPE position (`const WHITE: Color = {...}`),
 // which the type re-export above still serves.
-export { ColorConstants, Colors } from './colors';
-export { Key, MouseButton } from './keys';
+// Perry 0.5.1220's WASM barrel re-export leaves these object bindings undefined.
+// Explicit bindings preserve the public names and the shared palette objects.
+export const ColorConstants = sharedColorConstants;
+export const Colors = sharedColors;
+export const Key = sharedKey;
+export const MouseButton = sharedMouseButton;
 
 // FFI declarations
 declare function bloom_init_window(width: number, height: number, title: number, fullscreen: number): void;

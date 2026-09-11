@@ -75,6 +75,24 @@ let manifestPaths = null;   // Set<string> when a manifest was loaded
 // ESC without delivering the keydown. Both mismatches are reconciled here.
 let wantPointerLock = false;
 
+function requestDesiredPointerLock() {
+  const canvas = document.getElementById('bloom-canvas');
+  if (!wantPointerLock || !canvas || document.pointerLockElement === canvas) return;
+  try {
+    // Permission, focus and document state can reject a request, including a
+    // game's initial request outside a user gesture. Keep the intent so the
+    // next canvas click retries; optional pointer lock must not stop rendering.
+    Promise.resolve(canvas.requestPointerLock?.()).then(() => {
+      // Cleanup may have enabled the cursor while the browser was deciding.
+      if (!wantPointerLock && document.pointerLockElement === canvas) {
+        document.exitPointerLock?.();
+      }
+    }).catch(() => {});
+  } catch {
+    // Older implementations can throw synchronously instead of rejecting.
+  }
+}
+
 /**
  * Idempotent engine bootstrap. Safe to call multiple times; only the first
  * call performs work. Returns the resolved Bloom wasm-bindgen module.
@@ -319,7 +337,7 @@ function buildFfiImports() {
   };
   imports.bloom_disable_cursor = () => {
     wantPointerLock = true;
-    document.getElementById('bloom-canvas')?.requestPointerLock?.();
+    requestDesiredPointerLock();
     bloom.bloom_disable_cursor();
   };
   imports.bloom_enable_cursor = () => {
@@ -586,7 +604,7 @@ function setupDomBridge() {
     // released it on ESC, or never granted it because the request happened
     // outside a user gesture).
     if (wantPointerLock && document.pointerLockElement !== canvas) {
-      canvas.requestPointerLock?.();
+      requestDesiredPointerLock();
     }
     const b = domButtonToBloom[e.button];
     if (b !== undefined) inputQueue.push({ kind: 'mouse', k: 'm' + b, code: b, up: false });

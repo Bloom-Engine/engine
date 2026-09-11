@@ -1,8 +1,7 @@
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing,
-  clearBackground, setTargetFPS, getDeltaTime, isKeyDown, isKeyPressed,
+  initWindow, runGame, clearBackground, setTargetFPS, isKeyDown, isKeyPressed,
   isMouseButtonPressed, closeWindow, beginMode3D, endMode3D,
-  disableCursor, getMouseDeltaX, getMouseDeltaY,
+  disableCursor, enableCursor, getMouseDeltaX, getMouseDeltaY,
 } from "bloom/core";
 import { Color, Colors, Key, Camera3D, MouseButton } from "bloom/core";
 import { drawCube, drawCubeWires } from "bloom/models";
@@ -48,18 +47,20 @@ for (let i = 0; i < worldSizeX * WORLD_HEIGHT * worldSizeZ; i++) {
   blocks.push(BLOCK_AIR);
 }
 
-function blockIndex(x: number, y: number, z: number): number {
-  return (y * worldSizeX * worldSizeZ) + (z * worldSizeX) + x;
+// Explicit dimensions keep Perry's native integer specialization from replacing
+// captured globals with zero. Coordinates still use the same packed layout.
+function blockIndex(x: number, y: number, z: number, width: number, depth: number): number {
+  return (y * width * depth) + (z * width) + x;
 }
 
 function getBlock(x: number, y: number, z: number): number {
   if (x < 0 || x >= worldSizeX || y < 0 || y >= WORLD_HEIGHT || z < 0 || z >= worldSizeZ) return BLOCK_AIR;
-  return blocks[blockIndex(x, y, z)];
+  return blocks[blockIndex(x, y, z, worldSizeX, worldSizeZ)];
 }
 
 function setBlock(x: number, y: number, z: number, type: number): void {
   if (x < 0 || x >= worldSizeX || y < 0 || y >= WORLD_HEIGHT || z < 0 || z >= worldSizeZ) return;
-  blocks[blockIndex(x, y, z)] = type;
+  blocks[blockIndex(x, y, z, worldSizeX, worldSizeZ)] = type;
 }
 
 // Simple terrain generation using sine waves
@@ -296,10 +297,9 @@ function drawHUD(): void {
   );
 }
 
-while (!windowShouldClose()) {
-  handleInput(getDeltaTime());
+runGame((dt) => {
+  handleInput(dt);
 
-  beginDrawing();
   clearBackground({ r: 130, g: 200, b: 255, a: 255 });
 
   beginMode3D(camera);
@@ -314,7 +314,7 @@ while (!windowShouldClose()) {
   endMode3D();
 
   drawHUD();
-  endDrawing();
-}
-
-closeWindow();
+}, () => {
+  enableCursor();
+  closeWindow();
+});

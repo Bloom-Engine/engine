@@ -57,6 +57,10 @@ class NativeExampleGateTests(unittest.TestCase):
                 if outcome == "link-error":
                     kwargs["stderr"].write("undefined symbol: removed_palette\n")
                     return subprocess.CompletedProcess(command, 1)
+                if outcome in ("duplicate-msvc", "duplicate-lld"):
+                    prefix = "warning LNK4006:" if outcome == "duplicate-msvc" else "lld-link: warning: duplicate symbol:"
+                    kwargs["stderr"].write(prefix + " perry_global_index_ts__0\n")
+                    Path(command[command.index("-o") + 1]).write_bytes(b"MZ" + bytes(range(64)))
                 if isinstance(outcome, bytes):
                     Path(command[command.index("-o") + 1]).write_bytes(outcome)
                 return subprocess.CompletedProcess(command, 0)
@@ -97,6 +101,13 @@ class NativeExampleGateTests(unittest.TestCase):
         self.assertEqual(record["mode"], "native-compile-link")
         self.assertEqual(record["bytes"], len(executable))
         self.assertEqual(record["sha256"], hashlib.sha256(executable).hexdigest())
+
+    def test_zero_exit_with_merged_module_globals_is_not_success(self):
+        result, report, _ = self.exercise(["duplicate-msvc", "duplicate-lld", b"MZ" + bytes(range(64))])
+        self.assertEqual(result, 1)
+        self.assertEqual([row["status"] for row in report["examples"]], ["fail", "fail", "pass"])
+        self.assertTrue(all("duplicate Perry module globals" in row["error"] for row in report["examples"][:2]))
+        compile_examples.reject_duplicate_module_globals("warning LNK4006: rustc_demangle already defined")
 
 
 if __name__ == "__main__":

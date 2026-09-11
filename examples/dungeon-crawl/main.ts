@@ -1,6 +1,5 @@
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing,
-  clearBackground, setTargetFPS, getDeltaTime, isKeyPressed, isKeyDown,
+  initWindow, runGame, clearBackground, setTargetFPS, isKeyPressed, isKeyDown,
   getScreenWidth, getScreenHeight, closeWindow, beginMode2D, endMode2D,
 } from "bloom/core";
 import { Color, Colors, Key, Camera2D } from "bloom/core";
@@ -312,8 +311,7 @@ const camera: Camera2D = {
 };
 
 // Main game loop
-while (!windowShouldClose()) {
-  const dt = getDeltaTime();
+runGame((dt) => {
 
   if (player.hp > 0) {
     // Turn-based input
@@ -348,7 +346,6 @@ while (!windowShouldClose()) {
   if (messageTimer > 0) messageTimer = messageTimer - dt;
 
   // Drawing
-  beginDrawing();
   clearBackground({ r: 10, g: 10, b: 15, a: 255 });
 
   beginMode2D(camera);
@@ -416,8 +413,6 @@ while (!windowShouldClose()) {
     const restartMsg = "Press ENTER to try again";
     drawText(restartMsg, SCREEN_WIDTH / 2 - measureText(restartMsg, 18) / 2, SCREEN_HEIGHT / 2 + 15, 18, Colors.LIGHTGRAY);
   }
-
-  endDrawing();
-}
-
-closeWindow();
+}, () => {
+  closeWindow();
+});

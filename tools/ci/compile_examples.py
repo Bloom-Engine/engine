@@ -22,6 +22,13 @@ MANIFEST_PATH = Path(__file__).with_name("examples.json")
 REPORT_SCHEMA = "bloom-example-compile-v2"
 
 
+def reject_duplicate_module_globals(output: str) -> None:
+    # Perry can return success after the Windows linker merges unrelated TS
+    # module globals. Ordinary duplicate Rust archive symbols are distinct.
+    if re.search(r"(?:duplicate symbol:|warning LNK4006:)\s+perry_global_", output):
+        raise RuntimeError("linker merged duplicate Perry module globals; check cross-drive source paths")
+
+
 def load_inventory() -> tuple[list[str], list[str]]:
     failures: list[str] = []
     try:
@@ -201,6 +208,12 @@ def main() -> int:
                 elif not is_native_binary(fresh_output):
                     error = "compiler did not produce a new native executable"
                 else:
+                    stdout.flush()
+                    stderr.flush()
+                    reject_duplicate_module_globals(
+                        (log_dir / f"{name}.stdout.log").read_text(encoding="utf-8", errors="replace")
+                        + (log_dir / f"{name}.stderr.log").read_text(encoding="utf-8", errors="replace")
+                    )
                     fresh_output.replace(output)
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 error = str(exc)

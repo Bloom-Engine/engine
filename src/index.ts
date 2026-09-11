@@ -1,3 +1,37 @@
+import {
+  ColorConstants as coreColorConstants, Colors as coreColors, Key as coreKey,
+  MouseButton as coreMouseButton, CursorShape as coreCursorShape, Platform as corePlatform,
+} from './core/index';
+import {
+  FILTER_LINEAR as filterLinear, FILTER_NEAREST as filterNearest,
+  TEXTURE_KIND_COLOR as textureKindColor, TEXTURE_KIND_NORMAL as textureKindNormal,
+  TEXTURE_KIND_DATA as textureKindData,
+} from './textures/index';
+import {
+  MATERIAL_TEXTURE_SLOT_BASE_COLOR as materialSlotBaseColor, MATERIAL_TEXTURE_SLOT_NORMAL as materialSlotNormal,
+  MATERIAL_TEXTURE_SLOT_METALLIC_ROUGHNESS as materialSlotMetallicRoughness,
+  MATERIAL_TEXTURE_SLOT_EMISSIVE as materialSlotEmissive, MATERIAL_TEXTURE_SLOT_OCCLUSION as materialSlotOcclusion,
+} from './scene/index';
+
+// Explicit initialized bindings preserve runtime constants through Perry's WASM
+// package-root imports. Object aliases retain their original shared identity.
+export const ColorConstants = coreColorConstants;
+export const Colors = coreColors;
+export const Key = coreKey;
+export const MouseButton = coreMouseButton;
+export const CursorShape = coreCursorShape;
+export const Platform = corePlatform;
+export const FILTER_LINEAR = filterLinear;
+export const FILTER_NEAREST = filterNearest;
+export const TEXTURE_KIND_COLOR = textureKindColor;
+export const TEXTURE_KIND_NORMAL = textureKindNormal;
+export const TEXTURE_KIND_DATA = textureKindData;
+export const MATERIAL_TEXTURE_SLOT_BASE_COLOR = materialSlotBaseColor;
+export const MATERIAL_TEXTURE_SLOT_NORMAL = materialSlotNormal;
+export const MATERIAL_TEXTURE_SLOT_METALLIC_ROUGHNESS = materialSlotMetallicRoughness;
+export const MATERIAL_TEXTURE_SLOT_EMISSIVE = materialSlotEmissive;
+export const MATERIAL_TEXTURE_SLOT_OCCLUSION = materialSlotOcclusion;
+
 export {
   initWindow, closeWindow, windowShouldClose, resize,
   // Embedding (Perry UI `BloomView`, or any host that owns a native view).
@@ -20,15 +54,14 @@ export {
   isTouchActive, getMaxTouchPoints,
   toggleFullscreen, setWindowTitle, setWindowIcon,
   disableCursor, enableCursor, getMouseDeltaX, getMouseDeltaY, getMouseWheel, getCharPressed,
-  setCursorShape, CursorShape,
+  setCursorShape,
   setClipboardText, getClipboardText,
   openFileDialog, saveFileDialog,
   writeFile, fileExists, readFile,
   getScreenToWorld2D, getWorldToScreen2D,
   // `Color` is not here: it is the RGBA type, re-exported as a type below.
   // The palette map is `Colors` / `ColorConstants` (GH #53).
-  ColorConstants, Colors, Key, MouseButton,
-  injectKeyDown, injectKeyUp, isAnyInputPressed, getPlatform, isMobile, isTV, Platform,
+  injectKeyDown, injectKeyUp, isAnyInputPressed, getPlatform, isMobile, isTV,
   injectGamepadAxis, injectGamepadButtonDown, injectGamepadButtonUp,
   runGame, runGameLifecycle, FixedStepClock,
   setProfilerEnabled, getProfilerFrameCpuUs, getProfilerFrameGpuUs,
@@ -79,8 +112,7 @@ export {
   loadTexture, createTextureRgba8, unloadTexture, drawTexture, drawTexturePro, drawTextureRec,
   getTextureWidth, getTextureHeight, loadImage,
   imageResize, imageCrop, imageFlipH, imageFlipV, loadTextureFromImage,
-  genTextureMipmaps, setTextureFilter, FILTER_LINEAR, FILTER_NEAREST,
-  TEXTURE_KIND_COLOR, TEXTURE_KIND_NORMAL, TEXTURE_KIND_DATA,
+  genTextureMipmaps, setTextureFilter,
   loadTextureAsync, stageTextures, commitTexture,
   loadRenderTexture, loadRenderTextureKind, unloadRenderTexture,
   renderTextureGlsl, renderTextureSobel,
@@ -146,9 +178,6 @@ export {
   setSceneNodeColor, setSceneNodePbr, setSceneNodeMaterial, setSceneNodeTexture,
   setSceneNodeMaterialTextureHandles,
   setSceneNodeMaterialTextureTransform, setSceneNodeMaterialTextureStrengths,
-  MATERIAL_TEXTURE_SLOT_BASE_COLOR, MATERIAL_TEXTURE_SLOT_NORMAL,
-  MATERIAL_TEXTURE_SLOT_METALLIC_ROUGHNESS, MATERIAL_TEXTURE_SLOT_EMISSIVE,
-  MATERIAL_TEXTURE_SLOT_OCCLUSION,
   setSceneNodeWaterMaterial, pickSceneAll,
   getSceneNodeTransform, getSceneNodeBounds,
   setSceneNodeUserData, getSceneNodeUserData,
