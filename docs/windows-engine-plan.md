@@ -86,7 +86,10 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    command fails on Windows because npm's shim tries `/bin/bash`. A bounded
    starter compiles to WASM from that installed package; runtime rendering is
    not yet proven. The next implementation work is portable command execution
-   and native/browser startup acceptance.
+   and native/browser startup acceptance. The [portable web command](evidence/windows-portable-web-cli-v1.md)
+   now passes its clean installed help command, nine failure/assembly regression
+   checks, and a complete installed Perry-plus-engine WASM build on Windows.
+   Real starter rendering and native startup remain open.
 3. Complete the wider temporal/geometry, performance, memory, resize, and
    capability corpus. The
    [HD surface correction](evidence/windows-ssgi-surface-v1.md) and two valid

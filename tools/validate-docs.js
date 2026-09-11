@@ -97,7 +97,7 @@ if (!ultraDocs || ultraDocs !== ultraSource) {
 }
 
 const packageJson = JSON.parse(read("package.json"));
-if (packageJson.bin?.["bloom-web"] !== "native/web/build.sh") {
+if (packageJson.bin?.["bloom-web"] !== "native/web/build.cjs") {
   fail("package.json does not expose the bloom-web command");
 }
 
@@ -116,6 +116,8 @@ if (pack.status !== 0) {
   }
   for (const required of [
     "native/web/build.sh",
+    "native/web/build.cjs",
+    "native/web/splice_game.cjs",
     "native/web/splice_game.py",
     "crates/bloom-geometry-format/Cargo.toml",
     "crates/bloom-scene-format/Cargo.toml",
@@ -127,22 +129,7 @@ if (pack.status !== 0) {
   }
 }
 
-function bashExecutable() {
-  if (process.env.BLOOM_BASH) return process.env.BLOOM_BASH;
-  if (process.platform === "win32") {
-    // Git for Windows normally exposes git.exe through cmd/, while its Bash
-    // executable is deliberately absent from PATH. Use that same installation.
-    const gitPaths = spawnSync("where.exe", ["git"], { encoding: "utf8" });
-    for (const gitPath of (gitPaths.stdout || "").trim().split(/\r?\n/)) {
-      if (!gitPath) continue;
-      const candidate = path.resolve(path.dirname(gitPath), "..", "bin", "bash.exe");
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  }
-  return "bash";
-}
-
-const help = spawnSync(bashExecutable(), ["native/web/build.sh", "--help"], {
+const help = spawnSync(process.execPath, [packageJson.bin["bloom-web"], "--help"], {
   cwd: root,
   encoding: "utf8",
 });

@@ -5,7 +5,7 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "bin": {
-    "bloom-web": "native/web/build.sh"
+    "bloom-web": "native/web/build.cjs"
   },
   "exports": {
     ".": "./src/index.ts",
@@ -78,11 +78,16 @@
     "native/web/Cargo.lock",
     "native/web/src/**",
     "native/web/build.sh",
+    "native/web/build.cjs",
+    "native/web/splice_game.cjs",
     "native/web/splice_game.py",
     "native/web/index.html",
     "native/web/bloom_glue.js",
     "native/web/jolt_bridge.js"
   ],
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@bloomengine/jolt-prebuilt": "0.4.1"
   },

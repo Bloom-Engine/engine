@@ -239,6 +239,20 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Windows / installed web command
+        shell: pwsh
+        run: ./tools/ci/check-installed-web-cli.ps1
+
+      - name: Retain installed command evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installed-web-cli
+          path: |
+            target/ci/installed-web-cli/result.json
+            target/ci/installed-web-cli/*/*.log
+          if-no-files-found: error
+
       - name: Set up MSVC environment
         # Populates LIB / INCLUDE / PATH so cmake (which builds the Jolt C++
         # shim via bloom-shared's build.rs) can find the Windows SDK. Without

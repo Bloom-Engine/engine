@@ -230,6 +230,7 @@ run_component() {
       node tools/validate-ffi.js
       hr "documentation and package contracts"
       node tools/validate-docs.js
+      node --test tools/ci/test_web_build.cjs
       hr "file-size ratchet"
       node tools/check-file-lines.js
       ;;
