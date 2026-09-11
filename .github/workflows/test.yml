@@ -297,6 +297,23 @@ jobs:
           CARGO_BUILD_JOBS: '2'
         run: python tools/ci/setup_windows_perry.py --out "$env:RUNNER_TEMP/bloom-perry" --github-env
 
+      - name: Windows / installed native startup
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          python -m unittest tools.ci.test_native_package_smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/ci/native_package_smoke.py
+
+      - name: Retain installed native startup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-package-startup
+          path: target/ci/native-package
+          if-no-files-found: error
+
       - name: full / example-compile
         env:
           CARGO_BUILD_JOBS: '2'

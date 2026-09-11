@@ -47,3 +47,8 @@ Built by `.github/workflows/release.yml` on each tag push — a matrix job per p
 
 This package is versioned independently. `@bloomengine/engine` pins the
 compatible prebuilt version in its dependencies.
+
+The Windows package directory is `win32-x64`. The engine also accepts the legacy
+`windows-x64` spelling for manually staged archives. Rust bundles the selected
+static archives into `bloom_windows.lib`; Perry links that engine library without
+requiring an additional Jolt source-build directory.

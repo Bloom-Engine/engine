@@ -222,19 +222,28 @@ fn find_prebuilt_dir(
     } else {
         ""
     };
-    let target_token = format!("{}-{}{}", target_os, arch_token, sim_suffix);
+    // The published npm package/release matrix uses Node's Windows platform
+    // name. Keep Rust's spelling as a compatibility alias for staged CI libs.
+    let package_os = if target_os == "windows" {
+        "win32"
+    } else {
+        target_os
+    };
+    let package_token = format!("{}-{}{}", package_os, arch_token, sim_suffix);
+    let rust_token = format!("{}-{}{}", target_os, arch_token, sim_suffix);
+    let mut target_tokens = vec![package_token];
+    if target_tokens[0] != rust_token {
+        target_tokens.push(rust_token);
+    }
 
-    let candidates = std::iter::empty::<std::path::PathBuf>()
+    let roots = std::env::var_os("BLOOM_JOLT_PREBUILT_DIR")
+        .map(std::path::PathBuf::from)
+        .into_iter()
         .chain(
-            std::env::var_os("BLOOM_JOLT_PREBUILT_DIR")
-                .map(|v| std::path::PathBuf::from(v).join(&target_token)),
-        )
-        .chain(walk_up_for_node_modules(manifest_dir).map(|nm| {
-            nm.join("@bloomengine")
-                .join("jolt-prebuilt")
-                .join("lib")
-                .join(&target_token)
-        }));
+            walk_up_for_node_modules(manifest_dir)
+                .map(|nm| nm.join("@bloomengine").join("jolt-prebuilt").join("lib")),
+        );
+    let candidates = roots.flat_map(|root| target_tokens.iter().map(move |token| root.join(token)));
 
     let (lib_prefix, lib_ext) = if target_os == "windows" {
         ("", "lib")
