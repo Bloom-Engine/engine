@@ -84,6 +84,11 @@ cd dist/web && python3 -m http.server 8080
 
 ## Features
 
+The draft [starter command](docs/starter.md) adds project creation, native
+build/run and web build/serve from one source. It includes the template,
+permissions and asset example. Use the documented draft package flow; these
+commands are not present in stable npm 0.4.16.
+
 - **Simple API** — A function-first gameplay API with plain data handles. ([design rationale](docs/design-api.md))
 - **True native** — Compiles to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU via wgpu.
 - **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, watchOS, visionOS, Android, and Web from one codebase.

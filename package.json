@@ -5,6 +5,7 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "bin": {
+    "bloom": "tools/cli/bloom.cjs",
     "bloom-web": "native/web/build.cjs"
   },
   "exports": {
@@ -24,6 +25,8 @@
     "./quality": "./src/quality/index.ts"
   },
   "files": [
+    "tools/cli/**",
+    "tools/ci/setup_windows_perry.py",
     "src/",
     "perry.config.ts",
     "native/shared/Cargo.toml",

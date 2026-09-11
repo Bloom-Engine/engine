@@ -263,6 +263,18 @@ jobs:
         # MSVC is installed on the runner.
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Windows / installed starter creation
+        shell: pwsh
+        run: python tools/ci/starter_package_smoke.py
+
+      - name: Retain installed starter evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installed-starter
+          path: target/ci/installed-starter
+          if-no-files-found: error
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
