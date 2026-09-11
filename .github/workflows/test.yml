@@ -358,6 +358,7 @@ jobs:
         with:
           name: bloom-starter-web-${{ github.run_id }}
           path: target/ci/starter-web
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 

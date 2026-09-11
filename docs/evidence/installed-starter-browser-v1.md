@@ -52,6 +52,15 @@ passes all starter callbacks and one cleanup. Ten Python acceptance-control
 tests and the repository contracts pass; the text/image verifier accepts the
 previous actual native starter capture. Hosted browser rendering is pending.
 
+The first hosted run, 34571662102, passed all 21 preceding Tests jobs and the
+existing browser checks. The complete starter verifier then rejected the
+downloaded website before launch: upload-artifact omitted wasm-pack's
+`pkg/.gitignore`, while its build receipt correctly included all 11 files.
+All ten downloaded file hashes match. The scoped starter artifact upload now
+includes hidden files, preserving the complete site and the exact hash check.
+That failure remains retained; full starter browser execution still requires
+the corrected hosted run.
+
 General Perry exception propagation, browser physics acceptance, the complete
 canonical runtime matrix, visible native presentation and clean distribution
 packaging remain separate. A browser warning about optional physics startup is
