@@ -27,6 +27,19 @@ const BLOOM_SHELL = `
   <script type="module" src="./bloom_glue.js"></script>
 `;
 
+function installPerryVoidReturnCompatibility(runtime) {
+  // Perry 0.5.1220 exports named void functions with no WASM result, while
+  // its closure bridge always decodes the return as a NaN-boxed i64. Preserve
+  // an actual void result; keep the original decoder for every boxed value.
+  const decode = runtime.__bitsToJsValue;
+  if (typeof decode !== "function") {
+    throw new Error("Perry runtime has no value decoder; use the supported compiler version.");
+  }
+  runtime.__bitsToJsValue = function(bits) {
+    return bits === undefined ? undefined : decode(bits);
+  };
+}
+
 function splice(html) {
   if (!html.includes(PERRY_ROOT)) {
     throw new Error("could not find perry-root in Perry HTML; compiler output format may have changed");
@@ -43,10 +56,10 @@ function splice(html) {
   }
   tail = tail.replace(BOOT_CALL, 'window.__bloomReady.then(() => bootPerryWasm("');
   tail = tail.replace(BOOT_CATCH, '\")).catch(');
-  return head + tail;
+  return head + `(${installPerryVoidReturnCompatibility.toString()})(globalThis);\n` + tail;
 }
 
-module.exports = { splice };
+module.exports = { splice, installPerryVoidReturnCompatibility };
 if (require.main === module) {
   try {
     if (process.argv.length !== 4) throw new Error("Usage: splice_game.cjs <perry_html_in> <output_html_out>");

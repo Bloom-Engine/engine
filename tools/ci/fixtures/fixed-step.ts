@@ -104,6 +104,18 @@ const invalidDriverRejected = !invalidDriver.initialize();
 invalidDriver.frame(0.01, () => false);
 invalidDriver.dispose();
 
+let namedEvents = '';
+function namedInit(): void { namedEvents = namedEvents + 'I'; }
+function namedFixed(_dt: number, _tick: number): void { namedEvents = namedEvents + 'F'; }
+function namedUpdate(_dt: number): void { namedEvents = namedEvents + 'U'; }
+function namedDraw(_alpha: number): void { namedEvents = namedEvents + 'D'; }
+function namedCleanup(): void { namedEvents = namedEvents + 'C'; }
+const namedDriver = new GameLifecycleDriver({ init: namedInit, fixedUpdate: namedFixed,
+  update: namedUpdate, draw: namedDraw, cleanup: namedCleanup });
+namedDriver.initialize();
+namedDriver.frame(1 / 60, () => false);
+namedDriver.dispose();
+
 // Read each observation directly. The original object-literal JSON.stringify
 // report returned undefined in Perry WASM; preserve that separately from the
 // timing/lifecycle contract. Events contain only this fixture's fixed ASCII tags.
@@ -142,4 +154,5 @@ result = result + ",\"sparseDraws\":" + sparseDraws;
 result = result + ",\"updateStopEvents\":\"" + updateStopEvents + "\"";
 result = result + ",\"invalidDriverRejected\":" + invalidDriverRejected;
 result = result + ",\"invalidCalls\":" + invalidCalls;
+result = result + ",\"namedEvents\":\"" + namedEvents + "\"";
 console.log("BLOOM_FIXED_STEP_RESULT:" + result + "}");

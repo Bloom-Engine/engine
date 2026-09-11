@@ -20,7 +20,7 @@ class FixedStepEvidenceTests(unittest.TestCase):
             for body, success in ((emit, True), (emit + emit, False), ('', False),
                                   (emit + 'console.error("late failure");', False),
                                   (emit + 'throw new Error("late boot failure");', False)):
-                page.write_text('<script>async function bootPerryWasm() {' + body + '}</script>'
+                page.write_text('<script>function __bitsToJsValue(bits) {return bits;} async function bootPerryWasm() {' + body + '}</script>'
                                 '<script>window.__perryWasmB64 = "AGFzbQEAAAA=";'
                                 'bootPerryWasm().catch(e => console.error(e));</script>', encoding='utf-8')
                 result = subprocess.run(['node', str(helper), str(page)], capture_output=True, text=True, timeout=15)

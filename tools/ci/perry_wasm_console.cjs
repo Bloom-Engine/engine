@@ -5,6 +5,7 @@
 // renderer, GPU, network or FFI stubs participate in the contract result.
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { installPerryVoidReturnCompatibility } = require("../../native/web/splice_game.cjs");
 
 async function main() {
   if (process.argv.length !== 3) throw new Error("Usage: perry_wasm_console.cjs <compiled-fixture.html>");
@@ -36,6 +37,7 @@ async function main() {
     context.window = context;
     context.self = context;
     vm.runInContext(scripts[0][1], context, { timeout: 5000 });
+    vm.runInContext(`(${installPerryVoidReturnCompatibility.toString()})(globalThis);`, context, { timeout: 5000 });
     const boot = context.bootPerryWasm;
     if (typeof boot !== "function") throw new Error("Perry runtime has no boot entry");
     let completion;
