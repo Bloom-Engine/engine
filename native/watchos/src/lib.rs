@@ -402,6 +402,8 @@ pub extern "C" fn bloom_clear_background(r: f64, g: f64, b: f64, a: f64) {
 
 #[no_mangle]
 pub extern "C" fn bloom_run_game(_callback: f64) {}
+#[no_mangle]
+pub extern "C" fn bloom_run_game_with_cleanup(_callback: f64, _cleanup: f64) {}
 
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {

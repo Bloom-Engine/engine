@@ -284,15 +284,15 @@ function renderBlocks(): void {
 function drawHUD(): void {
   const cx = SCREEN_WIDTH / 2;
   const cy = SCREEN_HEIGHT / 2;
-  drawRect(cx - 10, cy - 1, 20, 2, Colors.White);
-  drawRect(cx - 1, cy - 10, 2, 20, Colors.White);
+  drawRect(cx - 10, cy - 1, 20, 2, Colors.WHITE);
+  drawRect(cx - 1, cy - 10, 2, 20, Colors.WHITE);
 
   const blockNames = ["", "Grass", "Dirt", "Stone", "Wood", "Leaves", "Sand", "Water"];
   drawRect(5, SCREEN_HEIGHT - 35, 200, 30, { r: 0, g: 0, b: 0, a: 150 });
-  drawText("Block: " + blockNames[selectedBlock] + " [1-7]", 10, SCREEN_HEIGHT - 30, 18, Colors.White);
+  drawText("Block: " + blockNames[selectedBlock] + " [1-7]", 10, SCREEN_HEIGHT - 30, 18, Colors.WHITE);
   drawText(
     "Pos: " + Math.floor(camX).toString() + ", " + Math.floor(camY).toString() + ", " + Math.floor(camZ).toString(),
-    10, 10, 16, Colors.White,
+    10, 10, 16, Colors.WHITE,
   );
 }
 
@@ -308,7 +308,7 @@ while (!windowShouldClose()) {
   if (highlightX >= 0) {
     drawCubeWires(
       { x: highlightX + 0.5, y: highlightY + 0.5, z: highlightZ + 0.5 },
-      1.02, 1.02, 1.02, Colors.White,
+      1.02, 1.02, 1.02, Colors.WHITE,
     );
   }
   endMode3D();

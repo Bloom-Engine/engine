@@ -1,7 +1,7 @@
 import {
   initWindow, runGame, clearBackground, closeWindow,
   captureFrameToPng, isFrameCaptureReady,
-  setDirect2DMode,
+  setDirect2DMode, writeFile,
 } from "@bloomengine/engine/core";
 import { drawRect } from "@bloomengine/engine/shapes";
 import {
@@ -18,6 +18,7 @@ const world = createWorld({ gravity: { x: 0, y: -9.81, z: 0 }, maxBodies: 64, nu
 const shape = sphereShape(0.5);
 const body = createBody(world, shape, { motionType: 2, position: { x: 0, y: 4, z: 0 } });
 let frames = 0;
+let cleanups = 0;
 runGame((_dt) => {
   stepVariable(world, 1 / 60, 1);
   const y = getBodyPosition(body).y;
@@ -31,7 +32,10 @@ runGame((_dt) => {
   if (frames > 8 && isFrameCaptureReady()) closeWindow();
   // A failed capture must terminate and fail the host's image check.
   if (frames >= 120) closeWindow();
+}, () => {
+  cleanups = cleanups + 1;
+  destroyBody(body);
+  releaseShape(shape);
+  destroyWorld(world);
+  writeFile("native-cleanup.txt", cleanups.toString());
 });
-destroyBody(body);
-releaseShape(shape);
-destroyWorld(world);

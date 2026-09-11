@@ -500,6 +500,7 @@ def main() -> int:
     site.mkdir()
     shutil.copytree(package_dir, site / "pkg")
     shutil.copy2(REPO_ROOT / "native" / "web" / "bloom_glue.js", site)
+    shutil.copy2(REPO_ROOT / "native" / "web" / "game_loop.mjs", site)
     shutil.copy2(REPO_ROOT / "native" / "web" / "jolt_bridge.js", site)
     shutil.copy2(
         REPO_ROOT / "examples" / "renderer-test" / "assets" / "DamagedHelmet.glb",

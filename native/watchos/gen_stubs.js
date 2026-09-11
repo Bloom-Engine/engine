@@ -18,7 +18,7 @@ const OVERRIDES = new Set([
   'bloom_get_delta_time', 'bloom_get_time', 'bloom_get_fps',
   'bloom_init_window', 'bloom_close_window', 'bloom_window_should_close',
   'bloom_begin_drawing', 'bloom_end_drawing', 'bloom_clear_background',
-  'bloom_run_game', 'bloom_is_any_input_pressed',
+  'bloom_run_game', 'bloom_run_game_with_cleanup', 'bloom_is_any_input_pressed',
   'bloom_is_key_pressed', 'bloom_is_key_down', 'bloom_is_key_released',
   'bloom_set_target_fps',
   'bloom_inject_key_down', 'bloom_inject_key_up',

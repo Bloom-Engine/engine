@@ -83,6 +83,7 @@
     "native/web/splice_game.py",
     "native/web/index.html",
     "native/web/bloom_glue.js",
+    "native/web/game_loop.mjs",
     "native/web/jolt_bridge.js"
   ],
   "engines": {
@@ -2477,6 +2478,14 @@
         {
           "name": "bloom_run_game",
           "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_run_game_with_cleanup",
+          "params": [
+            "f64",
             "f64"
           ],
           "returns": "void"

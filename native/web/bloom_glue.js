@@ -31,14 +31,36 @@
  */
 
 import init, * as bloom from './pkg/bloom_web.js';
+import { createGameLoop } from './game_loop.mjs';
 
 let bloomModule = null;
 let booted = false;
 
 // --- Game loop state ---
-let gameCallback = null;   // Perry closure handle captured from bloom_run_game
-let gameRunning = false;
-let rafId = null;
+let loadingRemoved = false;
+const gameLoop = createGameLoop({
+  requestFrame: (callback) => requestAnimationFrame(callback),
+  cancelFrame: (id) => cancelAnimationFrame(id),
+  beginFrame: () => {
+    if (!loadingRemoved) {
+      document.getElementById('loading')?.remove();
+      loadingRemoved = true;
+    }
+    flushInput();
+    bloom.bloom_begin_drawing();
+  },
+  endFrame: () => bloom.bloom_end_drawing(),
+  update: (callback) => callGameClosure(callback, bloom.bloom_get_delta_time()),
+  cleanup: (callback) => callGameClosure(callback),
+  onError: (error) => console.error('[bloom] game loop failed:', error),
+});
+
+function callGameClosure(callback, ...args) {
+  if (typeof globalThis.callWasmClosure !== 'function') {
+    throw new Error('Perry runtime is missing callWasmClosure; cannot run the game callback.');
+  }
+  return globalThis.callWasmClosure(callback, ...args);
+}
 
 // --- Asset prefetch cache ---
 // path → Uint8Array. Filled from assets_manifest.json before the game boots;
@@ -332,16 +354,13 @@ function buildFfiImports() {
   // to bloom_run_game and returns; the blocking native loop is never entered.
   // We capture the closure and drive it from requestAnimationFrame.
   imports.bloom_run_game = (callback) => {
-    gameCallback = callback;
-    if (!gameRunning) {
-      gameRunning = true;
-      startRafLoop();
-    }
+    gameLoop.start(callback);
   };
+  imports.bloom_run_game_with_cleanup = (callback, cleanup) => gameLoop.start(callback, cleanup);
   // Safety net for a game that still spins `while (!windowShouldClose())`:
   // report "should close" once the rAF loop owns frame pacing, so the stray
   // loop exits after one iteration instead of hanging the tab.
-  imports.bloom_window_should_close = () => (gameRunning ? 1 : 0);
+  imports.bloom_window_should_close = () => (gameLoop.running ? 1 : 0);
   imports.bloom_close_window = () => stopGame();
 
   // Last: wrap every entry so (a) a throw names the FFI call that produced
@@ -366,44 +385,9 @@ function buildFfiImports() {
   return imports;
 }
 
-/**
- * Drive the captured Perry game closure once per animation frame:
- *   flush queued input → begin_drawing → callback(dt) → end_drawing.
- *
- * The closure is invoked through Perry's `callWasmClosure`, a global helper its
- * runtime exposes that resolves the closure's function-table index + captures
- * against the live game WASM instance. By the time the first frame runs, the
- * runtime classic <script> has executed, so the global is defined.
- */
-function startRafLoop() {
-  let firstFrame = true;
-  function frame() {
-    if (!gameRunning) return;
-    if (firstFrame) {
-      firstFrame = false;
-      document.getElementById('loading')?.remove();
-    }
-    flushInput();
-    bloom.bloom_begin_drawing();
-    if (gameCallback !== null && typeof globalThis.callWasmClosure === 'function') {
-      const dt = bloom.bloom_get_delta_time();
-      try {
-        globalThis.callWasmClosure(gameCallback, dt);
-      } catch (e) {
-        console.error('[bloom] game frame threw; stopping loop:', e);
-        gameRunning = false;
-      }
-    }
-    bloom.bloom_end_drawing();
-    rafId = requestAnimationFrame(frame);
-  }
-  rafId = requestAnimationFrame(frame);
-}
-
-/** Stop the rAF loop. */
+/** Stop scheduling; cleanup runs after an active frame finishes. */
 export function stopGame() {
-  gameRunning = false;
-  if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+  gameLoop.stop();
 }
 
 // --- Synchronous asset fetching ---

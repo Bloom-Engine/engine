@@ -96,11 +96,18 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    fixes Jolt directory lookup and redundant final-link metadata. A diagnostic
    installed fixture simulates Jolt and renders an exact frame on DX12 and
    Vulkan. The complete fresh-package checker also passes both backends with
-   all 16,384 pixels matching and no CMake fallback. Hosted startup checks are
-   pending. The [direct-frame capture correction](evidence/windows-direct-frame-capture-v1.md)
+   all 16,384 pixels matching and no CMake fallback. All 22 hosted Tests jobs at
+   #167 pass, including installed startup, with [published evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-installed-native-20260911).
+   The [direct-frame capture correction](evidence/windows-direct-frame-capture-v1.md)
    also passes the installed physics/image fixture in both scene and direct-2D
    modes on DX12 and Vulkan. A render-target regression checks capture deferral
-   and fresh output pixels. Browser starter
+   and fresh output pixels. All 22 hosted Tests jobs at #168 pass, including
+   both installed rendering modes. The [game-loop cleanup](game-loop.md) adds an optional
+   final callback on native and web and moves Pong onto the shared loop with
+   edge-triggered pause input. [Native cleanup and Pong replay evidence](evidence/windows-game-cleanup-v1.md)
+   also verifies the corrected palette names and all 20 example links. The same
+   Pong source completes the real web build; its browser frame remains unproven.
+   Browser starter
    rendering, visible native presentation, shared lifecycle, general long-path
    support remain open.
 3. Complete the wider temporal/geometry, performance, memory, resize, and

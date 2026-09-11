@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use wasm_bindgen::prelude::*;
 
+mod game_loop;
+
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut LAST_PROJECT: (f64, f64) = (0.0, 0.0);
 static mut LAST_PICK: Option<bloom_shared::picking::PickResult> = None;
@@ -1954,18 +1956,6 @@ pub fn bloom_register_frame_callback(_priority: f64, _callback: f64) -> f64 {
 #[wasm_bindgen]
 pub fn bloom_unregister_frame_callback(_id: f64) {
     // Managed by JS glue layer
-}
-
-/// Emscripten-style game loop entry point.
-/// On native: blocks in a while loop calling begin_drawing/callback/end_drawing.
-/// On web: returns immediately. The JS glue layer (bloom_glue.js) intercepts
-/// this call and drives the game loop via requestAnimationFrame.
-#[wasm_bindgen]
-pub fn bloom_run_game(_callback: f64) {
-    // On web, this is a no-op — the JS glue intercepts the FFI call
-    // before it reaches here and sets up the rAF loop with the callback.
-    // The game's while(!windowShouldClose()) loop should exit after this
-    // (bloom_glue.js makes windowShouldClose return 1.0 once runGame is called).
 }
 
 // ============================================================

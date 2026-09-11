@@ -190,6 +190,7 @@ declare function bloom_write_file(path: number, data: number): number;
 declare function bloom_file_exists(path: number): number;
 declare function bloom_read_file(path: number): number;
 declare function bloom_run_game(callback: number): void;
+declare function bloom_run_game_with_cleanup(callback: number, cleanup: number): void;
 
 // Window management
 
@@ -1433,6 +1434,8 @@ export function isAnyInputPressed(): boolean {
  *
  * On native: blocks in a while loop calling beginDrawing/update/endDrawing each frame.
  * On web: passes the callback to the JS runtime which drives it via requestAnimationFrame.
+ * Optional cleanup runs once after the final frame, on both platforms. Put
+ * resource disposal there: code after runGame executes immediately on web.
  *
  * Usage:
  *   initWindow(800, 600, "My Game");
@@ -1441,12 +1444,16 @@ export function isAnyInputPressed(): boolean {
  *     // game logic + draw calls
  *   });
  */
-export function runGame(update: (dt: number) => void): void {
+export function runGame(update: (dt: number) => void, cleanup?: () => void): void {
   const platform = bloom_get_platform();
   if (platform === 7) {
     // Web: delegate to JS glue layer via FFI.
     // bloom_glue.js intercepts this call and sets up requestAnimationFrame.
-    bloom_run_game(update as any);
+    if (cleanup !== undefined) {
+      bloom_run_game_with_cleanup(update as any, cleanup as any);
+    } else {
+      bloom_run_game(update as any);
+    }
   } else {
     // Native: blocking game loop
     while (!windowShouldClose()) {
@@ -1454,6 +1461,7 @@ export function runGame(update: (dt: number) => void): void {
       update(getDeltaTime());
       endDrawing();
     }
+    if (cleanup !== undefined) cleanup();
   }
 }
 

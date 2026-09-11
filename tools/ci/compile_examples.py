@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,12 +48,27 @@ def load_inventory() -> tuple[list[str], list[str]]:
         failures.append(f"unlisted canonical examples: {missing}")
     if stale:
         failures.append(f"listed examples missing package.json/main.ts: {stale}")
+    try:
+        palette_source = (REPO_ROOT / "src/core/colors.ts").read_text(encoding="utf-8")
+        palette = re.search(r"export const Colors[^=]*=\s*\{(.*?)\n\};", palette_source, re.S)
+        if palette is None:
+            return examples, failures + ["cannot locate the public Colors palette"]
+        color_names = set(re.findall(r"^\s*(\w+)\s*:", palette[1], re.M))
+    except OSError as exc:
+        return examples, failures + [f"cannot read the public Colors palette: {exc}"]
     for relative in examples:
         directory = (REPO_ROOT / relative).resolve()
         try:
             directory.relative_to(REPO_ROOT / "examples")
         except ValueError:
             failures.append(f"example escapes examples/: {relative}")
+            continue
+        entry = directory / "main.ts"
+        if entry.is_file():
+            references = set(re.findall(r"\bColors\.([A-Za-z_]\w*)", entry.read_text(encoding="utf-8")))
+            invalid = sorted(references - color_names)
+            if invalid:
+                failures.append(f"undefined Colors names in {relative}: {invalid}")
     return examples, failures
 
 

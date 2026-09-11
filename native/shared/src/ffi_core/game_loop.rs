@@ -17,6 +17,13 @@ macro_rules! __bloom_ffi_game_loop {
         pub extern "C" fn bloom_run_game(_callback: extern "C" fn(f64)) {}
 
         #[no_mangle]
+        pub extern "C" fn bloom_run_game_with_cleanup(
+            _callback: extern "C" fn(f64),
+            _cleanup: extern "C" fn(),
+        ) {
+        }
+
+        #[no_mangle]
         pub extern "C" fn bloom_register_frame_callback(
             priority: f64,
             callback: extern "C" fn(f64),
