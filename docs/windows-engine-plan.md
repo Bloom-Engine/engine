@@ -107,6 +107,9 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    edge-triggered pause input. [Native cleanup and Pong replay evidence](evidence/windows-game-cleanup-v1.md)
    also verifies the corrected palette names and all 20 example links. The same
    Pong source completes the real web build; its browser frame remains unproven.
+   A [compiled-game browser gate](evidence/compiled-web-startup-v1.md) now prepares
+   real Perry startup and failure-control pages for hosted Chrome acceptance,
+   including exact pixels and one cleanup. Its hosted result is still required.
    Browser starter
    rendering, visible native presentation, shared lifecycle, general long-path
    support remain open.

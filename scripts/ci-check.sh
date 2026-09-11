@@ -283,6 +283,9 @@ run_component() {
         tools/ci/test_web_smoke.py \
         tools/ci/compile_examples.py \
         tools/ci/setup_windows_perry.py \
+        tools/ci/compile_web_game.py \
+        tools/ci/compiled_web_smoke.py \
+        tools/ci/test_compiled_web_smoke.py \
         tools/ci/test_compile_examples.py
       "$python_cmd" -m unittest \
         tools/quality/test_run.py \
@@ -295,6 +298,7 @@ run_component() {
         tools/quality/test_vsm_motion_corpus.py \
         tools/ci/test_web_smoke.py \
         tools/ci/test_compile_examples.py \
+        tools/ci/test_compiled_web_smoke.py \
         -v
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
@@ -330,6 +334,8 @@ run_component() {
     browser-smoke)
       hr "Bloom WebGPU real-browser known-frame smoke"
       "$python_cmd" tools/ci/web_smoke.py
+      hr "Perry compiled-game startup, frame, cleanup and failure control"
+      "$python_cmd" tools/ci/compiled_web_smoke.py
       ;;
     target-check)
       cross_crate="${BLOOM_CROSS_CRATE:-}"
