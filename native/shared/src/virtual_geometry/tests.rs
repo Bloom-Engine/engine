@@ -489,12 +489,16 @@ fn insufficient_budgets_fail_without_mutating_residency() {
 #[cfg(not(target_arch = "wasm32"))]
 fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
+        backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all()),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        force_fallback_adapter: std::env::var_os("BLOOM_TEST_FORCE_FALLBACK_ADAPTER").is_some(),
+        ..Default::default()
+    }))
+    .ok()?;
+    eprintln!("GPU oracle adapter: {:?}", adapter.get_info());
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("virtual_geometry_pool_test_device"),
         required_limits: wgpu::Limits::downlevel_defaults(),
@@ -506,12 +510,16 @@ fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
 #[cfg(not(target_arch = "wasm32"))]
 fn try_traversal_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
+        backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all()),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        force_fallback_adapter: std::env::var_os("BLOOM_TEST_FORCE_FALLBACK_ADAPTER").is_some(),
+        ..Default::default()
+    }))
+    .ok()?;
+    eprintln!("GPU oracle adapter: {:?}", adapter.get_info());
     let mut limits = wgpu::Limits::downlevel_defaults();
     limits.max_storage_buffers_per_shader_stage = 8;
     let optional_indirect = wgpu::Features::INDIRECT_FIRST_INSTANCE
@@ -1201,10 +1209,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<u32> {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline);
-        if device
-            .features()
-            .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
-        {
+        if crate::renderer::gpu_driven::supports_indirect_count(&device) {
             pass.multi_draw_indirect_count(
                 emitter.command_buffer(),
                 0,

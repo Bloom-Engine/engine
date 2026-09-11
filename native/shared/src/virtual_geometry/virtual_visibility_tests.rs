@@ -30,6 +30,15 @@ struct VirtualShadingProbeRecord {
 
 #[test]
 fn raw_virtual_clusters_rasterize_namespaced_visibility_ids_on_the_real_gpu() {
+    assert_virtual_visibility_raster(true);
+}
+
+#[test]
+fn default_virtual_submission_preserves_visibility_and_reconstructed_attributes() {
+    assert_virtual_visibility_raster(false);
+}
+
+fn assert_virtual_visibility_raster(force_binned: bool) {
     const WIDTH: u32 = 16;
     const HEIGHT: u32 = 16;
     const ROW_BYTES: u32 = 256;
@@ -54,10 +63,21 @@ fn raw_virtual_clusters_rasterize_namespaced_visibility_ids_on_the_real_gpu() {
         .unwrap();
     make_hierarchy_fully_resident(&mut pool, &queue, mesh);
     let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
-    let emitter = GpuVirtualDrawEmitter::new_binned_for_test(&device, &selector).unwrap();
-    assert_eq!(
-        emitter.submission_mode(),
-        VirtualGeometrySubmissionMode::BinnedFallback
+    let emitter = if force_binned {
+        GpuVirtualDrawEmitter::new_binned_for_test(&device, &selector)
+    } else {
+        GpuVirtualDrawEmitter::new(&device, &selector)
+    }
+    .unwrap();
+    if force_binned || device.adapter_info().backend == wgpu::Backend::Dx12 {
+        assert_eq!(
+            emitter.submission_mode(),
+            VirtualGeometrySubmissionMode::BinnedFallback
+        );
+    }
+    eprintln!(
+        "Virtual visibility submission: {:?}",
+        emitter.submission_mode()
     );
     let raster = GpuVirtualVisibilityRaster::new(&device, &pool, &selector, &emitter).unwrap();
     let identity = [
@@ -260,47 +280,50 @@ fn raw_virtual_clusters_rasterize_namespaced_visibility_ids_on_the_real_gpu() {
     );
     let probe_raw = read_gpu_buffer(&device, &queue, &probe_output, probe_bytes);
     let probe: &[VirtualShadingProbeRecord] = bytemuck::cast_slice(&probe_raw);
-    let binned_state_raw = read_gpu_buffer(
-        &device,
-        &queue,
-        emitter.binned_state_buffer().unwrap(),
-        std::mem::size_of::<GpuVirtualBinnedSubmissionState>() as u64,
-    );
-    let binned_state = bytemuck::from_bytes::<GpuVirtualBinnedSubmissionState>(&binned_state_raw);
-    assert_eq!(binned_state.counts[0], 4);
-    assert_eq!(binned_state.offsets[0], 0);
-    assert_eq!(binned_state.cursors[0], 4);
-    assert!(binned_state.counts[1..].iter().all(|count| *count == 0));
-    let (binned_indices, binned_commands) = emitter.binned_buffers().unwrap();
-    let command_raw = read_gpu_buffer(
-        &device,
-        &queue,
-        binned_commands,
-        u64::from(super::draw_emission::BINNED_FALLBACK_DRAW_COUNT)
-            * std::mem::size_of::<GpuVirtualDrawIndirect>() as u64,
-    );
-    let commands: &[GpuVirtualDrawIndirect] = bytemuck::cast_slice(&command_raw);
-    assert_eq!(
-        commands[0],
-        GpuVirtualDrawIndirect {
-            vertex_count: 3,
-            instance_count: 4,
-            first_vertex: 0,
-            first_instance: 0,
-        }
-    );
-    assert!(commands[1..]
-        .iter()
-        .all(|command| command.instance_count == 0));
-    let index_raw = read_gpu_buffer(
-        &device,
-        &queue,
-        binned_indices,
-        u64::from(emitter.draw_capacity()) * std::mem::size_of::<u32>() as u64,
-    );
-    let mut indices = bytemuck::cast_slice::<u8, u32>(&index_raw)[..4].to_vec();
-    indices.sort_unstable();
-    assert_eq!(indices, [0, 1, 2, 3]);
+    if emitter.submission_mode() == VirtualGeometrySubmissionMode::BinnedFallback {
+        let binned_state_raw = read_gpu_buffer(
+            &device,
+            &queue,
+            emitter.binned_state_buffer().unwrap(),
+            std::mem::size_of::<GpuVirtualBinnedSubmissionState>() as u64,
+        );
+        let binned_state =
+            bytemuck::from_bytes::<GpuVirtualBinnedSubmissionState>(&binned_state_raw);
+        assert_eq!(binned_state.counts[0], 4);
+        assert_eq!(binned_state.offsets[0], 0);
+        assert_eq!(binned_state.cursors[0], 4);
+        assert!(binned_state.counts[1..].iter().all(|count| *count == 0));
+        let (binned_indices, binned_commands) = emitter.binned_buffers().unwrap();
+        let command_raw = read_gpu_buffer(
+            &device,
+            &queue,
+            binned_commands,
+            u64::from(super::draw_emission::BINNED_FALLBACK_DRAW_COUNT)
+                * std::mem::size_of::<GpuVirtualDrawIndirect>() as u64,
+        );
+        let commands: &[GpuVirtualDrawIndirect] = bytemuck::cast_slice(&command_raw);
+        assert_eq!(
+            commands[0],
+            GpuVirtualDrawIndirect {
+                vertex_count: 3,
+                instance_count: 4,
+                first_vertex: 0,
+                first_instance: 0,
+            }
+        );
+        assert!(commands[1..]
+            .iter()
+            .all(|command| command.instance_count == 0));
+        let index_raw = read_gpu_buffer(
+            &device,
+            &queue,
+            binned_indices,
+            u64::from(emitter.draw_capacity()) * std::mem::size_of::<u32>() as u64,
+        );
+        let mut indices = bytemuck::cast_slice::<u8, u32>(&index_raw)[..4].to_vec();
+        indices.sort_unstable();
+        assert_eq!(indices, [0, 1, 2, 3]);
+    }
     let mut covered = 0usize;
     let mut background = 0usize;
     for y in 0..HEIGHT {
@@ -355,9 +378,7 @@ fn raw_virtual_clusters_rasterize_namespaced_visibility_ids_on_the_real_gpu() {
     assert!(background > 0);
     assert_eq!(
         raster.counted_submission_supported(),
-        device
-            .features()
-            .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
+        crate::renderer::gpu_driven::supports_indirect_count(&device)
     );
 }
 
@@ -405,12 +426,16 @@ fn production_renderer_constructs_virtual_four_mrt_pipeline_on_the_real_gpu() {
 
 fn try_virtual_pbr_renderer() -> Option<Renderer> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
+        backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all()),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        force_fallback_adapter: std::env::var_os("BLOOM_TEST_FORCE_FALLBACK_ADAPTER").is_some(),
+        ..Default::default()
+    }))
+    .ok()?;
+    eprintln!("GPU oracle adapter: {:?}", adapter.get_info());
     let required = wgpu::Features::PRIMITIVE_INDEX
         | wgpu::Features::INDIRECT_FIRST_INSTANCE
         | crate::renderer::material_indirection::TIER_A_FEATURES;

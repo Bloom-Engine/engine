@@ -46,6 +46,18 @@ pub fn request_features_if_supported(supported: wgpu::Features, required: &mut w
     super::visibility_buffer::request_feature_if_supported(supported, required);
 }
 
+/// Whether counted indirect submission preserves Bloom's draw identities.
+/// wgpu 29's DX12 count path uses the common command signature and loses the
+/// per-command first vertex/instance constants. Ordinary multi-draw uses the
+/// pipeline signature correctly. Keep DX12 on the existing bounded fallback
+/// until the counted path passes the GPU identity oracle with an updated HAL.
+pub(crate) fn supports_indirect_count(device: &wgpu::Device) -> bool {
+    device.adapter_info().backend != wgpu::Backend::Dx12
+        && device
+            .features()
+            .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
+}
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct GeometrySlice {
     pub vertex_offset: u64,
@@ -394,9 +406,7 @@ impl GpuDrivenRenderer {
         let tier_ready = global_material_layout.is_some();
         let enabled =
             cfg!(not(target_arch = "wasm32")) && feature_ready && tier_ready && !forced_off;
-        let count_supported = device
-            .features()
-            .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
+        let count_supported = supports_indirect_count(device);
         let routed_visibility = super::visibility_buffer::requested_mode().shades() && enabled;
         let draw_capacity = 64;
         let draw_buffer = create_draw_buffer(device, draw_capacity);

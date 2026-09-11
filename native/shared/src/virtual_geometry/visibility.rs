@@ -178,7 +178,7 @@ impl GpuVirtualVisibilityRaster {
         Ok(Self {
             selector_id: selector.id(),
             draw_capacity: emitter.draw_capacity(),
-            count_supported: features.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
+            count_supported: crate::renderer::gpu_driven::supports_indirect_count(device),
             frame_buffer,
             bind_group,
             pipeline,
