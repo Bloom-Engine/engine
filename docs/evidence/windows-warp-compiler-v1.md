@@ -37,8 +37,16 @@ The ray-query golden helper retains its deliberate DXC requirement.
 This is a software-renderer CI workaround. The WARP/DXIL access violation remains
 open, and physical DX12/DXC qualification remains required. The ordinary Windows
 engine compiler policy is unchanged. The candidate's library suite passes with
-four threads and explicit FXC (489 passed, one ignored). Complete local shared
-components and hosted validation are still running.
+four threads and explicit FXC (489 passed, one ignored). Complete local
+DX12/DXC and Vulkan shared components pass, including all 93 goldens.
+
+At source `f96af2e`, hosted Tests run 34552411807 passes all 22 jobs, including
+actual Windows shared execution, the native engine build and all 20 example
+links. Hosted Windows goldens skip its CPU adapter and do not qualify physical
+images. The [published report](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-warp-compiler-20260911)
+retains the skips and all original crashes. The expanded physical FXC run also
+exposes four [layered-material compiler failures](windows-fxc-layered-lut-v1.md);
+that separate correction preserves the original rendering assertions.
 
 Diagnostic commands, logs, debugger stacks, executable hashes and results are
 retained in `tools/quality/out/windows-engine-plan/windows-shared-crash/`.
