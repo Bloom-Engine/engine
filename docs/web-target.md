@@ -19,14 +19,15 @@ Game.ts ─(perry --target wasm)──> game WASM  (game logic, base64-embedded
                               Browser: <canvas> + WebGPU + Web Audio + DOM Events
 ```
 
-Both game logic and rendering run in WebAssembly. A thin JS glue layer (`native/web/bloom_glue.js`, spliced into Perry's self-contained HTML by `splice_game.py`) bridges the two modules, handles DOM events, asset fetching, and audio output.
+Both game logic and rendering run in WebAssembly. A thin JS glue layer (`native/web/bloom_glue.js`, spliced into Perry's self-contained HTML by `splice_game.cjs`) bridges the two modules, handles DOM events, asset fetching, and audio output.
 
 ## Building
 
 ### Prerequisites
 
+- Node.js 18 or newer, npm and a Rust toolchain
 - [wasm-pack](https://crates.io/crates/wasm-pack): `cargo install wasm-pack`
-- [Perry compiler](https://github.com/PerryTS/perry): built from source
+- [Perry compiler](https://github.com/PerryTS/perry) on PATH
 - wasm-opt (optional): `cargo install wasm-opt`
 
 ### Quick Build
@@ -36,10 +37,24 @@ npm exec -- bloom-web path/to/game/main.ts --output dist/web
 ```
 
 This runs:
-1. `wasm-pack build` to compile `native/web/` → `pkg/bloom_web_bg.wasm` + `pkg/bloom_web.js` bindings
-2. `wasm-opt -Oz` for binary size optimization (if installed)
-3. `perry main.ts --target wasm` to compile game TypeScript → WASM
-4. Assembles output directory at `dist/web/`
+1. `perry compile main.ts --target wasm` to compile game TypeScript and prepare its engine bootstrap
+2. `wasm-pack build` to compile `native/web/` into fresh WASM and JavaScript bindings
+3. `wasm-opt -Oz` for binary size optimization (if installed)
+4. Assembles the fresh artifacts in `dist/web/`
+
+The packaged command runs directly through Node on Windows, macOS and Linux.
+This portable entry point is part of the upcoming 0.5 branch; npm 0.4.16 still
+uses the earlier Bash entry point.
+It does not require Bash or Python. Paths resolve from the caller's directory,
+and paths containing spaces are passed directly to the tools. The existing
+`native/web/build.sh` entry point delegates to the same command.
+
+Use `--help` without a compiler installed. Missing tools and nonzero compiler
+exits stop the build before assembly; an old `pkg/` cannot satisfy a failed
+build. Set `BLOOM_PERRY`, `BLOOM_WASM_PACK` or `BLOOM_WASM_OPT` to a tool's
+executable path when it is not on PATH. These values are paths, not shell
+commands or argument strings. An explicitly configured optimizer is required;
+an absent default `wasm-opt` is optional.
 
 ### Serve Locally
 
@@ -48,6 +63,9 @@ cd dist/web
 python3 -m http.server 8080
 # Open http://localhost:8080
 ```
+
+On Windows, use `python -m http.server 8080` if Python is installed as `python`.
+Python is only an example HTTP server, not a build dependency.
 
 ## Game Loop
 

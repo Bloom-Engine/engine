@@ -35,6 +35,8 @@ You'll also need:
 - **Perry** — the TypeScript AOT compiler that turns your game into a native binary or WASM module. It also drives the engine's native build.
 - **Rust toolchain** ([rustup.rs](https://rustup.rs)) — Perry invokes Cargo to compile the engine's platform crate the first time you build for each target.
 - For web builds only: [wasm-pack](https://crates.io/crates/wasm-pack) (`cargo install wasm-pack`).
+- The packaged `bloom-web` command uses Node.js 18 or newer. See the
+  [web build guide](docs/web-target.md) for tool paths and Windows serving commands.
 
 ## Quick Start
 
