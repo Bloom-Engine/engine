@@ -1,11 +1,12 @@
 import {
-  initWindow, runGame, closeWindow, clearBackground, setTargetFPS,
+  initWindow, runGameLifecycle, closeWindow, clearBackground, setTargetFPS,
   setDirect2DMode, getScreenWidth, getScreenHeight, readFile, Colors,
 } from "@bloomengine/engine/core";
 import { drawRect } from "@bloomengine/engine/shapes";
 import { drawText } from "@bloomengine/engine/text";
 
 let elapsed = 0;
+let previousElapsed = 0;
 let greeting = "";
 
 function init(): void {
@@ -16,14 +17,19 @@ function init(): void {
   if (greeting.length === 0) throw new Error("Missing starter asset: assets/welcome.txt");
 }
 
-function update(dt: number): void {
-  // Variable update, with a cap on time accumulated while a tab is hidden.
-  elapsed = elapsed + Math.min(dt, 0.1);
+function fixedUpdate(dt: number): void {
+  previousElapsed = elapsed;
+  elapsed = elapsed + dt;
 }
 
-function draw(): void {
+function update(_dt: number): void {
+  // Read per-frame input and update non-simulation state here.
+}
+
+function draw(alpha: number): void {
   clearBackground(Colors.BLACK);
-  const x = getScreenWidth() / 2 - 32 + Math.sin(elapsed) * 80;
+  const displayTime = previousElapsed + (elapsed - previousElapsed) * alpha;
+  const x = getScreenWidth() / 2 - 32 + Math.sin(displayTime) * 80;
   drawRect(x, getScreenHeight() / 2 - 32, 64, 64, Colors.WHITE);
   drawText(greeting, 24, 24, 24, Colors.WHITE);
 }
@@ -33,5 +39,4 @@ function cleanup(): void {
   closeWindow();
 }
 
-init();
-runGame((dt) => { update(dt); draw(); }, cleanup);
+runGameLifecycle({ init, fixedUpdate, update, draw, cleanup });

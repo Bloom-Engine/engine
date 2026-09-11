@@ -30,7 +30,7 @@ export {
   ColorConstants, Colors, Key, MouseButton,
   injectKeyDown, injectKeyUp, isAnyInputPressed, getPlatform, isMobile, isTV, Platform,
   injectGamepadAxis, injectGamepadButtonDown, injectGamepadButtonUp,
-  runGame,
+  runGame, runGameLifecycle, FixedStepClock,
   setProfilerEnabled, getProfilerFrameCpuUs, getProfilerFrameGpuUs,
   printProfilerSummary, getProfilerOverlay, getProfilerFrameHistory,
   getMaterialBindingCapabilities, getRendererCapabilities, getImportedRefractionMode,
@@ -41,6 +41,7 @@ export {
 } from './core/index';
 
 export type {
+  GameLifecycle, GameLoopOptions,
   Rect, Camera2D, Camera3D,
   Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4,
   RayHit, FrustumPlanes,

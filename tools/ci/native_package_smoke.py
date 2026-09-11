@@ -18,6 +18,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from tools.quality.khronos_materials import png_rgb  # noqa: E402
+from tools.ci.fixed_step_smoke import validate_game_lifecycle  # noqa: E402
 
 
 def npm_command() -> list[str]:
@@ -54,14 +55,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, default=ROOT / "target/ci/native-package")
     parser.add_argument("--backend", choices=["dx12", "vulkan"], action="append")
-    parser.add_argument("--mode", choices=["scene", "direct-2d"], action="append")
+    parser.add_argument("--mode", choices=["scene", "direct-2d", "lifecycle"], action="append")
     args = parser.parse_args()
     if os.name != "nt":
         parser.error("this installed-package smoke currently supports Windows")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    report = {"schema": "bloom-native-package-smoke-v3", "status": "running", "commands": [], "frames": [], "binaries": [],
-              "scope": "Installed source package, native headless renderer and Jolt; window presentation and packaged DXC remain separate."}
+    report = {"schema": "bloom-native-package-smoke-v4", "status": "running", "commands": [], "frames": [], "binaries": [],
+              "scope": "Installed headless rendering; scene/direct-2D modes exercise Jolt and lifecycle mode checks hooks. Window presentation and packaged DXC remain separate."}
 
     def save() -> None:
         (out / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -104,6 +105,8 @@ def main() -> int:
         report["compiler_version"] = run("perry-version", [compiler, "--version"], ROOT, env, 30).strip()
         report["compiler_sha256"] = hashlib.sha256(Path(compiler).read_bytes()).hexdigest()
         report["source_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        report["source_dirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT))
+        report["selected_modes"] = args.mode or ["scene", "direct-2d", "lifecycle"]
         npm = npm_command()
         packed = json.loads(run("pack", npm + ["pack", "--json", "--ignore-scripts", "--pack-destination", str(temporary)], ROOT, env, 120))[0]
         archive = temporary / packed["filename"]
@@ -121,7 +124,8 @@ def main() -> int:
         report["installed_source_sha256"] = {
             name: hashlib.sha256((installed / name).read_bytes()).hexdigest()
             for name in ("native/shared/src/renderer/mod.rs", "native/shared/src/renderer/direct_frame.rs",
-                         "native/shared/src/renderer/quality_capture.rs")
+                         "native/shared/src/renderer/quality_capture.rs", "src/core/index.ts",
+                         "src/core/fixed_step.ts", "src/core/game_lifecycle.ts", "src/core/numbers.ts")
         }
         jolt = project / "node_modules/@bloomengine/jolt-prebuilt"
         report["jolt_version"] = json.loads((jolt / "package.json").read_text())["version"]
@@ -132,8 +136,10 @@ def main() -> int:
         if fixture_text.count(mode_marker) != 1:
             raise RuntimeError("native fixture must have exactly one render-mode marker")
         ctypes.windll.kernel32.SetErrorMode(0x0002 | 0x8000)
-        for mode in args.mode or ["scene", "direct-2d"]:
+        for mode in args.mode or ["scene", "direct-2d", "lifecycle"]:
             entry = fixture_text.replace(mode_marker, "const BLOOM_SMOKE_DIRECT_2D = " + ("true;" if mode == "direct-2d" else "false;"))
+            if mode == "lifecycle":
+                entry = (ROOT / "tools/ci/fixtures/compiled-web.ts").read_text(encoding="utf-8")
             (project / "main.ts").write_text(entry, encoding="utf-8")
             binary = temporary / f"native-smoke-{mode}.exe"
             run("compile-" + mode, [compiler, "compile", "main.ts", "-o", str(binary)], project, env, 1800)
@@ -161,10 +167,15 @@ def main() -> int:
                     raise RuntimeError("native startup exited without its required frame capture")
                 capture = out / f"{name}.png"
                 shutil.copyfile(png, capture)
-                report["frames"].append({"mode": mode, "backend": backend, "cleanup_count": 1, **check_frame(capture)})
+                frame = {"mode": mode, "backend": backend, "cleanup_count": 1, **check_frame(capture)}
+                if mode == "lifecycle":
+                    observation = run_dir / "compiled-web-lifecycle"
+                    frame["lifecycle"] = validate_game_lifecycle(observation.read_text(encoding="utf-8"))
+                    shutil.copyfile(observation, out / f"{name}.lifecycle.txt")
+                report["frames"].append(frame)
                 save()
         report["status"] = "pass"
-        print("PASS: installed native package links, simulates Jolt, and renders its exact frame.")
+        print("PASS: selected installed native modes link, render the exact frame and complete their required callbacks.")
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         report.update(status="fail", error=str(exc))

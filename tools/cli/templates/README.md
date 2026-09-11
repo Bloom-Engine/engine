@@ -29,15 +29,18 @@ platform SDK and packaging flow. Release builds omit Perry's debug-symbol flag;
 this command does not sign, install or publish a distributable release.
 
 Edit `main.ts`, stop and rerun the command to rebuild. There is no automatic hot
-reload yet. The template has init, variable update, draw and cleanup functions.
+reload yet. The template has init, fixed update, variable update, draw and cleanup
+functions. Fixed updates run at 60 Hz with at most eight ticks per frame; excess
+backlog is dropped. Draw interpolates between the previous and current tick.
 Cleanup runs after the final frame during normal shutdown. Focus loss does not
-automatically pause the game; the template caps its variable delta at 0.1 seconds.
-Fixed update and recovery after device loss are separate engine work.
+automatically pause the game; the lifecycle caps variable delta at 0.25 seconds.
+Recovery after device loss remains separate engine work.
 
 `assets/welcome.txt` demonstrates loading the same asset on native and web. Asset
 paths are relative to the project and are copied beside the generated binary or
 web page. Keep runtime resource disposal in `cleanup`. Do not put another
-beginDrawing/endDrawing pair inside the runGame callback.
+beginDrawing/endDrawing pair inside lifecycle hooks. Hooks use closures or free
+functions; they do not receive a bound `this` object.
 
 Missing prerequisites, incompatible versions and manifest errors stop the build.
 Native failures retain the compiler's output; browser startup failures appear in

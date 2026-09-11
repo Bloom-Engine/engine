@@ -287,6 +287,8 @@ run_component() {
         tools/ci/compile_web_game.py \
         tools/ci/compiled_web_smoke.py \
         tools/ci/test_compiled_web_smoke.py \
+        tools/ci/fixed_step_smoke.py \
+        tools/ci/test_fixed_step_smoke.py \
         tools/ci/test_compile_examples.py
       "$python_cmd" -m unittest \
         tools/quality/test_run.py \
@@ -300,6 +302,7 @@ run_component() {
         tools/ci/test_web_smoke.py \
         tools/ci/test_compile_examples.py \
         tools/ci/test_compiled_web_smoke.py \
+        tools/ci/test_fixed_step_smoke.py \
         -v
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
