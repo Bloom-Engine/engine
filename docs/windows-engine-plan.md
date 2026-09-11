@@ -17,7 +17,7 @@ first nine-scene Radeon evidence are in draft PR #154. Follow-up work starts at
 | #127 Vulkan PT correctness | Three deterministic progressive and motion runs, both negative controls, finite intermediates, reset/lighting/rigid-motion checks, retained report | Canonical hardware gate, all four focused temporal tests, and CPU reference sanity check pass on Radeon/Vulkan; [report](evidence/issue-127-windows-vulkan-v1.md) and [raw evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-155-windows-vulkan-20260910) published |
 | #128 Windows image discrepancies | Identify the first incorrect stage or document a reviewed backend-specific baseline decision; rerun the full strict corpus and reproducibility checks | Cutout and surface corrections pass all nine Radeon images. At #159 source `d610d6a`, full runs 2 and 3 pass every configured check and reproduce 257 artifacts byte-identically with matching metadata and timing differences inside existing noise bounds. Earlier invalid runs retain their failures; named hardware acceptance remains separate |
 | #135 / #149 temporal reconstruction | Enforced motion/producer/quality-preset corpus, representative scenes, fractional/native and frozen A/B timing, memory/resize checks, platform evidence | Device/resource, stationary SSGI, and profiler fixes are retained. The surface correction passes original HD startup limits and 154,720 analytic receiver checks on Vulkan, DX12, and hosted Metal; 93 local goldens pass, including lighting recovery. The full Radeon corpus passes twice. Wider representative scenes, frozen A/B performance, memory/resize, and platform acceptance remain open |
-| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | #160 fixes silent Windows CI non-execution and MSVC PATH ordering. #161 passes the actual native engine build and all 20 native links locally and in hosted CI; [evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-windows-examples-20260911) is published. Two real DX12 shared-test failures and an earlier access violation remain under investigation. Release startup/install acceptance remains open |
+| #140 integration gates | Same required local/hosted lanes pass on exact source; release package startup and all-example evidence | #160 fixes silent Windows CI non-execution and MSVC PATH ordering. #161 passes the actual native engine build and all 20 native links locally and in hosted CI; [evidence](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-windows-examples-20260911) is published. Draft #162 corrects the two focused DX12 GPU failures and passes the complete Vulkan shared component. Hosted Windows still crashes with an access violation; the expanded local DX12 goldens expose a separate camera-history reset defect. Release startup/install acceptance remains open |
 | #138 capability fallback | Actual constrained-adapter startup and relevant forced-tier corpus, truthful capability outputs | Existing implementation/evidence preserved; physical constrained-limit acceptance still needs proof |
 | PR integration | Reviewable changes, passing required checks, full issue evidence, merge-ready rendering branch | #147 and the stacked fixes #154–#159 remain drafts; no merge performed |
 
@@ -58,8 +58,12 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    [CI and example correction](evidence/windows-example-ci-v1.md) explicitly
    selects Bash, restores the MSVC linker ahead of Git's tools, and requires
    execution-summary artifacts. The hosted native build passes at `636b69a`.
-   The shared suite exposes two DX12 GPU failures and a process crash; both
-   focused GPU failures also reproduce locally under DX12 and remain open.
+   Draft #162 corrects the two focused DX12 failures and passes the complete
+   Vulkan shared component. Hosted Windows still hits an access violation.
+   The expanded local DX12 goldens expose a [camera-history reset defect](evidence/windows-camera-history-v1.md);
+   its read guard passes exact fresh/reset comparisons after eight and 40
+   history frames on Vulkan and DX12. Both complete local shared components
+   now pass, including all 93 goldens; hosted validation remains required.
 2. Finish all-example native linking, real starter/example startup, and clean
    Windows installation. The [native example gate](evidence/windows-example-gate-v1.md)
    passes all 20 links locally using Perry 0.5.1220 and one matching source-built

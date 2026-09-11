@@ -628,14 +628,17 @@ fn camera_motion_sequence_bounds_ghosting_flicker_and_cut_residue() {
     let new_angle = 0.65;
     eng.renderer.reset_temporal_history();
     let fresh_new_pose = capture(&mut eng, new_angle, 58.0);
-    advance(&mut eng, 8, old_angle, 42.0);
-    eng.renderer.reset_temporal_history();
-    let cut_new_pose = capture(&mut eng, new_angle, 58.0);
-    let cut_metrics = calculate_diff_metrics(&fresh_new_pose, &cut_new_pose, W, H);
-    assert_eq!(
-        cut_metrics.max_diff, 0,
-        "an explicit camera cut retained pixels from the prior camera"
-    );
+    // Cover both the initial confidence ramp and a fully settled old epoch.
+    for warmup_frames in [8, 40] {
+        advance(&mut eng, warmup_frames, old_angle, 42.0);
+        eng.renderer.reset_temporal_history();
+        let cut_new_pose = capture(&mut eng, new_angle, 58.0);
+        let cut_metrics = calculate_diff_metrics(&fresh_new_pose, &cut_new_pose, W, H);
+        assert_eq!(
+            cut_metrics.max_diff, 0,
+            "an explicit camera cut retained pixels after {warmup_frames} history frames"
+        );
+    }
 
     // A projection-only jump is currently remapped through the common motion
     // vectors rather than automatically invalidated. Compare it with a fresh
