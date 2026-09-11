@@ -403,10 +403,14 @@ fn layered_sheen_visibility(
 }
 
 fn layered_sheen_directional_albedo(n_dot: f32, roughness: f32) -> f32 {
-    return textureSample(
+    // This lookup table has one mip. Direct-light loops can have varying
+    // iteration counts, so avoid the implicit derivatives that force FXC to
+    // unroll those loops when sampling it.
+    return textureSampleLevel(
         layered_sheen_albedo_tex,
         layered_sampler,
         vec2<f32>(clamp(n_dot, 0.0, 1.0), clamp(roughness, 0.0, 1.0)),
+        0.0,
     ).r;
 }
 
