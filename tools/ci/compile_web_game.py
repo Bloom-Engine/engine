@@ -10,10 +10,24 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
 VERSION = "perry 0.5.1220"
+sys.path.insert(0, str(ROOT))
+from tools.ci.native_package_smoke import npm_command
+
+
+def validate_compilation(log, imports):
+    if "Could not resolve import" in log:
+        raise RuntimeError("Perry could not resolve a game import; a zero compiler exit is insufficient")
+    required = {"bloom_init_window", "bloom_set_target_fps", "bloom_set_direct_2d_mode",
+                "bloom_run_game_with_cleanup", "bloom_write_file", "bloom_draw_rect"}
+    actual = {item["name"] for item in imports if item["module"] == "ffi"}
+    missing = required - actual
+    if missing:
+        raise RuntimeError(f"compiled game is missing required engine FFI imports: {sorted(missing)}")
 
 
 def main() -> int:
@@ -48,6 +62,16 @@ def main() -> int:
 
     save()
     try:
+        # Perry does not resolve package self-references from an arbitrary
+        # source folder. Install an explicit local dependency for this project.
+        manifest = {"name": "bloom-compiled-web-fixture", "private": True,
+                    "dependencies": {"@bloomengine/engine": "file:" + os.path.relpath(ROOT, entries).replace(os.sep, "/")},
+                    "perry": {"allow": {"nativeLibrary": ["@bloomengine/engine", "@bloomengine/engine/*"]}}}
+        (entries / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        run("fixture-install", npm_command() + ["install", "--prefix", str(entries), "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "--install-links=false"])
+        dependency = entries / "node_modules/@bloomengine/engine"
+        if dependency.resolve() != ROOT.resolve():
+            raise RuntimeError("compiled fixture dependency must resolve to this exact engine checkout")
         run("perry-version", [args.perry, "--version"])
         report["compiler_version"] = (out / "perry-version.log").read_text(encoding="utf-8").strip()
         if report["compiler_version"] != VERSION:
@@ -69,10 +93,17 @@ def main() -> int:
             wasm = base64.b64decode(match[1], validate=True)
             if not wasm.startswith(b"\0asm"):
                 raise RuntimeError(f"{name}: invalid game WASM header")
+            wasm_path = out / f"{name}.game.wasm"
+            wasm_path.write_bytes(wasm)
+            inspect = "const fs=require('node:fs');process.stdout.write(JSON.stringify(WebAssembly.Module.imports(new WebAssembly.Module(fs.readFileSync(process.argv[1])))));"
+            run(name + "-imports", ["node", "-e", inspect, str(wasm_path)])
+            imports = json.loads((out / f"{name}-imports.log").read_text(encoding="utf-8"))
+            validate_compilation((out / f"{name}-compile.log").read_text(encoding="utf-8", errors="replace"), imports)
             run(name + "-splice", ["node", str(ROOT / "native/web/splice_game.cjs"), str(raw), str(page)])
             report["pages"].append({"name": name, "entry_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
                                      "game_wasm_sha256": hashlib.sha256(wasm).hexdigest(), "game_wasm_bytes": len(wasm),
                                      "html_sha256": hashlib.sha256(page.read_bytes()).hexdigest(),
+                                     "engine_ffi_imports": sorted(item["name"] for item in imports if item["module"] == "ffi"),
                                      "expected_startup_failure": fails})
         report["status"] = "pass"
         print("PASS: compiled and spliced actual Perry startup and failure-control pages")

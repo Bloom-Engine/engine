@@ -81,6 +81,9 @@ jobs:
           # physical DX12/DXC qualification remains a separate requirement.
           "WGPU_BACKEND=dx12" >> $env:GITHUB_ENV
           "WGPU_DX12_COMPILER=fxc" >> $env:GITHUB_ENV
+          # A later FXC run also crashed under concurrent unit tests. Keep
+          # every test and assertion, but serialize this hosted Windows lane.
+          "RUST_TEST_THREADS=1" >> $env:GITHUB_ENV
 
       - name: quick / shared-tests
         # Retain adapter identities and capability skips even when Rust reports

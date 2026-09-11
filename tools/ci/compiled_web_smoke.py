@@ -23,13 +23,41 @@ from tools.ci.web_smoke import QuietHandler, DevTools, browser_path, devtools_ta
 MONITOR = """
 (() => {
 globalThis.__compiledGameErrors = [];
+globalThis.__compiledGameLog = [];
 const describe = (value) => String(value?.stack || value).slice(0, 16384);
 const record = (value) => { if (__compiledGameErrors.length < 32) __compiledGameErrors.push(describe(value)); };
 const originalError = console.error;
 console.error = (...args) => { record(args.map(describe).join(' ')); originalError.apply(console, args); };
+for (const level of ['log', 'warn']) {
+  const original = console[level];
+  console[level] = (...args) => {
+    if (__compiledGameLog.length < 100) __compiledGameLog.push(level + ': ' + args.map(describe).join(' '));
+    original.apply(console, args);
+  };
+}
 addEventListener('error', (event) => record(event.error || event.message || 'script load error'));
 addEventListener('unhandledrejection', (event) => record(event.reason));
 globalThis.__joltFactory = async () => { throw new Error('physics omitted in compiled render smoke'); };
+// Inject a startup trap at a real compiled-game FFI call. The original write
+// records entry into the control before the exception crosses back into WASM.
+let ffiImports;
+Object.defineProperty(globalThis, '__ffiImports', {
+  configurable: true,
+  get: () => ffiImports,
+  set: (value) => {
+    const write = value.bloom_write_file;
+    if (typeof write === 'function') {
+      value.bloom_write_file = (...args) => {
+        const result = write(...args);
+        if (args[0] === 'compiled-web-expected-fault') {
+          throw new WebAssembly.RuntimeError('BLOOM_EXPECTED_STARTUP_FAILURE');
+        }
+        return result;
+      };
+    }
+    ffiImports = value;
+  },
+});
 if (globalThis.GPU) {
   const request = GPU.prototype.requestAdapter;
   GPU.prototype.requestAdapter = async function(...args) {
@@ -53,7 +81,7 @@ def validate_state(name, state):
     if name == "game":
         if state["errors"] or state["frames"] != "8" or state["cleanups"] != "1":
             raise RuntimeError(f"compiled game failed startup/frame/cleanup acceptance: {state}")
-    elif state["expectedFault"] != "BLOOM_EXPECTED_STARTUP_FAILURE" or not state["errors"] or state["frames"] is not None or state["cleanups"] is not None:
+    elif state["expectedFault"] != "BLOOM_EXPECTED_STARTUP_FAILURE" or not any("RuntimeError: BLOOM_EXPECTED_STARTUP_FAILURE" in error for error in state["errors"]) or state["frames"] is not None or state["cleanups"] is not None:
         raise RuntimeError(f"intentional compiled startup failure was not rejected: {state}")
 
 
@@ -137,6 +165,10 @@ def main() -> int:
                   cleanups: localStorage.getItem('bloom_fs:compiled-web-cleanups'),
                   expectedFault: localStorage.getItem('bloom_fs:compiled-web-expected-fault'),
                   errors: globalThis.__compiledGameErrors || [],
+                  logs: globalThis.__compiledGameLog || [],
+                  loading: document.getElementById('loading')?.textContent || null,
+                  rootText: document.getElementById('perry-root')?.textContent?.slice(0, 4096) || null,
+                  ffiCount: Object.keys(globalThis.__ffiImports || {}).length,
                 }); })()""")
                 if isinstance(state, dict) and (state["errors"] or state["cleanups"] is not None):
                     break
@@ -162,6 +194,12 @@ def main() -> int:
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, StopIteration, subprocess.SubprocessError) as exc:
         report["status"] = "fail"
         report["failures"].append(str(exc))
+        if devtools is not None:
+            try:
+                capture = devtools.call("Page.captureScreenshot", {"format": "png", "fromSurface": True})
+                (out / "failure.png").write_bytes(base64.b64decode(capture["data"]))
+            except (OSError, ValueError, RuntimeError, KeyError) as capture_error:
+                report["failure_capture_error"] = str(capture_error)
         print(f"FAIL: {exc}")
         return 1
     finally:

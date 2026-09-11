@@ -6,8 +6,10 @@ import { drawRect } from "@bloomengine/engine/shapes";
 
 const BLOOM_SMOKE_FAIL_STARTUP = false;
 if (BLOOM_SMOKE_FAIL_STARTUP) {
+  // The browser acceptance monitor records this real FFI call and injects a
+  // WebAssembly.RuntimeError across its return boundary. This is a fault
+  // injection control; the normal game never writes this marker.
   writeFile("compiled-web-expected-fault", "BLOOM_EXPECTED_STARTUP_FAILURE");
-  throw new Error("BLOOM_EXPECTED_STARTUP_FAILURE");
 }
 
 initWindow(128, 128, "Bloom compiled web startup");
