@@ -75,8 +75,11 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    exact scene/direct-2D frames and simulate Jolt locally and in hosted CI.
    [Shared cleanup, corrected example palettes and Pong pause replay](evidence/windows-game-cleanup-v1.md)
    are [published at #169](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-starter-lifecycle-20260911).
-   All 20 canonical native examples link. Project creation/build/run commands,
-   all-example web/runtime acceptance, fixed updates, visible native presentation,
+   All 20 canonical native examples link. The [starter command](starter.md)
+   creates a project from an installed package; its unmodified native/web builds
+   and bounded native greeting/asset/cleanup run pass locally. Default creation
+   now carries the exact engine archive, with hosted packaging checks pending.
+   All-example web/runtime acceptance, fixed updates, visible native presentation,
    packaged DXC/DXIL and general Windows long-path support remain incomplete.
 4. **Complete wider graphics and performance acceptance.**
    [Two strict full Radeon runs at #159](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-ssgi-surface-20260911)

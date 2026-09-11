@@ -226,6 +226,7 @@ run_component() {
     contracts)
       hr "CI command inventory"
       node tools/check-ci-contract.js
+      node --test tools/ci/test_starter_cli.cjs
       hr "FFI/schema parity"
       node tools/validate-ffi.js
       hr "documentation and package contracts"
