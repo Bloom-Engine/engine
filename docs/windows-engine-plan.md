@@ -63,7 +63,12 @@ audit are saved in `tools/quality/out/windows-engine-plan/plan-requirements.json
    The expanded local DX12 goldens expose a [camera-history reset defect](evidence/windows-camera-history-v1.md);
    its read guard passes exact fresh/reset comparisons after eight and 40
    history frames on Vulkan and DX12. Both complete local shared components
-   now pass, including all 93 goldens; hosted validation remains required.
+   now pass, including all 93 goldens. Hosted #163 also passes all 93 macOS
+   goldens and the expanded cut check; its [evidence is published](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-camera-history-20260911).
+   The Windows library crash reproduces locally inside WARP's DXIL shader
+   optimizer during concurrent traversal tests. An [explicit FXC hosted lane](evidence/windows-warp-compiler-v1.md)
+   and consistent test compiler selection are being validated. The underlying
+   WARP/DXIL defect and physical DX12/DXC acceptance remain separate.
 2. Finish all-example native linking, real starter/example startup, and clean
    Windows installation. The [native example gate](evidence/windows-example-gate-v1.md)
    passes all 20 links locally using Perry 0.5.1220 and one matching source-built

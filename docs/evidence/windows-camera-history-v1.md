@@ -51,11 +51,15 @@ ignored goldens, and two ignored documentation examples retain their status.
 Formatting, strict Clippy policy, and repository contracts also pass. The DX12
 run uses a process-local Vulkan loader override for older helper functions;
 some of those helpers explicitly use software adapters. The golden captures
-require a physical GPU and identify the Radeon/backend. Hosted validation is
-pending. The Windows hosted library access violation is separate and
-remains unresolved. This advances #135/#149/#140 without closing the wider
+require a physical GPU and identify the Radeon/backend. Hosted #163 passes the
+macOS shared suite, including all 93 goldens and the expanded camera-cut test,
+plus canonical Metal captures. Windows native builds and all 20 example links
+pass; its shared library stage still crashes before goldens. That access
+violation is separate and remains unresolved. This advances #135/#149/#140 without closing the wider
 performance, platform, representative-corpus, or hardware requirements.
 
 Source patches, commands, exact RGBA/PNG captures, changed-pixel coordinates,
 and results are retained under
 `tools/quality/out/windows-engine-plan/camera-cut-dx12/`.
+The [published archive](https://github.com/Bloom-Engine/engine/releases/tag/quality-evidence-camera-history-20260911)
+includes exact source-match receipts and the failed Windows hosted log.
