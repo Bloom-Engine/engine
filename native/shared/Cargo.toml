@@ -43,6 +43,8 @@ image-extras = [
 
 [build-dependencies]
 cmake = "0.1"
+# build.rs generates the BRDF table with the renderer's own generator
+half = "2"
 
 [dependencies]
 bloom-geometry-format = { path = "../../crates/bloom-geometry-format", optional = true }

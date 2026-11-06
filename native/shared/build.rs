@@ -4,9 +4,23 @@
 //! the `bloom_jolt` C++ shim (and JoltPhysics, via its own CMakeLists) via the
 //! `cmake` crate and emits link directives so rustc picks up both archives.
 
+// The split-sum BRDF table is a constant: generate it here, once per build,
+// instead of in every app's startup (see src/renderer/brdf_lut.rs).
+#[path = "src/renderer/brdf_lut.rs"]
+mod brdf_lut;
+
+fn write_brdf_lut() {
+    println!("cargo:rerun-if-changed=src/renderer/brdf_lut.rs");
+    let texels = brdf_lut::build_brdf_lut(brdf_lut::BRDF_LUT_SIZE);
+    let bytes: Vec<u8> = texels.iter().flat_map(|t| t.to_le_bytes()).collect();
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("brdf_lut.bin");
+    std::fs::write(&out, bytes).expect("write brdf_lut.bin");
+}
+
 fn main() {
     // Always re-run when these change.
     println!("cargo:rerun-if-changed=build.rs");
+    write_brdf_lut();
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_JOLT");
 
     // SH-055 — `fold_scene_inputs` cfg. GPUs that cap `maxBindGroups` at 4 —

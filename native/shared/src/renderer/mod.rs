@@ -70,6 +70,7 @@ mod gi_bake;
 mod glsl_render_target;
 pub mod gpu_driven;
 mod hiz;
+pub(crate) mod lazy_pipeline;
 mod immediate_draw3d;
 mod immediate_motion;
 mod layered_pbr;
@@ -155,7 +156,10 @@ pub use util::{
 };
 
 mod brdf_lut;
-use brdf_lut::build_brdf_lut;
+use lazy_pipeline::{LazyComputePipeline, LazyRenderPipeline};
+
+/// The split-sum BRDF table, generated at build time (build.rs).
+const BRDF_LUT_BAKED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/brdf_lut.bin"));
 mod atmosphere_lut;
 pub mod capabilities;
 pub mod device_negotiation;
@@ -507,8 +511,8 @@ pub struct Renderer {
     pub logical_width: u32,
     pub logical_height: u32,
 
-    pipeline_2d: wgpu::RenderPipeline,
-    pipeline_3d: wgpu::RenderPipeline,
+    pipeline_2d: LazyRenderPipeline,
+    pipeline_3d: LazyRenderPipeline,
     custom_pipelines: Vec<wgpu::RenderPipeline>,
 
     // 2D uniforms (multiple slots for mode switching)
@@ -592,7 +596,7 @@ pub struct Renderer {
     /// TAA-off source) so atmospherics stay consistent across paths.
     pub composed_rt_texture: wgpu::Texture,
     pub composed_rt_view: wgpu::TextureView,
-    pub scene_compose_pipeline: wgpu::RenderPipeline,
+    pub scene_compose_pipeline: LazyRenderPipeline,
     pub scene_compose_layout: wgpu::BindGroupLayout,
     pub scene_compose_uniform_buffer: wgpu::Buffer,
     scene_compose_bind_group_cache:
@@ -602,7 +606,7 @@ pub struct Renderer {
     /// linear-rgb (sRGB hardware encode handles the transfer fn).
     /// Now also samples bloom_chain[0] and additively merges before
     /// the tonemap.
-    pub composite_pipeline: wgpu::RenderPipeline,
+    pub composite_pipeline: LazyRenderPipeline,
     pub composite_layout: wgpu::BindGroupLayout,
     pub composite_sampler: wgpu::Sampler,
     composite_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::CompositeSource::COUNT * 2],
@@ -645,7 +649,7 @@ pub struct Renderer {
     pub exposure_history_valid: bool,
     /// Per-frame producer bit; only written exposure may advance ping-pong.
     exposure_history_written: bool,
-    pub exposure_pipeline: wgpu::RenderPipeline,
+    pub exposure_pipeline: LazyRenderPipeline,
     pub exposure_layout: wgpu::BindGroupLayout,
     pub exposure_uniform_buffer: wgpu::Buffer,
     exposure_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::CompositeSource::COUNT * 2],
@@ -659,9 +663,9 @@ pub struct Renderer {
     pub bloom_chain_textures: Vec<wgpu::Texture>,
     pub bloom_mip_views: Vec<wgpu::TextureView>,
     pub bloom_full_view: wgpu::TextureView,
-    pub bloom_pipeline_threshold_downsample: wgpu::RenderPipeline,
-    pub bloom_pipeline_downsample: wgpu::RenderPipeline,
-    pub bloom_pipeline_upsample: wgpu::RenderPipeline,
+    pub bloom_pipeline_threshold_downsample: LazyRenderPipeline,
+    pub bloom_pipeline_downsample: LazyRenderPipeline,
+    pub bloom_pipeline_upsample: LazyRenderPipeline,
     pub bloom_layout: wgpu::BindGroupLayout,
     /// One stable uniform buffer and bind group per bloom pass. Keeping
     /// these persistent avoids allocating Metal buffers/argument tables on
@@ -688,7 +692,7 @@ pub struct Renderer {
     /// crevices.
     pub ssao_rt_texture: wgpu::Texture,
     pub ssao_rt_view: wgpu::TextureView,
-    pub ssao_pipeline: wgpu::ComputePipeline,
+    pub ssao_pipeline: LazyComputePipeline,
     pub ssao_layout: wgpu::BindGroupLayout,
     pub ssao_uniform_buffer: wgpu::Buffer,
     pub ssao_depth_sampler: wgpu::Sampler,
@@ -701,10 +705,10 @@ pub struct Renderer {
     pub hiz_textures: Vec<wgpu::Texture>,
     pub hiz_views: Vec<wgpu::TextureView>,
     pub hiz_sampler: wgpu::Sampler,
-    pub hiz_linearize_pipeline: wgpu::ComputePipeline,
+    pub hiz_linearize_pipeline: LazyComputePipeline,
     pub hiz_linearize_layout: wgpu::BindGroupLayout,
     pub hiz_linearize_uniform_buffer: wgpu::Buffer,
-    pub hiz_downsample_pipeline: wgpu::ComputePipeline,
+    pub hiz_downsample_pipeline: LazyComputePipeline,
     pub hiz_downsample_layout: wgpu::BindGroupLayout,
     pub hiz_downsample_uniform_buffers: Vec<wgpu::Buffer>,
     hiz_linearize_bg_cache: Option<wgpu::BindGroup>,
@@ -717,7 +721,7 @@ pub struct Renderer {
     /// The TAA pass then samples ssao_blur_rt instead of ssao_rt.
     pub ssao_blur_rt_texture: wgpu::Texture,
     pub ssao_blur_rt_view: wgpu::TextureView,
-    pub ssao_blur_pipeline: wgpu::RenderPipeline,
+    pub ssao_blur_pipeline: LazyRenderPipeline,
     pub ssao_blur_layout: wgpu::BindGroupLayout,
     pub ssao_blur_uniform_buffer: wgpu::Buffer,
     /// Strength multiplier for SSAO (0 = off, 1 = full). Default 1.0.
@@ -774,7 +778,7 @@ pub struct Renderer {
     pub taa_depth_history_textures: [wgpu::Texture; 2],
     pub taa_depth_history_views: [wgpu::TextureView; 2],
     pub taa_current_idx: usize,
-    pub taa_pipeline: wgpu::RenderPipeline,
+    pub taa_pipeline: LazyRenderPipeline,
     pub taa_layout: wgpu::BindGroupLayout,
     pub taa_uniform_buffer: wgpu::Buffer,
     taa_bind_group_cache: [Option<wgpu::BindGroup>; 2],
@@ -889,7 +893,7 @@ pub struct Renderer {
     /// Half-res HDR SSR output, composited into the final image by TAA.
     pub ssr_rt_texture: wgpu::Texture,
     pub ssr_rt_view: wgpu::TextureView,
-    pub ssr_pipeline: wgpu::RenderPipeline,
+    pub ssr_pipeline: LazyRenderPipeline,
     pub ssr_layout: wgpu::BindGroupLayout,
     pub ssr_uniform_buffer: wgpu::Buffer,
     /// SSR strength (0 = off, 1 = full). The conservative 0.5 default avoids
@@ -906,7 +910,7 @@ pub struct Renderer {
     /// False after resize, feature/mode transitions, or parameter changes.
     /// The next temporal pass then replaces history instead of blending it.
     pub ssr_history_valid: bool,
-    pub ssr_temporal_pipeline: wgpu::RenderPipeline,
+    pub ssr_temporal_pipeline: LazyRenderPipeline,
     pub ssr_temporal_layout: wgpu::BindGroupLayout,
     pub ssr_temporal_uniform_buffer: wgpu::Buffer,
     ssr_temporal_bind_group_cache: [Option<wgpu::BindGroup>; 2],
@@ -1002,12 +1006,12 @@ pub struct Renderer {
     /// glass/card metadata.
     tlas_instance_data_count: u32,
 
-    pub probe_place_pipeline: wgpu::ComputePipeline,
+    pub probe_place_pipeline: LazyComputePipeline,
     pub probe_place_layout: wgpu::BindGroupLayout,
     pub probe_place_uniform: wgpu::Buffer,
     probe_place_bg_cache: Option<wgpu::BindGroup>,
 
-    pub probe_trace_pipeline: wgpu::ComputePipeline,
+    pub probe_trace_pipeline: LazyComputePipeline,
     pub probe_trace_layout: wgpu::BindGroupLayout,
     pub probe_trace_uniform: wgpu::Buffer,
     probe_trace_bg_cache: [Option<wgpu::BindGroup>; 2],
@@ -1016,7 +1020,7 @@ pub struct Renderer {
     /// (includes the TLAS + instance_data buffer bindings that the SW
     /// layout doesn't carry). `Some` only when `hw_rt_enabled`; `None`
     /// otherwise so the shader module isn't even compiled.
-    pub probe_trace_hw_pipeline: Option<wgpu::ComputePipeline>,
+    pub probe_trace_hw_pipeline: Option<LazyComputePipeline>,
     /// Lazily compiled specialization. It is absent until an SSGI frame
     /// actually contains imported physical transmission.
     pub probe_trace_hw_transparent_pipeline: Option<wgpu::ComputePipeline>,
@@ -1027,7 +1031,7 @@ pub struct Renderer {
     probe_trace_hw_bg_cache: [Option<wgpu::BindGroup>; 2],
     // --- Path tracing (PT-1, docs/pt/pt-roadmap.md) ---
     /// Base megakernel; None when the adapter lacks ray query.
-    pub pt_pipeline: Option<wgpu::ComputePipeline>,
+    pub pt_pipeline: Option<LazyComputePipeline>,
     pub pt_layout: Option<wgpu::BindGroupLayout>,
     /// Lazy group-2 specialization. Base-only PT never creates or binds it.
     pt_layered: layered_pbr_pt::PtLayeredRuntimeState,
@@ -1082,8 +1086,8 @@ pub struct Renderer {
     /// PT-3b — SVGF wavelet filter (realtime mode): four à-trous
     /// iterations (steps 1/2/4/8) on the trace grid, then a full-res
     /// upsample+modulate pass.
-    pt_atrous_mid_pipeline: Option<wgpu::ComputePipeline>,
-    pt_atrous_final_pipeline: Option<wgpu::ComputePipeline>,
+    pt_atrous_mid_pipeline: Option<LazyComputePipeline>,
+    pt_atrous_final_pipeline: Option<LazyComputePipeline>,
     pt_atrous_layout: Option<wgpu::BindGroupLayout>,
     /// Per-iteration uniform (step size + first-iteration flag + extent).
     pt_atrous_params_bufs: [wgpu::Buffer; 6],
@@ -1106,7 +1110,7 @@ pub struct Renderer {
     /// Ticket 014 V3 — SW SDF sphere-trace pipeline + layout.
     /// Active whenever the scene clipmap has been baked; chosen at
     /// dispatch time over the Hi-Z SW fallback when available.
-    pub probe_trace_sdf_pipeline: wgpu::ComputePipeline,
+    pub probe_trace_sdf_pipeline: LazyComputePipeline,
     /// SW counterpart of `probe_trace_hw_transparent_pipeline`.
     pub probe_trace_sdf_transparent_pipeline: Option<wgpu::ComputePipeline>,
     pub probe_trace_sdf_layout: wgpu::BindGroupLayout,
@@ -1131,7 +1135,7 @@ pub struct Renderer {
     /// captures land; consumed by the card-lighting pass for NdotL.
     pub card_slot_meta_buffer: wgpu::Buffer,
 
-    pub card_capture_pipeline: wgpu::RenderPipeline,
+    pub card_capture_pipeline: LazyRenderPipeline,
     pub card_capture_uniform_layout: wgpu::BindGroupLayout,
     pub card_capture_texture_layout: wgpu::BindGroupLayout,
     pub card_capture_uniform: wgpu::Buffer,
@@ -1146,10 +1150,10 @@ pub struct Renderer {
     pub card_capture_fallback_tex: wgpu::Texture,
     pub card_capture_fallback_view: wgpu::TextureView,
 
-    pub card_light_pipeline: wgpu::ComputePipeline,
+    pub card_light_pipeline: LazyComputePipeline,
     pub card_light_layout: wgpu::BindGroupLayout,
     /// RT-capable coherent relight; absent on adapters without ray queries.
-    card_light_hw_pipeline: Option<wgpu::ComputePipeline>,
+    card_light_hw_pipeline: Option<LazyComputePipeline>,
     card_light_hw_layout: Option<wgpu::BindGroupLayout>,
     pub card_light_uniform: wgpu::Buffer,
     card_light_bg_cache: Option<wgpu::BindGroup>,
@@ -1171,7 +1175,7 @@ pub struct Renderer {
     card_content_version: u64,
 
     // --- Ticket 014: per-mesh UDF bake ---
-    pub sdf_bake_pipeline: wgpu::ComputePipeline,
+    pub sdf_bake_pipeline: LazyComputePipeline,
     pub sdf_bake_layout: wgpu::BindGroupLayout,
     pub sdf_bake_uniform: wgpu::Buffer,
     /// Ticket 022 — staging buffers awaiting readback so freshly-baked
@@ -1200,7 +1204,7 @@ pub struct Renderer {
     /// Fullscreen-lag fix — dedicated binned+sliced clipmap bake
     /// pipeline (the per-mesh `sdf_bake_pipeline` stays brute-force;
     /// its 32³ per-mesh volumes are already rate-limited).
-    sdf_clipmap_bake_pipeline: wgpu::ComputePipeline,
+    sdf_clipmap_bake_pipeline: LazyComputePipeline,
     sdf_clipmap_bake_layout: wgpu::BindGroupLayout,
     scene_sdf_clipmap_staging_tex: wgpu::Texture,
     scene_sdf_clipmap_staging_view: wgpu::TextureView,
@@ -1217,7 +1221,7 @@ pub struct Renderer {
     /// to the baked borders so the miss-path lookup stays well-
     /// defined at probe seams.
     pub wsrc_atlas_sampler: wgpu::Sampler,
-    pub wsrc_bake_pipeline: wgpu::ComputePipeline,
+    pub wsrc_bake_pipeline: LazyComputePipeline,
     pub wsrc_bake_layout: wgpu::BindGroupLayout,
     pub wsrc_bake_uniform: wgpu::Buffer,
     wsrc_bake_bg_cache: Option<wgpu::BindGroup>,
@@ -1226,7 +1230,7 @@ pub struct Renderer {
     /// bake; extra bindings carry the TLAS + per-instance GI data
     /// + card atlas so probe-octel rays can sample pre-lit Mesh
     /// Cards radiance at hit points.
-    pub wsrc_bake_hw_pipeline: Option<wgpu::ComputePipeline>,
+    pub wsrc_bake_hw_pipeline: Option<LazyComputePipeline>,
     /// Lazy one-layer transmission specialization of the HW WSRC bake.
     pub wsrc_bake_hw_transparent_pipeline: Option<wgpu::ComputePipeline>,
     pub wsrc_bake_hw_layout: Option<wgpu::BindGroupLayout>,
@@ -1247,13 +1251,13 @@ pub struct Renderer {
     pub wsrc_last_sun_color: [[f32; 3]; 3],
     pub wsrc_last_sky_color: [[f32; 3]; 3],
 
-    pub probe_temporal_pipeline: wgpu::ComputePipeline,
-    pub probe_spatial_pipeline: wgpu::ComputePipeline,
+    pub probe_temporal_pipeline: LazyComputePipeline,
+    pub probe_spatial_pipeline: LazyComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
     pub probe_temporal_uniform: wgpu::Buffer,
     probe_temporal_bg_cache: [Option<wgpu::BindGroup>; 2],
 
-    pub probe_resolve_pipeline: wgpu::RenderPipeline,
+    pub probe_resolve_pipeline: LazyRenderPipeline,
     pub probe_resolve_layout: wgpu::BindGroupLayout,
     pub probe_resolve_uniform: wgpu::Buffer,
     probe_resolve_bg_cache: [Option<wgpu::BindGroup>; 2],
@@ -1263,7 +1267,7 @@ pub struct Renderer {
     /// here. Composite reads this instead of TAA when DoF is on.
     pub dof_rt_texture: wgpu::Texture,
     pub dof_rt_view: wgpu::TextureView,
-    pub dof_pipeline: wgpu::RenderPipeline,
+    pub dof_pipeline: LazyRenderPipeline,
     pub dof_layout: wgpu::BindGroupLayout,
     pub dof_uniform_buffer: wgpu::Buffer,
     dof_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::PostFxSource::COUNT],
@@ -1292,7 +1296,7 @@ pub struct Renderer {
     /// when motion blur is enabled.
     pub motion_blur_rt_texture: wgpu::Texture,
     pub motion_blur_rt_view: wgpu::TextureView,
-    pub motion_blur_pipeline: wgpu::RenderPipeline,
+    pub motion_blur_pipeline: LazyRenderPipeline,
     pub motion_blur_layout: wgpu::BindGroupLayout,
     pub motion_blur_uniform_buffer: wgpu::Buffer,
     motion_blur_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::PostFxSource::COUNT],
@@ -1311,7 +1315,7 @@ pub struct Renderer {
     /// instead of the upstream source when SSS is on.
     pub sss_rt_texture: wgpu::Texture,
     pub sss_rt_view: wgpu::TextureView,
-    pub sss_pipeline: wgpu::RenderPipeline,
+    pub sss_pipeline: LazyRenderPipeline,
     pub sss_layout: wgpu::BindGroupLayout,
     pub sss_uniform_buffer: wgpu::Buffer,
     sss_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::PostFxSource::COUNT],
@@ -1330,7 +1334,7 @@ pub struct Renderer {
     /// pass handles upscaling itself and this pass is skipped.
     pub upscale_rt_texture: wgpu::Texture,
     pub upscale_rt_view: wgpu::TextureView,
-    pub upscale_pipeline: wgpu::RenderPipeline,
+    pub upscale_pipeline: LazyRenderPipeline,
     pub upscale_layout: wgpu::BindGroupLayout,
     pub upscale_uniform_buffer: wgpu::Buffer,
     upscale_bind_group_cache: Option<wgpu::BindGroup>,
@@ -1345,7 +1349,7 @@ pub struct Renderer {
     /// then consumes.
     pub cas_rt_texture: wgpu::Texture,
     pub cas_rt_view: wgpu::TextureView,
-    pub cas_pipeline: wgpu::RenderPipeline,
+    pub cas_pipeline: LazyRenderPipeline,
     pub cas_layout: wgpu::BindGroupLayout,
     pub cas_uniform_buffer: wgpu::Buffer,
     cas_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::PostFxSource::COUNT],
@@ -1524,7 +1528,7 @@ pub struct Renderer {
     sky_texture: Option<wgpu::Texture>,
     sky_bind_group: Option<wgpu::BindGroup>,
     sky_uniform_buffer: wgpu::Buffer,
-    sky_pipeline: wgpu::RenderPipeline,
+    sky_pipeline: LazyRenderPipeline,
     sky_bind_group_layout: wgpu::BindGroupLayout,
     sky_sampler: wgpu::Sampler,
 
@@ -1542,11 +1546,11 @@ pub struct Renderer {
     sky_view_dirty: bool,
     _sky_view_lut_texture: wgpu::Texture,
     _sky_view_lut_view: wgpu::TextureView,
-    sky_view_compute_pipeline: wgpu::ComputePipeline,
+    sky_view_compute_pipeline: LazyComputePipeline,
     _sky_view_compute_bgl: wgpu::BindGroupLayout,
     sky_view_uniform_buffer: wgpu::Buffer,
     sky_view_compute_bind_group: wgpu::BindGroup,
-    procedural_sky_pipeline: wgpu::RenderPipeline,
+    procedural_sky_pipeline: LazyRenderPipeline,
     _procedural_sky_bgl: wgpu::BindGroupLayout,
     procedural_sun_uniform_buffer: wgpu::Buffer,
     procedural_sky_bind_group: wgpu::BindGroup,
@@ -1558,7 +1562,7 @@ pub struct Renderer {
     // `bake_procedural_ibl`. Mip 0 holds the un-prefiltered sky
     // (sampled by anything that wants raw radiance); mips 1..N are
     // GGX-roughness-stratified for split-sum specular IBL.
-    procedural_ibl_pipeline: wgpu::RenderPipeline,
+    procedural_ibl_pipeline: LazyRenderPipeline,
     _procedural_ibl_bgl: wgpu::BindGroupLayout,
     procedural_ibl_uniform_buffer: wgpu::Buffer,
     procedural_ibl_bind_group: wgpu::BindGroup,
@@ -1580,7 +1584,7 @@ pub struct Renderer {
     // frame (camera moves) when procedural sky is active. Replaces
     // scene_compose's 16-step volumetric fog march with a single
     // 3D-tex sample per fragment.
-    aerial_perspective_pipeline: wgpu::ComputePipeline,
+    aerial_perspective_pipeline: LazyComputePipeline,
     _aerial_perspective_bgl: wgpu::BindGroupLayout,
     aerial_perspective_uniform_buffer: wgpu::Buffer,
     aerial_perspective_bind_group: wgpu::BindGroup,
@@ -1598,9 +1602,11 @@ pub struct Renderer {
     // Scene pipeline (retained scene graph rendering with normal
     // mapping). Distinct from pipeline_3d so immediate-mode draws
     // don't have to carry tangent vertex data or normal-map bindings.
-    pub scene_pipeline: wgpu::RenderPipeline,
-    scene_transparent_pipeline: wgpu::RenderPipeline,
-    scene_transparent_double_sided_pipeline: wgpu::RenderPipeline,
+    pub scene_pipeline: LazyRenderPipeline,
+    /// The settings the pipelines were last prewarmed for (lazy_pipeline.rs).
+    prewarm_signature: u64,
+    scene_transparent_pipeline: LazyRenderPipeline,
+    scene_transparent_double_sided_pipeline: LazyRenderPipeline,
     scene_transparent_reactive_pipeline: Option<wgpu::RenderPipeline>,
     scene_transparent_reactive_double_sided_pipeline: Option<wgpu::RenderPipeline>,
     scene_weighted_transparent_pipeline: Option<wgpu::RenderPipeline>,
@@ -1636,13 +1642,13 @@ pub struct Renderer {
     scene_refractive_reflection_params_buffer: Option<wgpu::Buffer>,
     refractive_reflections_active: bool,
     /// EN-044 — depth-only prepass over the same cached-model draws.
-    pub scene_depth_pipeline: wgpu::RenderPipeline,
+    pub scene_depth_pipeline: LazyRenderPipeline,
     /// Shade-mode depth-only variant whose inert color slot makes it
     /// compatible with the inline packed visibility attachment.
     #[cfg(not(target_arch = "wasm32"))]
-    scene_depth_visibility_pipeline: Option<wgpu::RenderPipeline>,
+    scene_depth_visibility_pipeline: Option<LazyRenderPipeline>,
     /// EN-044 — cached-model pipeline for the prepassed path (no depth write, Equal).
-    pub scene_pipeline_prepassed: wgpu::RenderPipeline,
+    pub scene_pipeline_prepassed: LazyRenderPipeline,
     pub scene_material_layout: wgpu::BindGroupLayout,
     scene_sheen_albedo_lut: Option<layered_pbr_scene::SceneSheenAlbedoLut>,
     scene_layered_pbr_resources: Option<layered_pbr_scene::SceneLayeredPbrResources>,
@@ -1687,11 +1693,11 @@ pub struct Renderer {
     /// GGX prefilter pipeline. Run once per env load to convolve the
     /// HDR env into roughness-weighted mips, replacing the box filter
     /// stand-in. Matches Karis 2013's split-sum specular prefilter.
-    pub prefilter_pipeline: wgpu::RenderPipeline,
+    pub prefilter_pipeline: LazyRenderPipeline,
     /// Diffuse irradiance prefilter pipeline (cosine-weighted env
     /// convolution). Run on the smallest mip so the scene shader's
     /// diffuse IBL sample is properly Lambertian, not GGX-with-rough.
-    pub prefilter_diffuse_pipeline: wgpu::RenderPipeline,
+    pub prefilter_diffuse_pipeline: LazyRenderPipeline,
     pub prefilter_layout: wgpu::BindGroupLayout,
     pub prefilter_uniform_buffer: wgpu::Buffer,
     /// Default flat-normal (tangent-space +Z) 1x1 texture view — used
@@ -2238,8 +2244,9 @@ impl Renderer {
         // matching Karis 2013 ('Real Shading in UE4'). 1024 samples
         // per cell × 65536 cells ≈ 67M ops — runs in well under a
         // second on a modern CPU.
-        let brdf_lut_size: u32 = 256;
-        let brdf_lut_pixels = build_brdf_lut(brdf_lut_size as usize);
+        // generated by build.rs (brdf_lut.rs): Rg16Float texels, little-endian
+        let brdf_lut_size = brdf_lut::BRDF_LUT_SIZE as u32;
+        let brdf_lut_bytes: &[u8] = BRDF_LUT_BAKED;
         let brdf_lut_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("brdf_lut"),
             size: wgpu::Extent3d {
@@ -2261,7 +2268,7 @@ impl Renderer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            bytemuck::cast_slice(&brdf_lut_pixels),
+            brdf_lut_bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(brdf_lut_size * 4), // 2 channels × 2 bytes
@@ -2585,7 +2592,7 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        let pipeline_2d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline_2d = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("pipeline_2d"),
             layout: Some(&pipeline_layout_2d),
             vertex: wgpu::VertexState {
@@ -2689,7 +2696,7 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        let pipeline_3d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline_3d = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("pipeline_3d"),
             layout: Some(&pipeline_layout_3d),
             vertex: wgpu::VertexState {
@@ -2852,7 +2859,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&sky_bind_group_layout)],
             immediate_size: 0,
         });
-        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let sky_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("sky_pipeline"),
             layout: Some(&sky_pipeline_layout),
             vertex: wgpu::VertexState {
@@ -3026,7 +3033,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let sky_view_compute_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("sky_view_compute_pipeline"),
                 layout: Some(&sky_view_compute_pl_layout),
                 module: &sky_view_compute_shader,
@@ -3137,7 +3144,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let procedural_sky_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                 label: Some("procedural_sky_pipeline"),
                 layout: Some(&procedural_sky_pl_layout),
                 vertex: wgpu::VertexState {
@@ -3348,7 +3355,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let procedural_ibl_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                 label: Some("procedural_ibl_pipeline"),
                 layout: Some(&procedural_ibl_pl_layout),
                 vertex: wgpu::VertexState {
@@ -3551,7 +3558,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&prefilter_layout)],
             immediate_size: 0,
         });
-        let prefilter_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let prefilter_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("prefilter_pipeline"),
             layout: Some(&prefilter_pl_layout),
             vertex: wgpu::VertexState {
@@ -3596,7 +3603,7 @@ impl Renderer {
         // bind group layout (so we don't need to rebuild bind groups
         // when switching pipelines mid-encoder).
         let prefilter_diffuse_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                 label: Some("prefilter_diffuse_pipeline"),
                 layout: Some(&prefilter_pl_layout),
                 vertex: wgpu::VertexState {
@@ -3763,7 +3770,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let aerial_perspective_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("aerial_perspective_pipeline"),
                 layout: Some(&aerial_perspective_pl_layout),
                 module: &aerial_perspective_shader,
@@ -3809,7 +3816,7 @@ impl Renderer {
                 ],
                 immediate_size: 0,
             });
-        let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let scene_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("scene_pipeline"),
             layout: Some(&scene_pipeline_layout),
             vertex: wgpu::VertexState {
@@ -3887,7 +3894,7 @@ impl Renderer {
 
         let create_scene_transparent_pipeline =
             |label: &'static str, cull_mode: Option<wgpu::Face>| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&scene_pipeline_layout),
                     vertex: wgpu::VertexState {
@@ -3962,7 +3969,7 @@ impl Renderer {
         // scene_pipeline (Less, write) stays for the retained scene-graph nodes,
         // which are not in the prepass.
         let scene_pipeline_prepassed =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                 label: Some("scene_pipeline_prepassed"),
                 layout: Some(&scene_pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -4163,7 +4170,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&composite_layout)],
             immediate_size: 0,
         });
-        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let composite_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("composite_pipeline"),
             layout: Some(&composite_pl_layout),
             vertex: wgpu::VertexState {
@@ -4260,8 +4267,8 @@ impl Renderer {
         // would alias to the last write at submit.
 
         let make_bloom_pipeline =
-            |entry: &str, blend: Option<wgpu::BlendState>| -> wgpu::RenderPipeline {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            |entry: &str, blend: Option<wgpu::BlendState>| -> LazyRenderPipeline {
+                LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                     label: Some("bloom_pipeline"),
                     layout: Some(&bloom_pl_layout),
                     vertex: wgpu::VertexState {
@@ -4364,7 +4371,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let hiz_linearize_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("hiz_linearize_pipeline"),
                 layout: Some(&hiz_linearize_pl_layout),
                 module: &hiz_linearize_shader,
@@ -4425,7 +4432,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let hiz_downsample_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("hiz_downsample_pipeline"),
                 layout: Some(&hiz_downsample_pl_layout),
                 module: &hiz_downsample_shader,
@@ -4588,7 +4595,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&ssao_layout)],
             immediate_size: 0,
         });
-        let ssao_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let ssao_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
             label: Some("ssao_pipeline"),
             layout: Some(&ssao_pl_layout),
             module: &ssao_shader,
@@ -4672,7 +4679,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&ssao_blur_layout)],
             immediate_size: 0,
         });
-        let ssao_blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let ssao_blur_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("ssao_blur_pipeline"),
             layout: Some(&ssao_blur_pl_layout),
             vertex: wgpu::VertexState {
@@ -4726,7 +4733,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&taa_layout)],
             immediate_size: 0,
         });
-        let taa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let taa_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("taa_pipeline"),
             layout: Some(&taa_pl_layout),
             vertex: wgpu::VertexState {
@@ -4816,7 +4823,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&upscale_layout)],
             immediate_size: 0,
         });
-        let upscale_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let upscale_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("upscale_pipeline"),
             layout: Some(&upscale_pl_layout),
             vertex: wgpu::VertexState {
@@ -4902,7 +4909,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&cas_layout)],
             immediate_size: 0,
         });
-        let cas_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let cas_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("cas_pipeline"),
             layout: Some(&cas_pl_layout),
             vertex: wgpu::VertexState {
@@ -5050,7 +5057,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&ssr_layout)],
             immediate_size: 0,
         });
-        let ssr_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let ssr_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("ssr_pipeline"),
             layout: Some(&ssr_pl_layout),
             vertex: wgpu::VertexState {
@@ -5181,7 +5188,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let ssr_temporal_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                 label: Some("ssr_temporal_pipeline"),
                 layout: Some(&ssr_temporal_pl_layout),
                 vertex: wgpu::VertexState {
@@ -5288,7 +5295,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let probe_place_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_place_pipeline"),
                 layout: Some(&probe_place_pl_layout),
                 module: &probe_place_shader,
@@ -5434,7 +5441,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let probe_trace_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_trace_pipeline"),
                 layout: Some(&probe_trace_pl_layout),
                 module: &probe_trace_shader,
@@ -5628,7 +5635,7 @@ impl Renderer {
                 bind_group_layouts: &[Some(&hw_layout)],
                 immediate_size: 0,
             });
-            let hw_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let hw_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_trace_hw_pipeline"),
                 layout: Some(&hw_pl_layout),
                 module: &hw_shader,
@@ -5941,7 +5948,7 @@ impl Renderer {
                 bind_group_layouts: &pl_groups,
                 immediate_size: 0,
             });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("pt_pipeline"),
                 layout: Some(&pl),
                 module: &pt_shader,
@@ -6049,7 +6056,7 @@ impl Renderer {
                 bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-            let mid = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let mid = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("pt_atrous_mid"),
                 layout: Some(&pl),
                 module: &shader,
@@ -6057,7 +6064,7 @@ impl Renderer {
                 compilation_options: Default::default(),
                 cache: None,
             });
-            let fin = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let fin = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("pt_atrous_final"),
                 layout: Some(&pl),
                 module: &shader,
@@ -6232,7 +6239,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let probe_trace_sdf_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_trace_sdf_pipeline"),
                 layout: Some(&probe_trace_sdf_pl_layout),
                 module: &sdf_trace_shader,
@@ -6316,7 +6323,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let probe_temporal_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_temporal_pipeline"),
                 layout: Some(&probe_temporal_pl_layout),
                 module: &probe_temporal_shader,
@@ -6325,7 +6332,7 @@ impl Renderer {
                 cache: None,
             });
         let probe_spatial_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_spatial_pipeline"),
                 layout: Some(&probe_temporal_pl_layout),
                 module: &probe_temporal_shader,
@@ -6425,7 +6432,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let probe_resolve_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                 label: Some("probe_resolve_pipeline"),
                 layout: Some(&probe_resolve_pl_layout),
                 vertex: wgpu::VertexState {
@@ -6548,7 +6555,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let card_capture_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                 label: Some("card_capture_pipeline"),
                 layout: Some(&card_capture_pl_layout),
                 vertex: wgpu::VertexState {
@@ -6793,7 +6800,7 @@ impl Renderer {
             immediate_size: 0,
         });
         let card_light_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("card_light_pipeline"),
                 layout: Some(&card_light_pl_layout),
                 module: &card_light_shader,
@@ -6901,7 +6908,7 @@ impl Renderer {
                 bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("card_light_hw_pipeline"),
                 layout: Some(&pipeline_layout),
                 module: &shader,
@@ -6969,7 +6976,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&sdf_bake_layout)],
             immediate_size: 0,
         });
-        let sdf_bake_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let sdf_bake_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
             label: Some("sdf_bake_pipeline"),
             layout: Some(&sdf_bake_pl_layout),
             module: &sdf_bake_shader,
@@ -7038,7 +7045,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let sdf_clipmap_bake_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("sdf_clipmap_bake_pipeline"),
                 layout: Some(&sdf_clipmap_bake_pl_layout),
                 module: &sdf_clipmap_bake_shader,
@@ -7134,7 +7141,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&wsrc_bake_layout)],
             immediate_size: 0,
         });
-        let wsrc_bake_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let wsrc_bake_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
             label: Some("wsrc_bake_pipeline"),
             layout: Some(&wsrc_bake_pl_layout),
             module: &wsrc_bake_shader,
@@ -7275,7 +7282,7 @@ impl Renderer {
                 bind_group_layouts: &[Some(&hw_layout)],
                 immediate_size: 0,
             });
-            let hw_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let hw_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
                 label: Some("wsrc_bake_hw_pipeline"),
                 layout: Some(&hw_pl_layout),
                 module: &hw_shader,
@@ -7438,7 +7445,7 @@ impl Renderer {
                 immediate_size: 0,
             });
         let scene_compose_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
                 label: Some("scene_compose_pipeline"),
                 layout: Some(&scene_compose_pl_layout),
                 vertex: wgpu::VertexState {
@@ -7540,7 +7547,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&dof_layout)],
             immediate_size: 0,
         });
-        let dof_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let dof_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("dof_pipeline"),
             layout: Some(&dof_pl_layout),
             vertex: wgpu::VertexState {
@@ -7644,7 +7651,7 @@ impl Renderer {
                 bind_group_layouts: &[Some(&motion_blur_layout)],
                 immediate_size: 0,
             });
-        let motion_blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let motion_blur_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("motion_blur_pipeline"),
             layout: Some(&motion_blur_pl_layout),
             vertex: wgpu::VertexState {
@@ -7746,7 +7753,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&sss_layout)],
             immediate_size: 0,
         });
-        let sss_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let sss_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("sss_pipeline"),
             layout: Some(&sss_pl_layout),
             vertex: wgpu::VertexState {
@@ -7843,7 +7850,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&exposure_layout)],
             immediate_size: 0,
         });
-        let exposure_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let exposure_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("exposure_pipeline"),
             layout: Some(&exposure_pl_layout),
             vertex: wgpu::VertexState {
@@ -8517,6 +8524,7 @@ impl Renderer {
             aerial_perspective_sampler,
             env_diffuse_texture: None,
             scene_pipeline,
+            prewarm_signature: u64::MAX,
             scene_transparent_pipeline,
             scene_transparent_double_sided_pipeline,
             scene_transparent_reactive_pipeline: None,
@@ -12712,6 +12720,7 @@ impl Renderer {
     }
 
     pub fn end_frame(&mut self) {
+        self.prewarm_pipelines(false);
         if !self.material_per_view_bg_live {
             self.refresh_material_per_view_bg();
         }
@@ -12968,6 +12977,7 @@ impl Renderer {
         scene: &mut crate::scene::SceneGraph,
         profiler: &mut crate::profiler::Profiler,
     ) {
+        self.prewarm_pipelines(true);
         self.has_refractive_scene_nodes =
             self.imported_refraction_enabled && scene.has_refractive_nodes();
         (

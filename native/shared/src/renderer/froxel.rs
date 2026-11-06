@@ -17,6 +17,7 @@
 //! (256 = worst-case every light in one froxel — exact parity with the
 //! reference loop, no truncation).
 
+use super::lazy_pipeline::LazyComputePipeline;
 use wgpu::util::DeviceExt;
 
 pub(super) const GRID_X: u32 = 16;
@@ -243,7 +244,7 @@ pub(super) fn extra_lighting_layout_entries() -> [wgpu::BindGroupLayoutEntry; 3]
 }
 
 pub struct FroxelPass {
-    pub assign_pipeline: wgpu::ComputePipeline,
+    pub assign_pipeline: LazyComputePipeline,
     pub assign_layout: wgpu::BindGroupLayout,
     pub params_buffer: wgpu::Buffer,
     /// Compact point-light UBO for the compute pass (count + 256 lights).
@@ -323,7 +324,7 @@ impl FroxelPass {
             bind_group_layouts: &[Some(&assign_layout)],
             ..Default::default()
         });
-        let assign_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let assign_pipeline = LazyComputePipeline::new(device, &wgpu::ComputePipelineDescriptor {
             label: Some("froxel_assign_pipeline"),
             layout: Some(&pl),
             module: &shader,

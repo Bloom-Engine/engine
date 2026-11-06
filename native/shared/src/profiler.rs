@@ -69,6 +69,39 @@ pub struct Profiler {
     frame_total_gpu_us: [f64; ROLLING_FRAMES],
     histogram_idx: usize,
     histogram_filled: usize,
+
+    /// This frame's CPU phase spans (start, end), for the frame total:
+    /// phases nest (`queue_submit` runs inside `render_total`), so the
+    /// total is the time covered by any phase, not the sum of them.
+    cpu_spans: Vec<(Instant, Instant)>,
+    /// This frame's GPU busy time: the union of every pass interval.
+    /// Passes overlap on tile-based GPUs (the next pass's vertex work
+    /// starts while the previous pass's fragments run), so a sum
+    /// counts the same GPU time several times.
+    gpu_union_us: Option<f64>,
+}
+
+/// Total length covered by a set of (start, end) intervals, overlaps
+/// counted once.
+fn union_length(mut spans: Vec<(u64, u64)>) -> u64 {
+    spans.retain(|(b, e)| e > b);
+    spans.sort_unstable();
+    let mut total = 0;
+    let mut current: Option<(u64, u64)> = None;
+    for (b, e) in spans {
+        match current {
+            Some((cb, ce)) if b <= ce => current = Some((cb, ce.max(e))),
+            Some((cb, ce)) => {
+                total += ce - cb;
+                current = Some((b, e));
+            }
+            None => current = Some((b, e)),
+        }
+    }
+    if let Some((cb, ce)) = current {
+        total += ce - cb;
+    }
+    total
 }
 
 struct RollingStats {
@@ -193,6 +226,8 @@ impl Profiler {
             frame_total_gpu_us: [0.0; ROLLING_FRAMES],
             histogram_idx: 0,
             histogram_filled: 0,
+            cpu_spans: Vec::new(),
+            gpu_union_us: None,
         }
     }
 
@@ -264,7 +299,9 @@ impl Profiler {
             return;
         }
         if let Some(s) = self.open_cpu.remove(label) {
-            let us = s.start.elapsed().as_secs_f64() * 1_000_000.0;
+            let now = Instant::now();
+            let us = now.duration_since(s.start).as_secs_f64() * 1_000_000.0;
+            self.cpu_spans.push((s.start, now));
             self.frame.push(FrameSample {
                 label,
                 cpu_us: us,
@@ -358,6 +395,8 @@ impl Profiler {
         if !self.enabled {
             self.frame.clear();
             self.open_cpu.clear();
+            self.cpu_spans.clear();
+            self.gpu_union_us = None;
             self.next_query = 0;
             self.pending_gpu.clear();
             return;
@@ -375,7 +414,12 @@ impl Profiler {
                 let data = slice.get_mapped_range().to_vec();
                 readback.unmap();
                 let period = self.timestamp_period_ns as f64;
-                let mut by_label: HashMap<&'static str, f64> = HashMap::new();
+                // A label can cover several passes (the bloom mip chain), and
+                // on tile-based GPUs consecutive passes overlap: each label
+                // reports the time covered by its intervals, and the frame the
+                // time covered by all of them, not their sums.
+                let mut spans: HashMap<&'static str, Vec<(u64, u64)>> = HashMap::new();
+                let mut all = Vec::with_capacity(self.pending_gpu.len());
                 for (label, b, e) in &self.pending_gpu {
                     let bo = (*b as usize) * 8;
                     let eo = (*e as usize) * 8;
@@ -384,11 +428,20 @@ impl Profiler {
                     }
                     let bt = u64::from_le_bytes(data[bo..bo + 8].try_into().unwrap());
                     let et = u64::from_le_bytes(data[eo..eo + 8].try_into().unwrap());
+                    // an unwritten end (an empty pass on some drivers) reads 0
                     if et <= bt {
                         continue;
                     }
-                    let us = (et - bt) as f64 * period / 1000.0;
-                    *by_label.entry(*label).or_insert(0.0) += us;
+                    spans.entry(*label).or_default().push((bt, et));
+                    all.push((bt, et));
+                }
+                let ticks_to_us = |t: u64| t as f64 * period / 1000.0;
+                let mut by_label: HashMap<&'static str, f64> = spans
+                    .into_iter()
+                    .map(|(label, v)| (label, ticks_to_us(union_length(v))))
+                    .collect();
+                if !all.is_empty() {
+                    self.gpu_union_us = Some(ticks_to_us(union_length(all)));
                 }
                 for s in self.frame.iter_mut() {
                     if let Some(us) = by_label.remove(s.label) {
@@ -417,6 +470,8 @@ impl Profiler {
         // Phase 8 — sum the per-pass samples into a per-frame total
         // for the histogram before draining. CPU sums every sample;
         // GPU sums only those with timestamps (rest have None).
+        // Totals are the time covered by the frame's phases and passes
+        // (they nest and overlap); samples without spans (tests) add up.
         let mut frame_cpu = 0.0;
         let mut frame_gpu = 0.0;
         for s in &self.frame {
@@ -424,6 +479,14 @@ impl Profiler {
             if let Some(g) = s.gpu_us {
                 frame_gpu += g;
             }
+        }
+        if let Some(origin) = self.cpu_spans.iter().map(|(b, _)| *b).min() {
+            let ns = |t: Instant| t.duration_since(origin).as_nanos() as u64;
+            let spans = self.cpu_spans.drain(..).map(|(b, e)| (ns(b), ns(e))).collect();
+            frame_cpu = union_length(spans) as f64 / 1000.0;
+        }
+        if let Some(g) = self.gpu_union_us.take() {
+            frame_gpu = g;
         }
         self.frame_total_cpu_us[self.histogram_idx] = frame_cpu;
         self.frame_total_gpu_us[self.histogram_idx] = frame_gpu;
@@ -509,25 +572,24 @@ impl Profiler {
         out
     }
 
-    /// Average total CPU frame time across the rolling window (sum of
-    /// all phases). Useful for a single headline number.
+    /// Average CPU frame time across the rolling window: the time
+    /// covered by the frame's profiled phases (nested phases once).
     pub fn avg_frame_cpu_us(&self) -> f64 {
-        let fc = self.frame_count;
-        self.rolling
-            .values()
-            .filter(|s| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
-            .map(|s| s.avg_cpu())
-            .sum()
+        self.avg_history(|(cpu, _)| cpu)
     }
 
-    /// Average total GPU frame time where available.
+    /// Average GPU frame time where available: the time the frame's
+    /// timed passes kept the GPU busy (overlapping passes once).
     pub fn avg_frame_gpu_us(&self) -> f64 {
-        let fc = self.frame_count;
-        self.rolling
-            .values()
-            .filter(|s| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
-            .filter_map(|s| s.avg_gpu())
-            .sum()
+        self.avg_history(|(_, gpu)| gpu)
+    }
+
+    fn avg_history(&self, pick: impl Fn((f64, f64)) -> f64) -> f64 {
+        let h = self.frame_history();
+        if h.is_empty() {
+            return 0.0;
+        }
+        h.iter().map(|&f| pick(f)).sum::<f64>() / h.len() as f64
     }
 
     /// Snapshot the rolling averages in a stable, CPU-time-descending
@@ -660,6 +722,33 @@ mod tests {
         // Skip the gpu readback path (no device available) and go
         // straight to the CPU-only histogram + drain path.
         p.frame_end_cpu();
+    }
+
+    #[test]
+    fn union_length_counts_overlaps_once() {
+        assert_eq!(union_length(vec![]), 0);
+        assert_eq!(union_length(vec![(10, 20)]), 10);
+        // nine overlapping bloom mips spanning 270..1080 (as measured on M1 Max)
+        let bloom = vec![(270, 941), (369, 972), (386, 988), (471, 1003), (473, 1019), (512, 1027), (532, 1035), (551, 1047), (553, 1077)];
+        assert_eq!(union_length(bloom), 1077 - 270);
+        // disjoint, nested and empty/inverted spans
+        assert_eq!(union_length(vec![(0, 10), (20, 30), (22, 25), (40, 40), (50, 45)]), 20);
+    }
+
+    #[test]
+    fn nested_cpu_phases_count_once_in_frame_total() {
+        let mut p = Profiler::new();
+        p.set_enabled(true);
+        p.begin("outer");
+        p.begin("inner");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        p.end("inner");
+        p.end("outer");
+        p.frame_end_cpu();
+        let (cpu, _) = p.frame_history()[0];
+        let outer = p.snapshot().iter().find(|(l, _, _)| *l == "outer").unwrap().1;
+        assert!((cpu - outer).abs() < 1.0, "frame total {cpu} us must equal the outer phase {outer} us, not outer + inner");
+        assert!((p.avg_frame_cpu_us() - cpu).abs() < 1e-9);
     }
 
     #[test]
