@@ -155,6 +155,15 @@ impl Renderer {
         out.push_str(&self.material_binding_report_json());
         out.push_str(",\"runtime_support\":{\"hardware_ray_query\":");
         out.push_str(if self.hw_rt_enabled { "true" } else { "false" });
+        out.push_str(",\"ssgi_trace_backend\":");
+        json_string(
+            &mut out,
+            self.ssgi_backend_logged.unwrap_or(if self.hw_rt_enabled {
+                "hw-ray-query-pending"
+            } else {
+                "software-fallback-pending"
+            }),
+        );
         out.push_str(",\"path_tracing\":");
         out.push_str(if self.pt_pipeline.is_some() {
             "true"

@@ -1,0 +1,183 @@
+{
+  "schema": "bloom-quality-bloom-pass-tail-evidence-v1",
+  "git_commit": "5e543a0c5a8ec94105ae7e5365851b7235abf801",
+  "base_commit": "f101159a1ebd4c4b8e503ab375418e0a5fa08ade",
+  "adapter": {
+    "backend": "metal",
+    "name": "Apple M1 Max",
+    "device_type": "integratedgpu",
+    "capability_tier": "high-end"
+  },
+  "rejected_four_fetch_candidate": {
+    "image_comparison_passed": true,
+    "retained": false,
+    "reason": "balanced exact-commit repeats showed no reliable GPU improvement",
+    "pbr_bloom_base_median_ms": 12.106789,
+    "pbr_bloom_candidate_median_ms": 12.367435,
+    "sponza_bloom_base_median_ms": 27.061414,
+    "sponza_bloom_candidate_median_ms": 26.809699
+  },
+  "root_cause": {
+    "inference": "Metal render-pass/store-load overhead dominates the smallest bloom levels",
+    "sponza_downsample_gpu_mean_ms": [5.112913, 5.050788, 2.669662, 2.602168, 2.483796],
+    "sponza_upsample_gpu_mean_ms": [1.694660, 1.911898, 2.120113, 2.318603],
+    "base_mip_levels": 5,
+    "candidate_mip_levels": 4,
+    "base_render_passes": 9,
+    "candidate_render_passes": 7,
+    "nine_tap_upsample_retained": true,
+    "per_level_profiler_labels_added": true
+  },
+  "alternating_exact_commit_repeats": {
+    "warmup_frames": 120,
+    "measured_frames": 300,
+    "runs_per_variant": 3,
+    "order": ["candidate", "base", "base", "candidate", "candidate", "base"],
+    "cases": [
+      {
+        "id": "pbr-spheres-high",
+        "base": {
+          "bloom_gpu_mean_ms": [10.544548, 9.789593, 9.890579],
+          "bloom_gpu_mean_median_ms": 9.890579,
+          "gpu_mean_median_ms": 19.191367,
+          "gpu_p95_median_ms": 23.602083,
+          "wall_mean_median_ms": 8.689164
+        },
+        "candidate": {
+          "bloom_gpu_mean_ms": [10.000808, 7.836242, 7.757835],
+          "bloom_gpu_mean_median_ms": 7.836242,
+          "gpu_mean_median_ms": 16.754068,
+          "gpu_p95_median_ms": 22.181041,
+          "wall_mean_median_ms": 8.415515
+        },
+        "relative_change_percent": {
+          "bloom_gpu_mean": -20.770644,
+          "gpu_mean": -12.699976,
+          "gpu_p95": -6.020833,
+          "wall_mean": -3.149313
+        }
+      },
+      {
+        "id": "sponza-interior",
+        "base": {
+          "bloom_gpu_mean_ms": [28.188522, 25.647226, 27.431492],
+          "bloom_gpu_mean_median_ms": 27.431492,
+          "gpu_mean_median_ms": 46.878844,
+          "gpu_p95_median_ms": 77.348875,
+          "wall_mean_median_ms": 14.033090
+        },
+        "candidate": {
+          "bloom_gpu_mean_ms": [22.622009, 19.675125, 20.889596],
+          "bloom_gpu_mean_median_ms": 20.889596,
+          "gpu_mean_median_ms": 39.164869,
+          "gpu_p95_median_ms": 58.792959,
+          "wall_mean_median_ms": 12.600274
+        },
+        "relative_change_percent": {
+          "bloom_gpu_mean": -23.848123,
+          "gpu_mean": -16.455131,
+          "gpu_p95": -23.989898,
+          "wall_mean": -10.210267
+        }
+      },
+      {
+        "id": "weighted-transparency",
+        "base": {
+          "bloom_gpu_mean_ms": [6.930880, 7.249399, 8.054220],
+          "bloom_gpu_mean_median_ms": 7.249399,
+          "gpu_mean_median_ms": 20.314013,
+          "gpu_p95_median_ms": 31.006542,
+          "wall_mean_median_ms": 22.131813
+        },
+        "candidate": {
+          "bloom_gpu_mean_ms": [7.004770, 7.816152, 7.349754],
+          "bloom_gpu_mean_median_ms": 7.349754,
+          "gpu_mean_median_ms": 20.458495,
+          "gpu_p95_median_ms": 30.853664,
+          "wall_mean_median_ms": 22.188277
+        },
+        "relative_change_percent": {
+          "bloom_gpu_mean": 1.384322,
+          "gpu_mean": 0.711243,
+          "gpu_p95": -0.493051,
+          "wall_mean": 0.255126
+        },
+        "classification": "neutral within governed same-machine noise envelope"
+      }
+    ]
+  },
+  "image_comparison": {
+    "pixel_tolerance": 0.02,
+    "cases": [
+      {
+        "id": "pbr-spheres-high",
+        "passed": true,
+        "ssim_luminance": 1.0,
+        "rmse_luminance": 0.0,
+        "percent_above_tolerance": 0.0
+      },
+      {
+        "id": "sponza-interior",
+        "passed": true,
+        "ssim_luminance": 0.999998748,
+        "rmse_luminance": 0.000070276,
+        "max_abs_error": 0.015686274,
+        "percent_above_tolerance": 0.0,
+        "mean_oklab_delta": 0.000002034,
+        "mean_edge_delta": 0.000002416
+      },
+      {
+        "id": "weighted-transparency",
+        "passed": true,
+        "ssim_luminance": 1.0,
+        "rmse_luminance": 0.0,
+        "percent_above_tolerance": 0.0
+      }
+    ]
+  },
+  "full_capture": {
+    "suite": "full",
+    "machine_class": "apple-m1-max-metal",
+    "git_dirty": false,
+    "cases_completed": 9,
+    "cases_expected": 9,
+    "missing_required_intermediates": 0,
+    "approved_baselines_present": 0,
+    "approved_baselines_expected": 9,
+    "baseline_installed": false,
+    "cases": [
+      {"id": "pbr-spheres-high", "cpu_p95_ms": 2.239917, "gpu_p95_ms": 23.461290, "gpu_p95_budget_ms": 20.0, "performance_passed": false, "intermediate_count": 30},
+      {"id": "pbr-spheres-constrained", "cpu_p95_ms": 1.150748, "gpu_p95_ms": 5.791336, "performance_applicable_to_selected_machine_class": false, "intermediate_count": 8},
+      {"id": "damaged-helmet", "cpu_p95_ms": 2.084126, "gpu_p95_ms": 12.181002, "gpu_p95_budget_ms": 12.0, "performance_passed": false, "intermediate_count": 30},
+      {"id": "sponza-interior", "cpu_p95_ms": 2.654335, "gpu_p95_ms": 56.685251, "gpu_p95_budget_ms": 55.0, "performance_passed": false, "intermediate_count": 30},
+      {"id": "bistro-exterior", "cpu_p95_ms": 3.420623, "gpu_p95_ms": 44.033331, "performance_applicable_to_selected_machine_class": false, "intermediate_count": 30},
+      {"id": "skinned-alpha-motion", "cpu_p95_ms": 3.190624, "gpu_p95_ms": 27.497002, "gpu_p95_budget_ms": 30.0, "performance_passed": true, "intermediate_count": 30},
+      {"id": "draw-light-stress", "cpu_p95_ms": 13.426873, "gpu_p95_ms": 35.642585, "performance_applicable_to_selected_machine_class": false, "intermediate_count": 30},
+      {"id": "weighted-transparency", "cpu_p95_ms": 3.211167, "gpu_p95_ms": 30.840710, "gpu_p95_budget_ms": 30.0, "performance_passed": false, "intermediate_count": 30},
+      {"id": "masked-alpha-coverage", "cpu_p95_ms": 3.088376, "gpu_p95_ms": 20.388457, "gpu_p95_budget_ms": 30.0, "performance_passed": true, "intermediate_count": 30}
+    ],
+    "steady_state_resources": {
+      "all_cases_bind_group_creations": 0,
+      "all_cases_graph_compiles": 0,
+      "all_cases_first_use_pipeline_creations": 0,
+      "all_cases_transient_physical_texture_creations": 0,
+      "all_cases_transient_physical_buffer_creations": 0,
+      "all_cases_command_encoder_creations_per_frame": 1
+    }
+  },
+  "validation": {
+    "quality_governance_python_tests_passed": 70,
+    "bloom_diff_tests_passed": 3,
+    "focused_renderer_shader_tests_passed": 27,
+    "alternating_exact_runs_completed": 18,
+    "image_comparisons_passed": 3,
+    "full_capture_contracts_completed": 9,
+    "missing_required_intermediates": 0,
+    "diff_check_passed": true
+  },
+  "performance_checkpoint_passed": true,
+  "visual_baselines_approved": false,
+  "full_metal_performance_qualified": false,
+  "vulkan_qualified": false,
+  "parent_issue_closed": false
+}

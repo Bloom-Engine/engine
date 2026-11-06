@@ -6,6 +6,15 @@
 use super::*;
 use wgpu::util::DeviceExt;
 
+const BLOOM_DOWNSAMPLE_PROFILE_LABELS: [&str; BLOOM_MIP_COUNT as usize] = [
+    "bloom_downsample_0",
+    "bloom_downsample_1",
+    "bloom_downsample_2",
+    "bloom_downsample_3",
+];
+const BLOOM_UPSAMPLE_PROFILE_LABELS: [&str; BLOOM_MIP_COUNT as usize - 1] =
+    ["bloom_upsample_0", "bloom_upsample_1", "bloom_upsample_2"];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub(super) enum CompositeSource {
@@ -286,7 +295,7 @@ impl Renderer {
             for i in 0..BLOOM_MIP_COUNT as usize {
                 let threshold_pass = i == 0;
 
-                let bloom_ts = profiler.pass_timestamp_writes("bloom_pass");
+                let bloom_ts = profiler.pass_timestamp_writes(BLOOM_DOWNSAMPLE_PROFILE_LABELS[i]);
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("bloom_downsample_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -323,7 +332,7 @@ impl Renderer {
             // Upsample chain: blend mip i+1 additively into mip i for
             // i = N-2..0. Final mip 0 ends up with the full bloom result.
             for i in (0..(BLOOM_MIP_COUNT as usize - 1)).rev() {
-                let bloom_up_ts = profiler.pass_timestamp_writes("bloom_pass");
+                let bloom_up_ts = profiler.pass_timestamp_writes(BLOOM_UPSAMPLE_PROFILE_LABELS[i]);
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("bloom_upsample_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {

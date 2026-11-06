@@ -35,6 +35,7 @@ CAPABILITY_SNAPSHOT_SCHEMA = "bloom-renderer-capability-snapshot-v1"
 REVIEW_SCHEMA = "bloom-quality-baseline-review-v1"
 INSTALL_SCHEMA = "bloom-quality-baseline-install-v1"
 REPRO_SCHEMA = "bloom-quality-reproducibility-v1"
+HOST_PREFLIGHT_SCHEMA = "bloom-quality-host-preflight-v1"
 ALLOWED_SUITES = {"quick", "full"}
 ALLOWED_STATUSES = {"pass", "fail", "skip", "error"}
 KNOWN_INTERMEDIATE_NAMES = {
@@ -171,6 +172,139 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def host_load_snapshot() -> dict[str, Any]:
+    """Capture scheduler pressure without adding a non-stdlib dependency."""
+    logical_cpus = max(int(os.cpu_count() or 1), 1)
+    try:
+        load_average = [round(float(value), 3) for value in os.getloadavg()]
+    except (AttributeError, OSError):
+        load_average = []
+    command = ["ps", "-Ao", "pid=,pcpu=,comm="]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "logical_cpus": logical_cpus,
+            "load_average": load_average,
+            "available": False,
+            "error": str(exc),
+        }
+    if result.returncode != 0:
+        return {
+            "logical_cpus": logical_cpus,
+            "load_average": load_average,
+            "available": False,
+            "error": result.stderr.strip() or f"ps exited {result.returncode}",
+        }
+    processes: list[dict[str, Any]] = []
+    total_cpu_percent = 0.0
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid = int(parts[0])
+            cpu_percent = max(float(parts[1]), 0.0)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        total_cpu_percent += cpu_percent
+        processes.append(
+            {"pid": pid, "cpu_percent": round(cpu_percent, 3), "command": parts[2]}
+        )
+    processes.sort(key=lambda item: float(item["cpu_percent"]), reverse=True)
+    return {
+        "logical_cpus": logical_cpus,
+        "load_average": load_average,
+        "available": True,
+        "total_cpu_percent": round(total_cpu_percent, 3),
+        "cpu_fraction": round(total_cpu_percent / (logical_cpus * 100.0), 6),
+        "top_processes": processes[:8],
+    }
+
+
+def classify_host_snapshot(
+    snapshot: Mapping[str, Any],
+    max_cpu_fraction: float,
+    max_process_cpu_percent: float,
+) -> tuple[bool, str | None]:
+    if not snapshot.get("available", False):
+        return False, f"host load unavailable: {snapshot.get('error', 'unknown error')}"
+    fraction = snapshot.get("cpu_fraction")
+    if not isinstance(fraction, (int, float)):
+        return False, "host CPU fraction is unavailable"
+    top = snapshot.get("top_processes", [])
+    top_cpu = (
+        float(top[0].get("cpu_percent", 0.0))
+        if isinstance(top, list) and top and isinstance(top[0], dict)
+        else 0.0
+    )
+    if float(fraction) > max_cpu_fraction:
+        return (
+            False,
+            f"host CPU utilization {float(fraction) * 100.0:.1f}% > "
+            f"{max_cpu_fraction * 100.0:.1f}%",
+        )
+    if top_cpu > max_process_cpu_percent:
+        return (
+            False,
+            f"top process CPU {top_cpu:.1f}% > {max_process_cpu_percent:.1f}%",
+        )
+    return True, None
+
+
+def wait_for_idle_host(
+    timeout_seconds: float,
+    sample_interval_seconds: float,
+    required_samples: int,
+    max_cpu_fraction: float,
+    max_process_cpu_percent: float,
+) -> dict[str, Any]:
+    if timeout_seconds < 0 or sample_interval_seconds <= 0 or required_samples <= 0:
+        raise QualityError(
+            "host-idle timeout must be non-negative; interval and samples must be positive"
+        )
+    started = time.monotonic()
+    consecutive = 0
+    samples: list[dict[str, Any]] = []
+    while True:
+        snapshot = host_load_snapshot()
+        accepted, reason = classify_host_snapshot(
+            snapshot, max_cpu_fraction, max_process_cpu_percent
+        )
+        snapshot["accepted"] = accepted
+        snapshot["reason"] = reason
+        samples.append(snapshot)
+        consecutive = consecutive + 1 if accepted else 0
+        if consecutive >= required_samples:
+            passed = True
+            break
+        elapsed = time.monotonic() - started
+        if elapsed >= timeout_seconds:
+            passed = False
+            break
+        time.sleep(min(sample_interval_seconds, max(timeout_seconds - elapsed, 0.0)))
+    return {
+        "schema": HOST_PREFLIGHT_SCHEMA,
+        "passed": passed,
+        "required_consecutive_samples": required_samples,
+        "accepted_consecutive_samples": consecutive,
+        "max_cpu_fraction": max_cpu_fraction,
+        "max_process_cpu_percent": max_process_cpu_percent,
+        "sample_interval_seconds": sample_interval_seconds,
+        "timeout_seconds": timeout_seconds,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "samples": samples,
+    }
 
 
 def capability_snapshot_failures(adapter: Mapping[str, Any]) -> list[str]:
@@ -500,6 +634,28 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
             if not isinstance(item.get(key), str) or not item[key]:
                 raise QualityError(f"machine class {item['id']}.{key} is required")
         list_of_strings(item.get("hard_metrics"), f"{item['id']}.hard_metrics")
+        max_host_fraction = item.get("max_host_cpu_fraction")
+        if (
+            not isinstance(max_host_fraction, (int, float))
+            or isinstance(max_host_fraction, bool)
+            or not 0.0 < float(max_host_fraction) < 1.0
+        ):
+            raise QualityError(
+                f"machine class {item['id']}.max_host_cpu_fraction must be between 0 and 1"
+            )
+        max_process_cpu = item.get("max_host_process_cpu_percent")
+        if (
+            not isinstance(max_process_cpu, (int, float))
+            or isinstance(max_process_cpu, bool)
+            or float(max_process_cpu) <= 0.0
+        ):
+            raise QualityError(
+                f"machine class {item['id']}.max_host_process_cpu_percent must be positive"
+            )
+        if "hardware_gi" in item and not isinstance(item["hardware_gi"], bool):
+            raise QualityError(
+                f"machine class {item['id']}.hardware_gi must be a boolean"
+            )
     for case in cases:
         machine_id = case["budgets"]["machine_class"]
         if machine_id not in machine_ids:
@@ -634,6 +790,10 @@ def verify_assets(case: Mapping[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
+def scene_executable(host_os_name: str | None = None) -> str:
+    return ".\\main.exe" if (host_os_name or os.name) == "nt" else "./main"
+
+
 def placeholders(case: Mapping[str, Any], case_dir: Path) -> dict[str, str]:
     width, height = case["resolution"]
     camera = case["camera"]
@@ -641,6 +801,8 @@ def placeholders(case: Mapping[str, Any], case_dir: Path) -> dict[str, str]:
     target = camera["target"]
     return {
         "repo": str(REPO_ROOT),
+        "python": sys.executable,
+        "executable": scene_executable(),
         "case_dir": str(case_dir),
         "candidate": str(case_dir / "final.png"),
         "telemetry": str(case_dir / "telemetry.json"),
@@ -926,6 +1088,44 @@ def selected_machine_class(
     raise QualityError(f"unknown machine class: {machine_id}")
 
 
+def canonical_host_os(value: str) -> str:
+    normalized = value.strip().lower()
+    return {
+        "darwin": "macos",
+        "win32": "windows",
+        "nt": "windows",
+    }.get(normalized, normalized)
+
+
+def machine_host_failure(
+    machine: Mapping[str, Any] | None, actual_os: str | None = None
+) -> str | None:
+    if machine is None:
+        return None
+    expected_os = canonical_host_os(str(machine.get("os", "")))
+    if not expected_os:
+        return None
+    host_os = canonical_host_os(actual_os or platform.system())
+    if host_os != expected_os:
+        return (
+            f"machine class {machine.get('id')!r} requires OS {expected_os!r}, "
+            f"but this host reports {host_os!r}"
+        )
+    return None
+
+
+def machine_capture_environment(
+    machine: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    if machine is None:
+        return {}
+    backend = str(machine.get("backend", "")).strip().lower()
+    environment = {"BLOOM_WGPU_BACKEND": backend} if backend else {}
+    if machine.get("hardware_gi", False):
+        environment["BLOOM_HW_GI"] = "1"
+    return environment
+
+
 def effective_features(adapter: Mapping[str, Any] | None) -> set[str]:
     from_env = {
         feature.strip()
@@ -993,7 +1193,8 @@ def performance_failures(
         return []
     budgets = case.get("budgets", {})
     required_class = budgets.get("machine_class")
-    if required_class and required_class != machine.get("id"):
+    budget_class = machine.get("budget_class", machine.get("id"))
+    if required_class and required_class != budget_class:
         return []
     if telemetry is None:
         return ["hard-gated machine produced no telemetry.json"]
@@ -1121,6 +1322,7 @@ def run_case(
     report_only: bool,
     timeout_seconds: float,
     built_commands: set[tuple[str, ...]],
+    validate_host_load: bool = False,
 ) -> dict[str, Any]:
     case_id = str(case["id"])
     case_dir = out_dir / "cases" / case_id
@@ -1216,6 +1418,7 @@ def run_case(
         "BLOOM_QUALITY_INTERMEDIATES": str(intermediates),
         "RUST_BACKTRACE": "1",
     }
+    env.update(machine_capture_environment(machine))
     capture_result = run_command(capture_argv, cwd, timeout_seconds, env)
     record["commands"].append({"kind": "capture", **command_record(capture_result)})
     if capture_result.returncode != 0:
@@ -1226,6 +1429,28 @@ def run_case(
         record["status"] = "error"
         record["failures"].append(f"capture did not produce {candidate}")
         return record
+    host_postflight_passed = True
+    if validate_host_load and machine is not None:
+        max_cpu_fraction = float(machine.get("max_host_cpu_fraction", 0.20))
+        max_process_cpu_percent = float(
+            machine.get("max_host_process_cpu_percent", 75.0)
+        )
+        snapshot = host_load_snapshot()
+        host_postflight_passed, reason = classify_host_snapshot(
+            snapshot, max_cpu_fraction, max_process_cpu_percent
+        )
+        snapshot["accepted"] = host_postflight_passed
+        snapshot["reason"] = reason
+        host_path = case_dir / "host-postflight.json"
+        host_path.write_text(
+            json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        record["host_postflight"] = snapshot
+        record["artifacts"]["host_postflight"] = str(host_path.relative_to(out_dir))
+        if not host_postflight_passed:
+            record["failures"].append(
+                f"performance measurement invalid because host became busy: {reason}"
+            )
     candidate_dimensions = png_dimensions(candidate)
     if candidate_dimensions != tuple(case["resolution"]):
         record["failures"].append(
@@ -1273,10 +1498,22 @@ def run_case(
     missing_intermediates = sorted(required_intermediates - produced_names)
     if missing_intermediates:
         record["failures"].append(f"missing named intermediates: {missing_intermediates}")
+    # Baselines are independently governed and may legitimately be absent
+    # during initial corpus bring-up. Do not let that suppress the runtime,
+    # resource, or hard-performance contracts that the completed capture can
+    # already prove. In particular, report-only bootstrap runs must expose
+    # budget failures before a human installs the first visual reference.
+    record["failures"].extend(
+        performance_failures(
+            case, telemetry, machine if host_postflight_passed else None
+        )
+    )
     reference = repo_path(case["reference"]["path"])
     if not reference.exists():
         record["status"] = "fail"
         record["failures"].append(f"approved baseline missing: {case['reference']['path']}")
+        if report_only:
+            record["report_only_failure"] = True
         return record
     diff_argv = diff_command(
         diff_bin, case, reference, candidate, case_dir, report_only=False
@@ -1301,12 +1538,6 @@ def run_case(
         record["failures"].append("bloom-diff did not produce metrics.json")
     if diff_result.returncode != 0:
         record["failures"].append(f"visual thresholds failed (exit {diff_result.returncode})")
-    record["failures"].extend(
-        performance_failures(case, telemetry, machine)
-    )
-    record["failures"].extend(
-        f"missing named intermediate {item}" for item in missing_intermediates
-    )
     record["status"] = "pass" if not record["failures"] else "fail"
     if report_only and record["status"] == "fail":
         record["report_only_failure"] = True
@@ -1711,6 +1942,8 @@ def execute_suite(args: argparse.Namespace) -> int:
     manifest, manifest_hash = load_manifest(manifest_path)
     adapter = load_adapter(Path(args.adapter_json).resolve() if args.adapter_json else None)
     machine = selected_machine_class(manifest, args.machine_class)
+    if host_failure := machine_host_failure(machine):
+        raise QualityError(host_failure)
     selected_ids = list(manifest["workflow"][args.suite])
     if args.case:
         requested = set(args.case)
@@ -1734,6 +1967,32 @@ def execute_suite(args: argparse.Namespace) -> int:
                 ) from exc
             shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    host_preflight: dict[str, Any] | None = None
+    validate_host_load = bool(machine and machine.get("hard_gate", False))
+    if validate_host_load:
+        host_preflight = wait_for_idle_host(
+            timeout_seconds=float(args.host_idle_timeout),
+            sample_interval_seconds=float(args.host_idle_sample_interval),
+            required_samples=int(args.host_idle_samples),
+            max_cpu_fraction=float(machine.get("max_host_cpu_fraction", 0.20)),
+            max_process_cpu_percent=float(
+                machine.get("max_host_process_cpu_percent", 75.0)
+            ),
+        )
+        preflight_path = out_dir / "host-preflight.json"
+        preflight_path.write_text(
+            json.dumps(host_preflight, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if not host_preflight["passed"]:
+            last = host_preflight["samples"][-1]
+            print(
+                "[quality] host preflight: RETRY WHEN IDLE — "
+                + str(last.get("reason", "host load remained above the limit")),
+                file=sys.stderr,
+            )
+            print(f"[quality] host evidence: {preflight_path}", file=sys.stderr)
+            return 3
     diff_bin, build_result = build_diff_tool(args.timeout)
     started = time.perf_counter()
     features = effective_features(adapter)
@@ -1755,6 +2014,7 @@ def execute_suite(args: argparse.Namespace) -> int:
                 args.report_only,
                 args.timeout,
                 built_commands,
+                validate_host_load,
             )
         )
         print(f"[quality] {case_id}: {cases[-1]['status']}", flush=True)
@@ -1785,7 +2045,11 @@ def execute_suite(args: argparse.Namespace) -> int:
         "report_only": bool(args.report_only),
         "environment": environment,
         "features": sorted(observed_features or features),
-        "artifacts": {"capability_snapshot": capability_snapshot_path},
+        "artifacts": {
+            "capability_snapshot": capability_snapshot_path,
+            "host_preflight": "host-preflight.json" if host_preflight else None,
+        },
+        "host_preflight": host_preflight,
         "build": command_record(build_result) if build_result else None,
         "cases": cases,
         "status": "fail" if hard_fail else "pass",
@@ -2195,6 +2459,24 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--report-only", action="store_true")
     run.add_argument("--keep", action="store_true")
     run.add_argument("--timeout", type=float, default=900.0)
+    run.add_argument(
+        "--host-idle-timeout",
+        type=float,
+        default=120.0,
+        help="seconds a hard-budget run may wait for an idle host",
+    )
+    run.add_argument(
+        "--host-idle-samples",
+        type=int,
+        default=3,
+        help="consecutive low-load samples required before a hard-budget run",
+    )
+    run.add_argument(
+        "--host-idle-sample-interval",
+        type=float,
+        default=2.0,
+        help="seconds between hard-budget host-load samples",
+    )
     run.set_defaults(func=execute_suite)
 
     check = sub.add_parser("check", help="validate manifest, assets, and baselines")

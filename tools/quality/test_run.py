@@ -168,12 +168,91 @@ class BaselineGovernanceTests(unittest.TestCase):
             quality.baseline_review(args)
 
 
+class HostLoadPreflightTests(unittest.TestCase):
+    def snapshot(self, fraction: float, top_cpu: float) -> dict[str, object]:
+        return {
+            "available": True,
+            "logical_cpus": 10,
+            "cpu_fraction": fraction,
+            "total_cpu_percent": fraction * 1000.0,
+            "top_processes": [
+                {"pid": 123, "cpu_percent": top_cpu, "command": "test-worker"}
+            ],
+        }
+
+    def test_classifier_rejects_aggregate_and_single_process_pressure(self) -> None:
+        accepted, reason = quality.classify_host_snapshot(
+            self.snapshot(0.21, 40.0), 0.20, 75.0
+        )
+        self.assertFalse(accepted)
+        self.assertIn("21.0% > 20.0%", str(reason))
+
+        accepted, reason = quality.classify_host_snapshot(
+            self.snapshot(0.10, 80.0), 0.20, 75.0
+        )
+        self.assertFalse(accepted)
+        self.assertIn("80.0% > 75.0%", str(reason))
+
+    def test_wait_requires_consecutive_idle_samples(self) -> None:
+        samples = [
+            self.snapshot(0.40, 100.0),
+            self.snapshot(0.10, 30.0),
+            self.snapshot(0.12, 35.0),
+        ]
+        with (
+            mock.patch.object(quality, "host_load_snapshot", side_effect=samples),
+            mock.patch.object(quality.time, "sleep"),
+        ):
+            result = quality.wait_for_idle_host(10.0, 1.0, 2, 0.20, 75.0)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["accepted_consecutive_samples"], 2)
+        self.assertEqual(len(result["samples"]), 3)
+
+    def test_zero_timeout_records_busy_host_without_waiting(self) -> None:
+        with mock.patch.object(
+            quality, "host_load_snapshot", return_value=self.snapshot(0.50, 200.0)
+        ):
+            result = quality.wait_for_idle_host(0.0, 1.0, 3, 0.20, 75.0)
+        self.assertFalse(result["passed"])
+        self.assertEqual(len(result["samples"]), 1)
+        self.assertIn("host CPU utilization", result["samples"][0]["reason"])
+
+
 class ReproducibilityTests(unittest.TestCase):
     def test_checked_in_manifest_satisfies_contract(self) -> None:
         manifest, digest = quality.load_manifest(MODULE_PATH.with_name("scenes.toml"))
         self.assertEqual(manifest["schema_version"], 1)
         self.assertEqual(len(manifest["case"]), 9)
         self.assertEqual(len(digest), 64)
+        for machine in manifest["machine_class"]:
+            self.assertGreater(float(machine["max_host_cpu_fraction"]), 0.0)
+            self.assertLess(float(machine["max_host_cpu_fraction"]), 1.0)
+            self.assertGreater(float(machine["max_host_process_cpu_percent"]), 0.0)
+
+        for case in manifest["case"]:
+            values = quality.placeholders(case, Path("case-output"))
+            self.assertEqual(values["python"], sys.executable)
+            self.assertEqual(
+                values["executable"],
+                ".\\main.exe" if quality.os.name == "nt" else "./main",
+            )
+            capture = case["capture"]
+            self.assertEqual(
+                capture["command"][0],
+                "{executable}",
+                f"{case['id']}.command must use the host executable name",
+            )
+            for key in ("prepare", "build"):
+                argv = capture.get(key)
+                if argv:
+                    self.assertEqual(
+                        argv[0],
+                        "{python}",
+                        f"{case['id']}.{key} must use the active interpreter",
+                    )
+        self.assertEqual(quality.scene_executable("nt"), ".\\main.exe")
+        self.assertEqual(quality.scene_executable("posix"), "./main")
+
         temporal_evidence = {
             "ssr",
             "ssr-raw",
@@ -201,6 +280,56 @@ class ReproducibilityTests(unittest.TestCase):
                     temporal_evidence.isdisjoint(required),
                     f"{case['id']} cannot require disabled temporal systems",
                 )
+
+    def test_machine_class_rejects_cross_os_measurements(self) -> None:
+        machine = {"id": "windows-vulkan", "os": "windows"}
+        self.assertIsNone(quality.machine_host_failure(machine, "windows"))
+        self.assertIn(
+            "requires OS 'windows'",
+            str(quality.machine_host_failure(machine, "linux")),
+        )
+        self.assertIsNone(
+            quality.machine_host_failure({"id": "metal", "os": "macos"}, "Darwin")
+        )
+        self.assertEqual(
+            quality.machine_capture_environment(
+                {"backend": " Vulkan ", "hardware_gi": True}
+            ),
+            {"BLOOM_WGPU_BACKEND": "vulkan", "BLOOM_HW_GI": "1"},
+        )
+        self.assertEqual(quality.machine_capture_environment(None), {})
+
+    def test_machine_budget_alias_applies_governed_gpu_limits(self) -> None:
+        case = {
+            "budgets": {
+                "machine_class": "nvidia-rtx4080-vulkan",
+                "max_gpu_frame_p95_ms": 10.0,
+            }
+        }
+        machine = {
+            "id": "nvidia-rtx4080-windows-vulkan",
+            "budget_class": "nvidia-rtx4080-vulkan",
+            "hard_gate": True,
+            "hard_metrics": ["gpu"],
+            "backend": "vulkan",
+            "gpu": "NVIDIA GeForce RTX 4080",
+        }
+        telemetry = {
+            "adapter": {
+                "availability": "reported",
+                "backend": "vulkan",
+                "name": "NVIDIA GeForce RTX 4080",
+            },
+            "gpu_frame_p95_ms": 12.0,
+            "uncapped": True,
+            "warmup_excluded": True,
+            "shader_compilation_excluded": True,
+            "gpu_timestamps_available": True,
+        }
+        self.assertIn(
+            "gpu_frame_p95_ms 12.0000 > 10.0000",
+            quality.performance_failures(case, telemetry, machine),
+        )
 
     def test_stable_metadata_ignores_commands_and_duration(self) -> None:
         common = {
@@ -419,6 +548,122 @@ class ReproducibilityTests(unittest.TestCase):
         failures = quality.telemetry_contract_failures(case, telemetry)
         self.assertTrue(any("measured_frames" in item for item in failures))
         self.assertTrue(any("uncapped" in item for item in failures))
+
+
+class QualificationFailureOrderingTests(unittest.TestCase):
+    def test_missing_baseline_does_not_suppress_runtime_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            case = {
+                "id": "sample",
+                "description": "sample",
+                "quality_tier": "high",
+                "resolution": [1, 1],
+                "render_scale": 1.0,
+                "seed": 0,
+                "fixed_timestep": 1 / 60,
+                "warmup_frames": 1,
+                "measured_frames": 1,
+                "camera": {
+                    "position": [0.0, 0.0, 1.0],
+                    "target": [0.0, 0.0, 0.0],
+                    "up": [0.0, 1.0, 0.0],
+                    "fov_y_degrees": 45.0,
+                    "animation": "still",
+                },
+                "settings": {"quality_preset": 3},
+                "capture": {
+                    "working_dir": ".",
+                    "command": ["fake-capture", "{candidate}"],
+                },
+                "reference": {
+                    "path": "tools/quality/baselines/portable/missing.png"
+                },
+                "required_intermediates": ["hdr-scene"],
+                "budgets": {
+                    "machine_class": "test-machine",
+                    "max_cpu_frame_p95_ms": 1.0,
+                    "max_gpu_frame_p95_ms": 2.0,
+                },
+            }
+            machine = {
+                "id": "test-machine",
+                "hard_gate": True,
+                "hard_metrics": ["cpu", "gpu"],
+                "backend": "metal",
+                "gpu": "Test GPU",
+            }
+
+            def capture(
+                argv: list[str],
+                cwd: Path,
+                timeout_seconds: float,
+                env: dict[str, str] | None = None,
+            ) -> quality.CommandResult:
+                del timeout_seconds
+                Path(argv[1]).write_bytes(b"candidate")
+                assert env is not None
+                Path(env["BLOOM_QUALITY_TELEMETRY"]).write_text(
+                    json.dumps(
+                        {
+                            "adapter": {
+                                "availability": "reported",
+                                "backend": "metal",
+                                "name": "Test GPU",
+                                "features": [],
+                            },
+                            "cpu_frame_p95_ms": 4.0,
+                            "gpu_frame_p95_ms": 5.0,
+                            "uncapped": True,
+                            "warmup_excluded": True,
+                            "shader_compilation_excluded": True,
+                            "gpu_timestamps_available": True,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return quality.CommandResult(
+                    argv=list(argv),
+                    cwd=str(cwd),
+                    returncode=0,
+                    duration_ms=1.0,
+                    stdout="",
+                    stderr="",
+                    timed_out=False,
+                )
+
+            with (
+                mock.patch.object(quality, "REPO_ROOT", root),
+                mock.patch.object(
+                    quality,
+                    "verify_assets",
+                    return_value=[{"path": "asset", "status": "pass"}],
+                ),
+                mock.patch.object(quality, "run_command", side_effect=capture),
+                mock.patch.object(quality, "png_dimensions", return_value=(1, 1)),
+                mock.patch.object(quality, "telemetry_contract_failures", return_value=[]),
+            ):
+                record = quality.run_case(
+                    case,
+                    root / "out",
+                    root / "bloom-diff",
+                    set(),
+                    True,
+                    machine,
+                    True,
+                    1.0,
+                    set(),
+                )
+
+            self.assertEqual(record["status"], "fail")
+            self.assertTrue(record["report_only_failure"])
+            self.assertIn("missing named intermediates: ['hdr-scene']", record["failures"])
+            self.assertIn("cpu_frame_p95_ms 4.0000 > 1.0000", record["failures"])
+            self.assertIn("gpu_frame_p95_ms 5.0000 > 2.0000", record["failures"])
+            self.assertIn(
+                "approved baseline missing: tools/quality/baselines/portable/missing.png",
+                record["failures"],
+            )
 
 
 if __name__ == "__main__":

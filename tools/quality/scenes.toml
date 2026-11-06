@@ -43,6 +43,8 @@ hard_metrics = ["cpu", "gpu"]
 os = "macos"
 backend = "metal"
 gpu = "Apple M1 Max"
+max_host_cpu_fraction = 0.20
+max_host_process_cpu_percent = 75.0
 
 [[machine_class]]
 id = "nvidia-rtx4080-vulkan"
@@ -52,6 +54,24 @@ hard_metrics = ["cpu", "gpu", "vram"]
 os = "linux"
 backend = "vulkan"
 gpu = "NVIDIA GeForce RTX 4080"
+hardware_gi = true
+max_host_cpu_fraction = 0.20
+max_host_process_cpu_percent = 75.0
+
+[[machine_class]]
+id = "nvidia-rtx4080-windows-vulkan"
+description = "High-end discrete Windows desktop baseline, Vulkan"
+# Reuse the governed RTX 4080 Vulkan budgets while keeping the operating
+# system identity explicit in result.json.
+budget_class = "nvidia-rtx4080-vulkan"
+hard_gate = true
+hard_metrics = ["cpu", "gpu", "vram"]
+os = "windows"
+backend = "vulkan"
+gpu = "NVIDIA GeForce RTX 4080"
+hardware_gi = true
+max_host_cpu_fraction = 0.20
+max_host_process_cpu_percent = 75.0
 
 [[machine_class]]
 id = "apple-m1-metal-constrained"
@@ -61,6 +81,8 @@ hard_metrics = ["cpu", "gpu"]
 os = "macos"
 backend = "metal"
 gpu = "Apple M1"
+max_host_cpu_fraction = 0.20
+max_host_process_cpu_percent = 75.0
 
 [[case]]
 id = "pbr-spheres-high"
@@ -108,9 +130,9 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/pbr-spheres"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
 command = [
-  "./main",
+  "{executable}",
   "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
   "{camera_tx}", "{camera_ty}", "{camera_tz}", "{camera_fov}",
   "--res", "{width}", "{height}",
@@ -176,9 +198,9 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/pbr-spheres"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
 command = [
-  "./main",
+  "{executable}",
   "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
   "{camera_tx}", "{camera_ty}", "{camera_tz}", "{camera_fov}",
   "--res", "{width}", "{height}",
@@ -257,9 +279,9 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/renderer-test"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/renderer-test"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/renderer-test"]
 command = [
-  "./main",
+  "{executable}",
   "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
   "{camera_tx}", "{camera_ty}", "{camera_tz}", "{camera_fov}",
   "--res", "{width}", "{height}",
@@ -350,9 +372,9 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/sponza"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/sponza"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/sponza"]
 command = [
-  "./main", "--yaw", "0", "--taa", "1",
+  "{executable}", "--yaw", "0", "--taa", "1",
   "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
@@ -441,15 +463,15 @@ present_mode = "auto-no-vsync"
 [case.capture]
 working_dir = "examples/bistro"
 prepare = [
-  "python3", "{repo}/tools/quality/prepare_bistro.py",
+  "{python}", "{repo}/tools/quality/prepare_bistro.py",
   "{repo}/examples/bistro/assets/bistro.gltf",
   "{case_dir}/bistro-quality.gltf",
   "--metadata", "{case_dir}/bistro-quality.json",
   "--revision", "7c9f9f9ac0915024ccf3dddbccd8bfc643a42607",
 ]
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/bistro"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/bistro"]
 command = [
-  "./main", "--scene", "{case_dir}/bistro-quality.gltf",
+  "{executable}", "--scene", "{case_dir}/bistro-quality.gltf",
   "--yaw", "-1.8608027466", "--taa", "1",
   "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
@@ -539,9 +561,9 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/quality-motion"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-motion"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-motion"]
 command = [
-  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "{executable}", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
 ]
@@ -629,9 +651,9 @@ present_mode = "auto-no-vsync"
 
 [case.capture]
 working_dir = "examples/quality-stress"
-build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-stress"]
+build = ["{python}", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-stress"]
 command = [
-  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "{executable}", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
 ]
@@ -709,12 +731,12 @@ present_mode = "auto-no-vsync"
 [case.capture]
 working_dir = "examples/quality-transparency"
 build = [
-  "python3",
+  "{python}",
   "{repo}/tools/quality/build_example.py",
   "{repo}/examples/quality-transparency",
 ]
 command = [
-  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "{executable}", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
 ]
@@ -795,12 +817,12 @@ present_mode = "auto-no-vsync"
 [case.capture]
 working_dir = "examples/quality-masked"
 build = [
-  "python3",
+  "{python}",
   "{repo}/tools/quality/build_example.py",
   "{repo}/examples/quality-masked",
 ]
 command = [
-  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "{executable}", "--quality-preset", "3", "--render-scale", "{render_scale}",
   "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
   "{candidate}", "{telemetry}", "{intermediates}",
 ]

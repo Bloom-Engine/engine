@@ -1,0 +1,38 @@
+{
+  "schema": "bloom-issue-128-baseline-installation-v1",
+  "issues": [128],
+  "approval_date": "2026-08-31",
+  "approved_by": "Ralph Kuepper",
+  "approval_scope": "all-nine-reviewed-baselines",
+  "review": {
+    "schema": "bloom-quality-baseline-review-v1",
+    "sha256": "883fee9b552cb27b8eb28921b935bedc0e4d42b4f1359998b0aa7b553cfce0ed",
+    "source_commit": "09ad0b755af9f10083712327d7f0edb1d88f228b",
+    "source_result_sha256": "49de2b4a46d2f4ad309908777769c0de81d182a9f403afb294de59224cf24d37",
+    "manifest_sha256": "deee7f2528525c492146fc97c1a52551dad5dea5b5a8ffe4e1ef2c61158333e1",
+    "entries": 9,
+    "all_targets_absent_before_install": true
+  },
+  "installation_receipt": {
+    "schema": "bloom-quality-baseline-install-v1",
+    "sha256": "82a99b96ab7e402d9dadd554e31e3850e61b6e30ed7394236a8289158bf01ab9",
+    "approved_by": "Ralph Kuepper"
+  },
+  "independent_verification": {
+    "installed_matches_reviewed_candidate": true,
+    "installed_matches_receipt": true,
+    "verified_entries": 9
+  },
+  "installed": [
+    {"case": "pbr-spheres-high", "target": "tools/quality/baselines/portable/pbr-spheres-high.png", "sha256": "e71f00d571e22023bf54ee8fe343964ed4877066ca874e52b2b94e31cf53c5a4"},
+    {"case": "pbr-spheres-constrained", "target": "tools/quality/baselines/portable/pbr-spheres-constrained.png", "sha256": "61f209370e715b815b32cf67e11527c717830c09dc8616c50ebe828640510c98"},
+    {"case": "damaged-helmet", "target": "tools/quality/baselines/portable/damaged-helmet.png", "sha256": "3ca1d6c1dc1304513e765b9391188ca7fd9c0c2cb41b61e5664b310cd4eccf25"},
+    {"case": "sponza-interior", "target": "tools/quality/baselines/portable/sponza-interior.png", "sha256": "32837d3da922647db87b59b4c9fbd2854a79417b28bdac33e8267f0599d9177b"},
+    {"case": "bistro-exterior", "target": "tools/quality/baselines/portable/bistro-exterior.png", "sha256": "9274c04b74cccd71c2dbb1c9d47cf54fac57a106b660f40e49650ce1e97bbb66"},
+    {"case": "skinned-alpha-motion", "target": "tools/quality/baselines/portable/skinned-alpha-motion.png", "sha256": "18ccdef6405e764c9c49c13e89aa844e0d2a7185db315abd90fadb1a3dd10396"},
+    {"case": "draw-light-stress", "target": "tools/quality/baselines/portable/draw-light-stress.png", "sha256": "5f23f5dd2b239941052f2c1fedddb9c5d470d5e914fda8f857d4e6072a0a0862"},
+    {"case": "weighted-transparency", "target": "tools/quality/baselines/portable/weighted-transparency.png", "sha256": "094172fca31801f19ce7ad1ab6ae01b9d89f5c6b3a8459bed54166e18b7cbaf5"},
+    {"case": "masked-alpha-coverage", "target": "tools/quality/baselines/portable/masked-alpha-coverage.png", "sha256": "04b25e87ddf06e5c911490417035180d1d26934f3a05449dc0ace23e24f40339"}
+  ],
+  "remaining_gate": "clean strict qualification against the installed baseline corpus"
+}

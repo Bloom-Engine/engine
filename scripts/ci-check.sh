@@ -81,7 +81,7 @@ lane_components() {
     full) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory host-build wasm-build" ;;
     web) printf '%s\n' "wasm-check wasm-build browser-smoke" ;;
     cross) printf '%s\n' "target-check" ;;
-    hardware) printf '%s\n' "example-compile quality-check quality-faults quality-run virtual-geometry-stress" ;;
+    hardware) printf '%s\n' "example-compile quality-check quality-faults quality-run fractional-native-throughput virtual-geometry-stress" ;;
     *)
       echo "unknown lane: $1" >&2
       return 2
@@ -256,7 +256,9 @@ run_component() {
         tools/quality/vsm_caster_coverage.py \
         tools/quality/vsm_debug_views.py \
         tools/quality/vsm_motion_corpus.py \
-        tools/quality/prepare_bistro.py
+        tools/quality/prepare_bistro.py \
+        tools/ci/web_smoke.py \
+        tools/ci/test_web_smoke.py
       python3 -m unittest \
         tools/quality/test_run.py \
         tools/quality/test_khronos_materials.py \
@@ -266,6 +268,7 @@ run_component() {
         tools/quality/test_vsm_caster_coverage.py \
         tools/quality/test_vsm_debug_views.py \
         tools/quality/test_vsm_motion_corpus.py \
+        tools/ci/test_web_smoke.py \
         -v
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
@@ -391,13 +394,33 @@ run_component() {
           --case "$BLOOM_QUALITY_CASE" \
           --machine-class "$BLOOM_QUALITY_MACHINE_CLASS" \
           --out "$quality_out" \
+          --host-idle-timeout "${BLOOM_QUALITY_HOST_IDLE_TIMEOUT:-120}" \
           --timeout "${BLOOM_QUALITY_TIMEOUT:-1800}"
       else
         python3 tools/quality/run.py run "$quality_suite" \
           --machine-class "$BLOOM_QUALITY_MACHINE_CLASS" \
           --out "$quality_out" \
+          --host-idle-timeout "${BLOOM_QUALITY_HOST_IDLE_TIMEOUT:-120}" \
           --timeout "${BLOOM_QUALITY_TIMEOUT:-1800}"
       fi
+      ;;
+    fractional-native-throughput)
+      throughput_out="${BLOOM_PROFILE_FRACTIONAL_TAA_OUT:-tools/quality/out/ci-fractional-native-throughput}"
+      if [ "${throughput_out#/}" = "$throughput_out" ]; then
+        throughput_out="$ROOT/$throughput_out"
+      fi
+      hr "qualify fractional 0.75 throughput against native 1.0"
+      (
+        cd native/shared
+        BLOOM_PROFILE_FRACTIONAL_TAA_OUT="$throughput_out" \
+        BLOOM_PROFILE_FRACTIONAL_TAA_FRAMES="${BLOOM_PROFILE_FRACTIONAL_TAA_FRAMES:-600}" \
+        BLOOM_PROFILE_FRACTIONAL_TAA_PAIRS="${BLOOM_PROFILE_FRACTIONAL_TAA_PAIRS:-3}" \
+        BLOOM_PROFILE_FRACTIONAL_TAA_MIN_ADVANTAGE="${BLOOM_PROFILE_FRACTIONAL_TAA_MIN_ADVANTAGE:-0.05}" \
+        BLOOM_PROFILE_FRACTIONAL_TAA_CAMERA_STEP="${BLOOM_PROFILE_FRACTIONAL_TAA_CAMERA_STEP:-0.002}" \
+        cargo test --release --test golden_render \
+          quality_presets::profile_fractional_taa_native_advantage \
+          -- --exact --ignored --nocapture
+      )
       ;;
     virtual-geometry-stress)
       if [ -z "${BLOOM_VIRTUAL_STRESS_PLATFORM:-}" ] || [ -z "${BLOOM_VIRTUAL_STRESS_BACKEND:-}" ]; then

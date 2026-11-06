@@ -14,7 +14,7 @@ const expectedLanes = new Map([
   ["full", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "example-inventory", "host-build", "wasm-build"]],
   ["web", ["wasm-check", "wasm-build", "browser-smoke"]],
   ["cross", ["target-check"]],
-  ["hardware", ["example-compile", "quality-check", "quality-faults", "quality-run", "virtual-geometry-stress"]],
+  ["hardware", ["example-compile", "quality-check", "quality-faults", "quality-run", "fractional-native-throughput", "virtual-geometry-stress"]],
 ]);
 
 const listing = spawnSync("bash", ["scripts/ci-check.sh", "--list"], {
@@ -60,11 +60,12 @@ const workflowCommands = [
   "./scripts/ci-check.sh --hardware --component quality-check",
   "./scripts/ci-check.sh --hardware --component quality-faults",
   "./scripts/ci-check.sh --hardware --component quality-run",
+  "./scripts/ci-check.sh --hardware --component fractional-native-throughput",
   "./scripts/ci-check.sh --hardware --component virtual-geometry-stress",
 ];
 
 for (const command of workflowCommands) {
-  const workflow = command.includes("quality-") || command.includes("example-compile") || command.includes("virtual-geometry")
+  const workflow = command.includes("--hardware") || command.includes("--component quality-contract")
     ? qualityWorkflow
     : testWorkflow;
   if (!workflow.includes(command)) {

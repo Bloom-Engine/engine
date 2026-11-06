@@ -13,8 +13,8 @@
 ///   (set via wgpu's blend state on the upsample pipeline).
 ///
 /// Uniform: `params.xy` = source texel size (1/src_w, 1/src_h);
-/// `params.z` = bloom intensity (only used by upsample); `params.w`
-/// reserved.
+/// `params.z` = filter radius (only used by upsample); `params.w` =
+/// HDR threshold (only used by the threshold downsample).
 pub(in crate::renderer) const BLOOM_SHADER_WGSL: &str = "
 struct BloomParams {
     /// xy = source texel size (1/src_w, 1/src_h),

@@ -332,13 +332,18 @@ mod ray_query_variant_tests {
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("fallback_radiance / fallback_weight"));
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("var resolved = accum;"));
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("if (u.params.w > 0.5)"));
-        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("in.uv.x - velocity.x"));
-        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("in.uv.y + velocity.y"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("uv.x - velocity.x"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("uv.y + velocity.y"));
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("u.prev_view * vec4<f32>(P_ws, 1.0)"));
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("abs(history_depth - expected_previous_depth)"));
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("let moving_current_weight = 0.015625;"));
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("mix(1.0, moving_current_weight, motion_amount)"));
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("return vec4<f32>(resolved, linear_z);"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("@compute @workgroup_size(8, 8, 1)"));
+        assert!(
+            SSGI_PROBE_RESOLVE_WGSL.contains("resolve_out: texture_storage_2d<rgba16float, write>")
+        );
+        assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("@fragment"));
         assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("u.params.y * 0.90"));
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("(0.08 + probe_world_spacing * 0.85) * 3.0"));
         assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("let nearest_probe"));
@@ -378,8 +383,14 @@ mod ray_query_variant_tests {
     fn ssr_uses_stable_roughness_ownership_and_hit_provenance() {
         wgpu::naga::front::wgsl::parse_str(SSR_SHADER_WGSL)
             .unwrap_or_else(|error| panic!("SSR WGSL failed: {error:?}"));
-        wgpu::naga::front::wgsl::parse_str(SSR_TEMPORAL_SHADER_WGSL)
+        let temporal = wgpu::naga::front::wgsl::parse_str(SSR_TEMPORAL_SHADER_WGSL)
             .unwrap_or_else(|error| panic!("SSR temporal WGSL failed: {error:?}"));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&temporal)
+        .unwrap_or_else(|error| panic!("SSR temporal WGSL validation failed: {error:?}"));
 
         let ownership = "1.0 - smoothstep(0.45, 0.70, roughness)";
         assert!(SSR_SHADER_WGSL.contains(ownership));
@@ -387,6 +398,11 @@ mod ray_query_variant_tests {
         assert!(SSR_SHADER_WGSL.contains("luma / 4.0"));
         assert!(SSR_TEMPORAL_SHADER_WGSL.contains("provenance_disocclusion"));
         assert!(SSR_TEMPORAL_SHADER_WGSL.contains("current_hit == history_hit"));
+        assert!(
+            SSR_TEMPORAL_SHADER_WGSL.find("let depth_gradient").unwrap()
+                < SSR_TEMPORAL_SHADER_WGSL.find("if (off_screen)").unwrap(),
+            "fragment derivatives must stay outside divergent history control flow"
+        );
     }
 }
 mod post;

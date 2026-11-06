@@ -897,25 +897,19 @@ impl Renderer {
                                     &self.velocity_rt_view,
                                 ),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 8,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.ssgi_rt_views[write_idx],
+                                ),
+                            },
                         ],
                     }));
             }
-            let ts = profiler.pass_timestamp_writes("probe_resolve_pass");
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let ts = profiler.compute_pass_timestamp_writes("probe_resolve_pass");
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("probe_resolve_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.ssgi_rt_views[write_idx],
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
                 timestamp_writes: ts,
-                occlusion_query_set: None,
-                multiview_mask: None,
             });
             pass.set_pipeline(&self.probe_resolve_pipeline);
             pass.set_bind_group(
@@ -923,7 +917,7 @@ impl Renderer {
                 self.probe_resolve_bg_cache[write_idx].as_ref().unwrap(),
                 &[],
             );
-            pass.draw(0..3, 0..1);
+            pass.dispatch_workgroups(half_w.div_ceil(8), half_h.div_ceil(8), 1);
         } else {
             // Suppressed frames do not produce probe history. This also
             // catches progressive PT changing ownership without a mode change.

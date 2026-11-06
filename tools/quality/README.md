@@ -23,6 +23,13 @@ python3 tools/quality/run.py run quick
 python3 tools/quality/run.py run full \
   --machine-class apple-m1-max-metal
 
+# Windows PowerShell, on an NVIDIA RTX 4080 using Vulkan. The longer idle
+# allowance keeps unrelated builds out of the hard performance window.
+python tools/quality/run.py run full `
+  --machine-class nvidia-rtx4080-windows-vulkan `
+  --host-idle-timeout 600 `
+  --out tools/quality/out/windows-rtx4080-vulkan
+
 # Explore on an unqualified machine without changing the process exit code.
 python3 tools/quality/run.py run full \
   --report-only \
@@ -35,6 +42,14 @@ hard performance budget. `--report-only` records those same failures in
 `result.json`; it only makes the process exit zero for local investigation.
 It never turns a failure into a recorded pass.
 
+Before the Windows run, use `python tools/quality/run.py check` from a clean
+checkout and confirm that Python, Rust/Cargo, Node/npm, Perry, Vulkan, and the
+pinned Bistro assets are available. The runner records `windows` as the host
+OS, rejects the Linux RTX-4080 identity on Windows, waits for three consecutive
+idle samples, explicitly selects Vulkan, uses the active Python interpreter for
+helper scripts, and writes the complete evidence bundle under the selected
+output directory.
+
 Useful focused commands:
 
 ```sh
@@ -43,6 +58,26 @@ python3 tools/quality/run.py run full --case bistro-exterior --report-only
 python3 tools/quality/run.py faults
 python3 -m unittest tools/quality/test_run.py -v
 ```
+
+To qualify the browser fallback renderer in real Chrome after building the
+WASM package:
+
+```sh
+./scripts/ci-check.sh --web --component wasm-build
+./scripts/ci-check.sh --web --component browser-smoke
+```
+
+The browser gate first proves presentation with a known 2D frame, then loads
+the canonical Damaged Helmet through the production model importer and renders
+matched native 1.0, fractional 0.75 TAA, and fractional 0.75 no-TAA camera
+sequences. It rejects WebGPU validation errors, incomplete or flat output,
+missing motion, excessive fractional-to-native RGB or motion-derivative error,
+unexpected hardware ray-query use, and an inactive software SSGI fallback.
+`target/ci/web-smoke/result.json` records the limits, measured metrics, adapter,
+material residency, active runtime paths, and relative image directories. CI
+uploads that directory on success and failure for review. Browser GPU timestamp
+profiling is not inferred from compositor screenshots; performance changes
+still require the native fixed-step qualification contract below.
 
 To isolate an intermittent detailed-Bistro temporal defect by renderer owner,
 capture the same admitted scene, camera excursion, return pose, and 32-frame
@@ -390,6 +425,47 @@ Defined classes:
 - `apple-m1-max-metal`: Metal high-end RT/bindless baseline;
 - `nvidia-rtx4080-vulkan`: Vulkan discrete high-end baseline, including VRAM;
 - `apple-m1-metal-constrained`: constrained preset/render-scale gate.
+
+Hard-budget runs also protect their CPU measurements with a host-load gate.
+Before building or capturing, the runner requires three consecutive samples
+below the machine class's aggregate and single-process CPU limits. If the host
+does not settle within 120 seconds, the command exits with code 3 and writes
+`host-preflight.json`; this means **retry when idle**, not a renderer failure.
+Every completed case also writes `host-postflight.json`. If unrelated work
+starts during a capture, its performance numbers are invalidated instead of
+being compared with the hard budgets.
+
+On a shared workstation, let the runner wait longer rather than weakening a
+budget:
+
+```sh
+python3 tools/quality/run.py run full \
+  --machine-class apple-m1-max-metal \
+  --host-idle-timeout 1800
+```
+
+The wait changes only when measurement begins. It does not change scene
+quality, warm-up frames, measured frames, or any CPU/GPU limit.
+
+The high-end hardware jobs also prove that temporal reconstruction retains a
+real throughput advantage rather than assuming one from pixel count:
+
+```sh
+BLOOM_PROFILE_FRACTIONAL_TAA_OUT=tools/quality/out/local-fractional-native \
+./scripts/ci-check.sh --hardware --component fractional-native-throughput
+```
+
+The gate alternates three 0.75/native-1.0 pairs at 1600x900 with identical TAA,
+scene, camera crawl, and quality-preset-4 settings. Every run excludes 120
+warm-up frames and measures 600 frames in complete profiler windows. It records
+raw end-to-end wall, instrumented CPU, timestamped GPU, p50/p95, and TAA-pass
+timings, then requires at least a 5% median advantage in both end-to-end and
+timestamped GPU work. Per-frame GPU readback deliberately serializes these
+focused profiles; this makes wall time pessimistic but identical between the
+two scales and prevents vsync or queued work from fabricating the advantage.
+`result.json` also records the adapter, limits, every paired run, and the final
+steady-state resource counters. Metal and Vulkan jobs upload the result and
+append its `summary.md` to the job summary.
 
 The virtual-geometry portability gate is separate from the ordinary scene
 manifest because it deterministically generates and cooks a 10M-source-
