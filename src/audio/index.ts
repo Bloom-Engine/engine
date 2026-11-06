@@ -313,3 +313,53 @@ export function duckBus(bus: number, amount: number, attack: number, release: nu
 export function setReverb(size: number, damp: number, wet: number): void {
   bloom_set_reverb(size, damp, wet);
 }
+
+// ---- Web Audio bridge: non-spatial voices, music time --------------------
+//
+// What a Web Audio layer needs that fire-and-forget playSound can't give: a
+// voice id for a non-spatial play (to ride its gain, rate and pan while it
+// plays and to stop it), and music that can play once and say how far it is.
+
+declare function bloom_play_sound_ex(handle: number, looping: number, volume: number, pitch: number, pan: number): number;
+declare function bloom_voice_set_pan(voice: number, pan: number): void;
+declare function bloom_set_music_looping(handle: number, looping: number): void;
+declare function bloom_get_music_time(handle: number): number;
+declare function bloom_get_music_length(handle: number): number;
+declare function bloom_play_music_from(handle: number, seconds: number): void;
+
+/// Play a sound without position and return its voice id (0 = the sound was
+/// not loaded). `volume` multiplies the sound's own volume, `pitch` is the
+/// playback rate (0.25..4), `pan` a stereo balance from -1 (left) to 1 (right).
+/// Steer it with voiceSetVolume / voiceSetPitch / voiceSetPan / voiceStop.
+export function playSoundEx(sound: Sound, looping: boolean, volume: number, pitch: number, pan: number): number {
+  return bloom_play_sound_ex(sound.handle, looping ? 1 : 0, volume, pitch, pan);
+}
+
+/// Stereo balance of a non-spatial voice, -1..1 (spatial voices pan from their position).
+export function voiceSetPan(voice: number, pan: number): void {
+  if (voice !== 0) bloom_voice_set_pan(voice, pan);
+}
+
+/// Loop the track (the default) or play it once; isMusicPlaying turns false at its end.
+/// Set it before playMusic for a streamed (OGG/MP3) track.
+export function setMusicLooping(music: Music, looping: boolean): void {
+  bloom_set_music_looping(music.handle, looping ? 1 : 0);
+}
+
+/// Seconds played since the last playMusic. A looping streamed track keeps counting
+/// past its end: take it modulo the track's length.
+export function getMusicTimePlayed(music: Music): number {
+  return bloom_get_music_time(music.handle);
+}
+
+/// The track's length in seconds, or 0 for a streamed (OGG/MP3) track, whose length
+/// isn't known without decoding it.
+export function getMusicTimeLength(music: Music): number {
+  return bloom_get_music_length(music.handle);
+}
+
+/// Play a track from `seconds` into it (a seek; 0 is playMusic). A streamed track
+/// decodes up to that point on its decode worker first.
+export function playMusicFrom(music: Music, seconds: number): void {
+  bloom_play_music_from(music.handle, seconds);
+}

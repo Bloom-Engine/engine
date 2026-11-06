@@ -60,6 +60,21 @@
 }
 #[no_mangle] pub extern "C" fn bloom_voice_set_lowpass(_p0: f64, _p1: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_play_sound_ex(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_voice_set_pan(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_music_looping(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_get_music_time(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_play_music_from(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_get_music_length(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_load_texture_rgba8_scratch(_p0: f64, _p1: f64, _p2: f64) -> f64 {
     0.0
 }

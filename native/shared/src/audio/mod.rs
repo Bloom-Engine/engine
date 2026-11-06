@@ -63,6 +63,7 @@ enum MusicSource {
         kind: stream::StreamKind,
         bytes: Arc<Vec<u8>>,
         channels: u16,
+        sample_rate: u32,
     },
 }
 
@@ -158,10 +159,29 @@ impl AudioMixer {
         max_dist: f32,
         rolloff: f32,
     ) -> f64 {
+        self.send_play_with(handle, spatial, looping, ref_dist, max_dist, rolloff, 1.0, 1.0, 0.0)
+    }
+
+    /// `send_play` with a per-voice volume (multiplied onto the sound's own),
+    /// pitch and stereo pan from the start, so the first block is already
+    /// right (a volume set after the play would ramp in from the old level).
+    #[allow(clippy::too_many_arguments)]
+    fn send_play_with(
+        &mut self,
+        handle: f64,
+        spatial: Option<[f32; 3]>,
+        looping: bool,
+        ref_dist: f32,
+        max_dist: f32,
+        rolloff: f32,
+        gain: f32,
+        pitch: f32,
+        pan: f32,
+    ) -> f64 {
         let Some(data) = self.sounds.get(handle).cloned() else {
             return 0.0;
         };
-        let volume = self.get_sound_volume(handle);
+        let volume = self.get_sound_volume(handle) * gain.max(0.0);
         let (bus, send, lowpass) = self.routing(handle);
         self.next_voice += 1;
         let voice_id = self.next_voice;
@@ -175,7 +195,8 @@ impl AudioMixer {
             ref_dist,
             max_dist,
             rolloff,
-            pitch: 1.0,
+            pitch,
+            pan,
             bus,
             send,
             lowpass,
@@ -221,6 +242,22 @@ impl AudioMixer {
             if max_dist > 0.0 { max_dist } else { 1.0e9 },
             rolloff.max(0.0),
         )
+    }
+
+    /// Play a non-spatial voice and return its id (0.0 = unknown sound): the
+    /// handle a Web Audio source node needs to change its gain, rate and pan
+    /// while it plays, and to stop it. `looping` voices play until
+    /// [`Self::stop_voice`]. `pan` is a stereo balance, -1 (left) .. 1 (right).
+    pub fn play_sound_ex(&mut self, handle: f64, looping: bool, volume: f32, pitch: f32, pan: f32) -> f64 {
+        self.send_play_with(handle, None, looping, 1.0, 1.0e9, 1.0, volume, pitch, pan)
+    }
+
+    /// Stereo balance of a non-spatial voice, -1..1.
+    pub fn set_voice_pan(&mut self, voice: f64, pan: f32) {
+        self.send(Cmd::SetVoicePan {
+            voice_id: voice as u64,
+            pan,
+        });
     }
 
     pub fn set_voice_position(&mut self, voice: f64, x: f32, y: f32, z: f32) {
@@ -399,11 +436,12 @@ impl AudioMixer {
                 None
             };
             if let Some(kind) = kind {
-                if let Some((_rate, channels)) = stream::probe(kind, &data) {
+                if let Some((sample_rate, channels)) = stream::probe(kind, &data) {
                     return self.alloc_music(MusicSource::Streamed {
                         kind,
                         bytes: Arc::new(data),
                         channels,
+                        sample_rate,
                     });
                 }
                 // Mislabelled file — fall through to sniffing decode.
@@ -428,9 +466,28 @@ impl AudioMixer {
     }
 
     pub fn play_music(&mut self, handle: f64) {
+        self.play_music_from(handle, 0.0);
+    }
+
+    /// Play a track from `seconds` into it (0 = the start). A streamed track
+    /// decodes and drops what comes before, so a seek costs decode time,
+    /// done on the decode worker.
+    pub fn play_music_from(&mut self, handle: f64, seconds: f64) {
         let Some(m) = self.music.get(handle) else {
             return;
         };
+        let (rate, channels) = match &m.source {
+            MusicSource::Full(d) => (d.sample_rate, d.channels),
+            #[cfg(not(target_arch = "wasm32"))]
+            MusicSource::Streamed {
+                sample_rate,
+                channels,
+                ..
+            } => (*sample_rate, *channels),
+        };
+        let start = (seconds.max(0.0) * rate as f64) as usize * channels.max(1) as usize;
+        // what music_time reports until the render thread confirms
+        m.shared.position.store(start, Ordering::Relaxed);
         // Optimistically flip the flag so is_music_playing is true the
         // moment play_music returns (the render thread confirms on its
         // next callback).
@@ -442,8 +499,9 @@ impl AudioMixer {
                 kind,
                 bytes,
                 channels,
+                ..
             } => render::MusicPayload::Stream {
-                consumer: stream::start(*kind, bytes.clone(), m.looping),
+                consumer: stream::start_at(*kind, bytes.clone(), m.looping, start),
                 channels: *channels,
             },
         };
@@ -453,6 +511,7 @@ impl AudioMixer {
             shared: m.shared.clone(),
             volume: m.volume,
             looping: m.looping,
+            start,
         };
         self.send(cmd);
     }
@@ -474,6 +533,51 @@ impl AudioMixer {
             music_id: handle.to_bits(),
             volume,
         });
+    }
+
+    /// Loop the track (the default) or play it once. Applies to the next
+    /// play and to the playback already running.
+    pub fn set_music_looping(&mut self, handle: f64, looping: bool) {
+        if let Some(m) = self.music.get_mut(handle) {
+            m.looping = looping;
+        }
+        self.send(Cmd::SetMusicLooping {
+            music_id: handle.to_bits(),
+            looping,
+        });
+    }
+
+    /// Seconds of the track played since its last play_music. A looping
+    /// streamed track keeps counting past its end (take it modulo the
+    /// track's length); a looping decoded one starts again from 0.
+    pub fn music_time(&self, handle: f64) -> f64 {
+        let Some(m) = self.music.get(handle) else {
+            return 0.0;
+        };
+        let (rate, channels) = match &m.source {
+            MusicSource::Full(d) => (d.sample_rate, d.channels),
+            #[cfg(not(target_arch = "wasm32"))]
+            MusicSource::Streamed {
+                sample_rate,
+                channels,
+                ..
+            } => (*sample_rate, *channels),
+        };
+        let consumed = m.shared.position.load(Ordering::Relaxed) as f64;
+        // Decoded mono advances one sample per frame, decoded stereo two;
+        // the streamed path counts samples the same way.
+        consumed / channels.max(1) as f64 / rate.max(1) as f64
+    }
+
+    /// Length of a fully decoded track in seconds; 0 for a streamed one
+    /// (its length is not known without decoding it all).
+    pub fn music_length(&self, handle: f64) -> f64 {
+        match self.music.get(handle).map(|m| &m.source) {
+            Some(MusicSource::Full(d)) => {
+                d.samples.len() as f64 / d.channels.max(1) as f64 / d.sample_rate.max(1) as f64
+            }
+            _ => 0.0,
+        }
     }
 
     pub fn is_music_playing(&self, handle: f64) -> bool {
@@ -555,6 +659,89 @@ mod tests {
 
     fn peak(buf: &[f32]) -> f32 {
         buf.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    // ---- Web Audio bridge ----------------------------------------------
+
+    fn stereo_peaks(buf: &[f32]) -> (f32, f32) {
+        let mut l = 0.0f32;
+        let mut r = 0.0f32;
+        for f in buf.chunks(2) {
+            l = l.max(f[0].abs());
+            r = r.max(f[1].abs());
+        }
+        (l, r)
+    }
+
+    #[test]
+    fn play_sound_ex_returns_a_voice_with_its_volume() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(tone(4096));
+        let v = a.play_sound_ex(h, false, 0.25, 1.0, 0.0);
+        assert!(v > 0.0, "no voice id");
+        assert_eq!(a.play_sound_ex(999.0, false, 1.0, 1.0, 0.0), 0.0, "unknown sound must give 0");
+        let mut out = [0.0f32; 256];
+        a.mix_output(&mut out);
+        let (l, r) = stereo_peaks(&out);
+        assert!((l - 0.125).abs() < 1e-3 && (r - 0.125).abs() < 1e-3, "volume 0.25 of a 0.5 tone: {l} {r}");
+    }
+
+    #[test]
+    fn pan_moves_a_voice_between_channels() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(tone(1 << 14));
+        let v = a.play_sound_ex(h, true, 1.0, 1.0, -1.0);
+        let mut out = [0.0f32; 256];
+        a.mix_output(&mut out);
+        let (l, r) = stereo_peaks(&out);
+        assert!(l > 0.4 && r < 1e-4, "hard left: {l} {r}");
+        a.set_voice_pan(v, 1.0);
+        a.mix_output(&mut out); // ramps across this block
+        a.mix_output(&mut out);
+        let (l, r) = stereo_peaks(&out);
+        assert!(r > 0.4 && l < 1e-4, "hard right: {l} {r}");
+    }
+
+    #[test]
+    fn music_once_ends_and_reports_time() {
+        let mut a = AudioMixer::new();
+        // 0.5 s of mono at 44.1 kHz
+        let m = a.load_music(tone(22_050));
+        assert!((a.music_length(m) - 0.5).abs() < 1e-6);
+        a.set_music_looping(m, false);
+        a.play_music(m);
+        let mut out = vec![0.0f32; 2 * 11_025]; // 0.25 s
+        a.mix_output(&mut out);
+        assert!((a.music_time(m) - 0.25).abs() < 1e-3, "time {}", a.music_time(m));
+        a.mix_output(&mut out);
+        a.mix_output(&mut out);
+        assert!(!a.is_music_playing(m), "a track played once must stop at its end");
+    }
+
+    #[test]
+    fn music_plays_from_an_offset() {
+        let mut a = AudioMixer::new();
+        let m = a.load_music(tone(44_100)); // 1 s
+        a.set_music_looping(m, false);
+        a.play_music_from(m, 0.75);
+        assert!((a.music_time(m) - 0.75).abs() < 1e-3, "starts at the offset: {}", a.music_time(m));
+        let mut out = vec![0.0f32; 2 * 22_050]; // 0.5 s: past the end
+        a.mix_output(&mut out);
+        assert!(!a.is_music_playing(m), "0.25 s left, so 0.5 s of mixing ends it");
+    }
+
+    #[test]
+    fn music_volume_ramps_instead_of_jumping() {
+        let mut a = AudioMixer::new();
+        let m = a.load_music(tone(1 << 16));
+        a.play_music(m);
+        let mut out = [0.0f32; 512];
+        a.mix_output(&mut out);
+        a.set_music_volume(m, 0.0);
+        a.mix_output(&mut out);
+        // the first frame of the block is still at the old level, the last near 0
+        assert!(out[0].abs() > 0.4, "ramp starts at the old gain: {}", out[0]);
+        assert!(out[510].abs() < 0.01, "ramp ends at the new gain: {}", out[510]);
     }
 
     #[test]
