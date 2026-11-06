@@ -193,7 +193,7 @@ impl Renderer {
                 )
             } else {
                 (
-                    &self.ssr_pipeline,
+                    self.ssr_pipeline.get(),
                     self.ssr_bg_cache
                         .as_ref()
                         .expect("base SSR bind group initialized"),

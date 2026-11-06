@@ -18,6 +18,7 @@
 //! `bloom_set_occlusion_culling(0/1)` exposes the kill switch to games;
 //! default on.
 
+use super::lazy_pipeline::LazyComputePipeline;
 use wgpu::util::DeviceExt;
 
 pub(super) const GRID_W: u32 = 64;
@@ -69,7 +70,7 @@ struct Readback {
 }
 
 pub struct OcclusionCuller {
-    pipeline: wgpu::ComputePipeline,
+    pipeline: LazyComputePipeline,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
     grid_tex: wgpu::Texture,
@@ -92,6 +93,13 @@ pub struct OcclusionCuller {
     has_consumers: bool,
     /// set when record() ran this frame so after_submit() knows to map
     recorded_this_frame: bool,
+}
+
+impl OcclusionCuller {
+    /// The reduce pipeline, for `Renderer::prewarm_pipelines`.
+    pub(crate) fn warm_handle(&self) -> super::lazy_pipeline::WarmHandle {
+        self.pipeline.warm_handle()
+    }
 }
 
 impl OcclusionCuller {
@@ -140,7 +148,7 @@ impl OcclusionCuller {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = LazyComputePipeline::new(device, &wgpu::ComputePipelineDescriptor {
             label: Some("occlusion_reduce_pipeline"),
             layout: Some(&pl),
             module: &shader,

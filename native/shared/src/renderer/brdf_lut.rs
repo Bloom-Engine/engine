@@ -2,9 +2,10 @@
 //!
 //! Pre-integrates the GGX BRDF into a 2D `Rg16Float` table indexed by
 //! `(NdotV, roughness)` that the PBR shader samples at runtime via
-//! the Karis-2013 split-sum approximation. Entirely CPU-side —
-//! builds once at startup via `build_brdf_lut(size)` and hands the
-//! result to `queue.write_texture` in `Renderer::new`.
+//! the Karis-2013 split-sum approximation. The table is a constant:
+//! `build.rs` includes this file and runs `build_brdf_lut(BRDF_LUT_SIZE)`
+//! once per build, and `Renderer::new` uploads the embedded bytes
+//! (computing it at startup took ~0.4 s on an M1 Max, every launch).
 //!
 //! Private helpers (Hammersley, GGX importance sampling, Smith
 //! geometry) stay module-scoped; only `build_brdf_lut` is `pub` so
@@ -23,6 +24,9 @@
 // Importance-samples GGX in the H direction, integrates the visibility
 // × Fresnel(VdotH) part. The Fresnel split into scale (F0) and bias
 // (1) lets us factor F0 out of the integral.
+
+/// Width and height of the table, in texels.
+pub const BRDF_LUT_SIZE: usize = 256;
 
 const BRDF_LUT_SAMPLES: u32 = 1024;
 
@@ -128,7 +132,8 @@ fn build_brdf_lut_row(y: usize, size: usize) -> Vec<u16> {
 /// row is constant `roughness` (v axis), each column constant `NdotV`
 /// (u axis). Output is row-major suitable for write_texture. Splits
 /// across `available_parallelism()` threads since cells are
-/// independent — keeps startup latency manageable even at 1024 spp.
+/// independent. Runs in `build.rs`; the renderer only calls it in tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn build_brdf_lut(size: usize) -> Vec<u16> {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -160,5 +165,22 @@ pub fn build_brdf_lut(size: usize) -> Vec<u16> {
         (0..size)
             .flat_map(|y| build_brdf_lut_row(y, size))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The table the renderer embeds is the generator's output, row-major.
+    #[test]
+    fn baked_table_matches_generator() {
+        let baked = super::super::BRDF_LUT_BAKED;
+        assert_eq!(baked.len(), BRDF_LUT_SIZE * BRDF_LUT_SIZE * 2 * 2);
+        for y in [0, BRDF_LUT_SIZE / 2, BRDF_LUT_SIZE - 1] {
+            let row: Vec<u8> = build_brdf_lut_row(y, BRDF_LUT_SIZE).iter().flat_map(|t| t.to_le_bytes()).collect();
+            let start = y * BRDF_LUT_SIZE * 4;
+            assert_eq!(&baked[start..start + row.len()], row.as_slice(), "row {y}");
+        }
     }
 }

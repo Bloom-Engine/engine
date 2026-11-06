@@ -13,14 +13,14 @@ pub(super) fn create_scene_depth_pipeline(
     shader: &wgpu::ShaderModule,
     label: &'static str,
     visibility_target: bool,
-) -> wgpu::RenderPipeline {
+) -> super::lazy_pipeline::LazyRenderPipeline {
     let targets = [visibility_target.then_some(wgpu::ColorTargetState {
         format: visibility_buffer::VISIBILITY_FORMAT,
         blend: None,
         // Cached-model depth draws do not own packed visibility IDs.
         write_mask: wgpu::ColorWrites::empty(),
     })];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    super::lazy_pipeline::LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {

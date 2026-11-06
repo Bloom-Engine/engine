@@ -7,6 +7,7 @@
 //! for each fragment, giving high shadow resolution near the camera and
 //! coverage out to the far plane.
 
+use crate::renderer::lazy_pipeline::LazyRenderPipeline;
 use crate::renderer::IDENTITY_MAT4;
 
 /// Number of shadow cascades.
@@ -300,14 +301,14 @@ pub struct ShadowMap {
     pub sampler: wgpu::Sampler,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
-    pub pipeline: wgpu::RenderPipeline,
+    pub pipeline: LazyRenderPipeline,
     /// Alpha-tested variant for cutout foliage casters. Opaque casters keep
     /// using `pipeline` (byte-identical to before this was added).
-    pub pipeline_cutout: wgpu::RenderPipeline,
+    pub pipeline_cutout: LazyRenderPipeline,
     /// Skinning-aware variant for the immediate-mode batch (animated
     /// characters). Binds the joint-matrix buffer at group 1 and skins
     /// per-vertex so player/enemies cast a real posed shadow.
-    pub pipeline_skinned: wgpu::RenderPipeline,
+    pub pipeline_skinned: LazyRenderPipeline,
     /// Group-1 layout for `pipeline_cutout`: base-colour tex + sampler + a
     /// cutoff uniform. Per-mesh bind groups are built against this in
     /// `cache_model_if_static`.
@@ -609,7 +610,7 @@ impl ShadowMap {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
             label: Some("shadow_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -685,7 +686,7 @@ impl ShadowMap {
             bind_group_layouts: &[Some(&uniform_layout), Some(&cutout_tex_layout)],
             immediate_size: 0,
         });
-        let pipeline_cutout = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline_cutout = LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
             label: Some("shadow_pipeline_cutout"),
             layout: Some(&cutout_pl_layout),
             vertex: wgpu::VertexState {
@@ -734,7 +735,7 @@ impl ShadowMap {
             bind_group_layouts: &[Some(&uniform_layout), Some(joint_layout)],
             immediate_size: 0,
         });
-        let pipeline_skinned = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline_skinned = LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
             label: Some("shadow_pipeline_skinned"),
             layout: Some(&skinned_pl_layout),
             vertex: wgpu::VertexState {

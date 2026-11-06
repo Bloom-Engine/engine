@@ -16,6 +16,7 @@
 //! World footprint is a hardcoded 128 m square centred on origin at
 //! 256×256 texels = 0.5 m/texel for now. A later phase can replace
 //! that with a per-game descriptor.
+use super::lazy_pipeline::LazyComputePipeline;
 use crate::renderer::shader_include::ShaderSource;
 use crate::renderer::shader_library::library;
 
@@ -55,7 +56,7 @@ struct InfoUniforms {
 }
 
 pub struct ImpulseField {
-    pipeline: wgpu::ComputePipeline,
+    pipeline: LazyComputePipeline,
     bg_layout: wgpu::BindGroupLayout,
     info_buf: wgpu::Buffer,
     /// Backing textures for view_a/view_b — kept alive so the views
@@ -127,7 +128,7 @@ impl ImpulseField {
             label: Some("impulse_field"),
             source: wgpu::ShaderSource::Wgsl(shader_src.into()),
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = LazyComputePipeline::new(device, &wgpu::ComputePipelineDescriptor {
             label: Some("impulse_field_pipeline"),
             layout: Some(&pipeline_layout),
             module: &module,

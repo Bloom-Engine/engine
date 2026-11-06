@@ -7,6 +7,7 @@
 //! `instance_count` for culled draws. Keeping command slots ordered avoids the
 //! alpha/cutout ordering changes caused by atomic append compaction.
 
+use super::lazy_pipeline::{LazyComputePipeline, LazyRenderPipeline};
 use super::{
     material_indirection::GpuCompletionTracker, MeshDrawRef, Renderer, Uniforms3D, Vertex3D,
     DEPTH_FORMAT, HDR_FORMAT, MATERIAL_FORMAT, VELOCITY_FORMAT,
@@ -368,15 +369,31 @@ pub struct GpuDrivenRenderer {
     cull_bind_group: wgpu::BindGroup,
     draw_layout: wgpu::BindGroupLayout,
     draw_bind_group: wgpu::BindGroup,
-    cull_pipeline: Option<wgpu::ComputePipeline>,
-    depth_pipeline: Option<wgpu::RenderPipeline>,
-    main_pipeline: Option<wgpu::RenderPipeline>,
-    main_prepassed_pipeline: Option<wgpu::RenderPipeline>,
-    main_visibility_compat_pipeline: Option<wgpu::RenderPipeline>,
-    main_visibility_compat_prepassed_pipeline: Option<wgpu::RenderPipeline>,
+    cull_pipeline: Option<LazyComputePipeline>,
+    depth_pipeline: Option<LazyRenderPipeline>,
+    main_pipeline: Option<LazyRenderPipeline>,
+    main_prepassed_pipeline: Option<LazyRenderPipeline>,
+    main_visibility_compat_pipeline: Option<LazyRenderPipeline>,
+    main_visibility_compat_prepassed_pipeline: Option<LazyRenderPipeline>,
     visibility: super::visibility_buffer::VisibilityBufferRuntime,
     pub(super) draw_scratch: Vec<GpuDrawRecord>,
     pub stats: SubmissionStats,
+}
+
+impl GpuDrivenRenderer {
+    /// The pipelines a frame with GPU-driven draws uses, for `Renderer::prewarm_pipelines`.
+    pub(crate) fn warm_handles(&self) -> Vec<super::lazy_pipeline::WarmHandle> {
+        [
+            self.depth_pipeline.as_ref(),
+            self.main_pipeline.as_ref(),
+            self.main_prepassed_pipeline.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|p| p.warm_handle())
+        .chain(self.cull_pipeline.as_ref().map(|p| p.warm_handle()))
+        .collect()
+    }
 }
 
 impl GpuDrivenRenderer {
@@ -454,7 +471,7 @@ impl GpuDrivenRenderer {
                     bind_group_layouts: &[Some(&cull_layout)],
                     immediate_size: 0,
                 });
-            let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let cull_pipeline = LazyComputePipeline::new(device, &wgpu::ComputePipelineDescriptor {
                 label: Some("gpu_driven_cull_pipeline"),
                 layout: Some(&cull_pipeline_layout),
                 module: &cull_shader,
@@ -1358,7 +1375,7 @@ fn create_depth_pipeline(
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     visibility_target: bool,
-) -> wgpu::RenderPipeline {
+) -> LazyRenderPipeline {
     let targets = [visibility_target.then_some(wgpu::ColorTargetState {
         format: super::visibility_buffer::VISIBILITY_FORMAT,
         blend: None,
@@ -1366,7 +1383,7 @@ fn create_depth_pipeline(
         // priming depth; the ordinary path has no color target at all.
         write_mask: wgpu::ColorWrites::ALL,
     })];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
         label: Some("gpu_driven_depth_pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
@@ -1406,7 +1423,7 @@ fn create_main_pipeline(
     vertex_shader: &wgpu::ShaderModule,
     fragment_shader: &wgpu::ShaderModule,
     prepassed: bool,
-) -> wgpu::RenderPipeline {
+) -> LazyRenderPipeline {
     #[cfg(lean_mrt)]
     let targets = &[
         Some(wgpu::ColorTargetState {
@@ -1445,7 +1462,7 @@ fn create_main_pipeline(
             write_mask: wgpu::ColorWrites::ALL,
         }),
     ];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
         label: Some(if prepassed {
             "gpu_driven_main_prepassed_pipeline"
         } else {

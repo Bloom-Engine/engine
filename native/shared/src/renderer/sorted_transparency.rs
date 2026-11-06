@@ -281,8 +281,8 @@ impl Renderer {
             )
         } else {
             (
-                &self.scene_transparent_pipeline,
-                &self.scene_transparent_double_sided_pipeline,
+                self.scene_transparent_pipeline.get(),
+                self.scene_transparent_double_sided_pipeline.get(),
             )
         };
         pass.set_bind_group(1, &self.lighting_bind_group, &[]);
@@ -354,8 +354,8 @@ impl Renderer {
             )
         } else {
             (
-                &self.scene_transparent_pipeline,
-                &self.scene_transparent_double_sided_pipeline,
+                self.scene_transparent_pipeline.get(),
+                self.scene_transparent_double_sided_pipeline.get(),
             )
         };
         let mut current_pipeline = None;
