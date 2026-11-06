@@ -38,6 +38,29 @@ macro_rules! __bloom_ffi_game_loop {
             $crate::ffi::guard("bloom_get_fps", move || engine().get_fps())
         }
 
+        // bloom_get_display_scale  [source: ios]
+        #[no_mangle]
+        pub extern "C" fn bloom_get_display_scale() -> f64 {
+            $crate::ffi::guard("bloom_get_display_scale", move || $crate::display::display_scale())
+        }
+
+        // bloom_get_safe_area_inset  [source: ios]
+        #[no_mangle]
+        pub extern "C" fn bloom_get_safe_area_inset(edge: f64) -> f64 {
+            $crate::ffi::guard("bloom_get_safe_area_inset", move || {
+                if edge >= 0.0 { $crate::display::safe_area_inset(edge as usize) } else { 0.0 }
+            })
+        }
+
+        // bloom_set_menu_button_exits  [source: tvos]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_menu_button_exits(on: f64) -> f64 {
+            $crate::ffi::guard("bloom_set_menu_button_exits", move || {
+                $crate::display::set_menu_exits(on != 0.0);
+                1.0
+            })
+        }
+
         // bloom_get_screen_width  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_get_screen_width() -> f64 {

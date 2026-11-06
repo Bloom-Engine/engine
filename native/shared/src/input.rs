@@ -64,6 +64,12 @@ pub struct InputState {
     mouse_down: [bool; MAX_MOUSE_BUTTONS],
     mouse_released: [bool; MAX_MOUSE_BUTTONS],
     prev_mouse_down: [bool; MAX_MOUSE_BUTTONS],
+    // A press / release seen since the last begin_frame. iOS delivers touches
+    // (synthesized into mouse button 0) on the UI thread while the game thread
+    // renders, so a whole tap can start and end between two begin_frames;
+    // these latches keep its edges for the next frame to report.
+    mouse_press_latch: [bool; MAX_MOUSE_BUTTONS],
+    mouse_release_latch: [bool; MAX_MOUSE_BUTTONS],
 
     // Gamepad
     pub gamepad_available: bool,
@@ -131,6 +137,8 @@ impl InputState {
             mouse_down: [false; MAX_MOUSE_BUTTONS],
             mouse_released: [false; MAX_MOUSE_BUTTONS],
             prev_mouse_down: [false; MAX_MOUSE_BUTTONS],
+            mouse_press_latch: [false; MAX_MOUSE_BUTTONS],
+            mouse_release_latch: [false; MAX_MOUSE_BUTTONS],
             gamepad_available: false,
             gamepad_axes: [0.0; MAX_GAMEPAD_AXES],
             gamepad_buttons_down: [false; MAX_GAMEPAD_BUTTONS],
@@ -190,9 +198,22 @@ impl InputState {
             self.repeat_pending[i] = false;
         }
         for i in 0..MAX_MOUSE_BUTTONS {
-            self.mouse_pressed[i] = self.mouse_down[i] && !self.prev_mouse_down[i];
-            self.mouse_released[i] = !self.mouse_down[i] && self.prev_mouse_down[i];
+            self.mouse_pressed[i] =
+                (self.mouse_down[i] && !self.prev_mouse_down[i]) || self.mouse_press_latch[i];
+            self.mouse_released[i] =
+                (!self.mouse_down[i] && self.prev_mouse_down[i]) || self.mouse_release_latch[i];
+            self.mouse_press_latch[i] = false;
+            self.mouse_release_latch[i] = false;
         }
+        // The state these edges were computed from is the previous state for
+        // the next frame. Taking it here rather than in end_frame matters when
+        // input arrives from another thread (iOS touches): a change landing
+        // between begin_frame and end_frame was otherwise copied into prev_*
+        // without any frame ever reporting its edge, so a released finger never
+        // produced a release and a tap never produced a click.
+        self.prev_keys_down = self.keys_down;
+        self.prev_mouse_down = self.mouse_down;
+        self.prev_gamepad_buttons = self.gamepad_buttons_down;
         for i in 0..MAX_GAMEPAD_BUTTONS {
             self.gamepad_buttons_pressed[i] =
                 self.gamepad_buttons_down[i] && !self.prev_gamepad_buttons[i];
@@ -202,9 +223,6 @@ impl InputState {
     }
 
     pub fn end_frame(&mut self) {
-        self.prev_keys_down = self.keys_down;
-        self.prev_mouse_down = self.mouse_down;
-        self.prev_gamepad_buttons = self.gamepad_buttons_down;
         self.prev_mouse_x = self.mouse_x;
         self.prev_mouse_y = self.mouse_y;
         let mut flushed = false;
@@ -308,11 +326,17 @@ impl InputState {
 
     pub fn set_mouse_button_down(&mut self, button: usize) {
         if button < MAX_MOUSE_BUTTONS {
+            if !self.mouse_down[button] {
+                self.mouse_press_latch[button] = true;
+            }
             self.mouse_down[button] = true;
         }
     }
     pub fn set_mouse_button_up(&mut self, button: usize) {
         if button < MAX_MOUSE_BUTTONS {
+            if self.mouse_down[button] {
+                self.mouse_release_latch[button] = true;
+            }
             self.mouse_down[button] = false;
         }
     }

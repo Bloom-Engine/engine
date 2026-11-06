@@ -243,6 +243,25 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_menu_button_exits",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_display_scale",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_safe_area_inset",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_get_screen_width",
           "params": [],
           "returns": "f64"
@@ -1762,6 +1781,14 @@
         {
           "name": "bloom_set_auto_exposure",
           "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_camera_clip_planes",
+          "params": [
+            "f64",
             "f64"
           ],
           "returns": "f64"

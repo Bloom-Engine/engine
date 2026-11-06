@@ -139,9 +139,17 @@ fn build_jolt() {
     //   2. The Jolt build is expensive and identical across every cargo target
     //      hash — caching it once per profile lets `cargo clean` not nuke a
     //      multi-minute compile.
+    // Apple simulators share target_os/target_arch with the device (only the
+    // "sim" ABI tells them apart), so they need their own cache: a shared one
+    // hands simulator objects to a device link and ld rejects the platform.
+    let sim_suffix = if std::env::var("CARGO_CFG_TARGET_ABI").as_deref() == Ok("sim") {
+        "-sim"
+    } else {
+        ""
+    };
     let dst = shim_dir
         .join("build")
-        .join(format!("{}-{}", target_os, target_arch));
+        .join(format!("{}-{}{}", target_os, target_arch, sim_suffix));
 
     let lib_ext = if target_os == "windows" { "lib" } else { "a" };
     let lib_prefix = if target_os == "windows" { "" } else { "lib" };

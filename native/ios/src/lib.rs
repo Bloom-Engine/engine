@@ -104,6 +104,25 @@ unsafe impl RefEncode for CGRect {
     const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct UIEdgeInsets {
+    top: f64,
+    left: f64,
+    bottom: f64,
+    right: f64,
+}
+
+unsafe impl Encode for UIEdgeInsets {
+    const ENCODING: Encoding = Encoding::Struct(
+        "UIEdgeInsets",
+        &[Encoding::Double, Encoding::Double, Encoding::Double, Encoding::Double],
+    );
+}
+unsafe impl RefEncode for UIEdgeInsets {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+
 // ============================================================
 // ObjC runtime
 // ============================================================
@@ -444,7 +463,10 @@ unsafe extern "C" fn scene_will_connect(
         .unwrap_or(surface_caps.formats[0]);
 
     let surface_config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // COPY_SRC (where the surface offers it, as Metal does): bloom_take_screenshot reads
+        // the swapchain back, and without the flag the copy is a validation error that aborts.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | (surface_caps.usages & wgpu::TextureUsages::COPY_SRC),
         format,
         width: pixel_width,
         height: pixel_height,
@@ -609,7 +631,10 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
         .unwrap_or(surface_caps.formats[0]);
 
     let surface_config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // COPY_SRC (where the surface offers it, as Metal does): bloom_take_screenshot reads
+        // the swapchain back, and without the flag the copy is a validation error that aborts.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | (surface_caps.usages & wgpu::TextureUsages::COPY_SRC),
         format,
         width: pixel_width,
         height: pixel_height,
@@ -968,6 +993,26 @@ pub extern "C" fn bloom_begin_drawing() {
             let view_ptr = Retained::as_ptr(view);
             let layer: Retained<AnyObject> = msg_send![&*view_ptr, layer];
             let view_bounds: CGRect = msg_send![&*view_ptr, bounds];
+            // The view's own display scale and safe area, not UIScreen.mainScreen's:
+            // on a device with two displays (iPhone Duo) the main screen is
+            // ambiguous, and the safe area follows rotation, split view and the
+            // device opening or closing. Published for getDisplayScale() /
+            // getSafeAreaInset(), in the pixels getScreenWidth() reports.
+            let traits: *const AnyObject = msg_send![&*view_ptr, traitCollection];
+            if !traits.is_null() {
+                let display_scale: f64 = msg_send![&*traits, displayScale];
+                if display_scale.is_finite() && display_scale > 0.0 {
+                    SCREEN_SCALE = display_scale;
+                }
+            }
+            let insets: UIEdgeInsets = msg_send![&*view_ptr, safeAreaInsets];
+            bloom_shared::display::set_display_scale(SCREEN_SCALE);
+            bloom_shared::display::set_safe_area_insets(
+                insets.top * SCREEN_SCALE,
+                insets.right * SCREEN_SCALE,
+                insets.bottom * SCREEN_SCALE,
+                insets.left * SCREEN_SCALE,
+            );
             let scale = SCREEN_SCALE;
             let pw = (view_bounds.size.width * scale) as u32;
             let ph = (view_bounds.size.height * scale) as u32;
