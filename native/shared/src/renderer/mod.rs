@@ -794,6 +794,11 @@ pub struct Renderer {
     /// 1 = TAA on (default). When off the renderer behaves exactly
     /// as the pre-TAA pipeline did.
     pub taa_enabled: bool,
+    /// Perspective/orthographic clip planes for begin_mode_3d. Defaults keep
+    /// the historical 0.01..1000; a scene viewed from ~15 units away needs a
+    /// larger near plane, or surfaces a millimetre apart z-fight.
+    pub camera_near: f32,
+    pub camera_far: f32,
     /// True only after TAA wrote a current history in the active radiance
     /// domain. Separate from the jitter counter so ownership changes can
     /// replace history without restarting the sample sequence.
@@ -8126,6 +8131,8 @@ impl Renderer {
             taa_reactive_bind_group_cache_keys: [None, None],
             taa_frame_index: 0,
             taa_enabled: true,
+            camera_near: 0.01,
+            camera_far: 1000.0,
             taa_history_valid: false,
             taa_history_written: false,
             taa_history_pt_owned: false,
@@ -9121,6 +9128,21 @@ impl Renderer {
             feature_scale.max(1e-6),
             drift_speed,
         ];
+    }
+
+    /// Set the 3D camera's near and far clip planes (used from the next
+    /// begin_mode_3d). Depth precision depends on the near plane: at 15 units
+    /// from the camera, near 0.01 resolves only about a millimetre. Changing
+    /// them invalidates temporal history, so it only happens on a change.
+    pub fn set_camera_clip_planes(&mut self, near: f32, far: f32) {
+        if !(near > 0.0) || !(far > near * 1.0001) || !far.is_finite() {
+            return;
+        }
+        if (near - self.camera_near).abs() > f32::EPSILON || (far - self.camera_far).abs() > f32::EPSILON * far {
+            self.camera_near = near;
+            self.camera_far = far;
+            self.taa_history_valid = false;
+        }
     }
 
     /// Toggle TAA on/off. Resolution is an independent quality control:
@@ -13779,11 +13801,12 @@ impl Renderer {
         projection: f32,
     ) {
         let aspect = self.surface_config.width as f32 / self.surface_config.height as f32;
+        let (near, far) = (self.camera_near, self.camera_far);
         let mut proj = if projection < 0.5 {
-            mat4_perspective(fovy.to_radians(), aspect, 0.01, 1000.0)
+            mat4_perspective(fovy.to_radians(), aspect, near, far)
         } else {
             let top = fovy / 2.0;
-            mat4_ortho(-top * aspect, top * aspect, -top, top, 0.01, 1000.0)
+            mat4_ortho(-top * aspect, top * aspect, -top, top, near, far)
         };
         // Capture the pre-jitter projection for shadow cascade fitting.
         // TAA's sub-pixel nudge would otherwise change the cascade VPs

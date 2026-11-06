@@ -72,6 +72,7 @@ const RENDERER_STATUS_FUNCTIONS = new Set([
   'bloom_set_transparency_composition_mode',
   'bloom_set_sun_shafts',
   'bloom_set_auto_exposure',
+  'bloom_set_camera_clip_planes',
   'bloom_set_taa_enabled',
   'bloom_set_occlusion_culling',
   'bloom_set_render_scale',

@@ -47,6 +47,7 @@ declare function bloom_get_active_transparency_composition_mode(): number;
 declare function bloom_set_material_binding_tier_override(tier: number): number;
 declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): number;
 declare function bloom_set_auto_exposure(on: number): number;
+declare function bloom_set_camera_clip_planes(near: number, far: number): number;
 declare function bloom_set_taa_enabled(on: number): number;
 declare function bloom_set_occlusion_culling(on: number): number;
 declare function bloom_set_render_scale(scale: number): number;
@@ -127,6 +128,9 @@ declare function bloom_set_direct_2d_mode(on: number): void;
 declare function bloom_get_delta_time(): number;
 declare function bloom_get_fps(): number;
 declare function bloom_get_screen_width(): number;
+declare function bloom_get_display_scale(): number;
+declare function bloom_set_menu_button_exits(on: number): number;
+declare function bloom_get_safe_area_inset(edge: number): number;
 declare function bloom_get_screen_height(): number;
 declare function bloom_is_key_pressed(key: number): number;
 declare function bloom_is_key_repeated(key: number): number;
@@ -598,6 +602,17 @@ export function setAutoExposure(on: boolean): boolean {
  */
 export function setOcclusionCulling(on: boolean): boolean {
   return bloom_set_occlusion_culling(on ? 1 : 0) !== 0;
+}
+
+/**
+ * Near and far clip planes of the 3D camera (default 0.01 and 1000), used from
+ * the next `beginMode3D`. Depth precision follows the near plane: at 15 units
+ * away, 0.01 resolves only about a millimetre, so nearly coplanar surfaces
+ * (a decal, a board on its frame) z-fight. Pick the largest near plane the
+ * scene allows, as with three.js's PerspectiveCamera(fov, aspect, near, far).
+ */
+export function setCameraClipPlanes(near: number, far: number): boolean {
+  return bloom_set_camera_clip_planes(near, far) !== 0;
 }
 
 /** Toggle temporal anti-aliasing without changing render resolution. */
@@ -1091,6 +1106,33 @@ export function getTime(): number {
 }
 
 // Screen
+
+/**
+ * Physical pixels per point (UIKit's displayScale): 2 or 3 on iPhone and iPad,
+ * 1 where the platform doesn't report one. On iOS `getScreenWidth()` is in
+ * pixels, so `getScreenWidth() / getDisplayScale()` is the width in points.
+ */
+export function getDisplayScale(): number { return bloom_get_display_scale(); }
+
+/**
+ * tvOS: whether the Siri Remote's Menu button leaves the app (back to the Home screen) instead of
+ * reaching the game as Escape. Apple requires it at the app's top level, so turn it on while the
+ * title screen shows and off everywhere Menu means "back" or "pause". No effect elsewhere.
+ */
+export function setMenuButtonExits(on: boolean): void { bloom_set_menu_button_exits(on ? 1 : 0); }
+
+/** Edges for `getSafeAreaInset`. */
+export const SafeAreaEdge = { TOP: 0, RIGHT: 1, BOTTOM: 2, LEFT: 3 } as const;
+
+/**
+ * How much of one edge of the window the system covers: the Dynamic Island or
+ * notch, rounded corners, the home indicator, the status-bar column of an
+ * iPhone Duo. In the units of `getScreenWidth()`; 0 where the platform has no
+ * safe area. Keep buttons and text inside it, let the 3D view run underneath.
+ * It changes with rotation and when a foldable opens or closes, so read it
+ * per frame.
+ */
+export function getSafeAreaInset(edge: number): number { return bloom_get_safe_area_inset(edge); }
 
 export function getScreenWidth(): number {
   return bloom_get_screen_width();

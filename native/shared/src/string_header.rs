@@ -53,8 +53,12 @@ const _: () = {
     assert!(std::mem::offset_of!(StringHeader, flags) == 16);
 };
 
-/// All flag bits Perry currently defines.
-const KNOWN_FLAGS: u32 = 1; // STRING_FLAG_HAS_LONE_SURROGATES
+/// Flag bit that changes how the payload must be decoded. Perry also sets
+/// runtime-internal hint bits (JSON_ESCAPE_FREE = 2, WTF8_VALIDATED = 4, and
+/// more in 0.5.1663: 0x1c is common on literals); they do not change the
+/// layout or the payload, so they are not treated as an ABI mismatch.
+#[allow(dead_code)]
+const STRING_FLAG_HAS_LONE_SURROGATES: u32 = 1;
 
 /// Sanity-check a header against invariants that hold for every string the
 /// current Perry runtime produces. A failed check means either a corrupt
@@ -65,7 +69,9 @@ fn header_looks_valid(h: &StringHeader) -> bool {
         && h.capacity < (1 << 31)
         // utf16 length is never larger than the utf8 byte length
         && h.utf16_len <= h.byte_len
-        && (h.flags & !KNOWN_FLAGS) == 0
+        // flags are hints (see above); only a value too large to be flag
+        // bits suggests the fields shifted
+        && h.flags < (1 << 16)
 }
 
 fn abi_mismatch_warn_once(what: &str) {

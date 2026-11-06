@@ -67,11 +67,13 @@ export function createTextureRgba8(
   bloom_mesh_scratch_reset();
   for (let i = 0; i < texelCount; i++) {
     const offset = i * 4;
-    bloom_mesh_scratch_push_u32(
+    // `>>> 0`: with alpha >= 128, `a << 24` makes the packed value negative
+    // (JS bitwise ops are signed 32-bit), which the u32 FFI slot saturates to 0.
+    bloom_mesh_scratch_push_u32((
       (rgba[offset] & 255)
       | ((rgba[offset + 1] & 255) << 8)
       | ((rgba[offset + 2] & 255) << 16)
-      | ((rgba[offset + 3] & 255) << 24),
+      | ((rgba[offset + 3] & 255) << 24)) >>> 0,
     );
   }
   const id = bloom_load_texture_rgba8_scratch(width, height, kind);

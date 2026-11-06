@@ -50,6 +50,39 @@ static mut UI_VIEW: Option<Retained<AnyObject>> = None;
 static mut TOUCH_MAP: [*const c_void; 10] = [std::ptr::null(); 10];
 static mut BUNDLE_PATH: Option<String> = None;
 static mut SCREEN_SCALE: f64 = 1.0;
+/// The Menu tap recognizer that keeps Menu from leaving the app, and the root view controller:
+/// both switch over when the game lets Menu leave (setMenuButtonExits).
+static mut MENU_TAP: Option<Retained<AnyObject>> = None;
+static mut ROOT_VC: Option<Retained<AnyObject>> = None;
+static MENU_EXITS_APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// On the main thread: Menu leaves the app (recognizer off, controller events to UIKit, as a
+/// GCEventViewController does at a game's top level) or reaches the game.
+extern "C" fn apply_menu_exits(_ctx: *mut c_void) {
+    let exits = bloom_shared::display::menu_exits();
+    unsafe {
+        if let Some(tap) = MENU_TAP.as_ref() {
+            let _: () = msg_send![&**tap, setEnabled: Bool::new(!exits)];
+        }
+        if let Some(vc) = ROOT_VC.as_ref() {
+            let responds: Bool = msg_send![&**vc, respondsToSelector: sel!(setControllerUserInteractionEnabled:)];
+            if responds.as_bool() {
+                let _: () = msg_send![&**vc, setControllerUserInteractionEnabled: Bool::new(exits)];
+            }
+        }
+    }
+}
+
+/// From the frame: apply a change of setMenuButtonExits on the main thread.
+fn sync_menu_exits() {
+    let want = bloom_shared::display::menu_exits();
+    if MENU_EXITS_APPLIED.swap(want, std::sync::atomic::Ordering::Relaxed) == want { return; }
+    extern "C" {
+        static _dispatch_main_q: c_void;
+        fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    }
+    unsafe { dispatch_async_f(&_dispatch_main_q as *const c_void, std::ptr::null_mut(), apply_menu_exits); }
+}
 static SCENE_PTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // Atomic key event buffer: main thread writes, game thread reads before begin_frame
@@ -171,6 +204,44 @@ unsafe impl RefEncode for CGRect {
     const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct UIEdgeInsets { top: f64, left: f64, bottom: f64, right: f64 }
+
+unsafe impl Encode for UIEdgeInsets {
+    const ENCODING: Encoding = Encoding::Struct(
+        "UIEdgeInsets",
+        &[Encoding::Double, Encoding::Double, Encoding::Double, Encoding::Double],
+    );
+}
+unsafe impl RefEncode for UIEdgeInsets {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+
+/// Whether a set of presses holds the Menu button (UIPressType 5).
+unsafe fn has_menu_press(presses: *const AnyObject) -> bool {
+    if presses.is_null() { return false; }
+    let enumerator: Retained<AnyObject> = msg_send![&*presses, objectEnumerator];
+    loop {
+        let press: *const AnyObject = msg_send![&*enumerator, nextObject];
+        if press.is_null() { return false; }
+        let send_i64: unsafe extern "C" fn(*const AnyObject, Sel) -> i64 =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        if send_i64(press, Sel::register(c"type")) == 5 { return true; }
+    }
+}
+
+/// Hand a presses message to the superclass's implementation (UIKit's), as `super` would.
+unsafe fn presses_to_super(this: *mut c_void, sel: Sel, presses: *const AnyObject, event: *const AnyObject) {
+    extern "C" { fn objc_msgSendSuper(); fn object_getClass(obj: *const c_void) -> *const c_void; fn class_getSuperclass(cls: *const c_void) -> *const c_void; }
+    #[repr(C)]
+    struct Super { receiver: *mut c_void, super_class: *const c_void }
+    let sup = Super { receiver: this, super_class: class_getSuperclass(object_getClass(this)) };
+    let send: unsafe extern "C" fn(*const Super, Sel, *const AnyObject, *const AnyObject) =
+        std::mem::transmute(objc_msgSendSuper as unsafe extern "C" fn());
+    send(&sup, sel, presses, event);
+}
+
 // ============================================================
 // ObjC runtime
 // ============================================================
@@ -290,6 +361,11 @@ unsafe extern "C" fn bloom_can_become_focused(_this: *mut c_void, _sel: Sel) -> 
 // UIPressType values: 0=UpArrow, 1=DownArrow, 2=LeftArrow, 3=RightArrow,
 //                     4=Select, 5=Menu, 6=PlayPause
 unsafe extern "C" fn bloom_presses_began(_this: *mut c_void, _sel: Sel, presses: *const AnyObject, _event: *const AnyObject) {
+    // At the game's top level Menu goes to UIKit, which leaves the app (Apple requires it).
+    if bloom_shared::display::menu_exits() && has_menu_press(presses) {
+        presses_to_super(_this, _sel, presses, _event);
+        return;
+    }
     // Log to file since stderr doesn't always capture
     static PRESS_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = PRESS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -299,6 +375,10 @@ unsafe extern "C" fn bloom_presses_began(_this: *mut c_void, _sel: Sel, presses:
 }
 
 unsafe extern "C" fn bloom_presses_ended(_this: *mut c_void, _sel: Sel, presses: *const AnyObject, _event: *const AnyObject) {
+    if bloom_shared::display::menu_exits() && has_menu_press(presses) {
+        presses_to_super(_this, _sel, presses, _event);
+        return;
+    }
     handle_presses(presses, false);
 }
 
@@ -549,7 +629,14 @@ unsafe extern "C" fn bloom_window_send_event(this: *mut c_void, sel: Sel, event:
             }
         }
 
-        return; // Don't call super for type 3 — we extracted keys above
+        // Don't call super for type 3 — we extracted keys above. Except a Menu press while Menu
+        // leaves the app: that one goes on through the responder chain to UIKit.
+        if !(event_type == 3 && bloom_shared::display::menu_exits() && {
+            let all: *const AnyObject = msg_send![&*event, allPresses];
+            has_menu_press(all)
+        }) {
+            return;
+        }
     }
 
     // For other events, call super
@@ -1119,6 +1206,8 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
     let press_types_arr: Retained<AnyObject> = msg_send![arr_cls, arrayWithObject: &*menu_num];
     let _: () = msg_send![&*menu_tap, setAllowedPressTypes: &*press_types_arr];
     let _: () = msg_send![&*view, addGestureRecognizer: &*menu_tap];
+    MENU_TAP = Some(menu_tap.clone());
+    ROOT_VC = Some(vc.clone());
 
     // Trigger focus
     let _: () = msg_send![&*vc, setNeedsFocusUpdate];
@@ -1623,6 +1712,21 @@ pub extern "C" fn bloom_begin_drawing() {
             }
         }
     }
+    // The view's display scale and safe area (on a TV: the overscan-safe region), for
+    // getDisplayScale() / getSafeAreaInset(), in the pixels getScreenWidth() reports.
+    unsafe {
+        if let Some(view) = UI_VIEW.as_ref() {
+            let traits: *const AnyObject = msg_send![&**view, traitCollection];
+            if !traits.is_null() {
+                let s: f64 = msg_send![&*traits, displayScale];
+                if s.is_finite() && s > 0.0 { bloom_shared::display::set_display_scale(s); }
+            }
+            let insets: UIEdgeInsets = msg_send![&**view, safeAreaInsets];
+            let s = bloom_shared::display::display_scale();
+            bloom_shared::display::set_safe_area_insets(insets.top * s, insets.right * s, insets.bottom * s, insets.left * s);
+        }
+    }
+    sync_menu_exits();
     // Drain pending key events from main thread BEFORE begin_frame snapshots
     drain_pending_keys(engine());
 

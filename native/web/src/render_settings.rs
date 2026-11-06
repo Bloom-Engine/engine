@@ -69,6 +69,11 @@ pub fn bloom_set_manual_exposure(value: f64) -> f64 {
     1.0
 }
 #[wasm_bindgen]
+pub fn bloom_set_camera_clip_planes(near: f64, far: f64) -> f64 {
+    engine().renderer.set_camera_clip_planes(near as f32, far as f32);
+    1.0
+}
+#[wasm_bindgen]
 pub fn bloom_set_taa_enabled(on: f64) -> f64 {
     engine().renderer.set_taa_enabled(on != 0.0);
     1.0

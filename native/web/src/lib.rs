@@ -297,6 +297,25 @@ pub fn bloom_get_fps() -> f64 {
     engine().get_fps()
 }
 
+/// tvOS's Menu-leaves-the-app switch: nothing to do in a browser.
+#[wasm_bindgen]
+pub fn bloom_set_menu_button_exits(on: f64) -> f64 {
+    bloom_shared::display::set_menu_exits(on != 0.0);
+    1.0
+}
+
+/// Physical pixels per point: the page's devicePixelRatio is the browser's business here.
+#[wasm_bindgen]
+pub fn bloom_get_display_scale() -> f64 {
+    bloom_shared::display::display_scale()
+}
+
+/// Safe-area insets: none reported on the web (CSS env(safe-area-inset-*) covers pages).
+#[wasm_bindgen]
+pub fn bloom_get_safe_area_inset(edge: f64) -> f64 {
+    if edge >= 0.0 { bloom_shared::display::safe_area_inset(edge as usize) } else { 0.0 }
+}
+
 #[wasm_bindgen]
 pub fn bloom_get_screen_width() -> f64 {
     engine().screen_width()

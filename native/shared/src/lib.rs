@@ -10,6 +10,7 @@ pub mod audio;
 pub mod cooked_scene_store;
 #[cfg(all(feature = "image-extras", not(target_arch = "wasm32")))]
 pub mod cooked_texture_store;
+pub mod display;
 pub mod ffi;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffi_core;
