@@ -14,9 +14,9 @@
 //! Looping restarts the decoder from byte 0 inside the worker, so a loop
 //! seam never underruns the ring.
 
-use super::spsc::Consumer;
+use super::spsc::{Consumer, Producer};
 #[cfg(not(target_arch = "wasm32"))]
-use super::spsc::{self, Producer};
+use super::spsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
