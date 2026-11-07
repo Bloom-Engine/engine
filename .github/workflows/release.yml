@@ -210,7 +210,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # Build the JoltPhysics + bloom_jolt static libraries for every (os, arch)
   # combination Bloom supports. Each matrix entry runs on its native runner
-  # (Apple cross-compiles on macos-14, Android NDK on Linux, etc.) and uploads
+  # (Apple cross-compiles on macos-15, Android NDK on Linux, etc.) and uploads
   # its archives as a per-target artifact for the publish step below to
   # assemble. fail-fast: false so a broken slice (typically a platform-specific
   # cmake quirk) doesn't cancel the other 16 builds — the publish job won't
@@ -227,44 +227,44 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple — built on macos-14 (Apple Silicon). Apple cross-compiles
+          # Apple — built on macos-15 (Apple Silicon). Apple cross-compiles
           # use the Xcode generator because the make/ninja generators don't
           # reliably pick up iOS/tvOS/watchOS SDK toolchain quirks.
           - target: macos-arm64
-            runner: macos-14
+            runner: macos-15
             cmake_flags: ""
           - target: macos-x64
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-DCMAKE_OSX_ARCHITECTURES=x86_64"
 
           - target: ios-arm64
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos"
           - target: ios-arm64-sim
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphonesimulator"
           - target: ios-x64-sim
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_SYSROOT=iphonesimulator"
 
           - target: tvos-arm64
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=tvOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=appletvos"
           - target: tvos-arm64-sim
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=tvOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=appletvsimulator"
           - target: tvos-x64-sim
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=tvOS -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_SYSROOT=appletvsimulator"
 
           - target: watchos-arm64
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=watchOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=watchos"
           - target: watchos-arm64-sim
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=watchOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=watchsimulator"
           - target: watchos-x64-sim
-            runner: macos-14
+            runner: macos-15
             cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=watchOS -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_SYSROOT=watchsimulator"
 
           # Linux — native runners (no cross-compile). GitHub provides arm64

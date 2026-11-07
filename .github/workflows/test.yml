@@ -37,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-22.04, windows-latest]
+        os: [macos-15, ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -88,6 +88,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: quick / contracts
         run: ./scripts/ci-check.sh --quick --component contracts
       - name: quick / example-inventory
@@ -105,7 +107,7 @@ jobs:
   # findings advisory or silently accepting new correctness regressions.
   # ---------------------------------------------------------------------------
   lint:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -135,7 +137,7 @@ jobs:
   #   3. wgpu + the platform's windowing + audio deps resolve cleanly
   # ---------------------------------------------------------------------------
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -251,15 +253,15 @@ jobs:
           - { crate: android, target: aarch64-linux-android, runner: ubuntu-22.04, features: "models3d,image-extras" }
           - { crate: android, target: armv7-linux-androideabi, runner: ubuntu-22.04, features: "models3d,image-extras" }
           - { crate: android, target: x86_64-linux-android, runner: ubuntu-22.04, features: "models3d,image-extras" }
-          - { crate: ios, target: aarch64-apple-ios, runner: macos-14, features: "models3d,image-extras" }
-          - { crate: ios, target: aarch64-apple-ios-sim, runner: macos-14, features: "models3d,image-extras" }
-          - { crate: ios, target: x86_64-apple-ios, runner: macos-14, features: "models3d,image-extras" }
-          - { crate: tvos, target: aarch64-apple-tvos, runner: macos-14, features: "models3d,image-extras" }
-          - { crate: tvos, target: aarch64-apple-tvos-sim, runner: macos-14, features: "models3d,image-extras" }
-          - { crate: visionos, target: aarch64-apple-visionos, runner: macos-14, features: "models3d,image-extras" }
-          - { crate: visionos, target: aarch64-apple-visionos-sim, runner: macos-14, features: "models3d,image-extras" }
-          - { crate: watchos, target: aarch64-apple-watchos, runner: macos-14, features: "" }
-          - { crate: watchos, target: aarch64-apple-watchos-sim, runner: macos-14, features: "" }
+          - { crate: ios, target: aarch64-apple-ios, runner: macos-15, features: "models3d,image-extras" }
+          - { crate: ios, target: aarch64-apple-ios-sim, runner: macos-15, features: "models3d,image-extras" }
+          - { crate: ios, target: x86_64-apple-ios, runner: macos-15, features: "models3d,image-extras" }
+          - { crate: tvos, target: aarch64-apple-tvos, runner: macos-15, features: "models3d,image-extras" }
+          - { crate: tvos, target: aarch64-apple-tvos-sim, runner: macos-15, features: "models3d,image-extras" }
+          - { crate: visionos, target: aarch64-apple-visionos, runner: macos-15, features: "models3d,image-extras" }
+          - { crate: visionos, target: aarch64-apple-visionos-sim, runner: macos-15, features: "models3d,image-extras" }
+          - { crate: watchos, target: aarch64-apple-watchos, runner: macos-15, features: "" }
+          - { crate: watchos, target: aarch64-apple-watchos-sim, runner: macos-15, features: "" }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -353,7 +355,7 @@ jobs:
   # a working hosted WebGPU presentation path.
   browser-smoke:
     needs: build-web
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 

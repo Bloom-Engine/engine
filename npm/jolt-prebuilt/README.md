@@ -43,7 +43,7 @@ bundled in `@bloomengine/engine`.
 
 ## Build / publish
 
-Built by `.github/workflows/release.yml` on each tag push — a matrix job per platform produces the libraries on the appropriate native runner (`macos-14` for Apple targets, `ubuntu-22.04` for Linux/Android, `windows-latest` for Windows) and uploads them as artifacts. A final assembly job collects every artifact into this package's `lib/` tree and publishes via OIDC trusted publishing.
+Built by `.github/workflows/release.yml` on each tag push — a matrix job per platform produces the libraries on the appropriate native runner (`macos-15` for Apple targets, `ubuntu-22.04` for Linux/Android, `windows-latest` for Windows) and uploads them as artifacts. A final assembly job collects every artifact into this package's `lib/` tree and publishes via OIDC trusted publishing.
 
 This package is versioned independently. `@bloomengine/engine` pins the
 compatible prebuilt version in its dependencies.
