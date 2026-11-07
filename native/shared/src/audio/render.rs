@@ -50,7 +50,7 @@ use super::spsc::Consumer;
 #[cfg(not(target_arch = "wasm32"))]
 use super::stream::{StreamConsumer, StreamMsg};
 use super::{MusicShared, SoundData};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Control → render commands. Everything the FFI surface can do to audio
@@ -446,6 +446,24 @@ pub struct AudioRenderer {
     /// the audio thread never allocates.
     send_buf: Vec<f32>,
     sample_rate: f32,
+    stats: Arc<AudioStats>,
+}
+
+/// What the render thread did, for `BLOOM_AUDIO_STATS=1` (counters only;
+/// the render thread never prints).
+#[derive(Default)]
+pub struct AudioStats {
+    pub blocks: AtomicU64,
+    /// Blocks whose mix took longer than the audio they produced.
+    pub late: AtomicU64,
+    pub max_mix_us: AtomicU64,
+    /// Output samples beyond full scale (they clip in the device).
+    pub clipped: AtomicU64,
+    /// Streamed music ran dry inside a block.
+    pub underruns: AtomicU64,
+    /// `BLOOM_AUDIO_DUMP`: a copy of the output for debugging (try_lock only; a
+    /// contended block is skipped, never waited for).
+    pub dump: Option<std::sync::Mutex<Vec<f32>>>,
 }
 
 impl AudioRenderer {
@@ -462,6 +480,11 @@ impl AudioRenderer {
             reverb_r: Reverb::new(),
             send_buf: vec![0.0; 8192],
             sample_rate: 44_100.0,
+            stats: Arc::new(AudioStats {
+                dump: std::env::var_os("BLOOM_AUDIO_DUMP")
+                    .map(|_| std::sync::Mutex::new(Vec::with_capacity(44_100 * 2 * 60))),
+                ..AudioStats::default()
+            }),
         }
     }
 
@@ -698,7 +721,40 @@ impl AudioRenderer {
     /// Mix all playing voices into `output` (interleaved stereo f32).
     /// Wait-free: drains pending commands, then mixes. Call only from the
     /// thread that owns this renderer.
+    /// The counters the render thread keeps.
+    pub fn stats(&self) -> Arc<AudioStats> {
+        self.stats.clone()
+    }
+
     pub fn mix(&mut self, output: &mut [f32]) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let started = std::time::Instant::now();
+        self.mix_block(output);
+        let clipped = output.iter().filter(|s| s.abs() > 1.0).count() as u64;
+        let stats = &self.stats;
+        if let Some(dump) = stats.dump.as_ref() {
+            if let Ok(mut d) = dump.try_lock() {
+                if d.len() + output.len() <= d.capacity() {
+                    d.extend_from_slice(output);
+                }
+            }
+        }
+        stats.blocks.fetch_add(1, Ordering::Relaxed);
+        if clipped > 0 {
+            stats.clipped.fetch_add(clipped, Ordering::Relaxed);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let us = started.elapsed().as_micros() as u64;
+            let block_us = (output.len() / 2) as f64 / self.sample_rate.max(1.0) as f64 * 1e6;
+            if us as f64 > block_us {
+                stats.late.fetch_add(1, Ordering::Relaxed);
+            }
+            stats.max_mix_us.fetch_max(us, Ordering::Relaxed);
+        }
+    }
+
+    fn mix_block(&mut self, output: &mut [f32]) {
         // Bounded drain — the ring's capacity bounds this loop.
         while let Some(cmd) = self.rx.pop() {
             self.apply(cmd);
@@ -755,6 +811,7 @@ impl AudioRenderer {
             reverb_l,
             reverb_r,
             music,
+            stats,
             ..
         } = self;
 
@@ -1011,7 +1068,11 @@ impl AudioRenderer {
                             // Refill from the decode worker's ring.
                             match consumer.rx.pop() {
                                 Some(StreamMsg::Chunk(c)) => {
-                                    *current = c;
+                                    let used = std::mem::replace(current, c);
+                                    // back to the worker; never freed here
+                                    if let Err(used) = consumer.recycle.push(used) {
+                                        std::mem::forget(used);
+                                    }
                                     *offset = 0;
                                 }
                                 Some(StreamMsg::End) => {
@@ -1021,7 +1082,10 @@ impl AudioRenderer {
                                 // Underrun: worker is behind (cold start
                                 // or scheduling hiccup) — emit silence for
                                 // the rest of this callback, resume next.
-                                None => break,
+                                None => {
+                                    stats.underruns.fetch_add(1, Ordering::Relaxed);
+                                    break;
+                                }
                             }
                         }
                         if mono {

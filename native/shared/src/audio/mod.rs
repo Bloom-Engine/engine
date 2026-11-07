@@ -124,7 +124,16 @@ impl AudioMixer {
     /// from audio init, before the callback starts firing; the returned
     /// renderer must only be used from that one thread.
     pub fn take_renderer(&mut self) -> Option<AudioRenderer> {
-        self.renderer.take()
+        let renderer = self.renderer.take();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(r) = renderer.as_ref() {
+            if std::env::var_os("BLOOM_AUDIO_STATS").is_some()
+                || std::env::var_os("BLOOM_AUDIO_DUMP").is_some()
+            {
+                report_stats(r.stats());
+            }
+        }
+        renderer
     }
 
     fn send(&mut self, cmd: Cmd) {
@@ -1222,4 +1231,46 @@ mod tests {
             peak(&open)
         );
     }
+}
+
+/// `BLOOM_AUDIO_STATS=1`: every 5 s, what the render thread did since the
+/// last report (blocks, blocks mixed slower than real time, the slowest mix,
+/// clipped samples, streamed-music underruns).
+#[cfg(not(target_arch = "wasm32"))]
+fn report_stats(stats: std::sync::Arc<render::AudioStats>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let _ = std::thread::Builder::new()
+        .name("bloom-audio-stats".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            eprintln!(
+                "bloom audio: blocks={} late={} max_mix_us={} clipped={} underruns={}",
+                stats.blocks.swap(0, Relaxed),
+                stats.late.swap(0, Relaxed),
+                stats.max_mix_us.swap(0, Relaxed),
+                stats.clipped.swap(0, Relaxed),
+                stats.underruns.swap(0, Relaxed),
+            );
+            // BLOOM_AUDIO_DUMP=<file>: append the output so far (raw f32 stereo, 44.1 kHz)
+            if let (Some(dump), Some(path)) =
+                (stats.dump.as_ref(), std::env::var_os("BLOOM_AUDIO_DUMP"))
+            {
+                // swap in an empty buffer allocated beforehand, so the render
+                // thread never finds the dump without room
+                let fresh = Vec::with_capacity(44_100 * 2 * 60);
+                let samples: Vec<f32> = match dump.lock() {
+                    Ok(mut d) => std::mem::replace(&mut *d, fresh),
+                    Err(_) => continue,
+                };
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+                    let _ = f.write_all(&bytes);
+                }
+            }
+        });
 }

@@ -1213,6 +1213,12 @@ unsafe extern "C" fn audio_render_callback(
 #[no_mangle]
 pub extern "C" fn bloom_init_audio() {
     unsafe {
+        // Started once: a second call (several Web Audio objects each ask
+        // for the device) would start a second output unit pulling from the
+        // same renderer, each playing every other block: crackling noise.
+        if AUDIO_UNIT.is_some() {
+            return;
+        }
         // Configure the audio session BEFORE bringing up RemoteIO. Without a
         // category the session defaults to SoloAmbient: audio is silenced by
         // the ring/silent switch and stops when the screen locks (audit gap).
