@@ -651,6 +651,11 @@ pub extern "C" fn bloom_measure_text_ex(_font: f64, text: i64, size: f64, _spaci
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_render_emoji(_text: i64, _size: f64, _path: i64) -> f64 {
+    0.0
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_load_font(_path: i64, _size: f64) -> f64 {
     1.0 // All text uses the system font on watch; single sentinel handle.
 }

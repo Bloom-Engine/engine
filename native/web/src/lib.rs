@@ -313,7 +313,11 @@ pub fn bloom_get_display_scale() -> f64 {
 /// Safe-area insets: none reported on the web (CSS env(safe-area-inset-*) covers pages).
 #[wasm_bindgen]
 pub fn bloom_get_safe_area_inset(edge: f64) -> f64 {
-    if edge >= 0.0 { bloom_shared::display::safe_area_inset(edge as usize) } else { 0.0 }
+    if edge >= 0.0 {
+        bloom_shared::display::safe_area_inset(edge as usize)
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
@@ -649,6 +653,12 @@ pub fn bloom_measure_text(_text: f64, _size: f64) -> f64 {
 #[wasm_bindgen]
 pub fn bloom_measure_text_str(text: &str, size: f64) -> f64 {
     engine().text.measure_text(text, size as u32)
+}
+
+/// No system emoji renderer in the browser build: the page falls back.
+#[wasm_bindgen]
+pub fn bloom_render_emoji(_text: f64, _size: f64, _path: f64) -> f64 {
+    0.0
 }
 
 #[wasm_bindgen]
@@ -1286,7 +1296,6 @@ pub fn bloom_add_shadowed_spot_light(
 ) -> f64 {
     0.0
 }
-
 
 // ============================================================
 // Scene graph (retained mode)

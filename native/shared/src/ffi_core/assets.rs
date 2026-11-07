@@ -112,6 +112,22 @@ macro_rules! __bloom_ffi_assets {
             })
         }
 
+        // bloom_render_emoji — one emoji cluster drawn by the system (Core Text on
+        // Apple platforms) into a PNG at `path`; returns the baseline's distance
+        // from the image top in pixels, or 0 where emoji can't be rendered.
+        #[no_mangle]
+        pub extern "C" fn bloom_render_emoji(
+            text_ptr: *const u8,
+            size: f64,
+            path_ptr: *const u8,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_render_emoji", move || {
+                let text = $crate::string_header::str_from_header(text_ptr);
+                let path = $crate::string_header::str_from_header(path_ptr);
+                $crate::emoji::render_emoji_png(text, size, path).unwrap_or(0.0)
+            })
+        }
+
         // bloom_unload_font  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_unload_font(font_handle: f64) {

@@ -868,7 +868,10 @@ pub extern "C" fn bloom_init_audio() {
     #[cfg(target_os = "linux")]
     {
         use std::sync::atomic::Ordering;
-        AUDIO_RUNNING.store(true, Ordering::SeqCst);
+        // started once: a second call would open a second output stream
+        if AUDIO_RUNNING.swap(true, Ordering::SeqCst) {
+            return;
+        }
         // Move the render half into the audio thread; the engine keeps
         // only the command-producing control half.
         let renderer = engine().audio.take_renderer();

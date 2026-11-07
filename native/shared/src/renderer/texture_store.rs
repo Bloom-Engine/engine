@@ -110,9 +110,69 @@ impl Renderer {
     }
 
     /// Replace an existing no-mips texture in-place.
+    /// Write rows `y..y + rows` of a registered RGBA8 texture (no mips) in place.
+    pub fn write_texture_rows(&mut self, idx: u32, width: u32, y: u32, rows: u32, data: &[u8]) {
+        let i = idx as usize;
+        let Some(&(w, h)) = self.texture_sizes.get(i) else {
+            return;
+        };
+        if w != width || y + rows > h || data.len() as u64 != u64::from(width) * u64::from(rows) * 4
+        {
+            return;
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.textures[i],
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(rows),
+            },
+            wgpu::Extent3d {
+                width,
+                height: rows,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     pub fn replace_texture_no_mips(&mut self, idx: u32, width: u32, height: u32, data: &[u8]) {
         let i = idx as usize;
         if i >= self.textures.len() {
+            return;
+        }
+        // Same size (the text atlas, every time a glyph is added): write the
+        // pixels into the existing texture. Creating a new texture, bind group
+        // and global texture id per update churned GPU memory and texture
+        // slots every frame text was animating, until an allocation failed
+        // (a wgpu validation panic on iOS).
+        if self.texture_sizes.get(i).copied() == Some((width, height))
+            && data.len() as u64 == u64::from(width) * u64::from(height) * 4
+        {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.textures[i],
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
             return;
         }
         let texture = self.device.create_texture_with_data(

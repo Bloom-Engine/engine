@@ -69,9 +69,9 @@ fn header_looks_valid(h: &StringHeader) -> bool {
         && h.capacity < (1 << 31)
         // utf16 length is never larger than the utf8 byte length
         && h.utf16_len <= h.byte_len
-        // flags are hints (see above); only a value too large to be flag
-        // bits suggests the fields shifted
-        && h.flags < (1 << 16)
+    // `flags` is not checked: Perry 0.5.1664 keeps more than hint bits in it
+    // (0x16e001c on a 2-byte literal), and the length fields above already
+    // catch a shifted layout.
 }
 
 fn abi_mismatch_warn_once(what: &str) {
@@ -114,7 +114,10 @@ pub fn try_str_from_header(ptr: *const u8) -> Option<&'static str> {
     unsafe {
         let header = &*(ptr as *const StringHeader);
         if !header_looks_valid(header) {
-            abi_mismatch_warn_once("header invariants violated");
+            abi_mismatch_warn_once(&format!(
+                "header invariants violated: utf16_len={} byte_len={} capacity={} refcount={} flags={:#x} at {:p}",
+                header.utf16_len, header.byte_len, header.capacity, header.refcount, header.flags, ptr
+            ));
             return None;
         }
         let len = header.byte_len as usize;
@@ -136,7 +139,10 @@ pub fn str_from_header(ptr: *const u8) -> &'static str {
     unsafe {
         let header = &*(ptr as *const StringHeader);
         if !header_looks_valid(header) {
-            abi_mismatch_warn_once("header invariants violated");
+            abi_mismatch_warn_once(&format!(
+                "header invariants violated: utf16_len={} byte_len={} capacity={} refcount={} flags={:#x} at {:p}",
+                header.utf16_len, header.byte_len, header.capacity, header.refcount, header.flags, ptr
+            ));
             return "";
         }
         let len = header.byte_len as usize;

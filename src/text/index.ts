@@ -4,6 +4,7 @@ import { Color, Font, Vec2 } from '../core/types';
 declare function bloom_draw_text(text: number, x: number, y: number, size: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_measure_text(text: number, size: number): number;
 declare function bloom_load_font(path: number, size: number): number;
+declare function bloom_render_emoji(text: number, size: number, path: number): number;
 declare function bloom_draw_text_ex(font: number, text: number, x: number, y: number, size: number, spacing: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_measure_text_ex(font: number, text: number, size: number, spacing: number): number;
 declare function bloom_unload_font(font: number): void;
@@ -45,4 +46,13 @@ export function drawTextEx(font: Font, text: string, pos: Vec2, size: number, sp
 export function measureTextEx(font: Font, text: string, size: number, spacing: number): Vec2 {
   const width = bloom_measure_text_ex(font.handle, text as any, size, spacing);
   return { x: width, y: size };
+}
+
+/**
+ * Draw one emoji cluster (with its skin tone or ZWJ parts) at `size` pixels into a PNG at `path`,
+ * with the system's renderer. Returns the baseline's distance from the image top in pixels, or 0
+ * where the platform has no emoji renderer (only Apple platforms have one).
+ */
+export function renderEmoji(text: string, size: number, path: string): number {
+  return bloom_render_emoji(text as any, size, path as any);
 }

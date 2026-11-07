@@ -127,7 +127,13 @@ pub fn bloom_voice_set_lowpass(voice: f64, cutoff: f64) {
 
 #[wasm_bindgen]
 pub fn bloom_play_sound_ex(handle: f64, looping: f64, volume: f64, pitch: f64, pan: f64) -> f64 {
-    engine().audio.play_sound_ex(handle, looping != 0.0, volume as f32, pitch as f32, pan as f32)
+    engine().audio.play_sound_ex(
+        handle,
+        looping != 0.0,
+        volume as f32,
+        pitch as f32,
+        pan as f32,
+    )
 }
 
 #[wasm_bindgen]
