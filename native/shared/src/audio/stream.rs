@@ -80,12 +80,19 @@ pub fn probe(kind: StreamKind, bytes: &[u8]) -> Option<(u32, u16)> {
 /// Spawn the decode worker for one playback of a streamed track.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start(kind: StreamKind, bytes: Arc<Vec<u8>>, looping: bool) -> StreamConsumer {
+    start_at(kind, bytes, looping, 0)
+}
+
+/// Like [`start`], from `skip` interleaved samples into the track (a seek):
+/// the worker decodes and drops them before it pushes anything.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_at(kind: StreamKind, bytes: Arc<Vec<u8>>, looping: bool, skip: usize) -> StreamConsumer {
     let (tx, rx) = spsc::channel(RING_CHUNKS + 1);
     let stop = Arc::new(AtomicBool::new(false));
     let stop_worker = stop.clone();
     std::thread::Builder::new()
         .name("bloom-music-decode".into())
-        .spawn(move || run_worker(kind, &bytes, looping, tx, &stop_worker))
+        .spawn(move || run_worker(kind, &bytes, looping, skip, tx, &stop_worker))
         .expect("spawn music decode worker");
     StreamConsumer { rx, stop }
 }
@@ -95,6 +102,7 @@ fn run_worker(
     kind: StreamKind,
     bytes: &[u8],
     looping: bool,
+    mut skip: usize,
     mut tx: Producer<StreamMsg>,
     stop: &AtomicBool,
 ) {
@@ -118,9 +126,9 @@ fn run_worker(
 
     loop {
         let completed = match kind {
-            StreamKind::Ogg => decode_ogg(bytes, stop, &mut push),
+            StreamKind::Ogg => decode_ogg(bytes, stop, &mut skip, &mut push),
             #[cfg(feature = "mp3")]
-            StreamKind::Mp3 => decode_mp3(bytes, stop, &mut push),
+            StreamKind::Mp3 => decode_mp3(bytes, stop, &mut skip, &mut push),
         };
         if !completed || !looping {
             break;
@@ -133,7 +141,7 @@ fn run_worker(
 /// Decode one full pass of the track, pushing chunks. Returns false if
 /// stopped early (stop flag / consumer gone).
 #[cfg(not(target_arch = "wasm32"))]
-fn decode_ogg(bytes: &[u8], stop: &AtomicBool, push: &mut dyn FnMut(StreamMsg) -> bool) -> bool {
+fn decode_ogg(bytes: &[u8], stop: &AtomicBool, skip: &mut usize, push: &mut dyn FnMut(StreamMsg) -> bool) -> bool {
     let Ok(mut reader) = lewton::inside_ogg::OggStreamReader::new(std::io::Cursor::new(bytes))
     else {
         return false;
@@ -144,6 +152,10 @@ fn decode_ogg(bytes: &[u8], stop: &AtomicBool, push: &mut dyn FnMut(StreamMsg) -
             return false;
         }
         for &s in &packet {
+            if *skip > 0 {
+                *skip -= 1;
+                continue;
+            }
             chunk.push(s as f32 / 32768.0);
         }
         if chunk.len() >= CHUNK_SAMPLES {
@@ -160,7 +172,7 @@ fn decode_ogg(bytes: &[u8], stop: &AtomicBool, push: &mut dyn FnMut(StreamMsg) -
 }
 
 #[cfg(all(feature = "mp3", not(target_arch = "wasm32")))]
-fn decode_mp3(bytes: &[u8], stop: &AtomicBool, push: &mut dyn FnMut(StreamMsg) -> bool) -> bool {
+fn decode_mp3(bytes: &[u8], stop: &AtomicBool, skip: &mut usize, push: &mut dyn FnMut(StreamMsg) -> bool) -> bool {
     let mut decoder = minimp3::Decoder::new(std::io::Cursor::new(bytes));
     let mut chunk: Vec<f32> = Vec::with_capacity(CHUNK_SAMPLES);
     loop {
@@ -170,6 +182,10 @@ fn decode_mp3(bytes: &[u8], stop: &AtomicBool, push: &mut dyn FnMut(StreamMsg) -
         match decoder.next_frame() {
             Ok(frame) => {
                 for &s in &frame.data {
+                    if *skip > 0 {
+                        *skip -= 1;
+                        continue;
+                    }
                     chunk.push(s as f32 / 32768.0);
                 }
                 if chunk.len() >= CHUNK_SAMPLES {

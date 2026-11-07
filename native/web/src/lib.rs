@@ -1404,6 +1404,38 @@ pub fn bloom_voice_set_lowpass(voice: f64, cutoff: f64) {
     engine().audio.set_voice_lowpass(voice, cutoff as f32);
 }
 
+// ---- Web Audio bridge (see shared audio_ffi.rs for docs) -------------------
+
+#[wasm_bindgen]
+pub fn bloom_play_sound_ex(handle: f64, looping: f64, volume: f64, pitch: f64, pan: f64) -> f64 {
+    engine().audio.play_sound_ex(handle, looping != 0.0, volume as f32, pitch as f32, pan as f32)
+}
+
+#[wasm_bindgen]
+pub fn bloom_voice_set_pan(voice: f64, pan: f64) {
+    engine().audio.set_voice_pan(voice, pan as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_music_looping(handle: f64, looping: f64) {
+    engine().audio.set_music_looping(handle, looping != 0.0);
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_music_time(handle: f64) -> f64 {
+    engine().audio.music_time(handle)
+}
+
+#[wasm_bindgen]
+pub fn bloom_play_music_from(handle: f64, seconds: f64) {
+    engine().audio.play_music_from(handle, seconds);
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_music_length(handle: f64) -> f64 {
+    engine().audio.music_length(handle)
+}
+
 #[wasm_bindgen]
 pub fn bloom_load_music(_path: f64) -> f64 {
     0.0

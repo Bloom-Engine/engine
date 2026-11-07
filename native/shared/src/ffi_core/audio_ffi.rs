@@ -212,5 +212,69 @@ macro_rules! __bloom_ffi_audio_ffi {
                 engine().audio.set_voice_lowpass(voice, cutoff as f32);
             })
         }
+
+        // ---- Web Audio bridge: non-spatial voices, music position --------
+        //
+        // A Web Audio source node is a voice that changes gain, rate and pan
+        // while it plays; an <audio> element is a music track that reports
+        // its time and may play once instead of looping.
+
+        // bloom_play_sound_ex — non-spatial voice; returns its id (0 = unknown
+        // sound). looping != 0 loops until bloom_voice_stop; volume multiplies
+        // the sound's own; pan is a stereo balance -1..1.
+        #[no_mangle]
+        pub extern "C" fn bloom_play_sound_ex(
+            handle: f64,
+            looping: f64,
+            volume: f64,
+            pitch: f64,
+            pan: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_play_sound_ex", move || {
+                engine().audio.play_sound_ex(
+                    handle,
+                    looping != 0.0,
+                    volume as f32,
+                    pitch as f32,
+                    pan as f32,
+                )
+            })
+        }
+
+        // bloom_voice_set_pan — stereo balance of a non-spatial voice.
+        #[no_mangle]
+        pub extern "C" fn bloom_voice_set_pan(voice: f64, pan: f64) {
+            $crate::ffi::guard("bloom_voice_set_pan", move || {
+                engine().audio.set_voice_pan(voice, pan as f32);
+            })
+        }
+
+        // bloom_set_music_looping — 1 loops (the default), 0 plays once.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_music_looping(handle: f64, looping: f64) {
+            $crate::ffi::guard("bloom_set_music_looping", move || {
+                engine().audio.set_music_looping(handle, looping != 0.0);
+            })
+        }
+
+        // bloom_get_music_time — seconds played since the last play_music.
+        #[no_mangle]
+        pub extern "C" fn bloom_get_music_time(handle: f64) -> f64 {
+            $crate::ffi::guard("bloom_get_music_time", move || engine().audio.music_time(handle))
+        }
+
+        // bloom_play_music_from — play from `seconds` into the track (a seek).
+        #[no_mangle]
+        pub extern "C" fn bloom_play_music_from(handle: f64, seconds: f64) {
+            $crate::ffi::guard("bloom_play_music_from", move || {
+                engine().audio.play_music_from(handle, seconds);
+            })
+        }
+
+        // bloom_get_music_length — seconds; 0 when streamed (not known).
+        #[no_mangle]
+        pub extern "C" fn bloom_get_music_length(handle: f64) -> f64 {
+            $crate::ffi::guard("bloom_get_music_length", move || engine().audio.music_length(handle))
+        }
     };
 }

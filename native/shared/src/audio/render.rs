@@ -73,6 +73,8 @@ pub enum Cmd {
         rolloff: f32,
         /// EN-062 — playback-rate multiplier (doppler multiplies on top).
         pitch: f32,
+        /// Stereo balance of a non-spatial voice, -1 (left) .. 1 (right).
+        pan: f32,
         /// EN-029 — mix bus (see [`bus`]), reverb send (0..1) and low-pass
         /// cutoff in Hz (<= 0 or >= NYQUIST = bypass).
         bus: u8,
@@ -92,6 +94,9 @@ pub enum Cmd {
         shared: Arc<MusicShared>,
         volume: f32,
         looping: bool,
+        /// Interleaved samples into the track to start at (a seek). A streamed
+        /// track's worker already skipped them; this only seeds the position.
+        start: usize,
     },
     StopMusic {
         music_id: u64,
@@ -159,6 +164,16 @@ pub enum Cmd {
     SetVoiceLowpass {
         voice_id: u64,
         cutoff: f32,
+    },
+    /// Stereo balance of a non-spatial voice (spatial voices pan from
+    /// their position and ignore it).
+    SetVoicePan {
+        voice_id: u64,
+        pan: f32,
+    },
+    SetMusicLooping {
+        music_id: u64,
+        looping: bool,
     },
 }
 
@@ -257,6 +272,8 @@ struct Voice {
     rolloff: f32,
     /// Game-set playback rate. Doppler multiplies on top of it.
     pitch: f32,
+    /// Stereo balance when not spatial, -1..1.
+    pan: f32,
     /// Smoothed doppler rate.
     doppler: f32,
     /// Listener distance last block; < 0 = not yet seeded.
@@ -326,6 +343,10 @@ struct MusicVoice {
     looping: bool,
     /// Total samples consumed (drives the shared position mirror).
     consumed: usize,
+    /// Gain applied in the last block; the next block ramps from it to its
+    /// target, so per-frame fades (crossfades, ducking) never zipper.
+    gain: f32,
+    seeded: bool,
 }
 
 /// EN-029 — a Schroeder reverb: parallel comb filters (the density) into
@@ -463,6 +484,7 @@ impl AudioRenderer {
                 max_dist,
                 rolloff,
                 pitch,
+                pan,
                 bus,
                 send,
                 lowpass,
@@ -498,6 +520,7 @@ impl AudioRenderer {
                     max_dist: max_dist.max(0.0),
                     rolloff: rolloff.max(0.0),
                     pitch: pitch.clamp(0.25, 4.0),
+                    pan: pan.clamp(-1.0, 1.0),
                     doppler: 1.0,
                     prev_dist: -1.0,
                     g_l: 0.0,
@@ -526,13 +549,17 @@ impl AudioRenderer {
                 shared,
                 volume,
                 looping,
+                start,
             } => {
-                // Restart-from-zero semantics (matches the old mixer).
+                // Restart semantics (matches the old mixer), from `start`.
                 self.music.retain(|m| m.music_id != music_id);
                 shared.playing.store(true, Ordering::Relaxed);
-                shared.position.store(0, Ordering::Relaxed);
+                shared.position.store(start, Ordering::Relaxed);
                 let samples = match payload {
-                    MusicPayload::Full(data) => MusicSamples::Full { data, position: 0 },
+                    MusicPayload::Full(data) => {
+                        let position = start.min(data.samples.len());
+                        MusicSamples::Full { data, position }
+                    }
                     #[cfg(not(target_arch = "wasm32"))]
                     MusicPayload::Stream { consumer, channels } => MusicSamples::Stream {
                         consumer,
@@ -555,7 +582,9 @@ impl AudioRenderer {
                     shared,
                     volume,
                     looping,
-                    consumed: 0,
+                    consumed: start,
+                    gain: 0.0,
+                    seeded: false,
                 });
             }
             Cmd::StopMusic { music_id } => {
@@ -646,6 +675,20 @@ impl AudioRenderer {
                 for v in &mut self.voices {
                     if v.voice_id == voice_id {
                         v.lowpass = cutoff.max(0.0);
+                    }
+                }
+            }
+            Cmd::SetVoicePan { voice_id, pan } => {
+                for v in &mut self.voices {
+                    if v.voice_id == voice_id {
+                        v.pan = pan.clamp(-1.0, 1.0);
+                    }
+                }
+            }
+            Cmd::SetMusicLooping { music_id, looping } => {
+                for m in &mut self.music {
+                    if m.music_id == music_id {
+                        m.looping = looping;
                     }
                 }
             }
@@ -760,6 +803,10 @@ impl AudioRenderer {
                     }
                 }
                 (gl, gr, dist)
+            } else if v.pan != 0.0 {
+                // Balance, not equal-power: centred stays at unity, so a
+                // voice that never pans is as loud as before.
+                ((1.0 - v.pan).min(1.0), (1.0 + v.pan).min(1.0), -1.0)
             } else {
                 (1.0, 1.0, -1.0)
             };
@@ -912,15 +959,23 @@ impl AudioRenderer {
         // when the player takes a hit" is the single most-used mix move in the
         // genre and it needs music to be separable from SFX.
         let music_gain = bus_gain[bus::MUSIC as usize];
+        let music_frames = (output.len() / 2).max(1) as f32;
         music.retain_mut(|m| {
-            let vol = m.volume * master * music_gain;
+            let target = m.volume * master * music_gain;
+            if !m.seeded {
+                m.gain = target;
+                m.seeded = true;
+            }
+            let g0 = m.gain;
+            let dg = (target - g0) / music_frames;
+            m.gain = target;
             let mut i = 0;
             let mut finished = false;
             match &mut m.samples {
                 MusicSamples::Full { data, position } => {
                     while i < output.len() && *position < data.samples.len() {
                         if data.channels == 1 {
-                            let sample = data.samples[*position] * vol;
+                            let sample = data.samples[*position] * (g0 + dg * (i / 2) as f32);
                             output[i] += sample;
                             if i + 1 < output.len() {
                                 output[i + 1] += sample;
@@ -928,7 +983,7 @@ impl AudioRenderer {
                             *position += 1;
                             i += 2;
                         } else {
-                            output[i] += data.samples[*position] * vol;
+                            output[i] += data.samples[*position] * (g0 + dg * (i / 2) as f32);
                             *position += 1;
                             i += 1;
                         }
@@ -970,7 +1025,7 @@ impl AudioRenderer {
                             }
                         }
                         if mono {
-                            let sample = current[*offset] * vol;
+                            let sample = current[*offset] * (g0 + dg * (i / 2) as f32);
                             output[i] += sample;
                             if i + 1 < output.len() {
                                 output[i + 1] += sample;
@@ -979,7 +1034,7 @@ impl AudioRenderer {
                             m.consumed += 1;
                             i += 2;
                         } else {
-                            output[i] += current[*offset] * vol;
+                            output[i] += current[*offset] * (g0 + dg * (i / 2) as f32);
                             *offset += 1;
                             m.consumed += 1;
                             i += 1;
@@ -1026,6 +1081,7 @@ mod tests {
             max_dist: 0.0,
             rolloff: 1.0,
             pitch: 1.0,
+            pan: 0.0,
             bus: bus::SFX,
             send: 0.0,
             lowpass: 0.0,
