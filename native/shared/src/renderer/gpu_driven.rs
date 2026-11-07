@@ -414,7 +414,9 @@ impl GpuDrivenRenderer {
         let count_supported = device
             .features()
             .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
-        let routed_visibility = super::visibility_buffer::requested_mode().shades() && enabled;
+        let routed_visibility = super::visibility_buffer::requested_mode().shades()
+            && enabled
+            && super::visibility_buffer::shading_device_supported(device);
         let draw_capacity = 64;
         let draw_buffer = create_draw_buffer(device, draw_capacity);
         let indirect_buffer =
@@ -485,11 +487,9 @@ impl GpuDrivenRenderer {
 
             let shader_source = make_gpu_scene_shader(scene_source);
             let prepassed_source = strip_prepass_discard(&shader_source);
-            let visibility_compat_source = super::visibility_buffer::requested_mode()
-                .shades()
-                .then(|| {
-                    super::visibility_shading::make_forward_compatibility_shader(&shader_source)
-                });
+            let visibility_compat_source = routed_visibility.then(|| {
+                super::visibility_shading::make_forward_compatibility_shader(&shader_source)
+            });
             let visibility_compat_prepassed_source = visibility_compat_source
                 .as_deref()
                 .map(strip_prepass_discard);

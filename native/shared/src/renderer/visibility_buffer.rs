@@ -67,6 +67,17 @@ pub(crate) fn contract_json() -> String {
 /// Storage buffers the PBR shading pipeline binds in its fragment stage.
 const SHADE_FRAGMENT_STORAGE_BUFFERS: u32 = 9;
 
+/// Whether the device can run the PBR shading pass: primitive indices and
+/// enough fragment storage buffers. The GPU-driven renderer asks this before
+/// building shade-mode pipelines, so a fallback leaves both on the forward path.
+pub(crate) fn shading_device_supported(device: &wgpu::Device) -> bool {
+    device.features().contains(wgpu::Features::PRIMITIVE_INDEX) && shading_storage_supported(device)
+}
+
+fn shading_storage_supported(device: &wgpu::Device) -> bool {
+    device.limits().max_storage_buffers_per_shader_stage >= SHADE_FRAGMENT_STORAGE_BUFFERS
+}
+
 pub(crate) const RECONSTRUCTION_WGSL: &str =
     include_str!("../../shaders/visibility_buffer/reconstruct.wgsl");
 pub(crate) const GEOMETRY_WGSL: &str =
@@ -275,9 +286,7 @@ impl VisibilityBufferRuntime {
         // groups plus its own five tables, all read in the fragment stage.
         // Adapters with WebGPU's default of 8 per stage (paravirtual and
         // simulator GPUs among them) stay on the forward path.
-        if mode.shades()
-            && device.limits().max_storage_buffers_per_shader_stage < SHADE_FRAGMENT_STORAGE_BUFFERS
-        {
+        if mode.shades() && !shading_storage_supported(device) {
             runtime.disabled_reason = "storage-buffer-limit";
             return runtime;
         }
