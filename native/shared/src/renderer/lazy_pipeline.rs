@@ -124,7 +124,11 @@ struct OwnedCompilation {
 impl OwnedCompilation {
     fn new(o: &wgpu::PipelineCompilationOptions<'_>) -> Self {
         OwnedCompilation {
-            constants: o.constants.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            constants: o
+                .constants
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
             zero_initialize_workgroup_memory: o.zero_initialize_workgroup_memory,
         }
     }
@@ -177,8 +181,11 @@ impl LazyRenderPipeline {
         Lazy::from_init(
             name,
             Box::new(move || {
-                let vs_constants: Vec<(&str, f64)> =
-                    vs_compilation.constants.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+                let vs_constants: Vec<(&str, f64)> = vs_compilation
+                    .constants
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), *v))
+                    .collect();
                 let vertex_buffers: Vec<wgpu::VertexBufferLayout<'_>> = buffers
                     .iter()
                     .map(|b| wgpu::VertexBufferLayout {
@@ -189,7 +196,13 @@ impl LazyRenderPipeline {
                     .collect();
                 let fs_constants: Vec<(&str, f64)> = fragment
                     .as_ref()
-                    .map(|f| f.compilation.constants.iter().map(|(k, v)| (k.as_str(), *v)).collect())
+                    .map(|f| {
+                        f.compilation
+                            .constants
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), *v))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: label.as_deref(),
@@ -199,7 +212,8 @@ impl LazyRenderPipeline {
                         entry_point: vs_entry.as_deref(),
                         compilation_options: wgpu::PipelineCompilationOptions {
                             constants: &vs_constants,
-                            zero_initialize_workgroup_memory: vs_compilation.zero_initialize_workgroup_memory,
+                            zero_initialize_workgroup_memory: vs_compilation
+                                .zero_initialize_workgroup_memory,
                         },
                         buffers: &vertex_buffers,
                     },
@@ -211,7 +225,9 @@ impl LazyRenderPipeline {
                         entry_point: f.entry_point.as_deref(),
                         compilation_options: wgpu::PipelineCompilationOptions {
                             constants: &fs_constants,
-                            zero_initialize_workgroup_memory: f.compilation.zero_initialize_workgroup_memory,
+                            zero_initialize_workgroup_memory: f
+                                .compilation
+                                .zero_initialize_workgroup_memory,
                         },
                         targets: &f.targets,
                     }),
@@ -237,8 +253,11 @@ impl LazyComputePipeline {
         Lazy::from_init(
             name,
             Box::new(move || {
-                let constants: Vec<(&str, f64)> =
-                    compilation.constants.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+                let constants: Vec<(&str, f64)> = compilation
+                    .constants
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), *v))
+                    .collect();
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: label.as_deref(),
                     layout: layout.as_ref(),
@@ -246,7 +265,8 @@ impl LazyComputePipeline {
                     entry_point: entry_point.as_deref(),
                     compilation_options: wgpu::PipelineCompilationOptions {
                         constants: &constants,
-                        zero_initialize_workgroup_memory: compilation.zero_initialize_workgroup_memory,
+                        zero_initialize_workgroup_memory: compilation
+                            .zero_initialize_workgroup_memory,
                     },
                     cache: cache.as_ref(),
                 })
@@ -343,7 +363,8 @@ impl super::Renderer {
         // the previous frame queued GPU-driven draws (meshes that qualify: not
         // skinned-compat, blended, refractive or layered); the first such frame
         // starts these, later ones find them built
-        let gpu_driven_draws = scene_3d && self.gpu_driven.enabled() && !self.gpu_driven.draw_scratch.is_empty();
+        let gpu_driven_draws =
+            scene_3d && self.gpu_driven.enabled() && !self.gpu_driven.draw_scratch.is_empty();
         let upscale = self.render_scale < 0.999 && !self.taa_enabled;
         let flags = [
             scene_3d,
@@ -362,7 +383,10 @@ impl super::Renderer {
             self.sss_enabled,
             self.pt_mode > 0,
         ];
-        let signature = flags.iter().enumerate().fold(0u64, |acc, (i, on)| acc | ((*on as u64) << i));
+        let signature = flags
+            .iter()
+            .enumerate()
+            .fold(0u64, |acc, (i, on)| acc | ((*on as u64) << i));
         if signature == self.prewarm_signature {
             return;
         }
@@ -453,10 +477,14 @@ impl super::Renderer {
             }
             if self.pt_mode > 0 {
                 wanted.extend(
-                    [&self.pt_pipeline, &self.pt_atrous_mid_pipeline, &self.pt_atrous_final_pipeline]
-                        .into_iter()
-                        .flatten()
-                        .map(|p| p.warm_handle()),
+                    [
+                        &self.pt_pipeline,
+                        &self.pt_atrous_mid_pipeline,
+                        &self.pt_atrous_final_pipeline,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(|p| p.warm_handle()),
                 );
             }
         }
@@ -484,7 +512,11 @@ mod tests {
         let n = Arc::new(AtomicUsize::new(0));
         let p = counting("p", n.clone());
         assert!(!p.is_built());
-        assert_eq!(n.load(Ordering::SeqCst), 0, "creating a lazy pipeline must not build it");
+        assert_eq!(
+            n.load(Ordering::SeqCst),
+            0,
+            "creating a lazy pipeline must not build it"
+        );
         assert_eq!(*p, 7);
         let q = p.clone();
         assert_eq!(*q, 7);
@@ -512,7 +544,9 @@ mod tests {
                 }),
             )
         };
-        let others: Vec<Lazy<u32>> = (0..6).map(|i| counting(&format!("p{i}"), n.clone())).collect();
+        let others: Vec<Lazy<u32>> = (0..6)
+            .map(|i| counting(&format!("p{i}"), n.clone()))
+            .collect();
         let mut handles = vec![slow.warm_handle()];
         handles.extend(others.iter().map(|p| p.warm_handle()));
         prewarm(handles);

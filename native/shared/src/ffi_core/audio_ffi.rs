@@ -260,7 +260,9 @@ macro_rules! __bloom_ffi_audio_ffi {
         // bloom_get_music_time — seconds played since the last play_music.
         #[no_mangle]
         pub extern "C" fn bloom_get_music_time(handle: f64) -> f64 {
-            $crate::ffi::guard("bloom_get_music_time", move || engine().audio.music_time(handle))
+            $crate::ffi::guard("bloom_get_music_time", move || {
+                engine().audio.music_time(handle)
+            })
         }
 
         // bloom_play_music_from — play from `seconds` into the track (a seek).
@@ -274,7 +276,9 @@ macro_rules! __bloom_ffi_audio_ffi {
         // bloom_get_music_length — seconds; 0 when streamed (not known).
         #[no_mangle]
         pub extern "C" fn bloom_get_music_length(handle: f64) -> f64 {
-            $crate::ffi::guard("bloom_get_music_length", move || engine().audio.music_length(handle))
+            $crate::ffi::guard("bloom_get_music_length", move || {
+                engine().audio.music_length(handle)
+            })
         }
     };
 }

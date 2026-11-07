@@ -148,14 +148,17 @@ impl OcclusionCuller {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let pipeline = LazyComputePipeline::new(device, &wgpu::ComputePipelineDescriptor {
-            label: Some("occlusion_reduce_pipeline"),
-            layout: Some(&pl),
-            module: &shader,
-            entry_point: Some("cs_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = LazyComputePipeline::new(
+            device,
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("occlusion_reduce_pipeline"),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("occlusion_reduce_uniform"),
             contents: &[0u8; 16],

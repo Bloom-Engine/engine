@@ -482,7 +482,11 @@ impl Profiler {
         }
         if let Some(origin) = self.cpu_spans.iter().map(|(b, _)| *b).min() {
             let ns = |t: Instant| t.duration_since(origin).as_nanos() as u64;
-            let spans = self.cpu_spans.drain(..).map(|(b, e)| (ns(b), ns(e))).collect();
+            let spans = self
+                .cpu_spans
+                .drain(..)
+                .map(|(b, e)| (ns(b), ns(e)))
+                .collect();
             frame_cpu = union_length(spans) as f64 / 1000.0;
         }
         if let Some(g) = self.gpu_union_us.take() {
@@ -729,10 +733,23 @@ mod tests {
         assert_eq!(union_length(vec![]), 0);
         assert_eq!(union_length(vec![(10, 20)]), 10);
         // nine overlapping bloom mips spanning 270..1080 (as measured on M1 Max)
-        let bloom = vec![(270, 941), (369, 972), (386, 988), (471, 1003), (473, 1019), (512, 1027), (532, 1035), (551, 1047), (553, 1077)];
+        let bloom = vec![
+            (270, 941),
+            (369, 972),
+            (386, 988),
+            (471, 1003),
+            (473, 1019),
+            (512, 1027),
+            (532, 1035),
+            (551, 1047),
+            (553, 1077),
+        ];
         assert_eq!(union_length(bloom), 1077 - 270);
         // disjoint, nested and empty/inverted spans
-        assert_eq!(union_length(vec![(0, 10), (20, 30), (22, 25), (40, 40), (50, 45)]), 20);
+        assert_eq!(
+            union_length(vec![(0, 10), (20, 30), (22, 25), (40, 40), (50, 45)]),
+            20
+        );
     }
 
     #[test]
@@ -746,8 +763,16 @@ mod tests {
         p.end("outer");
         p.frame_end_cpu();
         let (cpu, _) = p.frame_history()[0];
-        let outer = p.snapshot().iter().find(|(l, _, _)| *l == "outer").unwrap().1;
-        assert!((cpu - outer).abs() < 1.0, "frame total {cpu} us must equal the outer phase {outer} us, not outer + inner");
+        let outer = p
+            .snapshot()
+            .iter()
+            .find(|(l, _, _)| *l == "outer")
+            .unwrap()
+            .1;
+        assert!(
+            (cpu - outer).abs() < 1.0,
+            "frame total {cpu} us must equal the outer phase {outer} us, not outer + inner"
+        );
         assert!((p.avg_frame_cpu_us() - cpu).abs() < 1e-9);
     }
 

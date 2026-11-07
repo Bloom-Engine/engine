@@ -324,14 +324,17 @@ impl FroxelPass {
             bind_group_layouts: &[Some(&assign_layout)],
             ..Default::default()
         });
-        let assign_pipeline = LazyComputePipeline::new(device, &wgpu::ComputePipelineDescriptor {
-            label: Some("froxel_assign_pipeline"),
-            layout: Some(&pl),
-            module: &shader,
-            entry_point: Some("cs_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let assign_pipeline = LazyComputePipeline::new(
+            device,
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("froxel_assign_pipeline"),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("froxel_params"),
             contents: &[0u8; std::mem::size_of::<FroxelParams>()],

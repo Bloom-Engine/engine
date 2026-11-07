@@ -128,14 +128,17 @@ impl ImpulseField {
             label: Some("impulse_field"),
             source: wgpu::ShaderSource::Wgsl(shader_src.into()),
         });
-        let pipeline = LazyComputePipeline::new(device, &wgpu::ComputePipelineDescriptor {
-            label: Some("impulse_field_pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("cs_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = LazyComputePipeline::new(
+            device,
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("impulse_field_pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         let info_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("impulse_field_info"),

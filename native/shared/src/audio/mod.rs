@@ -159,7 +159,9 @@ impl AudioMixer {
         max_dist: f32,
         rolloff: f32,
     ) -> f64 {
-        self.send_play_with(handle, spatial, looping, ref_dist, max_dist, rolloff, 1.0, 1.0, 0.0)
+        self.send_play_with(
+            handle, spatial, looping, ref_dist, max_dist, rolloff, 1.0, 1.0, 0.0,
+        )
     }
 
     /// `send_play` with a per-voice volume (multiplied onto the sound's own),
@@ -248,7 +250,14 @@ impl AudioMixer {
     /// handle a Web Audio source node needs to change its gain, rate and pan
     /// while it plays, and to stop it. `looping` voices play until
     /// [`Self::stop_voice`]. `pan` is a stereo balance, -1 (left) .. 1 (right).
-    pub fn play_sound_ex(&mut self, handle: f64, looping: bool, volume: f32, pitch: f32, pan: f32) -> f64 {
+    pub fn play_sound_ex(
+        &mut self,
+        handle: f64,
+        looping: bool,
+        volume: f32,
+        pitch: f32,
+        pan: f32,
+    ) -> f64 {
         self.send_play_with(handle, None, looping, 1.0, 1.0e9, 1.0, volume, pitch, pan)
     }
 
@@ -679,11 +688,18 @@ mod tests {
         let h = a.load_sound(tone(4096));
         let v = a.play_sound_ex(h, false, 0.25, 1.0, 0.0);
         assert!(v > 0.0, "no voice id");
-        assert_eq!(a.play_sound_ex(999.0, false, 1.0, 1.0, 0.0), 0.0, "unknown sound must give 0");
+        assert_eq!(
+            a.play_sound_ex(999.0, false, 1.0, 1.0, 0.0),
+            0.0,
+            "unknown sound must give 0"
+        );
         let mut out = [0.0f32; 256];
         a.mix_output(&mut out);
         let (l, r) = stereo_peaks(&out);
-        assert!((l - 0.125).abs() < 1e-3 && (r - 0.125).abs() < 1e-3, "volume 0.25 of a 0.5 tone: {l} {r}");
+        assert!(
+            (l - 0.125).abs() < 1e-3 && (r - 0.125).abs() < 1e-3,
+            "volume 0.25 of a 0.5 tone: {l} {r}"
+        );
     }
 
     #[test]
@@ -712,10 +728,17 @@ mod tests {
         a.play_music(m);
         let mut out = vec![0.0f32; 2 * 11_025]; // 0.25 s
         a.mix_output(&mut out);
-        assert!((a.music_time(m) - 0.25).abs() < 1e-3, "time {}", a.music_time(m));
+        assert!(
+            (a.music_time(m) - 0.25).abs() < 1e-3,
+            "time {}",
+            a.music_time(m)
+        );
         a.mix_output(&mut out);
         a.mix_output(&mut out);
-        assert!(!a.is_music_playing(m), "a track played once must stop at its end");
+        assert!(
+            !a.is_music_playing(m),
+            "a track played once must stop at its end"
+        );
     }
 
     #[test]
@@ -724,10 +747,17 @@ mod tests {
         let m = a.load_music(tone(44_100)); // 1 s
         a.set_music_looping(m, false);
         a.play_music_from(m, 0.75);
-        assert!((a.music_time(m) - 0.75).abs() < 1e-3, "starts at the offset: {}", a.music_time(m));
+        assert!(
+            (a.music_time(m) - 0.75).abs() < 1e-3,
+            "starts at the offset: {}",
+            a.music_time(m)
+        );
         let mut out = vec![0.0f32; 2 * 22_050]; // 0.5 s: past the end
         a.mix_output(&mut out);
-        assert!(!a.is_music_playing(m), "0.25 s left, so 0.5 s of mixing ends it");
+        assert!(
+            !a.is_music_playing(m),
+            "0.25 s left, so 0.5 s of mixing ends it"
+        );
     }
 
     #[test]
@@ -740,8 +770,16 @@ mod tests {
         a.set_music_volume(m, 0.0);
         a.mix_output(&mut out);
         // the first frame of the block is still at the old level, the last near 0
-        assert!(out[0].abs() > 0.4, "ramp starts at the old gain: {}", out[0]);
-        assert!(out[510].abs() < 0.01, "ramp ends at the new gain: {}", out[510]);
+        assert!(
+            out[0].abs() > 0.4,
+            "ramp starts at the old gain: {}",
+            out[0]
+        );
+        assert!(
+            out[510].abs() < 0.01,
+            "ramp ends at the new gain: {}",
+            out[510]
+        );
     }
 
     #[test]

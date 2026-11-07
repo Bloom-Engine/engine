@@ -594,6 +594,7 @@ fn visibility_shading_matches_forward_reference() {
                         "primitive-index-unavailable"
                             | "gpu-driven-unavailable"
                             | "tier-a-materials-unavailable"
+                            | "storage-buffer-limit"
                     ),
                     "unexpected visibility fallback reason: {reason}"
                 );

@@ -471,14 +471,17 @@ impl GpuDrivenRenderer {
                     bind_group_layouts: &[Some(&cull_layout)],
                     immediate_size: 0,
                 });
-            let cull_pipeline = LazyComputePipeline::new(device, &wgpu::ComputePipelineDescriptor {
-                label: Some("gpu_driven_cull_pipeline"),
-                layout: Some(&cull_pipeline_layout),
-                module: &cull_shader,
-                entry_point: Some("cs_cull"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+            let cull_pipeline = LazyComputePipeline::new(
+                device,
+                &wgpu::ComputePipelineDescriptor {
+                    label: Some("gpu_driven_cull_pipeline"),
+                    layout: Some(&cull_pipeline_layout),
+                    module: &cull_shader,
+                    entry_point: Some("cs_cull"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            );
 
             let shader_source = make_gpu_scene_shader(scene_source);
             let prepassed_source = strip_prepass_discard(&shader_source);
@@ -1383,38 +1386,41 @@ fn create_depth_pipeline(
         // priming depth; the ordinary path has no color target at all.
         write_mask: wgpu::ColorWrites::ALL,
     })];
-    LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
-        label: Some("gpu_driven_depth_pipeline"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main_scene"),
-            buffers: &[Vertex3D::desc()],
-            compilation_options: Default::default(),
+    LazyRenderPipeline::new(
+        device,
+        &wgpu::RenderPipelineDescriptor {
+            label: Some("gpu_driven_depth_pipeline"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &[Vertex3D::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_depth_prepass"),
+                // Slot zero is normally unattached. Shade mode declares the
+                // packed-ID target so one traversal owns both depth and IDs.
+                targets: &targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
         },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_depth_prepass"),
-            // Slot zero is normally unattached. Shade mode declares the
-            // packed-ID target so one traversal owns both depth and IDs.
-            targets: &targets,
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
-            stencil: Default::default(),
-            bias: Default::default(),
-        }),
-        multisample: Default::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+    )
 }
 
 fn create_main_pipeline(
@@ -1462,51 +1468,54 @@ fn create_main_pipeline(
             write_mask: wgpu::ColorWrites::ALL,
         }),
     ];
-    LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
-        label: Some(if prepassed {
-            "gpu_driven_main_prepassed_pipeline"
-        } else {
-            "gpu_driven_main_pipeline"
-        }),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: vertex_shader,
-            entry_point: Some("vs_main_scene"),
-            buffers: &[Vertex3D::desc()],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: fragment_shader,
-            entry_point: Some("fs_main_scene"),
-            targets,
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            // Match the canonical prepassed scene pipeline: the depth pass is
-            // two-sided, so the Equal-test main pass must shade the same face
-            // if overlapping geometry made a back face win depth.
-            cull_mode: if prepassed {
-                None
+    LazyRenderPipeline::new(
+        device,
+        &wgpu::RenderPipelineDescriptor {
+            label: Some(if prepassed {
+                "gpu_driven_main_prepassed_pipeline"
             } else {
-                Some(wgpu::Face::Back)
-            },
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(!prepassed),
-            depth_compare: Some(if prepassed {
-                wgpu::CompareFunction::Equal
-            } else {
-                wgpu::CompareFunction::Less
+                "gpu_driven_main_pipeline"
             }),
-            stencil: Default::default(),
-            bias: Default::default(),
-        }),
-        multisample: Default::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: vertex_shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &[Vertex3D::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: fragment_shader,
+                entry_point: Some("fs_main_scene"),
+                targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                // Match the canonical prepassed scene pipeline: the depth pass is
+                // two-sided, so the Equal-test main pass must shade the same face
+                // if overlapping geometry made a back face win depth.
+                cull_mode: if prepassed {
+                    None
+                } else {
+                    Some(wgpu::Face::Back)
+                },
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(!prepassed),
+                depth_compare: Some(if prepassed {
+                    wgpu::CompareFunction::Equal
+                } else {
+                    wgpu::CompareFunction::Less
+                }),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        },
+    )
 }
 
 pub(super) fn make_gpu_scene_shader(source: &str) -> String {

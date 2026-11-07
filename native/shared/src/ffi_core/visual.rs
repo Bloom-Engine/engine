@@ -417,7 +417,9 @@ macro_rules! __bloom_ffi_visual {
         #[no_mangle]
         pub extern "C" fn bloom_set_camera_clip_planes(near: f64, far: f64) -> f64 {
             $crate::ffi::guard_applied("bloom_set_camera_clip_planes", move || {
-                engine().renderer.set_camera_clip_planes(near as f32, far as f32);
+                engine()
+                    .renderer
+                    .set_camera_clip_planes(near as f32, far as f32);
             })
         }
 

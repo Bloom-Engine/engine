@@ -610,37 +610,40 @@ impl ShadowMap {
             immediate_size: 0,
         });
 
-        let pipeline = LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
-            label: Some("shadow_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_shadow"),
-                buffers: &[vertex_layout.clone()],
-                compilation_options: Default::default(),
-            },
-            fragment: None, // depth only
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 1,
-                    slope_scale: 1.0,
-                    clamp: 0.0,
+        let pipeline = LazyRenderPipeline::new(
+            device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("shadow_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_shadow"),
+                    buffers: &[vertex_layout.clone()],
+                    compilation_options: Default::default(),
                 },
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+                fragment: None, // depth only
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
 
         // Cutout (alpha-tested) shadow pipeline. Separate so the opaque path
         // above is untouched. Adds a group-1 texture/sampler/cutoff layout and
@@ -686,42 +689,45 @@ impl ShadowMap {
             bind_group_layouts: &[Some(&uniform_layout), Some(&cutout_tex_layout)],
             immediate_size: 0,
         });
-        let pipeline_cutout = LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
-            label: Some("shadow_pipeline_cutout"),
-            layout: Some(&cutout_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &cutout_shader,
-                entry_point: Some("vs_shadow_cutout"),
-                buffers: &[vertex_layout.clone()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &cutout_shader,
-                entry_point: Some("fs_shadow_cutout"),
-                targets: &[], // depth only
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 1,
-                    slope_scale: 1.0,
-                    clamp: 0.0,
+        let pipeline_cutout = LazyRenderPipeline::new(
+            device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("shadow_pipeline_cutout"),
+                layout: Some(&cutout_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &cutout_shader,
+                    entry_point: Some("vs_shadow_cutout"),
+                    buffers: &[vertex_layout.clone()],
+                    compilation_options: Default::default(),
                 },
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+                fragment: Some(wgpu::FragmentState {
+                    module: &cutout_shader,
+                    entry_point: Some("fs_shadow_cutout"),
+                    targets: &[], // depth only
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
 
         // Skinned (animated-character) shadow pipeline. Group 0 = the shared
         // shadow uniforms (light_vp + model, dynamic offset); group 1 = the
@@ -735,37 +741,40 @@ impl ShadowMap {
             bind_group_layouts: &[Some(&uniform_layout), Some(joint_layout)],
             immediate_size: 0,
         });
-        let pipeline_skinned = LazyRenderPipeline::new(device, &wgpu::RenderPipelineDescriptor {
-            label: Some("shadow_pipeline_skinned"),
-            layout: Some(&skinned_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &skinned_shader,
-                entry_point: Some("vs_shadow_skinned"),
-                buffers: &[vertex_layout],
-                compilation_options: Default::default(),
-            },
-            fragment: None, // depth only
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 1,
-                    slope_scale: 1.0,
-                    clamp: 0.0,
+        let pipeline_skinned = LazyRenderPipeline::new(
+            device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("shadow_pipeline_skinned"),
+                layout: Some(&skinned_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &skinned_shader,
+                    entry_point: Some("vs_shadow_skinned"),
+                    buffers: &[vertex_layout],
+                    compilation_options: Default::default(),
                 },
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+                fragment: None, // depth only
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
         let virtual_map =
             crate::virtual_shadows::DirectionalVirtualShadowMap::new(device, &uniform_layout);
 

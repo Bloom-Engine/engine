@@ -178,7 +178,10 @@ mod tests {
         let baked = super::super::BRDF_LUT_BAKED;
         assert_eq!(baked.len(), BRDF_LUT_SIZE * BRDF_LUT_SIZE * 2 * 2);
         for y in [0, BRDF_LUT_SIZE / 2, BRDF_LUT_SIZE - 1] {
-            let row: Vec<u8> = build_brdf_lut_row(y, BRDF_LUT_SIZE).iter().flat_map(|t| t.to_le_bytes()).collect();
+            let row: Vec<u8> = build_brdf_lut_row(y, BRDF_LUT_SIZE)
+                .iter()
+                .flat_map(|t| t.to_le_bytes())
+                .collect();
             let start = y * BRDF_LUT_SIZE * 4;
             assert_eq!(&baked[start..start + row.len()], row.as_slice(), "row {y}");
         }

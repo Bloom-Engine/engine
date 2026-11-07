@@ -70,7 +70,6 @@ mod gi_bake;
 mod glsl_render_target;
 pub mod gpu_driven;
 mod hiz;
-pub(crate) mod lazy_pipeline;
 mod immediate_draw3d;
 mod immediate_motion;
 mod layered_pbr;
@@ -78,6 +77,8 @@ mod layered_pbr_pt;
 mod layered_pbr_refraction;
 pub(crate) mod layered_pbr_scene;
 pub(crate) mod layered_pbr_ssr;
+pub(crate) mod lazy_pipeline;
+mod light_api;
 mod lighting;
 mod lighting_upload;
 mod material_api;
@@ -2592,46 +2593,49 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        let pipeline_2d = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("pipeline_2d"),
-            layout: Some(&pipeline_layout_2d),
-            vertex: wgpu::VertexState {
-                module: &shader_2d,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex2D::desc()],
-                compilation_options: Default::default(),
+        let pipeline_2d = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("pipeline_2d"),
+                layout: Some(&pipeline_layout_2d),
+                vertex: wgpu::VertexState {
+                    module: &shader_2d,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Vertex2D::desc()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_2d,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: output_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                // No depth-stencil — 2D never tests or writes depth, and
+                // the pipeline runs in two different passes: one with a
+                // depth attachment (composited into hdr_rt) and one
+                // without (drawn on top of the tonemapped surface).
+                // wgpu allows a depth-less pipeline in either pass; the
+                // reverse — a depth-bound pipeline in a depth-less pass
+                // — is a validation error.
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_2d,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: output_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            // No depth-stencil — 2D never tests or writes depth, and
-            // the pipeline runs in two different passes: one with a
-            // depth attachment (composited into hdr_rt) and one
-            // without (drawn on top of the tonemapped surface).
-            // wgpu allows a depth-less pipeline in either pass; the
-            // reverse — a depth-bound pipeline in a depth-less pass
-            // — is a validation error.
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         // --- Joint matrix buffer for GPU skinning ---
         // (`joint_layout` is created earlier, above the shadow map, because the
@@ -2696,84 +2700,87 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        let pipeline_3d = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("pipeline_3d"),
-            layout: Some(&pipeline_layout_3d),
-            vertex: wgpu::VertexState {
-                module: &shader_3d,
-                entry_point: Some("vs_main_3d"),
-                buffers: &[Vertex3D::desc()],
-                compilation_options: Default::default(),
+        let pipeline_3d = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("pipeline_3d"),
+                layout: Some(&pipeline_layout_3d),
+                vertex: wgpu::VertexState {
+                    module: &shader_3d,
+                    entry_point: Some("vs_main_3d"),
+                    buffers: &[Vertex3D::desc()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_3d,
+                    entry_point: Some("fs_main_3d"),
+                    // SH-055 — `lean_mrt` (Android): material/albedo -> None, mirroring
+                    // material_pipeline.rs's opaque_targets. Every pipeline drawn
+                    // inside main_hdr_pass must agree index-for-index on which
+                    // targets are Some/None (wgpu-core's RenderPassContext
+                    // compatibility check), so this pipeline, scene_pipeline, and
+                    // scene_pipeline_prepassed all mirror the same layout.
+                    #[cfg(lean_mrt)]
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        None,
+                        Some(wgpu::ColorTargetState {
+                            format: VELOCITY_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        None,
+                    ],
+                    #[cfg(not(lean_mrt))]
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: MATERIAL_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: VELOCITY_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_3d,
-                entry_point: Some("fs_main_3d"),
-                // SH-055 — `lean_mrt` (Android): material/albedo -> None, mirroring
-                // material_pipeline.rs's opaque_targets. Every pipeline drawn
-                // inside main_hdr_pass must agree index-for-index on which
-                // targets are Some/None (wgpu-core's RenderPassContext
-                // compatibility check), so this pipeline, scene_pipeline, and
-                // scene_pipeline_prepassed all mirror the same layout.
-                #[cfg(lean_mrt)]
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    None,
-                    Some(wgpu::ColorTargetState {
-                        format: VELOCITY_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    None,
-                ],
-                #[cfg(not(lean_mrt))]
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: MATERIAL_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: VELOCITY_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         // --- Pooled model uniform buffer (cached model draws) ---
         // 1024 slots × 256 B = 256 KB; grows by doubling if a scene
@@ -2859,87 +2866,90 @@ impl Renderer {
             bind_group_layouts: &[Some(&sky_bind_group_layout)],
             immediate_size: 0,
         });
-        let sky_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("sky_pipeline"),
-            layout: Some(&sky_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &sky_shader,
-                entry_point: Some("sky_vs"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let sky_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("sky_pipeline"),
+                layout: Some(&sky_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &sky_shader,
+                    entry_point: Some("sky_vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &sky_shader,
+                    entry_point: Some("sky_fs"),
+                    // SH-055 — `lean_mrt` (Android): see pipeline_3d's comment above.
+                    #[cfg(lean_mrt)]
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        None,
+                        Some(wgpu::ColorTargetState {
+                            format: VELOCITY_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        None,
+                    ],
+                    #[cfg(not(lean_mrt))]
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: MATERIAL_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: VELOCITY_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                // Depth: write z=1.0 (far plane). Use Always so the sky
+                // pass never gets occluded by stale depth from a previous
+                // frame; the 3D opaque pass will overwrite where it draws.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    // EN-044 — the sky must NOT write depth. It is drawn first, with
+                    // `Always`, so it used to stamp depth = 1.0 across the whole screen.
+                    // That was harmless while the buffer had just been cleared to 1.0
+                    // anyway — and instantly destructive once a depth PREPASS started
+                    // writing real geometry depth before it. The sky wiped the lot, the
+                    // main pass's Equal test then failed everywhere, and the entire
+                    // forest and player vanished. It never needed the write: where no
+                    // geometry is drawn the depth is already 1.0.
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &sky_shader,
-                entry_point: Some("sky_fs"),
-                // SH-055 — `lean_mrt` (Android): see pipeline_3d's comment above.
-                #[cfg(lean_mrt)]
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    None,
-                    Some(wgpu::ColorTargetState {
-                        format: VELOCITY_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    None,
-                ],
-                #[cfg(not(lean_mrt))]
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: MATERIAL_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: VELOCITY_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                ..Default::default()
-            },
-            // Depth: write z=1.0 (far plane). Use Always so the sky
-            // pass never gets occluded by stale depth from a previous
-            // frame; the 3D opaque pass will overwrite where it draws.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                // EN-044 — the sky must NOT write depth. It is drawn first, with
-                // `Always`, so it used to stamp depth = 1.0 across the whole screen.
-                // That was harmless while the buffer had just been cleared to 1.0
-                // anyway — and instantly destructive once a depth PREPASS started
-                // writing real geometry depth before it. The sky wiped the lot, the
-                // main pass's Equal test then failed everywhere, and the entire
-                // forest and player vanished. It never needed the write: where no
-                // geometry is drawn the depth is already 1.0.
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         // ============================================================
         // EN-005 Phase 2 — procedural sky pipeline + sky-view LUT
@@ -3032,15 +3042,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&sky_view_compute_bgl)],
                 immediate_size: 0,
             });
-        let sky_view_compute_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let sky_view_compute_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("sky_view_compute_pipeline"),
                 layout: Some(&sky_view_compute_pl_layout),
                 module: &sky_view_compute_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
         let sky_view_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sky_view_uniform_buffer"),
             size: std::mem::size_of::<SkyViewParams>() as u64,
@@ -3143,8 +3155,9 @@ impl Renderer {
                 bind_group_layouts: &[Some(&procedural_sky_bgl)],
                 immediate_size: 0,
             });
-        let procedural_sky_pipeline =
-            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
+        let procedural_sky_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
                 label: Some("procedural_sky_pipeline"),
                 layout: Some(&procedural_sky_pl_layout),
                 vertex: wgpu::VertexState {
@@ -3221,7 +3234,8 @@ impl Renderer {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
         let procedural_sky_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("procedural_sky_bg"),
             layout: &procedural_sky_bgl,
@@ -3354,8 +3368,9 @@ impl Renderer {
                 bind_group_layouts: &[Some(&procedural_ibl_bgl)],
                 immediate_size: 0,
             });
-        let procedural_ibl_pipeline =
-            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
+        let procedural_ibl_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
                 label: Some("procedural_ibl_pipeline"),
                 layout: Some(&procedural_ibl_pl_layout),
                 vertex: wgpu::VertexState {
@@ -3384,7 +3399,8 @@ impl Renderer {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
         let procedural_ibl_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("procedural_ibl_bg"),
             layout: &procedural_ibl_bgl,
@@ -3558,39 +3574,42 @@ impl Renderer {
             bind_group_layouts: &[Some(&prefilter_layout)],
             immediate_size: 0,
         });
-        let prefilter_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("prefilter_pipeline"),
-            layout: Some(&prefilter_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &prefilter_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let prefilter_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("prefilter_pipeline"),
+                layout: Some(&prefilter_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &prefilter_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &prefilter_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &prefilter_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let prefilter_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("prefilter_uniform_buffer"),
             size: std::mem::size_of::<PrefilterUniforms>() as u64,
@@ -3602,8 +3621,9 @@ impl Renderer {
         // cosine-weighted convolution in the fragment stage. Reused
         // bind group layout (so we don't need to rebuild bind groups
         // when switching pipelines mid-encoder).
-        let prefilter_diffuse_pipeline =
-            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
+        let prefilter_diffuse_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
                 label: Some("prefilter_diffuse_pipeline"),
                 layout: Some(&prefilter_pl_layout),
                 vertex: wgpu::VertexState {
@@ -3635,7 +3655,8 @@ impl Renderer {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
 
         // EN-005 Phase 3 — bind group for the GGX prefilter when
         // re-baking procedural IBL. Sources from the mip-0 view of
@@ -3769,15 +3790,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&aerial_perspective_bgl)],
                 immediate_size: 0,
             });
-        let aerial_perspective_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let aerial_perspective_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("aerial_perspective_pipeline"),
                 layout: Some(&aerial_perspective_pl_layout),
                 module: &aerial_perspective_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
         let aerial_perspective_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("aerial_perspective_bg"),
             layout: &aerial_perspective_bgl,
@@ -3816,123 +3839,129 @@ impl Renderer {
                 ],
                 immediate_size: 0,
             });
-        let scene_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("scene_pipeline"),
-            layout: Some(&scene_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &scene_shader,
-                entry_point: Some("vs_main_scene"),
-                buffers: &[Vertex3D::desc()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &scene_shader,
-                entry_point: Some("fs_main_scene"),
-                // SH-055 — `lean_mrt` (Android): see pipeline_3d's comment above.
-                #[cfg(lean_mrt)]
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    None,
-                    Some(wgpu::ColorTargetState {
-                        format: VELOCITY_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    None,
-                ],
-                #[cfg(not(lean_mrt))]
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: MATERIAL_FORMAT,
-                        // Replace blend so the material slot reflects
-                        // the topmost-fragment material, not blended.
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: VELOCITY_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let create_scene_transparent_pipeline =
-            |label: &'static str, cull_mode: Option<wgpu::Face>| {
-                LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&scene_pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &scene_shader,
-                        entry_point: Some("vs_main_scene"),
-                        buffers: &[Vertex3D::desc()],
-                        compilation_options: Default::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &scene_shader,
-                        entry_point: Some("fs_transparent_scene"),
-                        targets: &[Some(wgpu::ColorTargetState {
+        let scene_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("scene_pipeline"),
+                layout: Some(&scene_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &scene_shader,
+                    entry_point: Some("vs_main_scene"),
+                    buffers: &[Vertex3D::desc()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &scene_shader,
+                    entry_point: Some("fs_main_scene"),
+                    // SH-055 — `lean_mrt` (Android): see pipeline_3d's comment above.
+                    #[cfg(lean_mrt)]
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
                             format: HDR_FORMAT,
                             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                             write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: Default::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode,
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        unclipped_depth: false,
-                        conservative: false,
+                        }),
+                        None,
+                        Some(wgpu::ColorTargetState {
+                            format: VELOCITY_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        None,
+                    ],
+                    #[cfg(not(lean_mrt))]
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: MATERIAL_FORMAT,
+                            // Replace blend so the material slot reflects
+                            // the topmost-fragment material, not blended.
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: VELOCITY_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
+
+        let create_scene_transparent_pipeline =
+            |label: &'static str, cull_mode: Option<wgpu::Face>| {
+                LazyRenderPipeline::new(
+                    &device,
+                    &wgpu::RenderPipelineDescriptor {
+                        label: Some(label),
+                        layout: Some(&scene_pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &scene_shader,
+                            entry_point: Some("vs_main_scene"),
+                            buffers: &[Vertex3D::desc()],
+                            compilation_options: Default::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &scene_shader,
+                            entry_point: Some("fs_transparent_scene"),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: HDR_FORMAT,
+                                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                            compilation_options: Default::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            strip_index_format: None,
+                            front_face: wgpu::FrontFace::Ccw,
+                            cull_mode,
+                            polygon_mode: wgpu::PolygonMode::Fill,
+                            unclipped_depth: false,
+                            conservative: false,
+                        },
+                        depth_stencil: Some(wgpu::DepthStencilState {
+                            format: DEPTH_FORMAT,
+                            depth_write_enabled: Some(false),
+                            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                            stencil: wgpu::StencilState::default(),
+                            bias: wgpu::DepthBiasState::default(),
+                        }),
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview_mask: None,
+                        cache: None,
                     },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: DEPTH_FORMAT,
-                        depth_write_enabled: Some(false),
-                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState::default(),
-                    }),
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                })
+                )
             };
         let scene_transparent_pipeline =
             create_scene_transparent_pipeline("scene_transparent_pipeline", Some(wgpu::Face::Back));
@@ -3968,8 +3997,9 @@ impl Renderer {
         //
         // scene_pipeline (Less, write) stays for the retained scene-graph nodes,
         // which are not in the prepass.
-        let scene_pipeline_prepassed =
-            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
+        let scene_pipeline_prepassed = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
                 label: Some("scene_pipeline_prepassed"),
                 layout: Some(&scene_pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -4048,7 +4078,8 @@ impl Renderer {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
 
         // Default flat-normal 1×1 texture for meshes that have tangents
         // but no normal map. RGB encodes tangent-space (0, 0, 1), while
@@ -4170,39 +4201,42 @@ impl Renderer {
             bind_group_layouts: &[Some(&composite_layout)],
             immediate_size: 0,
         });
-        let composite_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("composite_pipeline"),
-            layout: Some(&composite_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &composite_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let composite_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("composite_pipeline"),
+                layout: Some(&composite_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &composite_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: output_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &composite_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: output_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -4268,39 +4302,42 @@ impl Renderer {
 
         let make_bloom_pipeline =
             |entry: &str, blend: Option<wgpu::BlendState>| -> LazyRenderPipeline {
-                LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-                    label: Some("bloom_pipeline"),
-                    layout: Some(&bloom_pl_layout),
-                    vertex: wgpu::VertexState {
-                        module: &bloom_shader,
-                        entry_point: Some("vs_main"),
-                        buffers: &[],
-                        compilation_options: Default::default(),
+                LazyRenderPipeline::new(
+                    &device,
+                    &wgpu::RenderPipelineDescriptor {
+                        label: Some("bloom_pipeline"),
+                        layout: Some(&bloom_pl_layout),
+                        vertex: wgpu::VertexState {
+                            module: &bloom_shader,
+                            entry_point: Some("vs_main"),
+                            buffers: &[],
+                            compilation_options: Default::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &bloom_shader,
+                            entry_point: Some(entry),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: HDR_FORMAT,
+                                blend,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                            compilation_options: Default::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            strip_index_format: None,
+                            front_face: wgpu::FrontFace::Ccw,
+                            cull_mode: None,
+                            polygon_mode: wgpu::PolygonMode::Fill,
+                            unclipped_depth: false,
+                            conservative: false,
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview_mask: None,
+                        cache: None,
                     },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &bloom_shader,
-                        entry_point: Some(entry),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: HDR_FORMAT,
-                            blend,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: Default::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: None,
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        unclipped_depth: false,
-                        conservative: false,
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                })
+                )
             };
         let bloom_pipeline_threshold_downsample =
             make_bloom_pipeline("fs_threshold_downsample", None);
@@ -4370,15 +4407,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&hiz_linearize_layout)],
                 immediate_size: 0,
             });
-        let hiz_linearize_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let hiz_linearize_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("hiz_linearize_pipeline"),
                 layout: Some(&hiz_linearize_pl_layout),
                 module: &hiz_linearize_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
         let hiz_linearize_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("hiz_linearize_uniform_buffer"),
             size: std::mem::size_of::<HizLinearizeParams>() as u64,
@@ -4431,15 +4470,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&hiz_downsample_layout)],
                 immediate_size: 0,
             });
-        let hiz_downsample_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let hiz_downsample_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("hiz_downsample_pipeline"),
                 layout: Some(&hiz_downsample_pl_layout),
                 module: &hiz_downsample_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
         let hiz_downsample_uniform_buffers: Vec<wgpu::Buffer> = (0..HIZ_MIP_COUNT - 1)
             .map(|_| {
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -4595,14 +4636,17 @@ impl Renderer {
             bind_group_layouts: &[Some(&ssao_layout)],
             immediate_size: 0,
         });
-        let ssao_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
-            label: Some("ssao_pipeline"),
-            layout: Some(&ssao_pl_layout),
-            module: &ssao_shader,
-            entry_point: Some("cs_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let ssao_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("ssao_pipeline"),
+                layout: Some(&ssao_pl_layout),
+                module: &ssao_shader,
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let ssao_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssao_uniform_buffer"),
             size: std::mem::size_of::<SsaoParams>() as u64,
@@ -4679,39 +4723,42 @@ impl Renderer {
             bind_group_layouts: &[Some(&ssao_blur_layout)],
             immediate_size: 0,
         });
-        let ssao_blur_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("ssao_blur_pipeline"),
-            layout: Some(&ssao_blur_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &ssao_blur_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let ssao_blur_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("ssao_blur_pipeline"),
+                layout: Some(&ssao_blur_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &ssao_blur_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &ssao_blur_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: SSAO_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &ssao_blur_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: SSAO_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let ssao_blur_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssao_blur_uniform_buffer"),
             size: std::mem::size_of::<SsaoBlurParams>() as u64,
@@ -4733,46 +4780,49 @@ impl Renderer {
             bind_group_layouts: &[Some(&taa_layout)],
             immediate_size: 0,
         });
-        let taa_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("taa_pipeline"),
-            layout: Some(&taa_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &taa_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let taa_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("taa_pipeline"),
+                layout: Some(&taa_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &taa_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &taa_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: TAA_DEPTH_HISTORY_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
+                        }),
+                    ],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &taa_shader,
-                entry_point: Some("fs_main"),
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: TAA_DEPTH_HISTORY_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
-                    }),
-                ],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let taa_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("taa_uniform_buffer"),
             size: std::mem::size_of::<TaaParams>() as u64,
@@ -4823,39 +4873,42 @@ impl Renderer {
             bind_group_layouts: &[Some(&upscale_layout)],
             immediate_size: 0,
         });
-        let upscale_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("upscale_pipeline"),
-            layout: Some(&upscale_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &upscale_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let upscale_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("upscale_pipeline"),
+                layout: Some(&upscale_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &upscale_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &upscale_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &upscale_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let upscale_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("upscale_uniform_buffer"),
             size: std::mem::size_of::<UpscaleParams>() as u64,
@@ -4909,39 +4962,42 @@ impl Renderer {
             bind_group_layouts: &[Some(&cas_layout)],
             immediate_size: 0,
         });
-        let cas_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("cas_pipeline"),
-            layout: Some(&cas_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &cas_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let cas_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("cas_pipeline"),
+                layout: Some(&cas_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &cas_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &cas_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &cas_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let cas_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cas_uniform_buffer"),
             size: std::mem::size_of::<RcasParams>() as u64,
@@ -5057,39 +5113,42 @@ impl Renderer {
             bind_group_layouts: &[Some(&ssr_layout)],
             immediate_size: 0,
         });
-        let ssr_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("ssr_pipeline"),
-            layout: Some(&ssr_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &ssr_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let ssr_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("ssr_pipeline"),
+                layout: Some(&ssr_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &ssr_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &ssr_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &ssr_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let ssr_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssr_uniform_buffer"),
             size: std::mem::size_of::<SsrParams>() as u64,
@@ -5187,8 +5246,9 @@ impl Renderer {
                 bind_group_layouts: &[Some(&ssr_temporal_layout)],
                 immediate_size: 0,
             });
-        let ssr_temporal_pipeline =
-            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
+        let ssr_temporal_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
                 label: Some("ssr_temporal_pipeline"),
                 layout: Some(&ssr_temporal_pl_layout),
                 vertex: wgpu::VertexState {
@@ -5220,7 +5280,8 @@ impl Renderer {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
         let ssr_temporal_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssr_temporal_uniform_buffer"),
             size: std::mem::size_of::<SsrTemporalParams>() as u64,
@@ -5294,15 +5355,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&probe_place_layout)],
                 immediate_size: 0,
             });
-        let probe_place_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let probe_place_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_place_pipeline"),
                 layout: Some(&probe_place_pl_layout),
                 module: &probe_place_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
         let probe_place_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe_place_uniform"),
             size: std::mem::size_of::<ProbePlaceParams>() as u64,
@@ -5440,15 +5503,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&probe_trace_layout)],
                 immediate_size: 0,
             });
-        let probe_trace_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let probe_trace_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_trace_pipeline"),
                 layout: Some(&probe_trace_pl_layout),
                 module: &probe_trace_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
         let probe_trace_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe_trace_uniform"),
             size: std::mem::size_of::<ProbeTraceParams>() as u64,
@@ -5635,14 +5700,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&hw_layout)],
                 immediate_size: 0,
             });
-            let hw_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
-                label: Some("probe_trace_hw_pipeline"),
-                layout: Some(&hw_pl_layout),
-                module: &hw_shader,
-                entry_point: Some("cs_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+            let hw_pipeline = LazyComputePipeline::new(
+                &device,
+                &wgpu::ComputePipelineDescriptor {
+                    label: Some("probe_trace_hw_pipeline"),
+                    layout: Some(&hw_pl_layout),
+                    module: &hw_shader,
+                    entry_point: Some("cs_main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            );
             (Some(hw_pipeline), Some(hw_layout))
         } else {
             (None, None)
@@ -5948,14 +6016,17 @@ impl Renderer {
                 bind_group_layouts: &pl_groups,
                 immediate_size: 0,
             });
-            let pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
-                label: Some("pt_pipeline"),
-                layout: Some(&pl),
-                module: &pt_shader,
-                entry_point: Some("cs_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+            let pipeline = LazyComputePipeline::new(
+                &device,
+                &wgpu::ComputePipelineDescriptor {
+                    label: Some("pt_pipeline"),
+                    layout: Some(&pl),
+                    module: &pt_shader,
+                    entry_point: Some("cs_main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            );
             (Some(pipeline), Some(layout), tex_layout)
         } else {
             (None, None, None)
@@ -6056,22 +6127,28 @@ impl Renderer {
                 bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-            let mid = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
-                label: Some("pt_atrous_mid"),
-                layout: Some(&pl),
-                module: &shader,
-                entry_point: Some("cs_mid"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-            let fin = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
-                label: Some("pt_atrous_final"),
-                layout: Some(&pl),
-                module: &shader,
-                entry_point: Some("cs_final"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+            let mid = LazyComputePipeline::new(
+                &device,
+                &wgpu::ComputePipelineDescriptor {
+                    label: Some("pt_atrous_mid"),
+                    layout: Some(&pl),
+                    module: &shader,
+                    entry_point: Some("cs_mid"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            );
+            let fin = LazyComputePipeline::new(
+                &device,
+                &wgpu::ComputePipelineDescriptor {
+                    label: Some("pt_atrous_final"),
+                    layout: Some(&pl),
+                    module: &shader,
+                    entry_point: Some("cs_final"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            );
             (Some(mid), Some(fin), Some(layout))
         } else {
             (None, None, None)
@@ -6238,15 +6315,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&probe_trace_sdf_layout)],
                 immediate_size: 0,
             });
-        let probe_trace_sdf_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let probe_trace_sdf_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_trace_sdf_pipeline"),
                 layout: Some(&probe_trace_sdf_pl_layout),
                 module: &sdf_trace_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
 
         // --- Probe temporal ---
         let probe_temporal_layout =
@@ -6322,24 +6401,28 @@ impl Renderer {
                 bind_group_layouts: &[Some(&probe_temporal_layout)],
                 immediate_size: 0,
             });
-        let probe_temporal_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let probe_temporal_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_temporal_pipeline"),
                 layout: Some(&probe_temporal_pl_layout),
                 module: &probe_temporal_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
-        let probe_spatial_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+            },
+        );
+        let probe_spatial_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_spatial_pipeline"),
                 layout: Some(&probe_temporal_pl_layout),
                 module: &probe_temporal_shader,
                 entry_point: Some("cs_spatial"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
         let probe_temporal_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe_temporal_uniform"),
             size: std::mem::size_of::<ProbeTemporalParams>() as u64,
@@ -6441,15 +6524,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&probe_resolve_layout)],
                 immediate_size: 0,
             });
-        let probe_resolve_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let probe_resolve_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("probe_resolve_pipeline"),
                 layout: Some(&probe_resolve_pl_layout),
                 module: &probe_resolve_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
         let probe_resolve_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe_resolve_uniform"),
             size: std::mem::size_of::<ProbeResolveParams>() as u64,
@@ -6539,8 +6624,9 @@ impl Renderer {
                 ],
                 immediate_size: 0,
             });
-        let card_capture_pipeline =
-            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
+        let card_capture_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
                 label: Some("card_capture_pipeline"),
                 layout: Some(&card_capture_pl_layout),
                 vertex: wgpu::VertexState {
@@ -6586,7 +6672,8 @@ impl Renderer {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
         let card_capture_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("card_capture_uniform"),
             // One aligned slice per axis in the largest capture batch. Queue
@@ -6784,15 +6871,17 @@ impl Renderer {
             bind_group_layouts: &[Some(&card_light_layout)],
             immediate_size: 0,
         });
-        let card_light_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let card_light_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("card_light_pipeline"),
                 layout: Some(&card_light_pl_layout),
                 module: &card_light_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
         let card_light_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("card_light_uniform"),
             size: std::mem::size_of::<CardLightParams>() as u64,
@@ -6893,14 +6982,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-            let pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
-                label: Some("card_light_hw_pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("cs_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+            let pipeline = LazyComputePipeline::new(
+                &device,
+                &wgpu::ComputePipelineDescriptor {
+                    label: Some("card_light_hw_pipeline"),
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("cs_main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            );
             (Some(pipeline), Some(layout))
         } else {
             (None, None)
@@ -6961,14 +7053,17 @@ impl Renderer {
             bind_group_layouts: &[Some(&sdf_bake_layout)],
             immediate_size: 0,
         });
-        let sdf_bake_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
-            label: Some("sdf_bake_pipeline"),
-            layout: Some(&sdf_bake_pl_layout),
-            module: &sdf_bake_shader,
-            entry_point: Some("cs_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let sdf_bake_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("sdf_bake_pipeline"),
+                layout: Some(&sdf_bake_pl_layout),
+                module: &sdf_bake_shader,
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let sdf_bake_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sdf_bake_uniform"),
             size: std::mem::size_of::<SdfBakeParams>() as u64,
@@ -7029,15 +7124,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&sdf_clipmap_bake_layout)],
                 immediate_size: 0,
             });
-        let sdf_clipmap_bake_pipeline =
-            LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
+        let sdf_clipmap_bake_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
                 label: Some("sdf_clipmap_bake_pipeline"),
                 layout: Some(&sdf_clipmap_bake_pl_layout),
                 module: &sdf_clipmap_bake_shader,
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
 
         // --- Ticket 014 V2: scene clipmap ---
         let (scene_sdf_clipmap_tex, scene_sdf_clipmap_view) = create_scene_sdf_clipmap(&device);
@@ -7126,14 +7223,17 @@ impl Renderer {
             bind_group_layouts: &[Some(&wsrc_bake_layout)],
             immediate_size: 0,
         });
-        let wsrc_bake_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
-            label: Some("wsrc_bake_pipeline"),
-            layout: Some(&wsrc_bake_pl_layout),
-            module: &wsrc_bake_shader,
-            entry_point: Some("cs_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let wsrc_bake_pipeline = LazyComputePipeline::new(
+            &device,
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("wsrc_bake_pipeline"),
+                layout: Some(&wsrc_bake_pl_layout),
+                module: &wsrc_bake_shader,
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let wsrc_bake_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wsrc_bake_uniform"),
             size: std::mem::size_of::<WsrcBakeParams>() as u64,
@@ -7267,14 +7367,17 @@ impl Renderer {
                 bind_group_layouts: &[Some(&hw_layout)],
                 immediate_size: 0,
             });
-            let hw_pipeline = LazyComputePipeline::new(&device, &wgpu::ComputePipelineDescriptor {
-                label: Some("wsrc_bake_hw_pipeline"),
-                layout: Some(&hw_pl_layout),
-                module: &hw_shader,
-                entry_point: Some("cs_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+            let hw_pipeline = LazyComputePipeline::new(
+                &device,
+                &wgpu::ComputePipelineDescriptor {
+                    label: Some("wsrc_bake_hw_pipeline"),
+                    layout: Some(&hw_pl_layout),
+                    module: &hw_shader,
+                    entry_point: Some("cs_main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            );
             (Some(hw_pipeline), Some(hw_layout))
         } else {
             (None, None)
@@ -7429,8 +7532,9 @@ impl Renderer {
                 bind_group_layouts: &[Some(&scene_compose_layout)],
                 immediate_size: 0,
             });
-        let scene_compose_pipeline =
-            LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
+        let scene_compose_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
                 label: Some("scene_compose_pipeline"),
                 layout: Some(&scene_compose_pl_layout),
                 vertex: wgpu::VertexState {
@@ -7462,7 +7566,8 @@ impl Renderer {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
         let scene_compose_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene_compose_uniform_buffer"),
             size: std::mem::size_of::<SceneComposeParams>() as u64,
@@ -7532,39 +7637,42 @@ impl Renderer {
             bind_group_layouts: &[Some(&dof_layout)],
             immediate_size: 0,
         });
-        let dof_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("dof_pipeline"),
-            layout: Some(&dof_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &dof_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let dof_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("dof_pipeline"),
+                layout: Some(&dof_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &dof_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &dof_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &dof_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let dof_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dof_uniform_buffer"),
             size: std::mem::size_of::<DofParams>() as u64,
@@ -7636,39 +7744,42 @@ impl Renderer {
                 bind_group_layouts: &[Some(&motion_blur_layout)],
                 immediate_size: 0,
             });
-        let motion_blur_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("motion_blur_pipeline"),
-            layout: Some(&motion_blur_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &motion_blur_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let motion_blur_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("motion_blur_pipeline"),
+                layout: Some(&motion_blur_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &motion_blur_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &motion_blur_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &motion_blur_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let motion_blur_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("motion_blur_uniform_buffer"),
             size: std::mem::size_of::<MotionBlurParams>() as u64,
@@ -7738,39 +7849,42 @@ impl Renderer {
             bind_group_layouts: &[Some(&sss_layout)],
             immediate_size: 0,
         });
-        let sss_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("sss_pipeline"),
-            layout: Some(&sss_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &sss_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let sss_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("sss_pipeline"),
+                layout: Some(&sss_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &sss_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &sss_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &sss_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let sss_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sss_uniform_buffer"),
             size: std::mem::size_of::<SssParams>() as u64,
@@ -7835,41 +7949,44 @@ impl Renderer {
             bind_group_layouts: &[Some(&exposure_layout)],
             immediate_size: 0,
         });
-        let exposure_pipeline = LazyRenderPipeline::new(&device, &wgpu::RenderPipelineDescriptor {
-            label: Some("exposure_pipeline"),
-            layout: Some(&exposure_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &exposure_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let exposure_pipeline = LazyRenderPipeline::new(
+            &device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("exposure_pipeline"),
+                layout: Some(&exposure_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &exposure_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &exposure_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        // Rg16Float: .g carries the anchored AE target
+                        // (flicker fix — see EXPOSURE_SHADER_WGSL).
+                        format: wgpu::TextureFormat::Rg16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &exposure_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    // Rg16Float: .g carries the anchored AE target
-                    // (flicker fix — see EXPOSURE_SHADER_WGSL).
-                    format: wgpu::TextureFormat::Rg16Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let exposure_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("exposure_uniform_buffer"),
             size: std::mem::size_of::<ExposureParams>() as u64,
@@ -9131,7 +9248,9 @@ impl Renderer {
         if !(near > 0.0) || !(far > near * 1.0001) || !far.is_finite() {
             return;
         }
-        if (near - self.camera_near).abs() > f32::EPSILON || (far - self.camera_far).abs() > f32::EPSILON * far {
+        if (near - self.camera_near).abs() > f32::EPSILON
+            || (far - self.camera_far).abs() > f32::EPSILON * far
+        {
             self.camera_near = near;
             self.camera_far = far;
             self.taa_history_valid = false;
@@ -14479,199 +14598,5 @@ impl Renderer {
 
     pub fn set_texture_3d(&mut self, texture_idx: u32) {
         self.current_texture_3d = texture_idx;
-    }
-
-    // ============================================================
-    // Lighting
-    // ============================================================
-
-    pub fn set_ambient_light(&mut self, r: f64, g: f64, b: f64, intensity: f64) {
-        self.lighting_uniforms.ambient = [
-            (r / 255.0) as f32,
-            (g / 255.0) as f32,
-            (b / 255.0) as f32,
-            intensity as f32,
-        ];
-    }
-
-    pub fn set_directional_light(
-        &mut self,
-        dx: f64,
-        dy: f64,
-        dz: f64,
-        r: f64,
-        g: f64,
-        b: f64,
-        intensity: f64,
-    ) {
-        // Note: the shadow cache reads `lighting_uniforms.light_dir`
-        // directly at gate time, so no explicit invalidate is needed
-        // here. Doing it via a setter would miss light changes that
-        // happen through other paths (preset reset, etc.) anyway.
-        self.lighting_uniforms.light_dir = [dx as f32, dy as f32, dz as f32, intensity as f32];
-        self.lighting_uniforms.light_color = [
-            (r / 255.0) as f32,
-            (g / 255.0) as f32,
-            (b / 255.0) as f32,
-            0.0,
-        ];
-    }
-
-    /// Add an additional directional light (up to MAX_DIR_LIGHTS).
-    /// Color is 0-1 range (not 0-255).
-    pub fn add_directional_light(
-        &mut self,
-        dx: f32,
-        dy: f32,
-        dz: f32,
-        r: f32,
-        g: f32,
-        b: f32,
-        intensity: f32,
-    ) {
-        let idx = self.lighting_uniforms.dir_light_count[0] as usize;
-        if idx >= MAX_DIR_LIGHTS {
-            return;
-        }
-        self.lighting_uniforms.dir_lights[idx] = DirLight {
-            direction: [dx, dy, dz, intensity],
-            color: [r, g, b, 0.0],
-        };
-        self.lighting_uniforms.dir_light_count[0] = (idx + 1) as f32;
-    }
-
-    /// Add a point light (up to MAX_POINT_LIGHTS).
-    /// Color is 0-1 range.
-    pub fn add_point_light(
-        &mut self,
-        x: f32,
-        y: f32,
-        z: f32,
-        range: f32,
-        r: f32,
-        g: f32,
-        b: f32,
-        intensity: f32,
-    ) {
-        let idx = self.lighting_uniforms.point_light_count[0] as usize;
-        if idx >= MAX_POINT_LIGHTS {
-            return;
-        }
-        self.lighting_uniforms.point_lights[idx] = PointLight {
-            position: [x, y, z, range],
-            color: [r, g, b, intensity],
-        };
-        self.lighting_uniforms.point_light_count[0] = (idx + 1) as f32;
-    }
-
-    /// Submit a point light whose direct contribution must never silently
-    /// fall back to an unshadowed light. Unsupported renderers reject the
-    /// request before changing the live light list.
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_shadowed_point_light(
-        &mut self,
-        x: f32,
-        y: f32,
-        z: f32,
-        range: f32,
-        r: f32,
-        g: f32,
-        b: f32,
-        intensity: f32,
-    ) -> bool {
-        let index = self.lighting_uniforms.point_light_count[0] as usize;
-        if index >= MAX_POINT_LIGHTS
-            || !self.shadow_map.enabled
-            // The path tracer consumes the point-light list directly and
-            // does not sample raster VSM pages. Reject instead of silently
-            // turning this into an unshadowed traced light.
-            || self.pt_active()
-            || [r, g, b].iter().any(|value| !value.is_finite())
-            || !self.shadow_map.virtual_map.submit_local_request(
-                index as u16,
-                [x, y, z],
-                range,
-                intensity,
-            )
-        {
-            return false;
-        }
-        self.lighting_uniforms.point_lights[index] = PointLight {
-            position: [x, y, z, range],
-            // Fail closed at submission. The shadow pass restores intensity
-            // only for a camera-visible request admitted to the shared page
-            // budget; paths that never prepare shadows cannot leak an
-            // unshadowed local light.
-            color: [r, g, b, 0.0],
-        };
-        self.lighting_uniforms.point_light_count[0] = (index + 1) as f32;
-        true
-    }
-
-    /// Submit a perspective spot light whose direct contribution remains
-    /// fail-closed until its single local VSM page is resident and clean.
-    /// Cone angles are full vertex angles in degrees.
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_shadowed_spot_light(
-        &mut self,
-        x: f32,
-        y: f32,
-        z: f32,
-        direction_x: f32,
-        direction_y: f32,
-        direction_z: f32,
-        range: f32,
-        inner_cone_degrees: f32,
-        outer_cone_degrees: f32,
-        r: f32,
-        g: f32,
-        b: f32,
-        intensity: f32,
-    ) -> bool {
-        let index = self.lighting_uniforms.point_light_count[0] as usize;
-        if index >= MAX_POINT_LIGHTS
-            || !self.shadow_map.enabled
-            || self.pt_active()
-            || [r, g, b].iter().any(|value| !value.is_finite())
-            || !self.shadow_map.virtual_map.submit_local_spot_request(
-                index as u16,
-                [x, y, z],
-                [direction_x, direction_y, direction_z],
-                range,
-                inner_cone_degrees,
-                outer_cone_degrees,
-                intensity,
-            )
-        {
-            return false;
-        }
-        self.lighting_uniforms.point_lights[index] = PointLight {
-            position: [x, y, z, range],
-            color: [r, g, b, 0.0],
-        };
-        self.lighting_uniforms.point_light_count[0] = (index + 1) as f32;
-        true
-    }
-
-    /// Clear all additional lights (called at begin_frame).
-    pub fn clear_additional_lights(&mut self) {
-        // dir_light_count.y carries the shadows-enabled flag for the shadow
-        // samplers (core sample_shadow + material-path sample_sun_shadow).
-        // Written here because this runs unconditionally every frame before
-        // any lighting upload; .x stays the actual additional-light count.
-        // (shadow_cascade_splits.w is NOT usable for this — it carries the
-        // TSR mip-LOD bias, written by the shadow pass each frame.)
-        let shadows_flag = if self.shadow_map.enabled { 1.0 } else { 0.0 };
-        // dir_light_count.z carries SSR's ownership share for EN-021's
-        // IBL-specular complement in fs_main_scene: strength while SSR
-        // runs, 0 when disabled (full IBL specular returns).
-        let ssr_share = if self.ssr_enabled {
-            self.ssr_strength
-        } else {
-            0.0
-        };
-        self.lighting_uniforms.dir_light_count = [0.0, shadows_flag, ssr_share, 0.0];
-        self.lighting_uniforms.point_light_count = [0.0; 4];
-        self.shadow_map.virtual_map.clear_local_requests();
     }
 }

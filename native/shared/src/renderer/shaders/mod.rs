@@ -2,7 +2,9 @@
 // everything re-exports from here so call sites keep `shaders::NAME`.
 
 mod core;
-pub(super) use core::{scene_refractive_shader_source, SCENE_SHADER};
+pub(super) use core::SCENE_SHADER;
+mod core_refractive;
+pub(super) use core_refractive::scene_refractive_shader_source;
 #[cfg(test)]
 mod core_tests;
 mod legacy;
@@ -27,9 +29,11 @@ pub(super) use gi::{
 };
 mod ssgi;
 pub(super) use ssgi::{
-    PROBE_HELPERS_WGSL, SSGI_PROBE_PLACE_WGSL, SSGI_PROBE_TEMPORAL_WGSL, SSGI_PROBE_TRACE_HW_WGSL,
-    SSGI_PROBE_TRACE_SDF_WGSL, SSGI_PROBE_TRACE_SW_WGSL,
+    PROBE_HELPERS_WGSL, SSGI_PROBE_PLACE_WGSL, SSGI_PROBE_TRACE_HW_WGSL, SSGI_PROBE_TRACE_SDF_WGSL,
+    SSGI_PROBE_TRACE_SW_WGSL,
 };
+mod ssgi_temporal;
+pub(super) use ssgi_temporal::SSGI_PROBE_TEMPORAL_WGSL;
 mod ssgi_resolve;
 pub(super) use ssgi_resolve::SSGI_PROBE_RESOLVE_WGSL;
 mod ssr;
@@ -408,6 +412,7 @@ mod ray_query_variant_tests {
 mod post;
 pub(super) use post::{
     BLOOM_SHADER_WGSL, COMPOSITE_SHADER_WGSL, DOF_SHADER_WGSL, EXPOSURE_SHADER_WGSL,
-    MOTION_BLUR_SHADER_WGSL, RCAS_SHADER_WGSL, SCENE_COMPOSE_SHADER_WGSL, SSS_SHADER_WGSL,
-    TAA_SHADER_WGSL, UPSCALE_SHADER_WGSL,
+    MOTION_BLUR_SHADER_WGSL, SCENE_COMPOSE_SHADER_WGSL, SSS_SHADER_WGSL, TAA_SHADER_WGSL,
 };
+mod post_upscale;
+pub(super) use post_upscale::{RCAS_SHADER_WGSL, UPSCALE_SHADER_WGSL};

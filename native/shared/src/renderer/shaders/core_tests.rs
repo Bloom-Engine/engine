@@ -1,4 +1,5 @@
-use super::core::{scene_refractive_shader_source, SCENE_SHADER};
+use super::core::SCENE_SHADER;
+use super::core_refractive::scene_refractive_shader_source;
 use super::legacy::SHADER_2D;
 
 #[test]

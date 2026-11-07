@@ -14,7 +14,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SCALE: AtomicU64 = AtomicU64::new(0);
-static INSETS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static INSETS: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
 
 /// Edges, in the order `getSafeAreaInset(edge)` takes them.
 pub const TOP: usize = 0;
@@ -31,7 +36,11 @@ pub fn set_display_scale(scale: f64) {
 /// Physical pixels per point; 1 where the platform doesn't report it.
 pub fn display_scale() -> f64 {
     let v = f64::from_bits(SCALE.load(Ordering::Relaxed));
-    if v > 0.0 { v } else { 1.0 }
+    if v > 0.0 {
+        v
+    } else {
+        1.0
+    }
 }
 
 /// tvOS: whether the Siri Remote's Menu button leaves the app (hands the press to UIKit, which
@@ -49,11 +58,16 @@ pub fn menu_exits() -> bool {
 
 pub fn set_safe_area_insets(top: f64, right: f64, bottom: f64, left: f64) {
     for (slot, v) in INSETS.iter().zip([top, right, bottom, left]) {
-        slot.store(if v.is_finite() && v > 0.0 { v } else { 0.0 }.to_bits(), Ordering::Relaxed);
+        slot.store(
+            if v.is_finite() && v > 0.0 { v } else { 0.0 }.to_bits(),
+            Ordering::Relaxed,
+        );
     }
 }
 
 /// One edge's inset (TOP, RIGHT, BOTTOM, LEFT); 0 for an unknown edge.
 pub fn safe_area_inset(edge: usize) -> f64 {
-    INSETS.get(edge).map_or(0.0, |v| f64::from_bits(v.load(Ordering::Relaxed)))
+    INSETS
+        .get(edge)
+        .map_or(0.0, |v| f64::from_bits(v.load(Ordering::Relaxed)))
 }
