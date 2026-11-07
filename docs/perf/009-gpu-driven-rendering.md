@@ -1,6 +1,6 @@
 # 009 — Indirect multi-draw for scene graph
 
-**Effort:** ~1 week · **Expected gain:** Removes 68 CPU draw calls, enables GPU-side cull · **Status:** deferred
+**Effort:** ~1 week · **Expected gain:** Removes CPU draw loops, enables GPU-side cull · **Status:** landed (2026-07-23)
 
 ## Problem
 
@@ -15,7 +15,7 @@ per-draw overhead, but we still have 340 `set_bind_group` calls. GPU-driven
 rendering collapses this to **one `draw_indirect_count` call** — the GPU does
 the culling and dispatches its own draws.
 
-## Proposed approach
+## Landed approach
 
 1. **One shared vertex buffer + one shared index buffer** for all scene
    geometry. On mesh upload, append vertices/indices into the shared buffers
@@ -25,16 +25,46 @@ the culling and dispatches its own draws.
    vertex_offset }`. Updated from the scene graph in `prepare()`.
 3. **GPU cull compute pass**: dispatch one thread per mesh. Each thread
    tests its mesh's AABB against the frustum (using the same
-   `extract_frustum_planes` logic we use on the CPU today). Surviving draws
-   append to an indirect-draw buffer via an atomic counter.
-4. **Single `draw_indexed_indirect_count`** call in the scene render pass.
-   GPU reads the indirect buffer, dispatches each surviving mesh.
+   `extract_frustum_planes` logic we use on the CPU today). Commands retain
+   deterministic scene order; culled slots get `instance_count = 0`.
+4. **Single indexed multi-draw-indirect call** in each depth/main render
+   pass. Metal uses fixed-count `multi_draw_indexed_indirect`; adapters with
+   `MULTI_DRAW_INDIRECT_COUNT` use the count variant.
 5. **Material data** lives in a storage buffer indexed by `material_idx`,
    fetched per-draw in the vertex or fragment shader.
 
-wgpu 24 supports `draw_indexed_indirect` and `draw_indexed_indirect_count`
+wgpu 29 supports indexed multi-draw and indirect-count submission
 via the `Features::INDIRECT_FIRST_INSTANCE` and `MULTI_DRAW_INDIRECT_COUNT`
 feature flags. Check adapter support at device creation.
+
+The fast path requires Tier-A global material indirection and at least 32
+eligible draws. Smaller scenes keep the lower-overhead CPU loop. Skinned,
+active-LOD, and order-sensitive retained alpha scenes also stay on the
+compatibility path. The `BLOOM_GPU_DRIVEN=0` environment override remains an
+explicit qualification oracle.
+
+## Qualification result
+
+Apple M1 Max / Metal, fixed 1,280×720 quality captures:
+
+- 10,240-draw stress: one indirect call, 10,180 visible and 60 culled;
+- stress CPU frame mean: 75.79 ms compatibility → 15.83 ms GPU-driven;
+- stress GPU frame mean: 16.31 ms → 10.41 ms;
+- stress `main_hdr_pass` CPU: 2.324 ms → 0.182 ms;
+- Sponza `main_hdr_pass` CPU: 0.014 ms, below the 0.100 ms target;
+- final, HDR, depth, and three shadow captures for the stress case are
+  byte-identical to the compatibility path;
+- full seven-case corpus minimum SSIM is 0.999908 across 42
+  final/intermediate comparisons; every shadow capture is exact;
+- PBR spheres exercise 25 distinct materials; the 10k stress exercises 12
+  shared material records with per-draw tint.
+- `cargo check` passes for shared, macOS, Linux, and the actual iOS, tvOS,
+  visionOS, and WebAssembly targets. Android and Windows cross-checks reach
+  their platform C dependencies but require the NDK/MSVC SDKs, which are not
+  installed on the qualification host.
+
+Run artifacts are written under `tools/quality/out/issue-28-*` and are ignored
+by git.
 
 ## References
 
@@ -46,15 +76,13 @@ feature flags. Check adapter support at device creation.
 
 ## Acceptance
 
-- Sponza main_hdr pass CPU time drops from ~700 µs to < 100 µs (measured via
-  profiler's `main_hdr_pass` CPU phase).
-- Frustum culling ratio (surviving draws / total meshes) logged per frame and
-  reasonable (e.g. 30-70% culled on typical Sponza camera poses).
-- Correctness: SSIM ≥ 0.99 vs baseline.
-- Doesn't break on meshes that use different materials (material index is
-  part of the descriptor).
-- Graceful fallback when the adapter doesn't support multi-draw-indirect
-  (write a TODO to handle — M1 Metal supports it).
+- [x] Sponza `main_hdr_pass` CPU time is < 100 µs.
+- [x] Submitted, compatibility, visible, culled, and cull-ratio telemetry is
+  emitted in `renderer_paths.gpu_driven`.
+- [x] Correctness SSIM is ≥ 0.99 (observed corpus minimum: 0.999908).
+- [x] Heterogeneous material IDs are part of each draw descriptor.
+- [x] Unsupported adapters and non-profitable/unsafe draw classes fall back
+  without changing the compatibility renderer.
 
 ## Notes for the implementer
 
@@ -73,7 +101,7 @@ feature flags. Check adapter support at device creation.
   cull compute shader, new render pass using `draw_indexed_indirect_count`.
 - `native/shared/src/scene.rs` — reworking of per-node GPU resources.
 
-## Deferred — reopen criteria
+## Historical deferred rationale
 
 Pure CPU-side optimization: removes ~340 CPU draw calls/frame on
 Sponza. But the perf README's own rule of thumb applies — **Sponza is

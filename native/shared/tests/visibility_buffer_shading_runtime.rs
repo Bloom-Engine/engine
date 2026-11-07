@@ -1,0 +1,918 @@
+//! Opt-in #27 full-PBR visibility shading smoke.
+//!
+//! This test has its own process because device feature selection reads the
+//! runtime mode once. Eligible forward fragments are suppressed in `shade`
+//! mode, so visible green coverage proves the reconstructed fragment inputs
+//! reached Bloom's authoritative PBR evaluator and all four MRT outputs.
+
+use bloom_geometry_format::{
+    sha256, CompatibilityReason, CLUSTER_RECORD_BYTES, COMPATIBILITY_RECORD_BYTES, ENDIAN_TAG,
+    FLAG_COARSE_ROOT, FLAG_DOUBLE_SIDED, HEADER_BYTES, MAGIC, MIN_PAGE_BYTES, NO_RELATION,
+    PAGE_RECORD_BYTES, VERSION,
+};
+use bloom_shared::{
+    models::{
+        MaterialAlphaMode, MaterialLayeredPbr, MaterialTransmission, MeshData, ModelData,
+        ModelPrimitiveSource, ModelVirtualCompatibilityRoute,
+    },
+    renderer::{Vertex3D, IDENTITY_MAT4},
+    virtual_geometry::{
+        GpuVirtualGeometryConfig, GpuVirtualInstance, GpuVirtualTraversalConfig,
+        VirtualGeometryAsset,
+    },
+};
+use std::path::Path;
+use std::sync::Arc;
+
+#[test]
+fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
+    unsafe { std::env::set_var("BLOOM_VISIBILITY_BUFFER", "shade") };
+    unsafe { std::env::set_var("BLOOM_SKIP_SKY", "1") };
+    let mut engine =
+        match bloom_shared::attach::attach_headless_engine(wgpu::Backends::PRIMARY, 128, 128) {
+            Ok(engine) => engine,
+            Err(error) if error.contains("no compatible adapter") => {
+                eprintln!("skip: no native GPU adapter ({error})");
+                return;
+            }
+            Err(error) => panic!("production renderer device negotiation failed: {error}"),
+        };
+    engine.renderer.set_render_scale(1.0);
+    engine.renderer.set_taa_enabled(false);
+    engine.renderer.set_ssao_enabled(false);
+    engine.renderer.set_ssr_enabled(false);
+    engine.renderer.set_ssgi_enabled(false);
+    engine.renderer.set_bloom_enabled(false);
+    engine.renderer.set_motion_blur_enabled(false);
+    engine.renderer.set_sharpen_strength(0.0);
+    engine.renderer.set_auto_exposure(false);
+
+    let initial: serde_json::Value =
+        serde_json::from_str(&engine.renderer.renderer_capability_report_json())
+            .expect("initial capability report is JSON");
+    let runtime = &initial["runtime_support"]["gpu_driven"]["visibility_buffer_runtime"];
+    if runtime["enabled"] != true {
+        eprintln!(
+            "skip: requested visibility shading unavailable ({})",
+            runtime["disabled_reason"]
+        );
+        return;
+    }
+
+    let vertices = vec![
+        Vertex3D {
+            position: [-0.35, -0.35, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            color: [0.1, 0.9, 0.2, 1.0],
+            uv: [0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        },
+        Vertex3D {
+            position: [0.35, -0.35, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            color: [0.1, 0.9, 0.2, 1.0],
+            uv: [1.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        },
+        Vertex3D {
+            position: [0.0, 0.35, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            color: [0.1, 0.9, 0.2, 1.0],
+            uv: [0.5, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        },
+    ];
+    for index in 0..32 {
+        let node = engine.scene.create_node();
+        engine
+            .scene
+            .update_geometry(node, vertices.clone(), vec![0, 1, 2]);
+        let column = (index % 8) as f32;
+        let row = (index / 8) as f32;
+        engine
+            .scene
+            .set_trs(node, (column - 3.5) * 0.7, (row - 1.5) * 0.7, 0.0, 0.0, 1.0);
+    }
+    let compatibility = engine.scene.create_node();
+    engine
+        .scene
+        .update_geometry(compatibility, vertices.clone(), vec![0, 1, 2]);
+    engine.scene.set_trs(compatibility, 0.0, 1.8, 0.0, 0.0, 1.0);
+    engine
+        .scene
+        .set_material_color(compatibility, 0.8, 0.15, 0.7, 1.0);
+    engine.scene.set_material_layered_pbr(
+        compatibility,
+        MaterialLayeredPbr {
+            clearcoat_authored: true,
+            clearcoat_factor: 0.8,
+            clearcoat_roughness_factor: 0.25,
+            ..Default::default()
+        },
+    );
+
+    let gltf_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/renderer-test/assets/DamagedHelmet.glb");
+    let gltf_bytes = std::fs::read(&gltf_path).expect("read ordinary glTF control");
+    let gltf_handle = engine.models.load_model_with_textures_from_source_path(
+        &gltf_bytes,
+        &gltf_path,
+        &mut engine.renderer,
+    );
+    assert!(gltf_handle > 0.0, "ordinary glTF control loads");
+    let gltf_handle_bits = gltf_handle.to_bits();
+    {
+        let model = engine
+            .models
+            .get(gltf_handle)
+            .expect("ordinary glTF control remains resident");
+        assert_eq!(model.meshes.len(), 1);
+        assert!(engine.renderer.cache_model_if_static_with_transforms(
+            gltf_handle_bits,
+            &model.meshes,
+            &model.mesh_transforms,
+        ));
+    }
+    let draw_gltf = |renderer: &mut bloom_shared::renderer::Renderer| {
+        renderer.draw_model_cached(gltf_handle_bits, [-1.7, 1.2, -0.4], 0.6, [1.0; 4]);
+    };
+
+    engine.begin_frame();
+    engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
+    engine
+        .renderer
+        .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+    engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+    engine.renderer.screenshot_requested = true;
+    engine.end_frame();
+
+    let procedural_rgba = take_rgba_screenshot(&mut engine.renderer);
+
+    engine.begin_frame();
+    engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
+    engine
+        .renderer
+        .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+    engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+    draw_gltf(&mut engine.renderer);
+    engine.renderer.screenshot_requested = true;
+    engine.end_frame();
+    let rgba = take_rgba_screenshot(&mut engine.renderer);
+    let gltf_changed_pixels = rgba
+        .chunks_exact(4)
+        .zip(procedural_rgba.chunks_exact(4))
+        .filter(|(with_gltf, procedural)| with_gltf != procedural)
+        .count();
+    assert!(
+        gltf_changed_pixels > 64,
+        "ordinary glTF control produced no visible cached-model pixels"
+    );
+    let green_pixels = rgba
+        .chunks_exact(4)
+        .filter(|pixel| {
+            pixel[1] > pixel[0].saturating_add(30)
+                && pixel[1] > pixel[2].saturating_add(30)
+                && pixel[3] > 200
+        })
+        .count();
+    assert!(
+        green_pixels > 256,
+        "eligible forward pixels were suppressed but visibility PBR produced no coverage"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&engine.renderer.renderer_capability_report_json())
+            .expect("post-frame capability report is JSON");
+    let gpu_driven = &report["runtime_support"]["gpu_driven"];
+    assert_eq!(gpu_driven["visibility_routed_indirect_streams"], true);
+    assert!(gpu_driven["visibility_routed_indirect_bytes"]
+        .as_u64()
+        .is_some_and(|bytes| bytes > 0));
+    let runtime = &gpu_driven["visibility_buffer_runtime"];
+    assert_eq!(runtime["requested_mode"], "shade");
+    assert_eq!(runtime["pbr_shading"], true);
+    assert_eq!(runtime["forward_authoritative"], false);
+    assert_eq!(
+        runtime["composition"],
+        "visibility-eligible+forward-compatibility"
+    );
+    assert!(runtime["eligible_draws"]
+        .as_u64()
+        .is_some_and(|value| value >= 32));
+    assert_eq!(runtime["compatibility_draws"], 1);
+    assert_eq!(runtime["allocated_bytes"], 128 * 128 * 8);
+    let disabled_virtual = &report["runtime_support"]["virtual_geometry"];
+    assert_eq!(disabled_virtual["enabled"], false);
+    assert_eq!(disabled_virtual["hiz_texture_bytes"], 0);
+    assert_eq!(disabled_virtual["hiz_history_valid"], false);
+    assert_eq!(disabled_virtual["last_occlusion_culled_groups"], 0);
+
+    engine
+        .renderer
+        .enable_virtual_geometry(
+            GpuVirtualGeometryConfig {
+                capacity_bytes: u64::from(bloom_geometry_format::MIN_PAGE_BYTES) * 2,
+                page_stride_bytes: bloom_geometry_format::MIN_PAGE_BYTES,
+                max_meshes: 2,
+                max_page_records: 4,
+                max_cluster_records: 4,
+                max_clusters_per_group: 4,
+                max_hierarchy_levels: 4,
+                max_upload_bytes_per_frame: u64::from(bloom_geometry_format::MIN_PAGE_BYTES) * 2,
+                max_upload_pages_per_frame: 2,
+                max_evictions_per_frame: 1,
+            },
+            GpuVirtualTraversalConfig {
+                max_instances: 2,
+                max_selected_clusters: 8,
+                max_page_requests: 4,
+            },
+        )
+        .expect("the negotiated visibility-shade device accepts virtual registration");
+    engine.begin_frame();
+    engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
+    engine
+        .renderer
+        .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+    engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+    draw_gltf(&mut engine.renderer);
+    engine
+        .renderer
+        .submit_virtual_geometry_current_view(&[], 1.0)
+        .expect("empty virtual batches are valid and preserve ordinary routing");
+    engine.renderer.screenshot_requested = true;
+    engine.end_frame();
+    let (_, _, mut virtual_noop_rgba) = engine
+        .renderer
+        .screenshot_data
+        .take()
+        .expect("registered virtual no-op frame produced a screenshot");
+    if matches!(
+        engine.renderer.surface_format(),
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    ) {
+        for pixel in virtual_noop_rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+    }
+    let noop_differences = image_difference_bounds(&rgba, &virtual_noop_rgba, 128);
+    eprintln!(
+        "visibility-invariance gltf_visible_pixels={gltf_changed_pixels} virtual_noop={noop_differences:?}"
+    );
+    assert_eq!(
+        noop_differences.changed_pixels, 0,
+        "an empty registered virtual batch changed ordinary visibility/compatibility pixels: {noop_differences:?}"
+    );
+
+    let queue = engine.renderer.queue.clone();
+    let virtual_asset = Arc::new(virtual_triangle_asset(
+        [1; 32],
+        &[(1, CompatibilityReason::AlphaBlend)],
+    ));
+    let virtual_mesh = {
+        let pool = engine
+            .renderer
+            .virtual_geometry_pool_mut()
+            .expect("enabled renderer owns its virtual pool");
+        let mesh = pool
+            .register_mesh(&queue, Arc::clone(&virtual_asset))
+            .expect("minimal virtual triangle registers");
+        mesh
+    };
+    let material_model = ModelData {
+        meshes: vec![Arc::new(MeshData {
+            vertices: vertices.clone(),
+            secondary_tex_coords: None,
+            indices: vec![0, 1, 2],
+            texture_idx: None,
+            normal_texture_idx: None,
+            metallic_roughness_texture_idx: None,
+            specular_glossiness_factor: None,
+            emissive_texture_idx: None,
+            occlusion_texture_idx: None,
+            metallic_factor: 0.0,
+            roughness_factor: 1.0,
+            emissive_factor: [0.0; 3],
+            alpha_mode: MaterialAlphaMode::Opaque,
+            alpha_cutoff: 0.0,
+            alpha_coverage_mips: false,
+            double_sided: true,
+            transmission: MaterialTransmission::default(),
+            layered_pbr: MaterialLayeredPbr::default(),
+        })],
+        mesh_transforms: vec![bloom_shared::renderer::IDENTITY_MAT4],
+        mesh_cast_shadows: vec![true],
+        mesh_sources: vec![Some(ModelPrimitiveSource {
+            mesh_index: 0,
+            primitive_index: 0,
+            placement_index: 0,
+        })],
+        source_geometry_sha256: Some([1; 32]),
+        bbox_min: [0.0; 3],
+        bbox_max: [1.0, 1.0, 0.0],
+    };
+    engine
+        .renderer
+        .bind_model_virtual_materials(virtual_mesh, &material_model)
+        .expect("virtual triangle derives its global material binding from the model");
+    let model = [
+        [1.5, 0.0, 0.0, 0.0],
+        [0.0, 1.5, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [-0.75, -0.75, 0.0, 1.0],
+    ];
+    let virtual_instance =
+        GpuVirtualInstance::with_render_state(virtual_mesh, 7, model, model, [1.0, 1.0, 1.0, 1.0])
+            .unwrap();
+    engine.begin_frame();
+    engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
+    engine
+        .renderer
+        .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+    engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+    draw_gltf(&mut engine.renderer);
+    engine
+        .renderer
+        .submit_virtual_geometry_current_view(&[virtual_instance], 1.0)
+        .expect("virtual triangle frame submission is bounded");
+    engine.renderer.screenshot_requested = true;
+    engine.end_frame();
+    let (_, _, mut virtual_rgba) = engine
+        .renderer
+        .screenshot_data
+        .take()
+        .expect("virtual geometry frame produced a screenshot");
+    if matches!(
+        engine.renderer.surface_format(),
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    ) {
+        for pixel in virtual_rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+    }
+    let changed_pixels = virtual_rgba
+        .chunks_exact(4)
+        .zip(rgba.chunks_exact(4))
+        .filter(|(virtual_pixel, ordinary_pixel)| virtual_pixel != ordinary_pixel)
+        .count();
+    assert!(
+        changed_pixels > 256,
+        "registered virtual producer did not compose visible four-MRT coverage"
+    );
+    for (pixel_index, (virtual_pixel, ordinary_pixel)) in virtual_rgba
+        .chunks_exact(4)
+        .zip(rgba.chunks_exact(4))
+        .enumerate()
+    {
+        let x = pixel_index % 128;
+        let y = pixel_index / 128;
+        if !(24..104).contains(&x) || !(24..104).contains(&y) {
+            assert_eq!(
+                virtual_pixel, ordinary_pixel,
+                "virtual composition changed an unrelated pixel at ({x}, {y})"
+            );
+        }
+    }
+    let registered_report: serde_json::Value =
+        serde_json::from_str(&engine.renderer.renderer_capability_report_json())
+            .expect("registered virtual capability report is JSON");
+    let virtual_geometry = &registered_report["runtime_support"]["virtual_geometry"];
+    assert_eq!(virtual_geometry["enabled"], true);
+    assert_eq!(virtual_geometry["frame_requested"], true);
+    assert_eq!(virtual_geometry["frame_prepared"], true);
+    assert_eq!(virtual_geometry["instances"], 1);
+    assert_eq!(virtual_geometry["active_meshes"], 1);
+    assert!(virtual_geometry["total_gpu_bytes"]
+        .as_u64()
+        .is_some_and(|bytes| bytes > 0));
+    assert_eq!(virtual_geometry["hiz_texture_bytes"], 349_524);
+    assert_eq!(virtual_geometry["hiz_history_valid"], true);
+    assert_eq!(virtual_geometry["hiz_captures_submitted"], 2);
+    assert_eq!(virtual_geometry["hiz_history_instances"], 1);
+
+    // Exercise the production model/archive split with two overlapping pairs:
+    // an alpha-blended compatibility primitive behind the left virtual
+    // triangle, and the same primitive in front of the right triangle. This
+    // catches both missing compatibility submission and depth/composition
+    // regressions at the virtual/ordinary boundary.
+    let mut compatibility_vertices = vertices.clone();
+    for (vertex, position) in
+        compatibility_vertices
+            .iter_mut()
+            .zip([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    {
+        vertex.position = position;
+        vertex.color = [0.95, 0.05, 0.1, 0.65];
+    }
+    let compatibility_mesh = Arc::new(MeshData {
+        vertices: compatibility_vertices,
+        secondary_tex_coords: None,
+        indices: vec![0, 1, 2],
+        texture_idx: None,
+        normal_texture_idx: None,
+        metallic_roughness_texture_idx: None,
+        specular_glossiness_factor: None,
+        emissive_texture_idx: None,
+        occlusion_texture_idx: None,
+        metallic_factor: 0.0,
+        roughness_factor: 1.0,
+        emissive_factor: [0.0; 3],
+        alpha_mode: MaterialAlphaMode::Blend,
+        alpha_cutoff: 0.0,
+        alpha_coverage_mips: false,
+        double_sided: true,
+        transmission: MaterialTransmission::default(),
+        layered_pbr: MaterialLayeredPbr::default(),
+    });
+    let placement = |x: f32, z: f32| {
+        [
+            [1.3, 0.0, 0.0, 0.0],
+            [0.0, 1.3, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [x, -0.65, z, 1.0],
+        ]
+    };
+    let mixed_model = ModelData {
+        meshes: vec![
+            Arc::clone(&material_model.meshes[0]),
+            Arc::clone(&compatibility_mesh),
+            Arc::clone(&material_model.meshes[0]),
+            compatibility_mesh,
+        ],
+        mesh_transforms: vec![
+            placement(-1.4, 0.0),
+            placement(-1.4, -0.2),
+            placement(0.1, 0.0),
+            placement(0.1, 0.2),
+        ],
+        mesh_cast_shadows: vec![true; 4],
+        mesh_sources: vec![
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 0,
+                placement_index: 0,
+            }),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 1,
+                placement_index: 0,
+            }),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 0,
+                placement_index: 1,
+            }),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 1,
+                placement_index: 1,
+            }),
+        ],
+        source_geometry_sha256: Some([1; 32]),
+        bbox_min: [-1.4, -0.65, -0.2],
+        bbox_max: [1.4, 0.65, 0.2],
+    };
+    let route = mixed_model
+        .route_virtual_geometry(&virtual_asset)
+        .expect("mixed source closure partitions exactly");
+    assert_eq!(route.virtual_placements.len(), 2);
+    assert_eq!(route.compatibility_placements.len(), 2);
+    assert!(route
+        .compatibility_placements
+        .iter()
+        .all(|placement| matches!(
+            placement.route,
+            ModelVirtualCompatibilityRoute::Cooked(record)
+                if record.reason == CompatibilityReason::AlphaBlend
+        )));
+    let compatibility_handle = 0x5647_434f_4d50_4154;
+    assert!(engine.renderer.cache_model_virtual_compatibility(
+        compatibility_handle,
+        &mixed_model,
+        &route,
+    ));
+    let mixed_instances = route
+        .virtual_instances(virtual_mesh, 32, IDENTITY_MAT4, IDENTITY_MAT4, [1.0; 4])
+        .expect("mixed virtual placements produce bounded instances");
+
+    let capture_mixed =
+        |engine: &mut bloom_shared::EngineState, draw_compatibility: bool| -> Vec<u8> {
+            engine.begin_frame();
+            engine.renderer.reset_temporal_history();
+            engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
+            engine
+                .renderer
+                .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+            engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+            draw_gltf(&mut engine.renderer);
+            if draw_compatibility {
+                assert!(engine.renderer.draw_model_cached_compatibility(
+                    compatibility_handle,
+                    [0.0; 3],
+                    1.0,
+                    [1.0; 4],
+                    &route,
+                ));
+            }
+            engine
+                .renderer
+                .submit_virtual_geometry_current_view(&mixed_instances, 1.0)
+                .expect("mixed virtual batch submits");
+            engine.renderer.screenshot_requested = true;
+            engine.end_frame();
+            let (_, _, mut pixels) = engine
+                .renderer
+                .screenshot_data
+                .take()
+                .expect("mixed compatibility frame produced a screenshot");
+            if matches!(
+                engine.renderer.surface_format(),
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+            ) {
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+            }
+            pixels
+        };
+    let virtual_pair = capture_mixed(&mut engine, false);
+    let composed_pair = capture_mixed(&mut engine, true);
+    assert_eq!(
+        rgba_pixel(&composed_pair, 43, 64),
+        rgba_pixel(&virtual_pair, 43, 64),
+        "compatibility geometry behind virtual coverage ignored shared depth"
+    );
+    let front_virtual = rgba_pixel(&virtual_pair, 75, 64);
+    let front_composed = rgba_pixel(&composed_pair, 75, 64);
+    assert_ne!(
+        front_composed, front_virtual,
+        "front alpha-blended compatibility coverage did not compose over virtual shading"
+    );
+    assert!(
+        front_composed[0] > front_virtual[0] && front_composed[1] < front_virtual[1],
+        "front compatibility pixel did not retain its authored red alpha blend: virtual={front_virtual:?}, composed={front_composed:?}"
+    );
+
+    // A second exact source closure proves that cooker-routed skinning keeps
+    // the established palette path instead of silently submitting bind-pose
+    // vertices as a static compatibility draw.
+    let skinned_asset = Arc::new(virtual_triangle_asset(
+        [2; 32],
+        &[(1, CompatibilityReason::Skinned)],
+    ));
+    let skinned_virtual_mesh = engine
+        .renderer
+        .virtual_geometry_pool_mut()
+        .expect("virtual pool remains enabled")
+        .register_mesh(&queue, Arc::clone(&skinned_asset))
+        .expect("skinned compatibility fixture registers beside the first asset");
+    let mut skinned_vertices = compatibility_vertices_for_skinning();
+    skinned_vertices[2].joints = [1.0, 0.0, 0.0, 0.0];
+    let skinned_mesh = Arc::new(MeshData {
+        vertices: skinned_vertices,
+        secondary_tex_coords: None,
+        indices: vec![0, 1, 2],
+        texture_idx: None,
+        normal_texture_idx: None,
+        metallic_roughness_texture_idx: None,
+        specular_glossiness_factor: None,
+        emissive_texture_idx: None,
+        occlusion_texture_idx: None,
+        metallic_factor: 0.0,
+        roughness_factor: 1.0,
+        emissive_factor: [0.0; 3],
+        alpha_mode: MaterialAlphaMode::Opaque,
+        alpha_cutoff: 0.0,
+        alpha_coverage_mips: false,
+        double_sided: true,
+        transmission: MaterialTransmission::default(),
+        layered_pbr: MaterialLayeredPbr::default(),
+    });
+    let skinned_model = ModelData {
+        meshes: vec![Arc::clone(&material_model.meshes[0]), skinned_mesh],
+        mesh_transforms: vec![placement(-0.65, 0.0), IDENTITY_MAT4],
+        mesh_cast_shadows: vec![true; 2],
+        mesh_sources: vec![
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 0,
+                placement_index: 0,
+            }),
+            Some(ModelPrimitiveSource {
+                mesh_index: 0,
+                primitive_index: 1,
+                placement_index: 0,
+            }),
+        ],
+        source_geometry_sha256: Some([2; 32]),
+        bbox_min: [-0.65, -0.65, -0.2],
+        bbox_max: [0.65, 0.65, 0.2],
+    };
+    engine
+        .renderer
+        .bind_model_virtual_materials(skinned_virtual_mesh, &skinned_model)
+        .expect("skinned fixture derives its virtual material binding");
+    let skinned_route = skinned_model
+        .route_virtual_geometry(&skinned_asset)
+        .expect("skinned source closure partitions exactly");
+    assert_eq!(skinned_route.virtual_placements.len(), 1);
+    assert_eq!(skinned_route.compatibility_placements.len(), 1);
+    assert!(matches!(
+        skinned_route.compatibility_placements[0].route,
+        ModelVirtualCompatibilityRoute::Cooked(record)
+            if record.reason == CompatibilityReason::Skinned
+    ));
+    let skinned_handle = 0x5647_534b_494e_4e45;
+    assert!(engine.renderer.cache_model_virtual_compatibility(
+        skinned_handle,
+        &skinned_model,
+        &skinned_route,
+    ));
+    assert!(engine.renderer.is_model_skinned(skinned_handle));
+    assert!(
+        !engine.renderer.draw_model_cached_compatibility_transform(
+            skinned_handle,
+            IDENTITY_MAT4,
+            [1.0; 4],
+            &skinned_route,
+        ),
+        "arbitrary outer transforms must fail closed for world-space skin palettes"
+    );
+    let skinned_instances = skinned_route
+        .virtual_instances(
+            skinned_virtual_mesh,
+            64,
+            IDENTITY_MAT4,
+            IDENTITY_MAT4,
+            [1.0; 4],
+        )
+        .expect("skinned fixture virtual placement produces one instance");
+
+    let capture_skinned = |engine: &mut bloom_shared::EngineState,
+                           palette: Option<[[[f32; 4]; 4]; 2]>| {
+        engine.begin_frame();
+        engine.renderer.reset_temporal_history();
+        engine.renderer.set_clear_color(0.08, 0.01, 0.01, 1.0);
+        engine
+            .renderer
+            .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+        engine.renderer.set_ambient_light(255.0, 255.0, 255.0, 1.0);
+        draw_gltf(&mut engine.renderer);
+        if let Some(palette) = palette {
+            engine.renderer.set_joint_matrices(&palette);
+            assert!(engine.renderer.draw_model_cached_compatibility(
+                skinned_handle,
+                [0.0; 3],
+                1.0,
+                [1.0; 4],
+                &skinned_route,
+            ));
+        }
+        engine
+            .renderer
+            .submit_virtual_geometry_current_view(&skinned_instances, 1.0)
+            .expect("skinned compatibility virtual half submits");
+        engine.renderer.screenshot_requested = true;
+        engine.end_frame();
+        take_rgba_screenshot(&mut engine.renderer)
+    };
+    let virtual_only = capture_skinned(&mut engine, None);
+    let behind = placement(-0.65, -0.2);
+    let skinned_behind = capture_skinned(&mut engine, Some([behind, behind]));
+    assert_eq!(
+        rgba_pixel(&skinned_behind, 60, 64),
+        rgba_pixel(&virtual_only, 60, 64),
+        "skinned compatibility geometry behind virtual coverage ignored shared depth"
+    );
+    let front = placement(-0.65, 0.2);
+    let skinned_front = capture_skinned(&mut engine, Some([front, front]));
+    let front_virtual = rgba_pixel(&virtual_only, 60, 64);
+    let front_skinned = rgba_pixel(&skinned_front, 60, 64);
+    assert_ne!(
+        front_skinned, front_virtual,
+        "front skinned compatibility coverage did not compose over virtual shading"
+    );
+    assert!(
+        front_skinned[2] > front_virtual[2] && front_skinned[0] < front_virtual[0],
+        "skinned compatibility pixel did not retain its authored blue material: virtual={front_virtual:?}, composed={front_skinned:?}"
+    );
+    let bent = placement(-0.15, 0.2);
+    let skinned_bent = capture_skinned(&mut engine, Some([front, bent]));
+    let deformed_pixels = skinned_front
+        .chunks_exact(4)
+        .zip(skinned_bent.chunks_exact(4))
+        .filter(|(rigid, bent)| rigid != bent)
+        .count();
+    assert!(
+        deformed_pixels > 32,
+        "changing the routed joint palette did not deform visible compatibility coverage"
+    );
+
+    let steady: serde_json::Value =
+        serde_json::from_str(&engine.renderer.quality_runtime_paths_json())
+            .expect("steady-state runtime report is JSON");
+    assert_eq!(
+        steady["steady_state_resources"]["bind_group_creations"]["sites"]["visibility_buffer"],
+        0
+    );
+    assert_eq!(
+        steady["steady_state_resources"]["transient_physical_creations"]["textures"],
+        0
+    );
+}
+
+fn virtual_triangle_asset(
+    source_sha256: [u8; 32],
+    compatibility: &[(u32, CompatibilityReason)],
+) -> VirtualGeometryAsset {
+    let mut payload = Vec::new();
+    for position in [
+        [0.0_f32, 0.0, 0.0],
+        [1.0_f32, 0.0, 0.0],
+        [0.0_f32, 1.0, 0.0],
+    ] {
+        for value in position
+            .into_iter()
+            .chain([0.0, 0.0, 1.0])
+            .chain([1.0, 0.0, 0.0, 1.0])
+            .chain([position[0], position[1]])
+            .chain([position[0] * 0.5, position[1] * 0.5])
+            .chain([1.0, 0.5, 0.25, 1.0])
+        {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    let index_offset = payload.len() as u64;
+    payload.extend_from_slice(&[0, 1, 2]);
+    payload.resize(payload.len().div_ceil(16) * 16, 0);
+    let payload_hash = sha256(&payload);
+    let page_table_offset = HEADER_BYTES + CLUSTER_RECORD_BYTES;
+    let compatibility_table_offset = page_table_offset + PAGE_RECORD_BYTES;
+    let payload_offset =
+        compatibility_table_offset + compatibility.len() * COMPATIBILITY_RECORD_BYTES;
+    let file_bytes = payload_offset + payload.len();
+    let mut bytes = Vec::with_capacity(file_bytes);
+    bytes.extend_from_slice(&MAGIC);
+    push_u32(&mut bytes, VERSION);
+    push_u32(&mut bytes, HEADER_BYTES as u32);
+    push_u32(&mut bytes, ENDIAN_TAG);
+    push_u32(&mut bytes, 0);
+    bytes.extend_from_slice(&source_sha256);
+    bytes.extend_from_slice(&payload_hash);
+    push_u32(&mut bytes, 1);
+    push_u32(&mut bytes, 1);
+    push_u32(&mut bytes, compatibility.len() as u32);
+    push_u32(&mut bytes, 0);
+    push_u64(&mut bytes, HEADER_BYTES as u64);
+    push_u64(&mut bytes, page_table_offset as u64);
+    push_u64(&mut bytes, compatibility_table_offset as u64);
+    push_u64(&mut bytes, payload_offset as u64);
+    push_u64(&mut bytes, payload.len() as u64);
+    push_u64(&mut bytes, file_bytes as u64);
+    push_u32(&mut bytes, MIN_PAGE_BYTES);
+    push_u32(&mut bytes, 0);
+
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, FLAG_COARSE_ROOT | FLAG_DOUBLE_SIDED);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 3);
+    push_u32(&mut bytes, 1);
+    push_u32(&mut bytes, 0);
+    push_u64(&mut bytes, 0);
+    push_u64(&mut bytes, index_offset);
+    push_f32x3(&mut bytes, [0.0, 0.0, 0.0]);
+    push_f32x3(&mut bytes, [1.0, 1.0, 0.0]);
+    push_f32x3(&mut bytes, [0.5, 0.5, 0.0]);
+    push_f32(&mut bytes, 1.0);
+    push_f32x3(&mut bytes, [0.0, 0.0, 1.0]);
+    push_f32(&mut bytes, -1.0);
+    push_f32(&mut bytes, 0.0);
+    push_u32(&mut bytes, NO_RELATION);
+    push_u32(&mut bytes, NO_RELATION);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 72);
+    push_u32(&mut bytes, 0);
+    assert_eq!(bytes.len(), page_table_offset);
+
+    push_u64(&mut bytes, 0);
+    push_u32(&mut bytes, payload.len() as u32);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 1);
+    push_u32(&mut bytes, 0);
+    bytes.extend_from_slice(&payload_hash);
+    push_u64(&mut bytes, 0);
+    assert_eq!(bytes.len(), compatibility_table_offset);
+    for &(primitive_index, reason) in compatibility {
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, primitive_index);
+        push_u32(&mut bytes, reason as u32);
+        push_u32(&mut bytes, 0);
+    }
+    assert_eq!(bytes.len(), payload_offset);
+    bytes.extend_from_slice(&payload);
+    VirtualGeometryAsset::from_bytes(bytes).expect("minimal virtual triangle fixture is valid")
+}
+
+fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_f32(bytes: &mut Vec<u8>, value: f32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_f32x3(bytes: &mut Vec<u8>, value: [f32; 3]) {
+    for component in value {
+        push_f32(bytes, component);
+    }
+}
+
+fn rgba_pixel(image: &[u8], x: usize, y: usize) -> &[u8] {
+    &image[(y * 128 + x) * 4..(y * 128 + x + 1) * 4]
+}
+
+fn compatibility_vertices_for_skinning() -> Vec<Vertex3D> {
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        .into_iter()
+        .map(|position| Vertex3D {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            color: [0.05, 0.2, 0.95, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            joints: [0.0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn take_rgba_screenshot(renderer: &mut bloom_shared::renderer::Renderer) -> Vec<u8> {
+    let (_, _, mut pixels) = renderer
+        .screenshot_data
+        .take()
+        .expect("renderer produced a screenshot");
+    if matches!(
+        renderer.surface_format(),
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    ) {
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+    }
+    pixels
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ImageDifferenceBounds {
+    changed_pixels: usize,
+    minimum: [usize; 2],
+    maximum: [usize; 2],
+    maximum_channel_delta: u8,
+}
+
+fn image_difference_bounds(
+    reference: &[u8],
+    candidate: &[u8],
+    width: usize,
+) -> ImageDifferenceBounds {
+    let mut changed_pixels = 0;
+    let mut minimum = [usize::MAX; 2];
+    let mut maximum = [0; 2];
+    let mut maximum_channel_delta = 0;
+    for (index, (reference, candidate)) in reference
+        .chunks_exact(4)
+        .zip(candidate.chunks_exact(4))
+        .enumerate()
+    {
+        if reference == candidate {
+            continue;
+        }
+        changed_pixels += 1;
+        let point = [index % width, index / width];
+        minimum[0] = minimum[0].min(point[0]);
+        minimum[1] = minimum[1].min(point[1]);
+        maximum[0] = maximum[0].max(point[0]);
+        maximum[1] = maximum[1].max(point[1]);
+        for channel in 0..4 {
+            maximum_channel_delta =
+                maximum_channel_delta.max(reference[channel].abs_diff(candidate[channel]));
+        }
+    }
+    if changed_pixels == 0 {
+        minimum = [0; 2];
+    }
+    ImageDifferenceBounds {
+        changed_pixels,
+        minimum,
+        maximum,
+        maximum_channel_delta,
+    }
+}

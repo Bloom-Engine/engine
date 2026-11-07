@@ -1,8 +1,14 @@
 # API Design — Functions, Not Classes
 
-Bloom's public API is a flat collection of free functions operating on plain-data
-interfaces. There are no classes, no inheritance trees, no `this`-bound methods,
-and no lifecycle base types to extend. This document records *why*.
+Bloom's gameplay-facing API is a flat collection of free functions operating on
+plain-data interfaces. There are no gameplay resource classes, inheritance
+trees, `this`-bound engine methods, or lifecycle base types to extend. This
+document records *why*.
+
+The `quality` tooling submodule is the deliberate exception: its inert
+`QualityRun` orchestration helper is a class for qualification scripts. It does
+not represent an engine resource or cross the Perry FFI boundary described
+below.
 
 The short version: the industry's most-cited performance voices, the architectural
 trend in every major engine, and the practical constraints of our Perry FFI all
@@ -10,7 +16,8 @@ point the same direction. Classes would be fighting three fights at once.
 
 ## The stated rationale (README)
 
-> **Simple API** — Functions, not classes. The entire API fits on a cheatsheet.
+> **Simple API** — Gameplay through functions and plain handles. The runtime API
+> fits on a cheatsheet.
 
 That one-liner captures the user-facing benefit. The rest of this document
 captures the engineering reasons behind it.
@@ -95,12 +102,13 @@ aesthetic call — it's where the industry has been migrating for a decade.
 
 ## The Bloom-specific reason: the Perry FFI boundary
 
-Bloom compiles TypeScript through [Perry](../../perry/perry) (our AOT compiler)
+Bloom compiles TypeScript through [Perry](https://github.com/PerryTS/perry) (our AOT compiler)
 and hands data across an FFI boundary to platform-specific Rust crates. The
 boundary has a specific shape, documented in `CLAUDE.md` and `package.json`:
 
-- **~465 `bloom_*` FFI functions** declared in `package.json` under
-  `perry.nativeLibrary.functions`.
+- **The versioned `bloom_*` FFI surface** is declared in `package.json` under
+  `perry.nativeLibrary.functions`; CI derives its count and validates every
+  platform against that manifest.
 - **Native platforms** use `#[no_mangle] extern "C"` — a C ABI.
 - **Web** uses `#[wasm_bindgen]`; Perry's runtime decodes NaN-boxed args
   (`wrapFfiForI64`) and the JS glue routes strings to `_str` variants.
@@ -168,7 +176,8 @@ This section is deliberately here to keep the doc honest.
   explicitly unloaded. TypeScript has no destructors, and the FFI boundary
   would not respect them even if it did.
 - **No "smart" object APIs that discover methods via IDE autocomplete.** You
-  navigate by module (`bloom/textures`, `bloom/audio`) and function name.
+  navigate by module (`@bloomengine/engine/textures`,
+  `@bloomengine/engine/audio`) and function name.
   The [cheatsheet](../README.md#modules) is the map.
 
 We've judged these acceptable — and in several cases desirable — given the

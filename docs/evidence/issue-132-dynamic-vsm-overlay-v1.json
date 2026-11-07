@@ -1,0 +1,111 @@
+{
+  "schema": "bloom-dynamic-vsm-overlay-evidence-v1",
+  "issue": 132,
+  "qualified_revision": "6b4c256bcf055204cee1af4f627274729077f43d",
+  "control_revision": "dcdb29559eef4e34db9cab80569077483c01c1bc",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end"
+  },
+  "fixture": {
+    "example": "examples/quality-motion",
+    "flag": "--vsm-dynamic",
+    "warmup_frames": 120,
+    "measured_frames": 120,
+    "fixed_timestep": 0.016666667,
+    "quality_preset": 3,
+    "render_scale": 1.0
+  },
+  "budgets": {
+    "dynamic_overlay_pages_per_frame": 4,
+    "dynamic_overlay_draws_per_frame": 64,
+    "physical_pages": 256,
+    "physical_bytes": 17842176,
+    "gpu_overhead_bytes": 2109456,
+    "gpu_total_bytes": 19951632
+  },
+  "final_telemetry": {
+    "mode": "bounded-page-overlay-with-csm",
+    "demand_source": "receiver-bounds",
+    "demand_pages": 224,
+    "resident_pages": 224,
+    "dynamic_guarded_pages": 151,
+    "dynamic_rendered_pages": 4,
+    "dynamic_overlay_draws": 8,
+    "dynamic_deferred_demand_pages": 75,
+    "dirty_pages": 75,
+    "denied_pages": 0,
+    "evictions": 0
+  },
+  "image_comparisons": {
+    "overlay_repeat": {
+      "reference_sha256": "528ddebc1fc7cc37837d2e828bb4a53b9ec5180189e4e17fa47266cbe87628bb",
+      "candidate_sha256": "8e4f2bedb97d6590695e55cc2bee2d1422fd4f2fb0f8c5ed7044f77485d5891c",
+      "rmse_luminance": 0.000005030,
+      "ssim_luminance": 1.0,
+      "percent_above_0_02": 0.0,
+      "mean_oklab_delta": 0.000000014,
+      "mean_edge_delta": 0.000000020
+    },
+    "prior_csm_mask_to_overlay": {
+      "reference_sha256": "17152b707cb42e1b365d73f2b44b3a56d0029707e50b0dfcd7d208018c4b5e20",
+      "candidate_sha256": "528ddebc1fc7cc37837d2e828bb4a53b9ec5180189e4e17fa47266cbe87628bb",
+      "rmse_luminance": 0.008894581,
+      "ssim_luminance": 0.992135584,
+      "percent_above_0_02": 3.640833378,
+      "mean_oklab_delta": 0.001824761,
+      "mean_edge_delta": 0.001542727
+    },
+    "vsm_disabled_control": {
+      "reference_sha256": "c96ca73f6cd64a1ac39c2721fe66bd8182fc1ab48c69f98f92a42fe1a4b857a6",
+      "candidate_sha256": "bec4978d1ab779e553047007e1a87e3543dd670fc180c75ff8182ade17995e0e",
+      "rmse_luminance": 0.000012179,
+      "ssim_luminance": 1.0,
+      "percent_above_0_02": 0.0,
+      "mean_oklab_delta": 0.000000107,
+      "mean_edge_delta": 0.000000104
+    }
+  },
+  "performance": {
+    "control_runs": 3,
+    "overlay_runs": 4,
+    "median_wall_ms": {
+      "control": 13.873404,
+      "overlay": 13.760610
+    },
+    "median_shadow_cpu_ms": {
+      "control": 0.054876,
+      "overlay": 0.180561,
+      "absolute_delta": 0.125685
+    },
+    "median_shadow_gpu_ms": {
+      "control": 4.008879,
+      "overlay": 4.100516,
+      "absolute_delta": 0.091637
+    }
+  },
+  "qualification": {
+    "ffi_schema_parity": "pass",
+    "format": "pass",
+    "strict_clippy": "pass",
+    "file_size_ratchet": "pass",
+    "native_release_check": "pass",
+    "wasm32_web_feature_check": "pass",
+    "shared_unit_tests_passed": 331,
+    "shared_unit_tests_ignored": 1,
+    "headless_device_tests_passed": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "focused_vsm_tests_passed": 24
+  },
+  "remaining": [
+    "independently snapped directional clipmaps",
+    "GPU request compaction and caster submission",
+    "spot and point virtual projections with shared arbitration",
+    "Bistro, moving-light, small-pool, contact-detail, and 100-light qualification",
+    "quality-tier rollout"
+  ]
+}

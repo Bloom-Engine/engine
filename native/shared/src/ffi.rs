@@ -62,6 +62,18 @@ pub fn guard<T: FfiDefault>(name: &'static str, f: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Run a mutating FFI call and return Perry's numeric boolean status.
+///
+/// Successful execution returns `1.0`; a caught panic returns the existing
+/// `f64` default (`0.0`). Platform stubs use the same return type and report
+/// `0.0`, so public setters never need a second capability query.
+pub fn guard_applied(name: &'static str, f: impl FnOnce()) -> f64 {
+    guard(name, || {
+        f();
+        1.0
+    })
+}
+
 /// Log `make_msg()` the first time `key` is seen, silently no-op after.
 fn warn_once(key: &'static str, make_msg: impl FnOnce() -> String) {
     use std::sync::Mutex;
@@ -86,6 +98,20 @@ pub fn feature_off_warn_once(name: &'static str, feature: &'static str) {
     warn_once(name, || {
         format!("bloom: {name}() ignored — engine built without the `{feature}` cargo feature")
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guard_applied;
+
+    #[test]
+    fn applied_status_distinguishes_success_from_caught_failure() {
+        assert_eq!(guard_applied("ffi_status_success_test", || {}), 1.0);
+        assert_eq!(
+            guard_applied("ffi_status_failure_test", || panic!("expected test panic")),
+            0.0
+        );
+    }
 }
 
 /// Platform-appropriate error log: logcat on Android, stderr elsewhere.

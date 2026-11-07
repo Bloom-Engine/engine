@@ -1,0 +1,109 @@
+{
+  "schema": "bloom-virtual-draw-emission-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "92daf0eae684ca5a0b359cc8c991f728ffb83600",
+  "gpu_abi": {
+    "draw_command_bytes": 16,
+    "emission_state_bytes": 48,
+    "dispatch_command_bytes": 12,
+    "float32_vertex_bytes": 72,
+    "quantized_vertex_bytes": 32,
+    "local_index_bytes": 1,
+    "draw_capacity_matches_selected_capacity": true,
+    "first_instance_addresses_selected_record": true
+  },
+  "construction_limits": {
+    "storage_buffer_count_checked": true,
+    "command_buffer_size_checked": true,
+    "storage_binding_size_checked": true,
+    "workgroup_size_checked": true,
+    "dispatch_dimension_checked": true,
+    "selector_identity_checked": true
+  },
+  "whole_batch_fallback": {
+    "selected_attempts": 4,
+    "selected_capacity": 2,
+    "selected_overflow": 2,
+    "published_draw_count": 0,
+    "published_dispatch_x": 0,
+    "batch_fallback": 1,
+    "emitted_draws": 0,
+    "emitted_triangles": 0,
+    "invalid_missing_counter_saturates": true,
+    "capacity_mismatch_fails_closed": true
+  },
+  "resident_ancestor_request_overflow": {
+    "request_attempts": 2,
+    "request_capacity": 1,
+    "request_overflow": 1,
+    "resident_ancestor_draws": 2,
+    "batch_fallback": 0
+  },
+  "metal_decode_oracle": {
+    "backend": "metal",
+    "selected_clusters": 4,
+    "decoded_corners_per_format": 12,
+    "encodings": ["float32", "quantized32"],
+    "position_match": true,
+    "normal_match": true,
+    "tangent_match": true,
+    "uv0_match": true,
+    "uv1_match": true,
+    "color_match": true,
+    "local_index_match": true,
+    "maximum_test_tolerance": 0.00001
+  },
+  "metal_indirect_raster_oracle": {
+    "commands": 4,
+    "triangles": 4,
+    "target_format": "Rgba8Uint",
+    "readback_red": [1, 2, 3, 4],
+    "first_instance_exact": true,
+    "same_encoder_after_compute": true
+  },
+  "default_path": {
+    "engine_state_fields_added": 0,
+    "renderer_fields_added": 0,
+    "model_manager_fields_added": 0,
+    "passes_added": 0,
+    "draws_added": 0,
+    "buffers_constructed": 0,
+    "bindings_added": 0,
+    "shader_branches_added": 0,
+    "pixels_changed": false
+  },
+  "qualification": {
+    "quick_lane": "pass",
+    "quick_lane_seconds": 51,
+    "shared_unit_tests_passed": 401,
+    "shared_unit_tests_ignored": 1,
+    "virtual_geometry_tests_passed": 22,
+    "golden_tests_passed": 59,
+    "golden_tests_ignored": 2,
+    "render_target_tests_passed": 4,
+    "visibility_parity_tests_passed": 2,
+    "visibility_runtime_tests_passed": 2,
+    "cooker_tests_passed": 29,
+    "quality_governance_tests_passed": 39,
+    "visual_fault_engine_tests_passed": 3,
+    "strict_production_clippy": "pass",
+    "format": "pass",
+    "contracts_ffi_file_ratchet": "pass",
+    "wasm_no_default_check": "pass",
+    "wasm_models3d_check": "pass",
+    "native_models3d_check": "pass",
+    "no_default_optional_dependency_boundary": "pass"
+  },
+  "acceptance_boxes_changed": 0,
+  "remaining": [
+    "current and previous transform plus material remap ABI",
+    "visibility and exact PBR material composition",
+    "bounded submission on adapters without indirect-count support",
+    "conservative previous-frame Hi-Z occlusion",
+    "asynchronous request feedback and artifact streaming",
+    "crack and temporal image corpus",
+    "per-MRT parity",
+    "10-million-triangle stress and total GPU timing",
+    "integrated and discrete adapter qualification"
+  ]
+}

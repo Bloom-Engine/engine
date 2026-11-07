@@ -66,6 +66,8 @@ const OVERRIDES = new Set([
   'bloom_enable_postfx', 'bloom_disable_postfx',
   'bloom_set_vignette', 'bloom_set_chromatic_aberration', 'bloom_set_film_grain',
   'bloom_set_manual_exposure', 'bloom_set_auto_exposure', 'bloom_set_sun_shafts',
+  // Explicit renderer-unavailable capability responses.
+  'bloom_get_material_binding_capabilities', 'bloom_get_renderer_capabilities',
 ]);
 
 const rustType = (p) => {

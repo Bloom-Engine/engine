@@ -1,0 +1,56 @@
+{
+  "schema": "bloom-virtual-geometry-compatibility-composition-evidence-v1",
+  "issue": 131,
+  "qualified_revisions": [
+    "9a3027008daf384d9cac29be001b43574ca0ef39",
+    "28939290cf711d31fc128f1b6eabffd494e0edc3"
+  ],
+  "date": "2026-08-29",
+  "adapter": {
+    "backend": "metal",
+    "gpu": "Apple M1 Max",
+    "profile": "native-full",
+    "os": "macOS 26.5 (25F71)"
+  },
+  "compatibility_routes": {
+    "alpha_blend_reason_inspectable": true,
+    "skinned_reason_inspectable": true,
+    "morph_targets_reason_inspectable": true,
+    "morph_targets_virtualized": false,
+    "compact_skin_uses_staged_palette": true,
+    "non_compact_weighted_subset_fails_closed": true,
+    "arbitrary_weighted_transform_fails_closed": true
+  },
+  "gpu_pixel_oracle": {
+    "extent": [128, 128],
+    "taa_enabled": false,
+    "alpha_blend_behind_virtual_depth_exact": true,
+    "alpha_blend_front_composes": true,
+    "skinned_behind_virtual_depth_exact": true,
+    "skinned_front_composes": true,
+    "skinned_deformation_changed_pixels_minimum": 33,
+    "empty_virtual_batch_ordinary_pixels_exact": true
+  },
+  "cached_skin_motion_golden": {
+    "movement_mean": 23.7362,
+    "initial_mean": 0.2141,
+    "frame4_mean": 0.0882,
+    "frame4_outliers_percent": 0.1190,
+    "trail_frames": 0,
+    "stable_flicker": 0.0360
+  },
+  "qualification": {
+    "visibility_runtime_tests_passed": 1,
+    "cached_skin_motion_tests_passed": 1,
+    "shared_unit_tests_passed": 480,
+    "shared_unit_tests_failed": 0,
+    "shared_unit_tests_ignored": 1,
+    "scoped_format": "pass",
+    "diff_check": "pass"
+  },
+  "acceptance_boxes_changed": 1,
+  "remaining": [
+    "fixed cross-backend camera-motion corpus",
+    "complete ordinary glTF invariance proof"
+  ]
+}

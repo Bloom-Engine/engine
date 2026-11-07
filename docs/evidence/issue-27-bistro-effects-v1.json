@@ -1,0 +1,91 @@
+{
+  "schema": "bloom-visibility-bistro-effects-evidence-v1",
+  "issue": 27,
+  "qualified_revision": "24d8ba4af7231a4e81c8829a6049b08da19f35e8",
+  "date": "2026-08-29",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "device_type": "integratedgpu",
+    "backend": "metal",
+    "capability_tier": "high-end",
+    "max_storage_buffer_binding_size": 134217728,
+    "max_storage_buffers_per_shader_stage": 9
+  },
+  "large_scene_storage": {
+    "vertex_count": 1738262,
+    "vertex_stride_bytes": 96,
+    "used_vertex_bytes": 166873152,
+    "used_vertex_mib": 159.14263916015625,
+    "arena_capacity_bytes": 268435456,
+    "whole_arena_binding_exceeds_limit": true,
+    "binding_windows": 3,
+    "global_vertex_namespace_preserved": true,
+    "resource_cache_tracks_used_vertex_bytes": true,
+    "exact_bistro_sized_unit_regression": "pass"
+  },
+  "workload": {
+    "scene": "examples/bistro/assets/bistrox.gltf",
+    "placements": 2909,
+    "resolution": [640, 360],
+    "quality_preset": 4,
+    "render_scale": 1.0,
+    "settle_frames": 108,
+    "camera_motion_steps": 30,
+    "captured_steps": [0, 5, 10, 15, 20, 25, 30],
+    "effects": ["taa", "ssao", "ssr", "ssgi", "bloom"],
+    "shadow_profiles": ["csm", "vsm"],
+    "ssgi_trace_backend": "hw-ray-query",
+    "temporal_histories_valid": ["taa", "ssr", "ssgi"],
+    "final_camera": {
+      "visibility_eligible_draws": 2404,
+      "forward_compatibility_draws": 164
+    },
+    "renderer_occlusion_enabled": false,
+    "renderer_occlusion_exclusion_reason": "asynchronous previous-frame readback can change A/B draw-admission timing; occlusion is qualified separately"
+  },
+  "metrics": {
+    "csm": [
+      {"step": 0, "mean_rgb": 0.007268519, "rms_rgb": 0.085255607, "p99_rgb": 0, "max_rgb": 1, "ssim": 0.999949947},
+      {"step": 5, "mean_rgb": 0.027641782, "rms_rgb": 0.215159017, "p99_rgb": 1, "max_rgb": 14, "ssim": 0.999828217},
+      {"step": 10, "mean_rgb": 0.025400752, "rms_rgb": 0.236122345, "p99_rgb": 1, "max_rgb": 18, "ssim": 0.999738925},
+      {"step": 15, "mean_rgb": 0.064822049, "rms_rgb": 0.469083215, "p99_rgb": 2, "max_rgb": 15, "ssim": 0.999430423},
+      {"step": 20, "mean_rgb": 0.044548611, "rms_rgb": 0.303008640, "p99_rgb": 1, "max_rgb": 19, "ssim": 0.999572590},
+      {"step": 25, "mean_rgb": 0.064280961, "rms_rgb": 0.317713456, "p99_rgb": 1, "max_rgb": 18, "ssim": 0.999355183},
+      {"step": 30, "mean_rgb": 0.058449074, "rms_rgb": 0.337812784, "p99_rgb": 1, "max_rgb": 19, "ssim": 0.999529795}
+    ],
+    "vsm": [
+      {"step": 0, "mean_rgb": 0.021362847, "rms_rgb": 0.340015488, "p99_rgb": 1, "max_rgb": 22, "ssim": 0.998759431},
+      {"step": 5, "mean_rgb": 0.026597222, "rms_rgb": 0.207714358, "p99_rgb": 1, "max_rgb": 14, "ssim": 0.999824722},
+      {"step": 10, "mean_rgb": 0.025357350, "rms_rgb": 0.235287575, "p99_rgb": 1, "max_rgb": 13, "ssim": 0.999728743},
+      {"step": 15, "mean_rgb": 0.068846933, "rms_rgb": 0.486732242, "p99_rgb": 2, "max_rgb": 15, "ssim": 0.999385902},
+      {"step": 20, "mean_rgb": 0.044612269, "rms_rgb": 0.303104118, "p99_rgb": 1, "max_rgb": 19, "ssim": 0.999572056},
+      {"step": 25, "mean_rgb": 0.064267940, "rms_rgb": 0.317692964, "p99_rgb": 1, "max_rgb": 18, "ssim": 0.999355197},
+      {"step": 30, "mean_rgb": 0.057352431, "rms_rgb": 0.334412316, "p99_rgb": 1, "max_rgb": 19, "ssim": 0.999534061}
+    ]
+  },
+  "gates": {
+    "csm": {"minimum_ssim": 0.999, "maximum_mean_rgb": 0.1, "maximum_rms_rgb": 0.5, "maximum_p99_rgb": 2, "maximum_rgb": 32, "pass": true},
+    "vsm": {"minimum_ssim": 0.99, "maximum_mean_rgb": 0.5, "maximum_rms_rgb": 5.0, "maximum_p99_rgb": 16, "maximum_rgb": 96, "pass": true},
+    "vsm_active_resident_demand_and_cache_hits": "pass"
+  },
+  "regressions": {
+    "visibility_buffer_parity_tests": 2,
+    "visibility_buffer_unit_and_gpu_tests": 9,
+    "format_check": "pass",
+    "strict_clippy": "blocked by 188 pre-existing repository-wide findings"
+  },
+  "scope": {
+    "full_bistro_effects_on_integrated_adapter": "pass",
+    "broad_issue_27_corpus": "incomplete",
+    "discrete_adapter": "not run",
+    "performance_activation_gates": "fail from prior evidence",
+    "default_activation": false
+  },
+  "remaining": [
+    "custom opaque and planar-probe corpus",
+    "skinning, refraction, transparency, and stress corpus",
+    "asynchronous occlusion parity",
+    "discrete adapter qualification",
+    "all visual, memory, and total-GPU activation gates"
+  ]
+}

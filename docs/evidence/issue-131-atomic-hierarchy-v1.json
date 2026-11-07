@@ -1,0 +1,83 @@
+{
+  "schema": "bloom-virtual-geometry-hierarchy-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "845ff9cbd535c54c85a4bcfd291427090f4bc911",
+  "format": {
+    "magic": "BLMGEO1\\0",
+    "version": 1,
+    "cluster_record_bytes": 128,
+    "default_max_vertices": 64,
+    "default_max_triangles": 124,
+    "default_page_budget_bytes": 65536,
+    "atomic_parent_groups": true,
+    "maximum_group_fanout": 8,
+    "absolute_accumulated_error": true,
+    "locked_group_borders": true
+  },
+  "deterministic_hierarchy_asset": {
+    "path": "examples/renderer-test/assets/DamagedHelmet.glb",
+    "source_sha256": "3de5114323cba08aaef85757a90ed9685f1597b5ea0e7d7913f9fa45eeacaae7",
+    "requested_levels": 8,
+    "maximum_level": 3,
+    "leaf_clusters": 247,
+    "leaf_triangles": 15452,
+    "leaf_payload_bytes": 1176828,
+    "parent_clusters": 385,
+    "all_level_clusters": 632,
+    "all_level_triangles": 33706,
+    "root_clusters": 100,
+    "root_triangles": 4510,
+    "root_payload_bytes": 468570,
+    "root_cluster_reduction_percent": 59.514170,
+    "root_triangle_reduction_percent": 70.812840,
+    "root_payload_reduction_percent": 60.183646,
+    "maximum_absolute_error": 2.467940092086792,
+    "pages": 47,
+    "maximum_page_bytes": 65536,
+    "payload_bytes": 2937040,
+    "file_bytes": 3021104,
+    "payload_sha256": "3546847f428431bd15681e32d451561744d5f5162729eb4c9cbeb35dc3b12915",
+    "artifact_sha256": "57f8cc200da84c7ab63cdcd7bf02cb0c8336a96777a2ccb7fc49beaa0af3fd10",
+    "independent_cooks_byte_identical": true,
+    "strict_inspection": "pass"
+  },
+  "default_leaf_regression": {
+    "artifact_sha256": "df089b23324fe8a8e00842a80b44894fd27b276c9124b8ff81dd77f8cf7b2cd2",
+    "payload_sha256": "67b0352a54d3d669d76d688f94899bcb8a665c561587123ea85d5d6a2b1061b0",
+    "matches_qualified_milestone": true
+  },
+  "compatibility_control": {
+    "path": "examples/test-gltf-watch/assets/Fox.glb",
+    "reason": "skinned",
+    "meshlets": 0,
+    "file_bytes": 176,
+    "artifact_sha256": "5e4125b6ba31649f5ebbd694d79242e19fdb0c561073beee08f490c12be063e2",
+    "matches_qualified_milestone": true
+  },
+  "qualification": {
+    "release_tests_passed": 16,
+    "strict_clippy": "pass",
+    "format": "pass",
+    "atomic_relation_corruption_rejected": true,
+    "locked_outer_boundary_test": "pass"
+  },
+  "shipping_runtime_delta": {
+    "passes": 0,
+    "draws": 0,
+    "buffers": 0,
+    "images": 0,
+    "allocations": 0,
+    "bindings": 0,
+    "shader_branches": 0,
+    "engine_dependencies": 0,
+    "pixels_changed": false
+  },
+  "remaining": [
+    "quantized and compressed geometry payload qualification",
+    "coarse root and streaming page placement",
+    "runtime artifact database integration",
+    "residency and streaming budgets",
+    "GPU traversal, Hi-Z culling, and indirect selection",
+    "runtime visual and performance qualification"
+  ]
+}

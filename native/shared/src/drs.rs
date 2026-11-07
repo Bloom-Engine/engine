@@ -106,11 +106,15 @@ impl DrsController {
         }
     }
 
-    pub fn current_scale(&self) -> f32 { STEPS[self.idx] }
+    pub fn current_scale(&self) -> f32 {
+        STEPS[self.idx]
+    }
 }
 
 impl Default for DrsController {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn closest_step_idx(scale: f32) -> usize {
@@ -139,7 +143,7 @@ mod tests {
         assert_eq!(closest_step_idx(0.70), 2); // closer to 0.67 (Δ0.03) than 0.75 (Δ0.05)
         assert_eq!(closest_step_idx(1.00), 5);
         assert_eq!(closest_step_idx(2.00), 5); // clamped at top
-        assert_eq!(closest_step_idx(0.0), 0);  // clamped at bottom
+        assert_eq!(closest_step_idx(0.0), 0); // clamped at bottom
     }
 
     #[test]
@@ -183,13 +187,21 @@ mod tests {
         let mut cooldown = 0u32;
 
         let advance = |ms: f32, ema: &mut f32, idx: &mut usize, cooldown: &mut u32| {
-            if *ema == 0.0 { *ema = ms; } else { *ema += EMA_ALPHA * (ms - *ema); }
+            if *ema == 0.0 {
+                *ema = ms;
+            } else {
+                *ema += EMA_ALPHA * (ms - *ema);
+            }
             *cooldown = cooldown.saturating_add(1);
-            if *cooldown < COOLDOWN_FRAMES { return; }
+            if *cooldown < COOLDOWN_FRAMES {
+                return;
+            }
             if *ema > target * HYSTERESIS_DOWN && *idx > 0 {
-                *idx -= 1; *cooldown = 0;
+                *idx -= 1;
+                *cooldown = 0;
             } else if *ema < target * HYSTERESIS_UP && *idx + 1 < STEPS.len() {
-                *idx += 1; *cooldown = 0;
+                *idx += 1;
+                *cooldown = 0;
             }
         };
 

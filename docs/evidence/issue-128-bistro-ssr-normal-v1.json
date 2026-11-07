@@ -1,0 +1,62 @@
+{
+  "schema": "bloom-bistro-ssr-normal-evidence-v1",
+  "issue": 128,
+  "qualified_revision": "56bf87c7c3def12cc2552c96c77a2209a4eb4790",
+  "adapter": "Apple M1 Max / Metal",
+  "case": {
+    "id": "bistro-exterior",
+    "resolution": [800, 450],
+    "warmup_frames": 180,
+    "measured_frames": 240,
+    "mesh_count": 96,
+    "quality_preset": 3,
+    "render_scale": 1.0,
+    "taa": true,
+    "ssgi_trace_backend": "hw-ray-query"
+  },
+  "correction": {
+    "before_derivative_normal": "cross(dpdx, dpdy)",
+    "after_derivative_normal": "view-facing cross(dpdy, dpdx)",
+    "passes_added": 0,
+    "buffers_added": 0,
+    "textures_added": 0,
+    "bindings_added": 0
+  },
+  "ssr_capture": {
+    "before_mean_luminance": 0.266009541,
+    "after_mean_luminance": 0.011289671,
+    "reduction_ratio": 23.56,
+    "after_max_luminance": 0.151700571,
+    "after_non_finite_pixels": 0,
+    "after_isolated_local_outliers": 0
+  },
+  "final_image": {
+    "before_sha256": "b39e19822372269c0ec17393de98643668c700e075872406ae38fad778fdf27c",
+    "after_sha256": "3bfb6ae42cd8e2f86ceedbbbb53ab2352b7f91236b49aca7fb1894fa1573cbba",
+    "baseline_status": "missing-human-approved-baseline"
+  },
+  "performance": {
+    "before_ssr_gpu_mean_ms": 2.639690,
+    "after_ssr_gpu_mean_ms": 2.643431,
+    "delta_ms": 0.003741,
+    "delta_percent": 0.14,
+    "steady_state_graph_compiles": 0,
+    "steady_state_bind_group_creations": 0,
+    "steady_state_pipeline_creations": 0,
+    "steady_state_transient_texture_creations": 0,
+    "steady_state_transient_buffer_creations": 0,
+    "compiled_graph_passes": 25,
+    "graph_cache_hits": 419
+  },
+  "qualification": {
+    "release_unit_tests_passed": 357,
+    "release_gpu_goldens_passed": 59,
+    "render_target_tests_passed": 4,
+    "device_construction_test": "pass",
+    "strict_lint_and_format": "pass",
+    "wasm_check": "pass",
+    "ffi_and_schema_contracts": "pass",
+    "quality_contract": "pass",
+    "example_inventory": "pass"
+  }
+}

@@ -12,16 +12,67 @@ use wgpu;
 // Depth texture helper
 // ============================================================
 
-pub(super) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Linear HDR format for the offscreen render target. The scene + sky
 /// + immediate-mode 3D passes write here in linear space; a final
 /// composite pass tonemaps to the sRGB surface format.
 pub(super) const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Number of bloom mip levels. 5 mips gives a long-tail glow that
-/// covers ~32× the source pixel size. More mips = more haloing,
+/// Previous-frame TAA provenance: R = geometric depth. G keeps ordinary
+/// normalized history confidence in 0..1 and encodes reactive history as
+/// -(confidence + 1), preserving all 17 confidence states exactly. RG16Float
+/// has the same 4 B/px footprint as the former R32Float depth-only target and
+/// is a core renderable + sampleable WebGPU format. Half-float relative
+/// precision remains inside the geometric rejection tolerance, including the
+/// 10 km sky sentinel.
+pub(super) const TAA_DEPTH_HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+
+#[cfg(test)]
+mod taa_history_format_tests {
+    use super::*;
+
+    #[test]
+    fn depth_reactive_and_confidence_fit_the_original_webgpu_memory_contract() {
+        assert_eq!(TAA_DEPTH_HISTORY_FORMAT.block_copy_size(None), Some(4));
+        let features = TAA_DEPTH_HISTORY_FORMAT.guaranteed_format_features(wgpu::Features::empty());
+        let required =
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        assert!(features.allowed_usages.contains(required));
+    }
+
+    #[test]
+    fn packed_reactive_confidence_is_exact_in_half_float() {
+        for reactive in [false, true] {
+            for confidence in 0..=16_u16 {
+                let normalized = f32::from(confidence) / 16.0;
+                let packed = if reactive {
+                    -normalized - 1.0
+                } else {
+                    normalized
+                };
+                let stored = half::f16::from_f32(packed).to_f32();
+                assert_eq!(stored, packed);
+            }
+        }
+    }
+
+    #[test]
+    fn half_depth_quantization_stays_inside_taa_rejection_tolerance() {
+        for depth in [0.0_f32, 0.01, 0.1, 1.0, 10.0, 100.0, 1_000.0, 10_000.0] {
+            let stored = half::f16::from_f32(depth).to_f32();
+            let tolerance = 0.02 + depth.abs() * 0.005;
+            assert!(
+                (stored - depth).abs() < tolerance,
+                "depth {depth} quantized to {stored} outside tolerance {tolerance}"
+            );
+        }
+    }
+}
+
+/// Number of bloom mip levels. 4 mips gives a long-tail glow that
+/// covers ~16× the source pixel size. More mips = more haloing,
 /// fewer = less coverage. Each mip is half the previous size.
-pub(super) const BLOOM_MIP_COUNT: u32 = 5;
+pub(super) const BLOOM_MIP_COUNT: u32 = 4;
 
 /// SSAO RT layout: R = GTAO occlusion (bilaterally blurred), G =
 /// contact-shadow factor (passed through blur unchanged so the fine-
@@ -57,10 +108,18 @@ pub(super) const HIZ_MIP_COUNT: u32 = 5;
 /// color attachment in the HDR pass; motion blur and TAA read it.
 pub(super) const VELOCITY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 
-pub(super) fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_depth_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth_texture"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -73,18 +132,26 @@ pub(super) fn create_depth_texture(device: &wgpu::Device, width: u32, height: u3
         // texture so translucent materials can sample it without
         // aliasing the pass's own depth-stencil attachment.
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING
-             | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
 }
 
-pub(super) fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_hdr_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("hdr_rt"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -96,9 +163,9 @@ pub(super) fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (
         // STORAGE_BINDING: the path-trace megakernel (PT-1) writes the
         // traced scene colour directly into hdr_rt from compute.
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING
-             | wgpu::TextureUsages::COPY_SRC
-             | wgpu::TextureUsages::STORAGE_BINDING,
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::STORAGE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -107,19 +174,24 @@ pub(super) fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (
 
 /// Create the two ping-pong 1×1 exposure textures. Single fragment
 /// writes to one, composite samples the other, swap each frame.
-pub(super) fn create_exposure_textures(device: &wgpu::Device) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+pub(super) fn create_exposure_textures(
+    device: &wgpu::Device,
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
     let make = |label: &str| -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             // Rg16Float (was R16Float): .r = smoothed exposure, .g = the
             // anchored AE target (flicker fix — see EXPOSURE_SHADER_WGSL).
             format: wgpu::TextureFormat::Rg16Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -131,16 +203,23 @@ pub(super) fn create_exposure_textures(device: &wgpu::Device) -> ([wgpu::Texture
 }
 
 /// Create the material G-buffer (Rg8Unorm, surface size).
-pub(super) fn create_material_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_material_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("material_rt"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: MATERIAL_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -150,16 +229,23 @@ pub(super) fn create_material_rt(device: &wgpu::Device, width: u32, height: u32)
 /// Create the albedo G-buffer (Rgba8Unorm, surface size). Written by
 /// the scene pass so post-passes can modulate bounce light by the
 /// receiving surface's diffuse albedo (SSGI etc.).
-pub(super) fn create_albedo_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_albedo_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("albedo_rt"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -172,16 +258,23 @@ pub(super) fn create_albedo_rt(device: &wgpu::Device, width: u32, height: u32) -
 /// as its "current frame" input) and the TAA-off path (composite
 /// reads it directly) read from the same buffer, so fog / shafts /
 /// post-effects stay visible regardless of TAA state.
-pub(super) fn create_composed_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_composed_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("composed_rt"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -190,16 +283,23 @@ pub(super) fn create_composed_rt(device: &wgpu::Device, width: u32, height: u32)
 
 /// Create the velocity render target (Rg16Float, surface size).
 /// Per-pixel screen-space velocity for motion blur and TAA.
-pub(super) fn create_velocity_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_velocity_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("velocity_rt"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: VELOCITY_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -213,18 +313,27 @@ pub(super) fn create_velocity_rt(device: &wgpu::Device, width: u32, height: u32)
 /// counts 4× and the bilinear upsample in compose is imperceptible
 /// because the GGX cone + temporal blend is already wider than one
 /// quarter-res texel.
-pub(super) fn create_ssr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_ssr_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let w = (width / 4).max(1);
     let h = (height / 4).max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssr_rt"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: HDR_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -232,25 +341,34 @@ pub(super) fn create_ssr_rt(device: &wgpu::Device, width: u32, height: u32) -> (
 }
 
 /// Create the SSR temporal history textures (ping-pong pair, same
-/// format/size as ssr_rt — half-res HDR). The temporal denoiser
+/// format/size as ssr_rt — quarter-res HDR). The temporal denoiser
 /// blends the noisy current-frame stochastic SSR into the
 /// reprojected previous-frame history so 4–8 frames of accumulation
 /// converge to a smooth reflection.
 pub(super) fn create_ssr_history_textures(
-    device: &wgpu::Device, width: u32, height: u32,
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
 ) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
     let w = (width / 4).max(1);
     let h = (height / 4).max(1);
     let make = || {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ssr_history"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: HDR_FORMAT,
+            // COPY_SRC is inert during normal frames and exposes the temporal
+            // result to opt-in SSR firefly qualification captures.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                 | wgpu::TextureUsages::TEXTURE_BINDING,
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -264,28 +382,47 @@ pub(super) fn create_ssr_history_textures(
 /// Create the SSGI render target (half-res HDR — indirect diffuse bounce light).
 /// Same half-res HDR strategy as SSR: keeps the per-pixel ray march cheap
 /// while still providing enough color resolution for colored bounce light.
-pub(super) fn create_ssgi_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_ssgi_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
     let w = (width / 2).max(1);
     let h = (height / 2).max(1);
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("ssgi_rt"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
+    let make = || {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ssgi_rt"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            // Resolve ping-pongs these textures so the shader can reproject
+            // last frame's per-pixel result while writing the current frame.
+            // COPY_SRC is inert during normal frames and lets qualification
+            // retain the resolved HDR evidence without another shader pass.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    };
+    let (texture_0, view_0) = make();
+    let (texture_1, view_1) = make();
+    ([texture_0, texture_1], [view_0, view_1])
 }
 
-/// Probe grid = ceil(half_w / 16) × ceil(half_h / 16). 50×29 on a
-/// 800×450 half-res Sponza RT = 1450 probes, each holding an 8×8
+/// Probe grid = ceil(half_w / 8) × ceil(half_h / 8). 100×57 on an
+/// 800×450 half-res Sponza RT = 5700 probes, each holding an 8×8
 /// octahedral atlas = 64 radiance samples (ticket 007a).
-pub(super) const PROBE_TILE_SIZE: u32 = 16;
+pub(super) const PROBE_TILE_SIZE: u32 = 8;
 pub(super) const PROBE_OCT_SIZE: u32 = 8;
 pub(super) const PROBE_OCT_TEXELS: u32 = PROBE_OCT_SIZE * PROBE_OCT_SIZE;
 
@@ -301,17 +438,27 @@ pub(super) fn probe_grid_dims(width: u32, height: u32) -> (u32, u32) {
 /// 64)` — one voxel per probe × octahedral texel. Shared shape for the
 /// trace output and the ping-pong history textures.
 fn create_probe_3d_tex(
-    device: &wgpu::Device, label: &'static str, gw: u32, gh: u32,
+    device: &wgpu::Device,
+    label: &'static str,
+    gw: u32,
+    gh: u32,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: gw, height: gh, depth_or_array_layers: PROBE_OCT_TEXELS },
+        size: wgpu::Extent3d {
+            width: gw,
+            height: gh,
+            depth_or_array_layers: PROBE_OCT_TEXELS,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format: HDR_FORMAT,
+        // COPY_SRC exists solely for capture/diagnostic readbacks; it has no
+        // effect on the production passes.
         usage: wgpu::TextureUsages::STORAGE_BINDING
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -322,7 +469,9 @@ fn create_probe_3d_tex(
 /// pass reads it as the "current" input. Not ping-pong because its
 /// contents are fully regenerated every frame.
 pub(super) fn create_probe_trace_tex(
-    device: &wgpu::Device, width: u32, height: u32,
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let (gw, gh) = probe_grid_dims(width, height);
     create_probe_3d_tex(device, "probe_trace", gw, gh)
@@ -427,9 +576,7 @@ pub(super) const WSRC_CASCADE_COUNT: u32 = 3;
 pub(super) const WSRC_CASCADE_EXTENTS: [f32; 3] = [30.0, 120.0, 500.0];
 pub(super) const WSRC_REBAKE_THRESHOLD: f32 = 0.25;
 
-pub(super) fn create_wsrc_atlas(
-    device: &wgpu::Device,
-) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_wsrc_atlas(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("wsrc_atlas"),
         size: wgpu::Extent3d {
@@ -441,8 +588,7 @@ pub(super) fn create_wsrc_atlas(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::STORAGE_BINDING
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -480,9 +626,9 @@ pub(super) fn create_mesh_sdf_texture(
         // path on cache miss. Both have zero runtime cost when the
         // cache isn't used (just usage-flag bits at allocation).
         usage: wgpu::TextureUsages::STORAGE_BINDING
-             | wgpu::TextureUsages::TEXTURE_BINDING
-             | wgpu::TextureUsages::COPY_SRC
-             | wgpu::TextureUsages::COPY_DST,
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -494,25 +640,24 @@ pub(super) fn create_mesh_sdf_texture(
 /// at 64×64 each; 4096² atlas ⇒ 64×64 = 4096 slots ⇒ 682 meshes at
 /// full 6-axis capture (Sponza's ~405 fits comfortably).
 ///
-/// Two atlases are kept in lockstep:
-///   - `mesh_card_albedo_atlas`   — baked once per mesh at load.
-///   - `mesh_card_radiance_atlas` — written every frame by the card-
-///     lighting compute pass (albedo × sun × NdotL + sky × NdotUp).
-/// The HW trace samples radiance directly at hit, amortising shading
-/// cost across all rays that land in the same card texel.
+/// The material atlases retain the full 64x64 capture, while the diffuse
+/// radiance atlas stores a deliberately lower-frequency 16x16 representation
+/// per slot. A 32-ray diffuse gather cannot resolve the full material texture;
+/// preserving it made bright fabric detail behave like a sharp projector.
+/// The normalized slot layout remains identical across both resolutions.
 pub(super) const CARD_ATLAS_SIZE: u32 = 4096;
 pub(super) const CARD_SLOT_SIZE: u32 = 64;
 pub(super) const CARD_SLOTS_PER_ROW: u32 = CARD_ATLAS_SIZE / CARD_SLOT_SIZE;
-pub(super) const CARD_MAX_SLOTS: u32 = CARD_SLOTS_PER_ROW * CARD_SLOTS_PER_ROW;
+pub(super) const CARD_RADIANCE_SLOT_SIZE: u32 = 16;
+pub(super) const CARD_RADIANCE_ATLAS_SIZE: u32 = CARD_SLOTS_PER_ROW * CARD_RADIANCE_SLOT_SIZE;
+pub(crate) const CARD_MAX_SLOTS: u32 = CARD_SLOTS_PER_ROW * CARD_SLOTS_PER_ROW;
 /// V2: 6 directed axes per mesh (+X, -X, +Y, -Y, +Z, -Z).
-pub(super) const CARD_AXES_PER_MESH: u32 = 6;
+pub(crate) const CARD_AXES_PER_MESH: u32 = 6;
 
 /// Create the mesh-card albedo atlas. `RENDER_ATTACHMENT` for capture,
 /// `TEXTURE_BINDING` for both the card-lighting compute input and a
 /// direct HW-trace fallback.
-pub(super) fn create_mesh_card_atlas(
-    device: &wgpu::Device,
-) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_mesh_card_atlas(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("mesh_card_albedo_atlas"),
         size: wgpu::Extent3d {
@@ -525,7 +670,8 @@ pub(super) fn create_mesh_card_atlas(
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -550,15 +696,16 @@ pub(super) fn create_mesh_card_emissive_atlas(
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
 }
 
-/// Create the mesh-card radiance atlas. Written every frame by the
-/// card-lighting compute pass; sampled at hit by the HW probe trace.
+/// Create the low-frequency mesh-card radiance atlas. Rebuilt only when its
+/// lighting/geometry inputs change and sampled at hit by the probe trace.
 /// Rgba16Float so we can carry multiplicatively-composed sun + sky
 /// without banding. `STORAGE_BINDING` for the compute write,
 /// `TEXTURE_BINDING` for the trace sample.
@@ -568,16 +715,15 @@ pub(super) fn create_mesh_card_radiance_atlas(
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("mesh_card_radiance_atlas"),
         size: wgpu::Extent3d {
-            width: CARD_ATLAS_SIZE,
-            height: CARD_ATLAS_SIZE,
+            width: CARD_RADIANCE_ATLAS_SIZE,
+            height: CARD_RADIANCE_ATLAS_SIZE,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::STORAGE_BINDING
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -590,7 +736,9 @@ pub(super) fn create_mesh_card_radiance_atlas(
 /// samples `[write_idx]`. Separate textures — the temporal pass cannot
 /// bind the same view as both sampled input and storage-write output.
 pub(super) fn create_probe_history_textures(
-    device: &wgpu::Device, width: u32, height: u32,
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
 ) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
     let (gw, gh) = probe_grid_dims(width, height);
     let (t0, v0) = create_probe_3d_tex(device, "probe_history_0", gw, gh);
@@ -601,16 +749,23 @@ pub(super) fn create_probe_history_textures(
 /// Create the DoF render target (full-res HDR, same format as TAA output).
 /// DoF reads the TAA output + depth, writes the blurred result here.
 /// Composite then reads this instead of the TAA output.
-pub(super) fn create_dof_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_dof_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dof_rt"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -618,16 +773,23 @@ pub(super) fn create_dof_rt(device: &wgpu::Device, width: u32, height: u32) -> (
 }
 
 /// Create the SSS render target (full-res HDR, same format as DoF/motion-blur).
-pub(super) fn create_sss_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_sss_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sss_rt"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -651,17 +813,24 @@ pub(super) fn halton(mut i: u32, b: u32) -> f32 {
 }
 
 /// Create the two TAA history textures (HDR format, surface size).
-pub(super) fn create_taa_textures(device: &wgpu::Device, width: u32, height: u32) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+pub(super) fn create_taa_textures(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
     let make = |label: &str| -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -672,21 +841,59 @@ pub(super) fn create_taa_textures(device: &wgpu::Device, width: u32, height: u32
     ([a, b], [av, bv])
 }
 
+/// Create the two full-resolution geometric/confidence history surfaces paired
+/// with the TAA color ping-pong. The TAA pass writes both attachments together,
+/// so color can never advance without matching depth and confidence provenance.
+pub(super) fn create_taa_depth_history_textures(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+    let make = |label: &str| -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TAA_DEPTH_HISTORY_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    };
+    let (a, av) = make("taa_depth_history_a");
+    let (b, bv) = make("taa_depth_history_b");
+    ([a, b], [av, bv])
+}
+
 /// Create the SSAO render target. Written by the compute GTAO pass
 /// (via `STORAGE_BINDING`) and sampled by the bilateral blur +
 /// downstream passes.
-pub(super) fn create_ssao_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_ssao_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let w = (width / 2).max(1);
     let h = (height / 2).max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssao_rt"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: SSAO_FORMAT,
-        usage: wgpu::TextureUsages::STORAGE_BINDING
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -709,13 +916,16 @@ pub(super) fn create_ssao_history_textures(
     let make = |label: &str| -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: SSAO_FORMAT,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -727,18 +937,25 @@ pub(super) fn create_ssao_history_textures(
 }
 
 /// Create the SSAO bilateral-blur render target (same format/size as ssao_rt).
-pub(super) fn create_ssao_blur_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(super) fn create_ssao_blur_rt(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let w = (width / 2).max(1);
     let h = (height / 2).max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssao_blur_rt"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: SSAO_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -762,13 +979,16 @@ pub(super) fn create_linear_depth_hiz_chain(
         let h = ((height / 2) >> i).max(1);
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("linear_depth_hiz_mip"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: HIZ_FORMAT,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -796,7 +1016,11 @@ pub(super) fn create_bloom_chain(
     width: u32,
     height: u32,
     mip_count: u32,
-) -> (Vec<wgpu::Texture>, Vec<wgpu::TextureView>, wgpu::TextureView) {
+) -> (
+    Vec<wgpu::Texture>,
+    Vec<wgpu::TextureView>,
+    wgpu::TextureView,
+) {
     let mut textures = Vec::with_capacity(mip_count as usize);
     let mut views = Vec::with_capacity(mip_count as usize);
     for i in 0..mip_count {
@@ -804,13 +1028,16 @@ pub(super) fn create_bloom_chain(
         let h = ((height / 2) >> i).max(1);
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("bloom_mip_tex"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());

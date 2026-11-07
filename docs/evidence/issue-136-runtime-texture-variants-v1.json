@@ -1,0 +1,80 @@
+{
+  "schema": "bloom-runtime-texture-variant-evidence-v1",
+  "issue": 136,
+  "qualified_revision": "9140c9672ce29af43840516646c0b768087850a4",
+  "core_loader_revision": "cc557c0b966ba28b087c6f55b8362078f98784ad",
+  "host": {
+    "architecture": "arm64",
+    "cpu": "Apple M1 Max",
+    "gpu_backend": "Metal",
+    "os": "macOS 26.5 (25F71)"
+  },
+  "source": {
+    "path": "embed-perry/bloomFull.png",
+    "sha256": "b6727d85a0793a3434ceb2f012b4df5613a9be51da43afbb960077c281087aa6",
+    "width": 880,
+    "height": 600,
+    "mip_levels": 10
+  },
+  "native_exact": {
+    "request": "macos/high",
+    "selected": "macos/high",
+    "kind": "exact",
+    "fallback_rank": null,
+    "reason": "adapter-native-profile",
+    "bc_supported": true,
+    "format": "bc7-rgba-unorm-srgb",
+    "bytes": 705156,
+    "artifact_sha256": "bfdceade7a6be6c8cc59edffa9f7958c6bceeadba96e67ec13152722e3a83a61",
+    "worker_validation": "pass",
+    "gpu_upload": "pass"
+  },
+  "portable_fallback": {
+    "request": "macos/high",
+    "selected": "portable/high",
+    "kind": "fallback",
+    "fallback_rank": 0,
+    "reason": "portable-fallback-after-native-miss",
+    "bc_supported": true,
+    "format": "rgba8-unorm-srgb",
+    "bytes": 2815824,
+    "artifact_sha256": "df4aa2a4c036e669c83fd8cdccdc86b161cd6a952a8db5a09eda2a7defcbe8cb",
+    "worker_validation": "pass",
+    "gpu_upload": "pass"
+  },
+  "negative_controls": {
+    "damaged_artifact_hash": "rejected",
+    "bc_inside_portable_profile": "rejected",
+    "automatic_request_mutation": "rejected",
+    "source_decode_fallback": "disabled-for-indexed-path"
+  },
+  "bc_tail_mips": {
+    "initial_control": "failed-with-unaligned-copy",
+    "fix": "physical-block-copy-extent",
+    "native_gpu_retest": "pass"
+  },
+  "qualification": {
+    "cooker_release_tests_passed": 44,
+    "native_release_tests_passed": 480,
+    "native_release_tests_ignored": 1,
+    "cooker_strict_clippy": "pass",
+    "native_ci_clippy_policy": "pass",
+    "feature_builds": {
+      "no_default_features": "pass",
+      "models3d_only": "pass",
+      "image_extras_only": "pass"
+    },
+    "format": "pass",
+    "diff_check": "pass",
+    "file_line_gate": {
+      "status": "pre-existing-failures",
+      "unrelated_failures": 5,
+      "new_files_over_limit": 0
+    }
+  },
+  "acceptance": {
+    "runtime_adapter_platform_variant_and_deliberate_fallback": "pass",
+    "remaining_issue_136_item": "full-shipping-scene-source-free-cook",
+    "browser_package_fetch_and_index_transport": "separate-integration-boundary"
+  }
+}

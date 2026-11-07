@@ -1,9 +1,47 @@
 # Bloom renderer validation tools
 
-Two companion binaries that close the loop between the Bloom realtime
-renderer and a reference ground truth. Used to track whether each
-renderer change moves the realtime output closer to or farther from
-physically-correct rendering.
+The canonical regression workflow is
+[`tools/quality`](quality/README.md). It owns versioned cameras/assets,
+fixed-step uncapped capture, named render-graph evidence, perceptual gates,
+GPU/CPU budgets, adapter metadata, negative controls, and baseline governance.
+
+The companion binaries below close the loop between the Bloom realtime
+renderer and reference ground truth. The quality harness reuses them; direct
+invocation remains useful for investigation and reference generation.
+
+## `bloom-cook` — offline asset cooking
+
+The cooker produces BC7 native color/data textures, capability-neutral RGBA8
+portable variants, quality-preserving RGBA8 normal DDS textures with
+vector/variance mips, and the versioned meshlet geometry artifacts used by the
+staged virtualized-geometry work:
+
+```shell
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  geometry examples/renderer-test/assets/DamagedHelmet.glb /tmp/helmet.bgeo
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  geometry-inspect /tmp/helmet.bgeo
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  texture-benchmark examples/intel-sponza/assets/textures/curtain_fabric_red_BaseColor.png \
+  --iterations 15
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  geometry-load-benchmark examples/renderer-test/assets/DamagedHelmet.glb \
+  /tmp/helmet.bgeo --iterations 25
+```
+
+Cooking remains offline and does not change ordinary source loading by
+default. Native runtime consumers can opt into indexed, source-free geometry
+and texture store loaders with adapter-owned package selection. See
+[`docs/virtualized-geometry.md`](../docs/virtualized-geometry.md) for the
+format, corruption guarantees, limits, compatibility reasons, and staged
+runtime boundary.
+
+The opt-in hierarchy cooker uses the `meshopt` Rust wrapper (MIT OR
+Apache-2.0) and its vendored meshoptimizer implementation (MIT). It is linked
+only into this offline tool, not the engine runtime.
 
 ## `bloom-reference` — CPU path tracer
 
@@ -32,6 +70,76 @@ cargo build --release
   --spec ../../examples/renderer-test/specs/helmet.json \
   --out ref.png
 ```
+
+For the engine path-tracing golden, use the built-in scene rather than
+maintaining a second asset. It mirrors the test's floor slab, six
+colored cubes, camera, sun, ambient sky, and deterministic seed, and
+writes a machine-readable reproduction record:
+
+```shell
+cargo run --release -- \
+  --builtin pt-golden \
+  --out pt-golden-reference.png \
+  --metadata pt-golden-reference.json \
+  --width 256 --height 256 --spp 256 --bounces 8 --seed 0 \
+  --camera 5 4 7 0 0.5 0 50 \
+  --sun-dir 0.5 1 0.3 --sun-intensity 1.2
+```
+
+Use this reference to inspect energy, visibility, silhouettes, and
+occlusion. Do not gate raw whole-frame RMSE against the GPU golden:
+the reference renders analytic sky on camera misses, performs
+environment NEE/MIS, and uses a fixed ACES+sRGB display transform,
+while the engine PT preserves the raster sky and passes through the
+engine HDR/post stack.
+
+### Layered-PBR parameter reference
+
+`bloom-brdf-reference` evaluates the versioned layered-material contracts
+without scene, texture, sampling-noise, or tone-mapping variables:
+
+```shell
+cargo run --release \
+  --manifest-path tools/bloom-reference/Cargo.toml \
+  --bin bloom-brdf-reference -- \
+  --out tools/bloom-reference/reference/layered-pbr-v1.json
+```
+
+The checked-in 48-case matrix includes separate diffuse/specular terms,
+directional-light response, MIS PDF, and deterministic white-furnace
+reflectance. Tests require exact regeneration plus reciprocal, finite, and
+energy-bounded behavior. See
+[`docs/layered-pbr.md`](../docs/layered-pbr.md).
+
+Version 2 adds clearcoat and dielectric specular/IOR:
+
+```shell
+cargo run --release \
+  --manifest-path tools/bloom-reference/Cargo.toml \
+  --bin bloom-brdf-reference -- \
+  --version 2 \
+  --out tools/bloom-reference/reference/layered-pbr-v2.json
+```
+
+Its 39 checked cases cover base/default equivalence, water/diamond/zero IOR,
+disabled/colored specular, smooth/rough clearcoat, and combined lobes at three
+view angles. The tests additionally sweep a larger reciprocal white-furnace
+matrix and require pure conductors to remain independent of dielectric
+specular controls.
+
+Version 3 adds Charlie sheen and tangent-space anisotropic GGX:
+
+```shell
+cargo run --release \
+  --manifest-path tools/bloom-reference/Cargo.toml \
+  --bin bloom-brdf-reference -- \
+  --version 3 \
+  --out tools/bloom-reference/reference/layered-pbr-v3.json
+```
+
+The 30 checked rows cover sheen roughness, anisotropy strength/rotation,
+fabric, clearcoat-over-sheen, and all-lobe combinations at three view angles.
+The same tool owns the 128×128 R16F sheen directional-albedo LUT oracle.
 
 ## `bloom-diff` — pixel comparison
 
@@ -96,9 +204,10 @@ change an improvement?". As the Bloom realtime renderer gains normal
 maps, MR textures, HDR IBL etc. through the v2 spec phases, those
 numbers should monotonically decrease.
 
-## Multi-camera validation suite (`tools/validate.sh`)
+## Legacy multi-camera exploration (`tools/validate.sh`)
 
-Wraps the workflow above in a script that runs four cameras of the
+This script predates `tools/quality` and is no longer a merge/qualification
+gate. It runs four cameras of the
 helmet scene (front, three-quarter, side, top-down) through both
 renderers and reports per-view + aggregate metrics:
 
@@ -123,16 +232,20 @@ Numbers from this suite are higher than single-camera diff at native
 resolution because the realtime output is downsampled via `sips` to
 match the reference resolution — sips's resampling adds blur that
 inflates RMSE. The suite is consistent with itself across runs, so
-it's good for regression detection; just don't directly compare its
-numbers to single-camera native-res diff.
+it remains useful for macOS-only visual exploration. Do not use it to certify a
+renderer change: its cameras live in the shell script, references are cached,
+output is resized through `sips`, and it does not enforce the quality harness's
+fixed-step, warm-up, adapter, timing, intermediate, or baseline-review
+contracts.
 
 ## PBR material grid (`examples/pbr-spheres/`)
 
 Diagnostic scene: a 5×5 grid of spheres where rows vary metallic
 (0 → 1) and columns vary roughness (0 → 1), all sharing a gold base
-color and lit purely by the outdoor HDR. Visual-only validation
-right now (no comparable bloom-reference path yet — synthetic
-scenes don't load through glTF).
+color and lit purely by the outdoor HDR. The versioned CPU parameter matrix
+above now supplies a lobe-level numeric reference; image comparison still
+requires a shared scene/camera because synthetic scenes do not load through
+glTF.
 
 ```
 cd examples/pbr-spheres

@@ -50,6 +50,39 @@ static mut UI_VIEW: Option<Retained<AnyObject>> = None;
 static mut TOUCH_MAP: [*const c_void; 10] = [std::ptr::null(); 10];
 static mut BUNDLE_PATH: Option<String> = None;
 static mut SCREEN_SCALE: f64 = 1.0;
+/// The Menu tap recognizer that keeps Menu from leaving the app, and the root view controller:
+/// both switch over when the game lets Menu leave (setMenuButtonExits).
+static mut MENU_TAP: Option<Retained<AnyObject>> = None;
+static mut ROOT_VC: Option<Retained<AnyObject>> = None;
+static MENU_EXITS_APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// On the main thread: Menu leaves the app (recognizer off, controller events to UIKit, as a
+/// GCEventViewController does at a game's top level) or reaches the game.
+extern "C" fn apply_menu_exits(_ctx: *mut c_void) {
+    let exits = bloom_shared::display::menu_exits();
+    unsafe {
+        if let Some(tap) = MENU_TAP.as_ref() {
+            let _: () = msg_send![&**tap, setEnabled: Bool::new(!exits)];
+        }
+        if let Some(vc) = ROOT_VC.as_ref() {
+            let responds: Bool = msg_send![&**vc, respondsToSelector: sel!(setControllerUserInteractionEnabled:)];
+            if responds.as_bool() {
+                let _: () = msg_send![&**vc, setControllerUserInteractionEnabled: Bool::new(exits)];
+            }
+        }
+    }
+}
+
+/// From the frame: apply a change of setMenuButtonExits on the main thread.
+fn sync_menu_exits() {
+    let want = bloom_shared::display::menu_exits();
+    if MENU_EXITS_APPLIED.swap(want, std::sync::atomic::Ordering::Relaxed) == want { return; }
+    extern "C" {
+        static _dispatch_main_q: c_void;
+        fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    }
+    unsafe { dispatch_async_f(&_dispatch_main_q as *const c_void, std::ptr::null_mut(), apply_menu_exits); }
+}
 static SCENE_PTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // Atomic key event buffer: main thread writes, game thread reads before begin_frame
@@ -171,6 +204,44 @@ unsafe impl RefEncode for CGRect {
     const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct UIEdgeInsets { top: f64, left: f64, bottom: f64, right: f64 }
+
+unsafe impl Encode for UIEdgeInsets {
+    const ENCODING: Encoding = Encoding::Struct(
+        "UIEdgeInsets",
+        &[Encoding::Double, Encoding::Double, Encoding::Double, Encoding::Double],
+    );
+}
+unsafe impl RefEncode for UIEdgeInsets {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+
+/// Whether a set of presses holds the Menu button (UIPressType 5).
+unsafe fn has_menu_press(presses: *const AnyObject) -> bool {
+    if presses.is_null() { return false; }
+    let enumerator: Retained<AnyObject> = msg_send![&*presses, objectEnumerator];
+    loop {
+        let press: *const AnyObject = msg_send![&*enumerator, nextObject];
+        if press.is_null() { return false; }
+        let send_i64: unsafe extern "C" fn(*const AnyObject, Sel) -> i64 =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        if send_i64(press, Sel::register(c"type")) == 5 { return true; }
+    }
+}
+
+/// Hand a presses message to the superclass's implementation (UIKit's), as `super` would.
+unsafe fn presses_to_super(this: *mut c_void, sel: Sel, presses: *const AnyObject, event: *const AnyObject) {
+    extern "C" { fn objc_msgSendSuper(); fn object_getClass(obj: *const c_void) -> *const c_void; fn class_getSuperclass(cls: *const c_void) -> *const c_void; }
+    #[repr(C)]
+    struct Super { receiver: *mut c_void, super_class: *const c_void }
+    let sup = Super { receiver: this, super_class: class_getSuperclass(object_getClass(this)) };
+    let send: unsafe extern "C" fn(*const Super, Sel, *const AnyObject, *const AnyObject) =
+        std::mem::transmute(objc_msgSendSuper as unsafe extern "C" fn());
+    send(&sup, sel, presses, event);
+}
+
 // ============================================================
 // ObjC runtime
 // ============================================================
@@ -290,6 +361,11 @@ unsafe extern "C" fn bloom_can_become_focused(_this: *mut c_void, _sel: Sel) -> 
 // UIPressType values: 0=UpArrow, 1=DownArrow, 2=LeftArrow, 3=RightArrow,
 //                     4=Select, 5=Menu, 6=PlayPause
 unsafe extern "C" fn bloom_presses_began(_this: *mut c_void, _sel: Sel, presses: *const AnyObject, _event: *const AnyObject) {
+    // At the game's top level Menu goes to UIKit, which leaves the app (Apple requires it).
+    if bloom_shared::display::menu_exits() && has_menu_press(presses) {
+        presses_to_super(_this, _sel, presses, _event);
+        return;
+    }
     // Log to file since stderr doesn't always capture
     static PRESS_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = PRESS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -299,6 +375,10 @@ unsafe extern "C" fn bloom_presses_began(_this: *mut c_void, _sel: Sel, presses:
 }
 
 unsafe extern "C" fn bloom_presses_ended(_this: *mut c_void, _sel: Sel, presses: *const AnyObject, _event: *const AnyObject) {
+    if bloom_shared::display::menu_exits() && has_menu_press(presses) {
+        presses_to_super(_this, _sel, presses, _event);
+        return;
+    }
     handle_presses(presses, false);
 }
 
@@ -549,7 +629,14 @@ unsafe extern "C" fn bloom_window_send_event(this: *mut c_void, sel: Sel, event:
             }
         }
 
-        return; // Don't call super for type 3 — we extracted keys above
+        // Don't call super for type 3 — we extracted keys above. Except a Menu press while Menu
+        // leaves the app: that one goes on through the responder chain to UIKit.
+        if !(event_type == 3 && bloom_shared::display::menu_exits() && {
+            let all: *const AnyObject = msg_send![&*event, allPresses];
+            has_menu_press(all)
+        }) {
+            return;
+        }
     }
 
     // For other events, call super
@@ -742,59 +829,11 @@ unsafe extern "C" fn scene_will_connect(
         Err(_) => panic!("[bloom-tvos] No GPU adapter found"),
     };
 
-    // Ticket 007b: HW ray-query on RT-capable tvOS hardware (A13+).
-    let supported = adapter.features();
-    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-    let mut required_features = wgpu::Features::empty();
-    // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
-    // can record GPU timings. Optional — profiler falls back to CPU-only
-    // when the adapter doesn't grant it.
-    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-        required_features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-    // Cooked BC7 textures (bloom-cook) upload compressed when the
-    // adapter has BC support; without it they CPU-decode at load.
-    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-    }
-    if !force_sw_gi && supported.contains(rt_mask) {
-        required_features |= rt_mask;
-    }
-    let experimental_features = if required_features.intersects(rt_mask) {
-        unsafe { wgpu::ExperimentalFeatures::enabled() }
-    } else {
-        wgpu::ExperimentalFeatures::disabled()
-    };
-    // Base the requested limits on what the adapter actually advertises so we
-    // never ask for more than the backend can grant. The tvOS/iOS *simulators*
-    // cap several limits below wgpu's desktop default() — notably
-    // max_inter_stage_shader_variables (15 vs 16) — which makes request_device
-    // fail with LimitsExceeded. On real Apple TV hardware adapter.limits()
-    // meets or exceeds default(), so behaviour there is unchanged.
-    let adapter_limits = adapter.limits();
-    let mut required_limits = wgpu::Limits::default();
-    required_limits.max_inter_stage_shader_variables = required_limits
-        .max_inter_stage_shader_variables
-        .min(adapter_limits.max_inter_stage_shader_variables);
-    if required_features.intersects(rt_mask) {
-        required_limits = required_limits
-            .using_minimum_supported_acceleration_structure_values();
-    }
-    let (device, queue) = match pollster_block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("bloom_device"),
-            required_features,
-            required_limits,
-            experimental_features,
-            ..Default::default()
-        },
-    )) {
-        Ok(dq) => dq,
-        Err(e) => panic!("[bloom-tvos] Failed to create device: {e}"),
-    };
+    let negotiated = request_renderer_device(&adapter);
+    let negotiation_report = negotiated.report.report_json();
+    eprintln!("[bloom-tvos] renderer device negotiation = {negotiation_report}");
+    let device = negotiated.device;
+    let queue = negotiated.queue;
 
     let surface_caps = surface.get_capabilities(&adapter);
     // Use non-sRGB format to match game's sRGB color space (colors are specified as sRGB 0-255)
@@ -814,7 +853,8 @@ unsafe extern "C" fn scene_will_connect(
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
+    let mut renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
+    renderer.set_device_negotiation_report(negotiation_report);
     let _ = ENGINE.set(EngineState::new(renderer));
     std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] ENGINE created on main thread\n").ok();
 }
@@ -1035,56 +1075,11 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
         ..Default::default()
     })).expect("[bloom-tvos] No GPU adapter found");
 
-    // Ticket 007b: HW ray-query on RT-capable tvOS hardware (A13+).
-    let supported = adapter.features();
-    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-    let mut required_features = wgpu::Features::empty();
-    // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
-    // can record GPU timings. Optional — profiler falls back to CPU-only
-    // when the adapter doesn't grant it.
-    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-        required_features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-    // Cooked BC7 textures (bloom-cook) upload compressed when the
-    // adapter has BC support; without it they CPU-decode at load.
-    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-    }
-    if !force_sw_gi && supported.contains(rt_mask) {
-        required_features |= rt_mask;
-    }
-    let experimental_features = if required_features.intersects(rt_mask) {
-        unsafe { wgpu::ExperimentalFeatures::enabled() }
-    } else {
-        wgpu::ExperimentalFeatures::disabled()
-    };
-    // Base the requested limits on what the adapter actually advertises so we
-    // never ask for more than the backend can grant. The tvOS/iOS *simulators*
-    // cap several limits below wgpu's desktop default() — notably
-    // max_inter_stage_shader_variables (15 vs 16) — which makes request_device
-    // fail with LimitsExceeded. On real Apple TV hardware adapter.limits()
-    // meets or exceeds default(), so behaviour there is unchanged.
-    let adapter_limits = adapter.limits();
-    let mut required_limits = wgpu::Limits::default();
-    required_limits.max_inter_stage_shader_variables = required_limits
-        .max_inter_stage_shader_variables
-        .min(adapter_limits.max_inter_stage_shader_variables);
-    if required_features.intersects(rt_mask) {
-        required_limits = required_limits
-            .using_minimum_supported_acceleration_structure_values();
-    }
-    let (device, queue) = pollster_block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("bloom_device"),
-            required_features,
-            required_limits,
-            experimental_features,
-            ..Default::default()
-        },
-    )).expect("[bloom-tvos] Failed to create device");
+    let negotiated = request_renderer_device(&adapter);
+    let negotiation_report = negotiated.report.report_json();
+    eprintln!("[bloom-tvos] renderer device negotiation = {negotiation_report}");
+    let device = negotiated.device;
+    let queue = negotiated.queue;
 
     let surface_caps = surface.get_capabilities(&adapter);
     let format = surface_caps.formats.iter()
@@ -1103,7 +1098,8 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
+    let mut renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
+    renderer.set_device_negotiation_report(negotiation_report);
     let _ = ENGINE.set(EngineState::new(renderer));
     let _ = std::fs::write("/tmp/bloom_tvos_debug.txt", format!("ENGINE created\nformat={:?}\nsize={}x{}\n", format, pixel_width, pixel_height));
 }
@@ -1210,6 +1206,8 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
     let press_types_arr: Retained<AnyObject> = msg_send![arr_cls, arrayWithObject: &*menu_num];
     let _: () = msg_send![&*menu_tap, setAllowedPressTypes: &*press_types_arr];
     let _: () = msg_send![&*view, addGestureRecognizer: &*menu_tap];
+    MENU_TAP = Some(menu_tap.clone());
+    ROOT_VC = Some(vc.clone());
 
     // Trigger focus
     let _: () = msg_send![&*vc, setNeedsFocusUpdate];
@@ -1296,6 +1294,25 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
             }
         }
     }
+}
+
+fn request_renderer_device(
+    adapter: &wgpu::Adapter,
+) -> bloom_shared::renderer::device_negotiation::NegotiatedDevice {
+    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    pollster_block_on(
+        bloom_shared::renderer::device_negotiation::request_device_with_fallback(
+            adapter,
+            bloom_shared::renderer::device_negotiation::DeviceRequestOptions {
+                allow_ray_query: !force_sw_gi,
+                profile:
+                    bloom_shared::renderer::device_negotiation::DeviceRequestProfile::NativeFull,
+            },
+        ),
+    )
+    .unwrap_or_else(|error| panic!("[bloom-tvos] Failed to create renderer device: {error}"))
 }
 
 // ============================================================
@@ -1695,6 +1712,21 @@ pub extern "C" fn bloom_begin_drawing() {
             }
         }
     }
+    // The view's display scale and safe area (on a TV: the overscan-safe region), for
+    // getDisplayScale() / getSafeAreaInset(), in the pixels getScreenWidth() reports.
+    unsafe {
+        if let Some(view) = UI_VIEW.as_ref() {
+            let traits: *const AnyObject = msg_send![&**view, traitCollection];
+            if !traits.is_null() {
+                let s: f64 = msg_send![&*traits, displayScale];
+                if s.is_finite() && s > 0.0 { bloom_shared::display::set_display_scale(s); }
+            }
+            let insets: UIEdgeInsets = msg_send![&**view, safeAreaInsets];
+            let s = bloom_shared::display::display_scale();
+            bloom_shared::display::set_safe_area_insets(insets.top * s, insets.right * s, insets.bottom * s, insets.left * s);
+        }
+    }
+    sync_menu_exits();
     // Drain pending key events from main thread BEFORE begin_frame snapshots
     drain_pending_keys(engine());
 

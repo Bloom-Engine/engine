@@ -8,23 +8,73 @@
 
 use super::*;
 
+#[path = "models_gltf_layered_pbr.rs"]
+mod layered_pbr_import;
+use layered_pbr_import::{
+    layered_pbr_from_material, retain_layered_normal_image_indices, retain_material_tex_coords_1,
+    texture_binding_from_info,
+};
+#[path = "models_gltf_material.rs"]
+mod material_import;
+#[cfg(test)]
+use material_import::unsupported_material_extension_diagnostics;
+use material_import::{
+    apply_transmission_hack, emit_unsupported_material_extension_diagnostics,
+    transmission_from_material,
+};
+#[path = "models_gltf_bake.rs"]
+mod bake;
+#[path = "models_gltf_texture_io.rs"]
+mod texture_io;
+#[path = "models_gltf_texture_semantics.rs"]
+mod texture_semantics;
+#[path = "models_gltf_transform.rs"]
+mod transform;
+use bake::{
+    complete_geometry_source_hash, model_bounds, share_scene_mesh_instances,
+    shared_or_owned_instance,
+};
+use texture_io::{base64_decode, decode_texture_bytes, swap_extension};
+use texture_semantics::srgb_material_image_indices;
+
 /// Walk the scene graph and collect EVERY world-space transform that
 /// references each mesh. Unlike `walk_scene_for_mesh_transforms` which
 /// records only the first occurrence, this version captures every
 /// instance — so glTF scenes with heavy mesh reuse (Bistro: 5910 nodes
 /// referencing 551 unique meshes) render every chair / bollard / chain
 /// / bush instead of collapsing to a single copy each.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MeshInstance {
+    transform: [[f32; 4]; 4],
+    cast_shadow: bool,
+}
+
+fn node_casts_shadow(node: &gltf::Node<'_>) -> bool {
+    node.extras()
+        .as_ref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+        .and_then(|extras| {
+            extras
+                .get("BLOOM_cast_shadow")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(true)
+}
+
 fn walk_scene_collect_instances(
     node: &gltf::Node,
     parent: &[[f32; 4]; 4],
-    out: &mut [Vec<[[f32; 4]; 4]>],
+    out: &mut [Vec<MeshInstance>],
 ) {
     let local = node.transform().matrix();
     let world = mat4_mul(parent, &local);
     if let Some(mesh) = node.mesh() {
         let idx = mesh.index();
         if idx < out.len() {
-            out[idx].push(world);
+            out[idx].push(MeshInstance {
+                transform: world,
+                cast_shadow: node_casts_shadow(node),
+            });
         }
     }
     for child in node.children() {
@@ -32,71 +82,23 @@ fn walk_scene_collect_instances(
     }
 }
 
-/// Transform a 3D point by a 4x4 matrix (column-major). Treats the
-/// point as having w=1 and drops w from the result.
-fn mat4_transform_point(m: &[[f32; 4]; 4], p: &[f32; 3]) -> [f32; 3] {
-    [
-        m[0][0]*p[0] + m[1][0]*p[1] + m[2][0]*p[2] + m[3][0],
-        m[0][1]*p[0] + m[1][1]*p[1] + m[2][1]*p[2] + m[3][1],
-        m[0][2]*p[0] + m[1][2]*p[1] + m[2][2]*p[2] + m[3][2],
-    ]
-}
-
-/// Transform a direction vector by a 3x3 matrix (extracted from a 4x4
-/// column-major stored as the top-left 3x3). Used for normals under
-/// the inverse-transpose matrix.
-fn mat3_transform_vec(m: &[[f32; 3]; 3], v: &[f32; 3]) -> [f32; 3] {
-    [
-        m[0][0]*v[0] + m[1][0]*v[1] + m[2][0]*v[2],
-        m[0][1]*v[0] + m[1][1]*v[1] + m[2][1]*v[2],
-        m[0][2]*v[0] + m[1][2]*v[1] + m[2][2]*v[2],
-    ]
-}
-
-/// Inverse-transpose of the 3x3 rotation+scale part of a 4x4 matrix.
-/// Correct way to transform normals when the matrix has non-uniform
-/// scale; falls back to identity if the 3x3 block isn't invertible.
-fn mat4_inverse_transpose_3x3(m: &[[f32; 4]; 4]) -> [[f32; 3]; 3] {
-    let a = m[0][0]; let b = m[1][0]; let c = m[2][0];
-    let d = m[0][1]; let e = m[1][1]; let f = m[2][1];
-    let g = m[0][2]; let h = m[1][2]; let i = m[2][2];
-
-    let inv00 =  e*i - f*h;
-    let inv01 =  f*g - d*i;
-    let inv02 =  d*h - e*g;
-    let inv10 =  c*h - b*i;
-    let inv11 =  a*i - c*g;
-    let inv12 =  b*g - a*h;
-    let inv20 =  b*f - c*e;
-    let inv21 =  c*d - a*f;
-    let inv22 =  a*e - b*d;
-
-    let det = a*inv00 + b*inv01 + c*inv02;
-    if det.abs() < 1e-10 {
-        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    }
-    let inv_det = 1.0 / det;
-    // Store in column-major like the rest of the file (columns first).
-    // The result is the inverse-transpose, so rows/cols are swapped
-    // from the plain inverse.
-    [
-        [inv00 * inv_det, inv01 * inv_det, inv02 * inv_det],
-        [inv10 * inv_det, inv11 * inv_det, inv12 * inv_det],
-        [inv20 * inv_det, inv21 * inv_det, inv22 * inv_det],
-    ]
-}
-
 // ============================================================
 // glTF animation loader
 // ============================================================
 
-fn read_accessor_f32(_gltf: &gltf::Gltf, buffer_data: &[Vec<u8>], accessor: &gltf::Accessor) -> Vec<f32> {
+fn read_accessor_f32(
+    _gltf: &gltf::Gltf,
+    buffer_data: &[Vec<u8>],
+    accessor: &gltf::Accessor,
+) -> Vec<f32> {
     let view = match accessor.view() {
         Some(v) => v,
         None => return Vec::new(),
     };
     let buf_idx = view.buffer().index();
-    if buf_idx >= buffer_data.len() { return Vec::new(); }
+    if buf_idx >= buffer_data.len() {
+        return Vec::new();
+    }
     let buf = &buffer_data[buf_idx];
     let offset = view.offset() + accessor.offset();
     let count = accessor.count();
@@ -116,7 +118,12 @@ fn read_accessor_f32(_gltf: &gltf::Gltf, buffer_data: &[Vec<u8>], accessor: &glt
         for c in 0..component_count {
             let byte_offset = base + c * 4;
             if byte_offset + 4 <= buf.len() {
-                let val = f32::from_le_bytes([buf[byte_offset], buf[byte_offset+1], buf[byte_offset+2], buf[byte_offset+3]]);
+                let val = f32::from_le_bytes([
+                    buf[byte_offset],
+                    buf[byte_offset + 1],
+                    buf[byte_offset + 2],
+                    buf[byte_offset + 3],
+                ]);
                 result.push(val);
             } else {
                 result.push(0.0);
@@ -126,7 +133,7 @@ fn read_accessor_f32(_gltf: &gltf::Gltf, buffer_data: &[Vec<u8>], accessor: &glt
     result
 }
 
-pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
+pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
     let gltf = gltf::Gltf::from_slice(data).ok()?;
 
     // Get buffer data
@@ -168,10 +175,7 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             let mut default_ibm = Vec::with_capacity(joint_count * 16);
             for _ in 0..joint_count {
                 default_ibm.extend_from_slice(&[
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    0.0, 0.0, 0.0, 1.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ]);
             }
             default_ibm
@@ -199,7 +203,8 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             // The 100x in IBMs converts meter-space vertices to cm-space bone transforms.
             // DO NOT normalize — the scale is intentional and required.
 
-            let children: Vec<usize> = node.children()
+            let children: Vec<usize> = node
+                .children()
                 .filter_map(|child| node_to_joint.get(&child.index()).copied())
                 .collect();
 
@@ -207,7 +212,9 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             let (t, r, s) = node.transform().decomposed();
 
             joints.push(JointData {
-                inverse_bind: ibm, children, name,
+                inverse_bind: ibm,
+                children,
+                name,
                 rest_translation: t,
                 rest_rotation: r,
                 rest_scale: s,
@@ -218,24 +225,38 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
         let mut is_child = vec![false; joint_count];
         for joint in &joints {
             for &child in &joint.children {
-                if child < joint_count { is_child[child] = true; }
+                if child < joint_count {
+                    is_child[child] = true;
+                }
             }
         }
         for i in 0..joint_count {
-            if !is_child[i] { root_joints.push(i); }
+            if !is_child[i] {
+                root_joints.push(i);
+            }
         }
 
         #[cfg(debug_assertions)]
         {
-            eprintln!("[anim] Skeleton: {} joints, {} roots", joints.len(), root_joints.len());
+            eprintln!(
+                "[anim] Skeleton: {} joints, {} roots",
+                joints.len(),
+                root_joints.len()
+            );
             for (i, j) in joints.iter().enumerate() {
                 if i < 5 || i == joints.len() - 1 {
-                    eprintln!("[anim]   joint {}: '{}' children={:?}", i, j.name, j.children);
+                    eprintln!(
+                        "[anim]   joint {}: '{}' children={:?}",
+                        i, j.name, j.children
+                    );
                 }
             }
         }
 
-        Some(SkeletonData { joints, root_joints })
+        Some(SkeletonData {
+            joints,
+            root_joints,
+        })
     } else {
         #[cfg(debug_assertions)]
         eprintln!("[anim] No skin found in glTF!");
@@ -249,14 +270,28 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
         let mut duration: f32 = 0.0;
 
         // Build node-to-joint mapping for channel resolution
-        let node_to_joint: std::collections::HashMap<usize, usize> = if let Some(skin) = gltf.skins().next() {
-            skin.joints().enumerate().map(|(ji, node)| (node.index(), ji)).collect()
-        } else {
-            std::collections::HashMap::new()
-        };
+        let node_to_joint: std::collections::HashMap<usize, usize> =
+            if let Some(skin) = gltf.skins().next() {
+                skin.joints()
+                    .enumerate()
+                    .map(|(ji, node)| (node.index(), ji))
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
 
         // Group channels by target node: (trans_ts, translations, rot_ts, rotations, scale_ts, scales)
-        let mut node_channels: std::collections::HashMap<usize, (Vec<f32>, Vec<[f32; 3]>, Vec<f32>, Vec<[f32; 4]>, Vec<f32>, Vec<[f32; 3]>)> = std::collections::HashMap::new();
+        let mut node_channels: std::collections::HashMap<
+            usize,
+            (
+                Vec<f32>,
+                Vec<[f32; 3]>,
+                Vec<f32>,
+                Vec<[f32; 4]>,
+                Vec<f32>,
+                Vec<[f32; 3]>,
+            ),
+        > = std::collections::HashMap::new();
 
         #[cfg(debug_assertions)]
         let mut skipped_channels = 0usize;
@@ -264,14 +299,22 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
         let mut mapped_channels = 0usize;
         #[cfg(debug_assertions)]
         {
-            eprintln!("[anim] Animation '{}' has {} channels, node_to_joint map has {} entries",
-                anim.name().unwrap_or("?"), anim.channels().count(), node_to_joint.len());
+            eprintln!(
+                "[anim] Animation '{}' has {} channels, node_to_joint map has {} entries",
+                anim.name().unwrap_or("?"),
+                anim.channels().count(),
+                node_to_joint.len()
+            );
             for (ci, ch) in anim.channels().enumerate() {
                 if ci < 5 {
                     let tn = ch.target().node();
-                    eprintln!("[anim]   channel {} targets node {} '{}'  mapped={}",
-                        ci, tn.index(), tn.name().unwrap_or("?"),
-                        node_to_joint.contains_key(&tn.index()));
+                    eprintln!(
+                        "[anim]   channel {} targets node {} '{}'  mapped={}",
+                        ci,
+                        tn.index(),
+                        tn.name().unwrap_or("?"),
+                        node_to_joint.contains_key(&tn.index())
+                    );
                 }
             }
         }
@@ -280,14 +323,18 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             let joint_index = match node_to_joint.get(&target_node) {
                 Some(&ji) => {
                     #[cfg(debug_assertions)]
-                    { mapped_channels += 1; }
+                    {
+                        mapped_channels += 1;
+                    }
                     ji
-                },
+                }
                 None => {
                     #[cfg(debug_assertions)]
-                    { skipped_channels += 1; }
+                    {
+                        skipped_channels += 1;
+                    }
                     continue;
-                },
+                }
             };
 
             let sampler = channel.sampler();
@@ -298,10 +345,21 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             let values = read_accessor_f32(&gltf, &buffer_data, &output_accessor);
 
             if let Some(&last) = timestamps.last() {
-                if last > duration { duration = last; }
+                if last > duration {
+                    duration = last;
+                }
             }
 
-            let entry = node_channels.entry(joint_index).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+            let entry = node_channels.entry(joint_index).or_insert_with(|| {
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            });
 
             match channel.target().property() {
                 gltf::animation::Property::Translation => {
@@ -320,7 +378,9 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             }
         }
 
-        for (joint_index, (trans_ts, translations, rot_ts, rotations, scale_ts, scales)) in node_channels {
+        for (joint_index, (trans_ts, translations, rot_ts, rotations, scale_ts, scales)) in
+            node_channels
+        {
             // Use the longest timestamp array as the primary (for backward compat)
             let timestamps = if rot_ts.len() >= trans_ts.len() && rot_ts.len() >= scale_ts.len() {
                 rot_ts.clone()
@@ -344,11 +404,19 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
         #[cfg(debug_assertions)]
         {
             let total_kf: usize = channels.iter().map(|c| c.timestamps.len()).sum();
-            let avg_kf = if !channels.is_empty() { total_kf / channels.len() } else { 0 };
+            let avg_kf = if !channels.is_empty() {
+                total_kf / channels.len()
+            } else {
+                0
+            };
             eprintln!("[anim] Animation '{}': {} channels mapped, {} skipped, duration={:.2}s, avg {}/ch keyframes",
                 name, mapped_channels, skipped_channels, duration, avg_kf);
         }
-        animations.push(AnimationData { channels, duration, name });
+        animations.push(AnimationData {
+            channels,
+            duration,
+            name,
+        });
     }
 
     let joint_count = skeleton.as_ref().map(|s| s.joints.len()).unwrap_or(0);
@@ -361,14 +429,25 @@ pub(super) fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             let anim0 = &animations[0];
             for ch in &anim0.channels {
                 if ch.joint_index < joint_count_s && !ch.rotations.is_empty() {
-                    rest_rots[ch.joint_index] = if ch.rotations.len() > 0 { ch.rotations[0] } else { [0.0, 0.0, 0.0, 1.0] };
+                    rest_rots[ch.joint_index] = if ch.rotations.len() > 0 {
+                        ch.rotations[0]
+                    } else {
+                        [0.0, 0.0, 0.0, 1.0]
+                    };
                 }
             }
             #[cfg(debug_assertions)]
-            eprintln!("[retarget] Built reference rest rotations from anim 0 for {} joints", joint_count_s);
+            eprintln!(
+                "[retarget] Built reference rest rotations from anim 0 for {} joints",
+                joint_count_s
+            );
             Some(rest_rots)
-        } else { None }
-    } else { None };
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     Some(ModelAnimation {
         skeleton: skeleton.map(Arc::new),
@@ -386,15 +465,19 @@ pub(super) fn load_gltf_with_textures(
     data: &[u8],
     renderer: &mut crate::renderer::Renderer,
     base_dir: Option<&std::path::Path>,
+    source_label: Option<&str>,
 ) -> Option<ModelData> {
     let gltf = gltf::Gltf::from_slice(data).ok()?;
+    emit_unsupported_material_extension_diagnostics(&gltf, source_label.unwrap_or("<memory glTF>"));
 
     // Get buffer data
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
     for buffer in gltf.buffers() {
         match buffer.source() {
             gltf::buffer::Source::Bin => {
-                if let Some(blob) = gltf.blob.as_ref() { buffer_data.push(blob.clone()); }
+                if let Some(blob) = gltf.blob.as_ref() {
+                    buffer_data.push(blob.clone());
+                }
             }
             gltf::buffer::Source::Uri(uri) => {
                 if let Some(encoded) = uri.strip_prefix("data:application/octet-stream;base64,") {
@@ -414,6 +497,7 @@ pub(super) fn load_gltf_with_textures(
             }
         }
     }
+    let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     // Pre-walk materials to identify which image indices are normal
     // maps. They need LEADR-style vector-space mip generation and per-
@@ -424,11 +508,19 @@ pub(super) fn load_gltf_with_textures(
             normal_image_set.insert(nt.texture().source().index());
         }
     }
+    retain_layered_normal_image_indices(&gltf, &mut normal_image_set);
+    let srgb_image_set = srgb_material_image_indices(&gltf);
+    let mask_coverage_references = target_mask_texture_coverage_references(&gltf);
+    let mask_only_images =
+        mask_only_texture_images(&gltf, mask_coverage_references.keys().copied());
+    let mut mask_texture_indices: std::collections::HashMap<MaskTextureVariantKey, u32> =
+        Default::default();
 
     // Extract and register textures
     let mut texture_indices: Vec<u32> = Vec::new(); // maps glTF image index -> renderer texture index
     for (image_idx, image) in gltf.images().enumerate() {
         let is_normal = normal_image_set.contains(&image_idx);
+        let is_srgb = !is_normal && srgb_image_set.contains(&image_idx);
         match image.source() {
             gltf::image::Source::View { view, .. } => {
                 let buf_idx = view.buffer().index();
@@ -441,8 +533,18 @@ pub(super) fn load_gltf_with_textures(
                         if let Ok(img) = image::load_from_memory(img_data) {
                             let rgba = img.to_rgba8();
                             let (w, h) = (rgba.width(), rgba.height());
-                            let tex_idx = renderer.register_texture_kind(w, h, &rgba, is_normal);
-                            texture_indices.push(tex_idx);
+                            texture_indices.push(register_gltf_image_with_mask_variants(
+                                renderer,
+                                image_idx,
+                                w,
+                                h,
+                                &rgba,
+                                is_normal,
+                                is_srgb,
+                                mask_coverage_references.get(&image_idx).map(Vec::as_slice),
+                                mask_only_images.contains(&image_idx),
+                                &mut mask_texture_indices,
+                            ));
                         } else {
                             texture_indices.push(0); // fallback to white
                         }
@@ -486,12 +588,28 @@ pub(super) fn load_gltf_with_textures(
                     };
                 match bytes.and_then(|b| decode_texture_bytes(&b, &effective_uri)) {
                     Some((rgba, w, h)) => {
-                        texture_indices.push(renderer.register_texture_kind(w, h, &rgba, is_normal));
+                        texture_indices.push(register_gltf_image_with_mask_variants(
+                            renderer,
+                            image_idx,
+                            w,
+                            h,
+                            &rgba,
+                            is_normal,
+                            is_srgb,
+                            mask_coverage_references.get(&image_idx).map(Vec::as_slice),
+                            mask_only_images.contains(&image_idx),
+                            &mut mask_texture_indices,
+                        ));
                     }
                     None => texture_indices.push(0),
                 }
             }
         }
+        // Imports complete before Bloom's first frame submission. Flush each
+        // completed image so wgpu can retire its queue-owned upload staging
+        // before the next decoded image is produced. The resident texture is
+        // bit-identical; this only bounds transient CPU memory.
+        renderer.flush_import_uploads();
     }
 
     // Detect armature scale for skinned meshes.
@@ -527,14 +645,32 @@ pub(super) fn load_gltf_with_textures(
                         let data = &buffer_data[buf_idx];
                         if offset + 12 <= data.len() {
                             // Read first 3 floats (first column of first IBM)
-                            let f0 = f32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                            let f1 = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                            let f2 = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                            let diag = (f0*f0 + f1*f1 + f2*f2).sqrt();
+                            let f0 = f32::from_le_bytes([
+                                data[offset],
+                                data[offset + 1],
+                                data[offset + 2],
+                                data[offset + 3],
+                            ]);
+                            let f1 = f32::from_le_bytes([
+                                data[offset + 4],
+                                data[offset + 5],
+                                data[offset + 6],
+                                data[offset + 7],
+                            ]);
+                            let f2 = f32::from_le_bytes([
+                                data[offset + 8],
+                                data[offset + 9],
+                                data[offset + 10],
+                                data[offset + 11],
+                            ]);
+                            let diag = (f0 * f0 + f1 * f1 + f2 * f2).sqrt();
                             if diag > 10.0 {
                                 scale = diag;
                                 #[cfg(debug_assertions)]
-                                eprintln!("[skin] IBM col0 len={:.1}, applying {:.0}x vertex scale", diag, scale);
+                                eprintln!(
+                                    "[skin] IBM col0 len={:.1}, applying {:.0}x vertex scale",
+                                    diag, scale
+                                );
                             }
                         }
                     }
@@ -543,28 +679,37 @@ pub(super) fn load_gltf_with_textures(
         }
         if (scale - 1.0).abs() > 0.01 {
             #[cfg(debug_assertions)]
-            eprintln!("[skin] Applying {:.0}x vertex scale to compensate armature transform", scale);
+            eprintln!(
+                "[skin] Applying {:.0}x vertex scale to compensate armature transform",
+                scale
+            );
         }
         scale
     };
 
-    let mut meshes = Vec::new();
-    let mut bbox_min = [f32::MAX; 3];
-    let mut bbox_max = [f32::MIN; 3];
+    let mut meshes: Vec<Arc<MeshData>> = Vec::new();
+    let mut mesh_transforms = Vec::new();
+    let mut mesh_cast_shadows = Vec::new();
+    let mut mesh_sources = Vec::new();
 
     // Walk the scene node tree to collect world-space transforms for
     // each mesh-referencing node. glTF supports instancing by having
     // multiple nodes reference the same mesh at different transforms
     // — Bistro uses this heavily (5910 nodes, 551 meshes: chairs,
     // bollards, chains, foliage repeated everywhere). We emit one
-    // MeshData PER (mesh, transform) pair so every instance actually
-    // shows up in the scene. Memory cost is linear in node count;
-    // not great for deep instancing but correct. Animated / skinned
-    // meshes are unaffected — the armature transforms apply on top.
+    // placement entry per (mesh, transform) pair so every instance actually
+    // shows up in the scene. Static entries share one immutable primitive
+    // payload; only their compact transforms scale with node count. Animated
+    // / skinned meshes retain their owned compatibility path.
     let mesh_count = gltf.meshes().count();
-    let mut mesh_instances: Vec<Vec<[[f32; 4]; 4]>> = vec![Vec::new(); mesh_count];
-    let identity = [[1.0f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
-    for scene in gltf.scenes() {
+    let mut mesh_instances: Vec<Vec<MeshInstance>> = vec![Vec::new(); mesh_count];
+    let identity = [
+        [1.0f32, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    if let Some(scene) = gltf.default_scene().or_else(|| gltf.scenes().next()) {
         for node in scene.nodes() {
             walk_scene_collect_instances(&node, &identity, &mut mesh_instances);
         }
@@ -575,223 +720,338 @@ pub(super) fn load_gltf_with_textures(
         // Meshes reachable from no scene node would have no instances;
         // fall back to a single identity transform so orphan meshes
         // still render (matches prior behaviour for simple models).
-        let instance_transforms: Vec<Option<[[f32; 4]; 4]>> = if instances.is_empty() {
-            vec![None]
+        let placements: Vec<MeshInstance> = if instances.is_empty() {
+            vec![MeshInstance {
+                transform: identity,
+                cast_shadow: true,
+            }]
         } else {
-            instances.into_iter().map(Some).collect()
+            instances
         };
 
-        for mesh_world in &instance_transforms {
-            let mesh_world = *mesh_world;
-            // Inverse-transpose 3×3 for normals under non-uniform scale.
-            let normal_xform = mesh_world.map(|m| mat4_inverse_transpose_3x3(&m));
-        for primitive in mesh.primitives() {
-            let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
-            let positions: Vec<[f32; 3]> = match reader.read_positions() {
-                Some(iter) => iter.collect(),
-                None => continue,
-            };
-            let normals: Vec<[f32; 3]> = reader.read_normals()
-                .map(|iter| iter.collect())
-                .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
-            let tex_coords: Vec<[f32; 2]> = reader.read_tex_coords(0)
-                .map(|iter| iter.into_f32().collect())
-                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
-            // Tangents (vec4: xyz = tangent, w = bitangent sign ±1).
-            // If absent, we leave them as zero so the shader knows to
-            // skip normal-map perturbation for this mesh.
-            let tangents: Vec<[f32; 4]> = reader.read_tangents()
-                .map(|iter| iter.collect())
-                .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
+        let mut primitive_cache: Vec<Option<Arc<MeshData>>> =
+            (0..mesh.primitives().count()).map(|_| None).collect();
+        for (placement_index, placement) in placements.iter().enumerate() {
+            let instance_transform = placement.transform;
+            for (primitive_index, primitive) in mesh.primitives().enumerate() {
+                if let Some(source) = primitive_cache[primitive_index].as_ref() {
+                    let (instance, transform) =
+                        shared_or_owned_instance(source, instance_transform);
+                    meshes.push(instance);
+                    mesh_transforms.push(transform);
+                    mesh_cast_shadows.push(placement.cast_shadow);
+                    mesh_sources.push(Some(ModelPrimitiveSource {
+                        mesh_index: mesh.index() as u32,
+                        primitive_index: primitive_index as u32,
+                        placement_index: placement_index as u32,
+                    }));
+                    continue;
+                }
+                let reader =
+                    primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
+                let positions: Vec<[f32; 3]> = match reader.read_positions() {
+                    Some(iter) => iter.collect(),
+                    None => continue,
+                };
+                let normals: Vec<[f32; 3]> = reader
+                    .read_normals()
+                    .map(|iter| iter.collect())
+                    .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+                let tex_coords: Vec<[f32; 2]> = reader
+                    .read_tex_coords(0)
+                    .map(|iter| iter.into_f32().collect())
+                    .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+                // Tangents (vec4: xyz = tangent, w = bitangent sign ±1).
+                // If absent, we leave them as zero so the shader knows to
+                // skip normal-map perturbation for this mesh.
+                let tangents: Vec<[f32; 4]> = reader
+                    .read_tangents()
+                    .map(|iter| iter.map(sanitize_imported_tangent).collect())
+                    .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
+                let joint_vals: Option<Vec<[u16; 4]>> =
+                    reader.read_joints(0).map(|iter| iter.into_u16().collect());
+                let weight_vals: Option<Vec<[f32; 4]>> =
+                    reader.read_weights(0).map(|iter| iter.into_f32().collect());
+                // Get vertex colors if available
+                let vert_colors: Option<Vec<[f32; 4]>> = reader
+                    .read_colors(0)
+                    .map(|iter| iter.into_rgba_f32().collect());
 
-            // Get vertex colors if available
-            let vert_colors: Option<Vec<[f32; 4]>> = reader.read_colors(0)
-                .map(|iter| iter.into_rgba_f32().collect());
+                let mat = primitive.material();
+                let pbr = mat.pbr_metallic_roughness();
+                let emissive_factor = mat.emissive_factor();
+                let transmission =
+                    match transmission_from_material(&mat, Some(texture_indices.as_slice())) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            log::error!("{error}");
+                            return None;
+                        }
+                    };
+                let layered_pbr = match layered_pbr_from_material(
+                    &gltf,
+                    &mat,
+                    Some(texture_indices.as_slice()),
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        log::error!("{error}");
+                        return None;
+                    }
+                };
+                let secondary_tex_coords = retain_material_tex_coords_1(
+                    transmission,
+                    layered_pbr,
+                    positions.len(),
+                    || {
+                        reader
+                            .read_tex_coords(1)
+                            .map(|iter| iter.into_f32().collect())
+                    },
+                );
 
-            let mat = primitive.material();
-            let pbr = mat.pbr_metallic_roughness();
-            let emissive_factor = mat.emissive_factor();
+                let tex_idx_of =
+                    |img_idx: usize| -> Option<u32> { texture_indices.get(img_idx).copied() };
+                let (base_color_tex_idx, alpha_coverage_mips) =
+                    base_color_texture_selection(&mat, &texture_indices, &mask_texture_indices);
 
-            let tex_idx_of = |img_idx: usize| -> Option<u32> {
-                texture_indices.get(img_idx).copied()
-            };
+                let normal_tex_idx = mat
+                    .normal_texture()
+                    .and_then(|info| tex_idx_of(info.texture().source().index()));
+                let emissive_tex_idx = mat
+                    .emissive_texture()
+                    .and_then(|info| tex_idx_of(info.texture().source().index()));
+                let occlusion_tex_idx = mat
+                    .occlusion_texture()
+                    .and_then(|info| tex_idx_of(info.texture().source().index()));
 
-            let normal_tex_idx = mat.normal_texture()
-                .and_then(|info| tex_idx_of(info.texture().source().index()));
-            let emissive_tex_idx = mat.emissive_texture()
-                .and_then(|info| tex_idx_of(info.texture().source().index()));
-            let occlusion_tex_idx = mat.occlusion_texture()
-                .and_then(|info| tex_idx_of(info.texture().source().index()));
-
-            // Metallic-roughness first; fall back to
-            // KHR_materials_pbrSpecularGlossiness when only that's
-            // authored (Lumberyard Bistro + many FBX exports).
-            // Conversion matches the load_gltf_staged path — see
-            // specgloss_to_metalrough for the algorithm.
-            let (mut base_color, mut metallic_factor, mut roughness_factor, tex_idx, mr_tex_idx) =
-                if pbr.base_color_texture().is_none() {
+                // Metallic-roughness first; fall back to
+                // KHR_materials_pbrSpecularGlossiness when only that's
+                // authored (Lumberyard Bistro + many FBX exports).
+                // Conversion matches the load_gltf_staged path — see
+                // specgloss_to_metalrough for the algorithm.
+                let (
+                    mut base_color,
+                    mut metallic_factor,
+                    mut roughness_factor,
+                    tex_idx,
+                    mr_tex_idx,
+                    specular_glossiness_factor,
+                ) = if pbr.base_color_texture().is_none() {
                     if let Some(sg) = mat.pbr_specular_glossiness() {
                         let diffuse = sg.diffuse_factor();
                         let spec = sg.specular_factor();
-                        let (base_color, metallic) =
-                            specgloss_to_metalrough(diffuse, spec);
-                        let roughness = 1.0 - sg.glossiness_factor();
-                        let diffuse_tex = sg.diffuse_texture()
-                            .and_then(|info| tex_idx_of(info.texture().source().index()));
-                        (base_color, metallic, roughness, diffuse_tex, None)
+                        let glossiness = sg.glossiness_factor();
+                        if let Some((spec_gloss_tex_idx, factors)) =
+                            specular_glossiness_texture_selection(&sg, &texture_indices)
+                        {
+                            // Preserve the authored RGB specular + A glossiness
+                            // map. The shader converts diffuse/spec-gloss to
+                            // metallic-roughness per pixel; doing that here with
+                            // scalar factors discarded most of Bistro's surface
+                            // variation.
+                            (
+                                diffuse,
+                                0.0,
+                                1.0,
+                                base_color_tex_idx,
+                                Some(spec_gloss_tex_idx),
+                                Some(factors),
+                            )
+                        } else {
+                            let (base_color, metallic) = specgloss_to_metalrough(diffuse, spec);
+                            let roughness = 1.0 - glossiness;
+                            (
+                                base_color,
+                                metallic,
+                                roughness,
+                                base_color_tex_idx,
+                                None,
+                                None,
+                            )
+                        }
                     } else {
-                        (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), None, None)
+                        (
+                            pbr.base_color_factor(),
+                            pbr.metallic_factor(),
+                            pbr.roughness_factor(),
+                            None,
+                            None,
+                            None,
+                        )
                     }
                 } else {
-                    let tex = pbr.base_color_texture()
+                    let mr = pbr
+                        .metallic_roughness_texture()
                         .and_then(|info| tex_idx_of(info.texture().source().index()));
-                    let mr = pbr.metallic_roughness_texture()
-                        .and_then(|info| tex_idx_of(info.texture().source().index()));
-                    (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), tex, mr)
-                };
-
-            if let Some(t) = mat.transmission() {
-                apply_transmission_hack(
-                    t.transmission_factor(),
-                    &mut base_color,
-                    &mut metallic_factor,
-                    &mut roughness_factor,
-                );
-            }
-
-            let mut vertices = Vec::with_capacity(positions.len());
-            for i in 0..positions.len() {
-                let p = positions[i];
-                for k in 0..3 {
-                    if p[k] < bbox_min[k] { bbox_min[k] = p[k]; }
-                    if p[k] > bbox_max[k] { bbox_max[k] = p[k]; }
-                }
-                let color = if let Some(ref vc) = vert_colors {
-                    vc[i]
-                } else {
-                    [base_color[0], base_color[1], base_color[2], base_color[3]]
-                };
-                // Skin data (joints + weights)
-                let joint_vals: Option<Vec<[u16; 4]>> = reader.read_joints(0)
-                    .map(|iter| iter.into_u16().collect());
-                let weight_vals: Option<Vec<[f32; 4]>> = reader.read_weights(0)
-                    .map(|iter| iter.into_f32().collect());
-
-                let jv = if let Some(ref j) = joint_vals {
-                    [j[i][0] as f32, j[i][1] as f32, j[i][2] as f32, j[i][3] as f32]
-                } else {
-                    [0.0; 4]
-                };
-                let wv = if let Some(ref w) = weight_vals {
-                    w[i]
-                } else {
-                    [0.0; 4]
-                };
-                // Apply inverse armature scale to skinned vertex positions
-                let is_skinned = wv[0] + wv[1] + wv[2] + wv[3] > 0.01;
-                let base_pos = if is_skinned && (skin_vertex_scale - 1.0).abs() > 0.01 {
-                    [p[0] * skin_vertex_scale, p[1] * skin_vertex_scale, p[2] * skin_vertex_scale]
-                } else {
-                    p
-                };
-                // Bake the mesh's scene node transform into world-space
-                // position/normal. Skinned meshes are NOT world-baked:
-                // their node transform is expected to be consumed by the
-                // armature, and the pose is driven by joint matrices at
-                // draw time. Static (non-skinned) meshes get the baked
-                // transform so drawModel's position/scale arguments
-                // apply on top of the correct base pose.
-                let (final_pos, final_normal, final_tangent) = if is_skinned {
-                    (base_pos, normals[i], tangents[i])
-                } else if let Some(xform) = mesh_world {
-                    let t_in = [tangents[i][0], tangents[i][1], tangents[i][2]];
-                    let t_out = match normal_xform {
-                        // Tangents transform like positions (as directions)
-                        // under the linear part of the transform — we use
-                        // the upper 3×3 of the model matrix, not its
-                        // inverse-transpose. But since our mesh_world is
-                        // rigid-ish (no shear), the normal_xform gets us
-                        // close enough for the common case. For a purely
-                        // orthonormal node transform these are identical.
-                        Some(ref n) => mat3_transform_vec(n, &t_in),
-                        None => t_in,
-                    };
                     (
-                        mat4_transform_point(&xform, &base_pos),
-                        match normal_xform {
-                            Some(ref n) => mat3_transform_vec(n, &normals[i]),
-                            None => normals[i],
-                        },
-                        [t_out[0], t_out[1], t_out[2], tangents[i][3]],
+                        pbr.base_color_factor(),
+                        pbr.metallic_factor(),
+                        pbr.roughness_factor(),
+                        base_color_tex_idx,
+                        mr,
+                        None,
                     )
-                } else {
-                    (base_pos, normals[i], tangents[i])
                 };
-                // Update bbox to reflect the final (possibly transformed)
-                // position so the camera auto-framing still works right.
-                for k in 0..3 {
-                    if final_pos[k] < bbox_min[k] { bbox_min[k] = final_pos[k]; }
-                    if final_pos[k] > bbox_max[k] { bbox_max[k] = final_pos[k]; }
+
+                if !crate::models::physical_transmission_requested() {
+                    if let Some(t) = mat.transmission() {
+                        apply_transmission_hack(
+                            t.transmission_factor(),
+                            &mut base_color,
+                            &mut metallic_factor,
+                            &mut roughness_factor,
+                        );
+                    }
                 }
-                vertices.push(Vertex3D {
-                    position: final_pos,
-                    normal: final_normal,
-                    color,
-                    uv: tex_coords[i],
-                    joints: jv,
-                    weights: wv,
-                    tangent: final_tangent,
+
+                let mut vertices = Vec::with_capacity(positions.len());
+                for i in 0..positions.len() {
+                    let p = positions[i];
+                    let color = vert_colors
+                        .as_ref()
+                        .map(|colors| multiply_rgba(colors[i], base_color))
+                        .unwrap_or(base_color);
+
+                    let jv = if let Some(ref j) = joint_vals {
+                        [
+                            j[i][0] as f32,
+                            j[i][1] as f32,
+                            j[i][2] as f32,
+                            j[i][3] as f32,
+                        ]
+                    } else {
+                        [0.0; 4]
+                    };
+                    let wv = if let Some(ref w) = weight_vals {
+                        w[i]
+                    } else {
+                        [0.0; 4]
+                    };
+                    // Apply inverse armature scale to skinned vertex positions
+                    let is_skinned = wv[0] + wv[1] + wv[2] + wv[3] > 0.01;
+                    let base_pos = if is_skinned && (skin_vertex_scale - 1.0).abs() > 0.01 {
+                        [
+                            p[0] * skin_vertex_scale,
+                            p[1] * skin_vertex_scale,
+                            p[2] * skin_vertex_scale,
+                        ]
+                    } else {
+                        p
+                    };
+                    vertices.push(Vertex3D {
+                        position: base_pos,
+                        normal: normals[i],
+                        color,
+                        uv: tex_coords[i],
+                        joints: jv,
+                        weights: wv,
+                        tangent: tangents[i],
+                    });
+                }
+                let indices: Vec<u32> = match reader.read_indices() {
+                    Some(iter) => iter.into_u32().collect(),
+                    None => (0..positions.len() as u32).collect(),
+                };
+                let source = Arc::new(MeshData {
+                    vertices,
+                    secondary_tex_coords,
+                    indices,
+                    texture_idx: tex_idx,
+                    normal_texture_idx: normal_tex_idx,
+                    metallic_roughness_texture_idx: mr_tex_idx,
+                    specular_glossiness_factor,
+                    emissive_texture_idx: emissive_tex_idx,
+                    occlusion_texture_idx: occlusion_tex_idx,
+                    metallic_factor,
+                    roughness_factor,
+                    emissive_factor,
+                    alpha_mode: alpha_mode_from_material(&mat),
+                    alpha_cutoff: alpha_cutoff_from_material(&mat),
+                    alpha_coverage_mips,
+                    double_sided: mat.double_sided(),
+                    transmission,
+                    layered_pbr,
                 });
+                primitive_cache[primitive_index] = Some(Arc::clone(&source));
+                let (instance, transform) = shared_or_owned_instance(&source, instance_transform);
+                meshes.push(instance);
+                mesh_transforms.push(transform);
+                mesh_cast_shadows.push(placement.cast_shadow);
+                mesh_sources.push(Some(ModelPrimitiveSource {
+                    mesh_index: mesh.index() as u32,
+                    primitive_index: primitive_index as u32,
+                    placement_index: placement_index as u32,
+                }));
             }
-            let indices: Vec<u32> = match reader.read_indices() {
-                Some(iter) => iter.into_u32().collect(),
-                None => (0..positions.len() as u32).collect(),
-            };
-            meshes.push(MeshData {
-                vertices,
-                indices,
-                texture_idx: tex_idx,
-                normal_texture_idx: normal_tex_idx,
-                metallic_roughness_texture_idx: mr_tex_idx,
-                emissive_texture_idx: emissive_tex_idx,
-                occlusion_texture_idx: occlusion_tex_idx,
-                metallic_factor,
-                roughness_factor,
-                emissive_factor,
-                alpha_cutoff: alpha_cutoff_from_material(&mat),
-            });
-        }
         } // end instance loop
     }
 
-    if meshes.is_empty() { return None; }
-    Some(ModelData { meshes, bbox_min, bbox_max })
+    if meshes.is_empty() {
+        return None;
+    }
+    let (bbox_min, bbox_max) = model_bounds(&meshes, &mesh_transforms);
+    Some(ModelData {
+        meshes,
+        mesh_transforms,
+        mesh_cast_shadows,
+        mesh_sources,
+        source_geometry_sha256,
+        bbox_min,
+        bbox_max,
+    })
 }
 
 /// Like load_gltf_with_textures but decodes textures to RGBA without GPU registration.
 /// Returns a StagedModel with decoded textures that can later be committed on the main thread.
 pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
-    use crate::staging::{StagedTexture, StagedModel};
+    load_gltf_staged_impl(data, None, "<staged glTF>")
+}
+
+/// Path-aware staged import for the offline cooker. External buffers/images
+/// resolve relative to the source document, including Bistro's DDS siblings.
+pub fn load_gltf_staged_from_source_path(
+    data: &[u8],
+    source_path: &std::path::Path,
+) -> Option<crate::staging::StagedModel> {
+    let base_dir = source_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    load_gltf_staged_impl(data, Some(base_dir), &source_path.display().to_string())
+}
+
+fn load_gltf_staged_impl(
+    data: &[u8],
+    base_dir: Option<&std::path::Path>,
+    source_label: &str,
+) -> Option<crate::staging::StagedModel> {
+    use crate::staging::{StagedModel, StagedTexture};
 
     let gltf = gltf::Gltf::from_slice(data).ok()?;
+    emit_unsupported_material_extension_diagnostics(&gltf, source_label);
 
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
     for buffer in gltf.buffers() {
         match buffer.source() {
             gltf::buffer::Source::Bin => {
-                if let Some(blob) = gltf.blob.as_ref() { buffer_data.push(blob.clone()); }
+                if let Some(blob) = gltf.blob.as_ref() {
+                    buffer_data.push(blob.clone());
+                }
             }
             gltf::buffer::Source::Uri(uri) => {
                 if let Some(encoded) = uri.strip_prefix("data:application/octet-stream;base64,") {
                     let mut decoded = Vec::new();
                     let _ = base64_decode(encoded, &mut decoded);
                     buffer_data.push(decoded);
+                } else if let Some(dir) = base_dir {
+                    buffer_data.push(std::fs::read(dir.join(uri)).ok()?);
                 } else {
                     buffer_data.push(Vec::new());
                 }
             }
         }
     }
+    let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     // Pre-walk materials for the image indices used as normal maps — they
     // must be registered via register_texture_kind's linear/LEADR path at
@@ -802,6 +1062,13 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
             normal_image_set.insert(nt.texture().source().index());
         }
     }
+    retain_layered_normal_image_indices(&gltf, &mut normal_image_set);
+    let srgb_image_set = srgb_material_image_indices(&gltf);
+    let mask_coverage_references = target_mask_texture_coverage_references(&gltf);
+    let mask_only_images =
+        mask_only_texture_images(&gltf, mask_coverage_references.keys().copied());
+    let mut mask_texture_indices: std::collections::HashMap<MaskTextureVariantKey, u32> =
+        Default::default();
 
     // Decode textures to RGBA without GPU registration.
     // staged_textures[i] corresponds to glTF image index i.
@@ -809,37 +1076,57 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
     let mut staged_textures: Vec<StagedTexture> = Vec::new();
     let mut texture_indices: Vec<u32> = Vec::new();
     for (image_idx, image) in gltf.images().enumerate() {
-        match image.source() {
+        let decoded = match image.source() {
             gltf::image::Source::View { view, .. } => {
                 let buf_idx = view.buffer().index();
-                if buf_idx < buffer_data.len() {
+                if let Some(buffer) = buffer_data.get(buf_idx) {
                     let offset = view.offset();
                     let length = view.length();
-                    if offset + length <= buffer_data[buf_idx].len() {
-                        let img_data = &buffer_data[buf_idx][offset..offset + length];
-                        if let Ok(img) = image::load_from_memory(img_data) {
-                            let rgba = img.to_rgba8();
-                            let (w, h) = (rgba.width(), rgba.height());
-                            staged_textures.push(StagedTexture {
-                                data: rgba.into_raw(),
-                                width: w,
-                                height: h,
-                                is_normal: normal_image_set.contains(&image_idx),
-                            });
-                            // 1-based index into staged_textures
-                            texture_indices.push(staged_textures.len() as u32);
-                        } else {
-                            texture_indices.push(0);
-                        }
+                    if offset + length <= buffer.len() {
+                        decode_texture_bytes(&buffer[offset..offset + length], "embedded-image")
                     } else {
-                        texture_indices.push(0);
+                        None
                     }
                 } else {
-                    texture_indices.push(0);
+                    None
                 }
             }
-            _ => { texture_indices.push(0); }
-        }
+            gltf::image::Source::Uri { uri, .. } => {
+                let (bytes, effective_uri) = if let Some(encoded) = uri.strip_prefix("data:") {
+                    let decoded = encoded.find(";base64,").map(|position| {
+                        let mut output = Vec::new();
+                        let _ = base64_decode(&encoded[position + 8..], &mut output);
+                        output
+                    });
+                    (decoded, uri.to_string())
+                } else if let Some(dir) = base_dir {
+                    match std::fs::read(dir.join(uri)) {
+                        Ok(bytes) => (Some(bytes), uri.to_string()),
+                        Err(_) => {
+                            let swapped = swap_extension(uri, "dds");
+                            (std::fs::read(dir.join(&swapped)).ok(), swapped)
+                        }
+                    }
+                } else {
+                    (None, uri.to_string())
+                };
+                bytes.and_then(|bytes| decode_texture_bytes(&bytes, &effective_uri))
+            }
+        };
+        texture_indices.push(decoded.map_or(0, |(rgba, width, height)| {
+            stage_image_variants(
+                image_idx,
+                rgba,
+                width,
+                height,
+                normal_image_set.contains(&image_idx),
+                srgb_image_set.contains(&image_idx),
+                mask_only_images.contains(&image_idx),
+                mask_coverage_references.get(&image_idx).map(Vec::as_slice),
+                &mut staged_textures,
+                &mut mask_texture_indices,
+            )
+        }));
     }
 
     // Detect armature scale (same logic as load_gltf_with_textures)
@@ -869,10 +1156,25 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                         let offset = view.offset() + accessor.offset();
                         let data = &buffer_data[buf_idx];
                         if offset + 12 <= data.len() {
-                            let f0 = f32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                            let f1 = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                            let f2 = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                            let diag = (f0*f0 + f1*f1 + f2*f2).sqrt();
+                            let f0 = f32::from_le_bytes([
+                                data[offset],
+                                data[offset + 1],
+                                data[offset + 2],
+                                data[offset + 3],
+                            ]);
+                            let f1 = f32::from_le_bytes([
+                                data[offset + 4],
+                                data[offset + 5],
+                                data[offset + 6],
+                                data[offset + 7],
+                            ]);
+                            let f2 = f32::from_le_bytes([
+                                data[offset + 8],
+                                data[offset + 9],
+                                data[offset + 10],
+                                data[offset + 11],
+                            ]);
+                            let diag = (f0 * f0 + f1 * f1 + f2 * f2).sqrt();
                             if diag > 10.0 {
                                 scale = diag;
                             }
@@ -884,9 +1186,8 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         scale
     };
 
-    let mut meshes = Vec::new();
-    let mut bbox_min = [f32::MAX; 3];
-    let mut bbox_max = [f32::MIN; 3];
+    let mut source_meshes: Vec<Vec<(u32, MeshData)>> =
+        (0..gltf.meshes().count()).map(|_| Vec::new()).collect();
 
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
@@ -895,31 +1196,65 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                 Some(iter) => iter.collect(),
                 None => continue,
             };
-            let normals: Vec<[f32; 3]> = reader.read_normals()
+            let normals: Vec<[f32; 3]> = reader
+                .read_normals()
                 .map(|iter| iter.collect())
                 .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
-            let tex_coords: Vec<[f32; 2]> = reader.read_tex_coords(0)
+            let tex_coords: Vec<[f32; 2]> = reader
+                .read_tex_coords(0)
                 .map(|iter| iter.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
-            let tangents: Vec<[f32; 4]> = reader.read_tangents()
-                .map(|iter| iter.collect())
+            let tangents: Vec<[f32; 4]> = reader
+                .read_tangents()
+                .map(|iter| iter.map(sanitize_imported_tangent).collect())
                 .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
-            let vert_colors: Option<Vec<[f32; 4]>> = reader.read_colors(0)
+            let joint_vals: Option<Vec<[u16; 4]>> =
+                reader.read_joints(0).map(|iter| iter.into_u16().collect());
+            let weight_vals: Option<Vec<[f32; 4]>> =
+                reader.read_weights(0).map(|iter| iter.into_f32().collect());
+            let vert_colors: Option<Vec<[f32; 4]>> = reader
+                .read_colors(0)
                 .map(|iter| iter.into_rgba_f32().collect());
 
             let mat = primitive.material();
             let pbr = mat.pbr_metallic_roughness();
             let emissive_factor = mat.emissive_factor();
+            let transmission =
+                match transmission_from_material(&mat, Some(texture_indices.as_slice())) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        log::error!("{error}");
+                        return None;
+                    }
+                };
+            let layered_pbr =
+                match layered_pbr_from_material(&gltf, &mat, Some(texture_indices.as_slice())) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        log::error!("{error}");
+                        return None;
+                    }
+                };
+            let secondary_tex_coords =
+                retain_material_tex_coords_1(transmission, layered_pbr, positions.len(), || {
+                    reader
+                        .read_tex_coords(1)
+                        .map(|iter| iter.into_f32().collect())
+                });
 
-            let tex_idx_of = |img_idx: usize| -> Option<u32> {
-                texture_indices.get(img_idx).copied()
-            };
+            let tex_idx_of =
+                |img_idx: usize| -> Option<u32> { texture_indices.get(img_idx).copied() };
+            let (base_color_tex_idx, alpha_coverage_mips) =
+                base_color_texture_selection(&mat, &texture_indices, &mask_texture_indices);
 
-            let normal_tex_idx = mat.normal_texture()
+            let normal_tex_idx = mat
+                .normal_texture()
                 .and_then(|info| tex_idx_of(info.texture().source().index()));
-            let emissive_tex_idx = mat.emissive_texture()
+            let emissive_tex_idx = mat
+                .emissive_texture()
                 .and_then(|info| tex_idx_of(info.texture().source().index()));
-            let occlusion_tex_idx = mat.occlusion_texture()
+            let occlusion_tex_idx = mat
+                .occlusion_texture()
                 .and_then(|info| tex_idx_of(info.texture().source().index()));
 
             // Prefer the glTF 2.0 metallic-roughness model. Fall back
@@ -932,62 +1267,105 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
             // base_color between diffuse and specular weighted by
             // metallic² (metals tint their reflection, dielectrics
             // show their diffuse).
-            let (mut base_color, mut metallic_factor, mut roughness_factor, tex_idx, mr_tex_idx) =
-                if pbr.base_color_texture().is_none() {
-                    if let Some(sg) = mat.pbr_specular_glossiness() {
-                        let diffuse = sg.diffuse_factor();
-                        let spec = sg.specular_factor();
-                        let (base_color, metallic) =
-                            specgloss_to_metalrough(diffuse, spec);
-                        let roughness = 1.0 - sg.glossiness_factor();
-                        let diffuse_tex = sg.diffuse_texture()
-                            .and_then(|info| tex_idx_of(info.texture().source().index()));
-                        (base_color, metallic, roughness, diffuse_tex, None)
+            let (
+                mut base_color,
+                mut metallic_factor,
+                mut roughness_factor,
+                tex_idx,
+                mr_tex_idx,
+                specular_glossiness_factor,
+            ) = if pbr.base_color_texture().is_none() {
+                if let Some(sg) = mat.pbr_specular_glossiness() {
+                    let diffuse = sg.diffuse_factor();
+                    let spec = sg.specular_factor();
+                    let glossiness = sg.glossiness_factor();
+                    if let Some((spec_gloss_tex_idx, factors)) =
+                        specular_glossiness_texture_selection(&sg, &texture_indices)
+                    {
+                        (
+                            diffuse,
+                            0.0,
+                            1.0,
+                            base_color_tex_idx,
+                            Some(spec_gloss_tex_idx),
+                            Some(factors),
+                        )
                     } else {
-                        (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), None, None)
+                        let (base_color, metallic) = specgloss_to_metalrough(diffuse, spec);
+                        let roughness = 1.0 - glossiness;
+                        (
+                            base_color,
+                            metallic,
+                            roughness,
+                            base_color_tex_idx,
+                            None,
+                            None,
+                        )
                     }
                 } else {
-                    let tex = pbr.base_color_texture()
-                        .and_then(|info| tex_idx_of(info.texture().source().index()));
-                    let mr = pbr.metallic_roughness_texture()
-                        .and_then(|info| tex_idx_of(info.texture().source().index()));
-                    (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), tex, mr)
-                };
+                    (
+                        pbr.base_color_factor(),
+                        pbr.metallic_factor(),
+                        pbr.roughness_factor(),
+                        None,
+                        None,
+                        None,
+                    )
+                }
+            } else {
+                let mr = pbr
+                    .metallic_roughness_texture()
+                    .and_then(|info| tex_idx_of(info.texture().source().index()));
+                (
+                    pbr.base_color_factor(),
+                    pbr.metallic_factor(),
+                    pbr.roughness_factor(),
+                    base_color_tex_idx,
+                    mr,
+                    None,
+                )
+            };
 
-            if let Some(t) = mat.transmission() {
-                apply_transmission_hack(
-                    t.transmission_factor(),
-                    &mut base_color,
-                    &mut metallic_factor,
-                    &mut roughness_factor,
-                );
+            if !crate::models::physical_transmission_requested() {
+                if let Some(t) = mat.transmission() {
+                    apply_transmission_hack(
+                        t.transmission_factor(),
+                        &mut base_color,
+                        &mut metallic_factor,
+                        &mut roughness_factor,
+                    );
+                }
             }
 
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
                 let p = positions[i];
-                for k in 0..3 {
-                    if p[k] < bbox_min[k] { bbox_min[k] = p[k]; }
-                    if p[k] > bbox_max[k] { bbox_max[k] = p[k]; }
-                }
-                let color = if let Some(ref vc) = vert_colors {
-                    vc[i]
-                } else {
-                    [base_color[0], base_color[1], base_color[2], base_color[3]]
-                };
-                let joint_vals: Option<Vec<[u16; 4]>> = reader.read_joints(0)
-                    .map(|iter| iter.into_u16().collect());
-                let weight_vals: Option<Vec<[f32; 4]>> = reader.read_weights(0)
-                    .map(|iter| iter.into_f32().collect());
+                let color = vert_colors
+                    .as_ref()
+                    .map(|colors| multiply_rgba(colors[i], base_color))
+                    .unwrap_or(base_color);
                 let jv = if let Some(ref j) = joint_vals {
-                    [j[i][0] as f32, j[i][1] as f32, j[i][2] as f32, j[i][3] as f32]
+                    [
+                        j[i][0] as f32,
+                        j[i][1] as f32,
+                        j[i][2] as f32,
+                        j[i][3] as f32,
+                    ]
                 } else {
                     [0.0; 4]
                 };
-                let wv = if let Some(ref w) = weight_vals { w[i] } else { [0.0; 4] };
+                let wv = if let Some(ref w) = weight_vals {
+                    w[i]
+                } else {
+                    [0.0; 4]
+                };
                 let is_skinned = wv[0] + wv[1] + wv[2] + wv[3] > 0.01;
                 let final_pos = if is_skinned && (skin_vertex_scale - 1.0).abs() > 0.01 {
-                    [p[0] * skin_vertex_scale, p[1] * skin_vertex_scale, p[2] * skin_vertex_scale]
+                    [
+                        p[0] * skin_vertex_scale,
+                        p[1] * skin_vertex_scale,
+                        p[2] * skin_vertex_scale,
+                    ]
                 } else {
                     p
                 };
@@ -1005,31 +1383,98 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                 Some(iter) => iter.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
             };
-            meshes.push(MeshData {
-                vertices,
-                indices,
-                texture_idx: tex_idx,
-                normal_texture_idx: normal_tex_idx,
-                metallic_roughness_texture_idx: mr_tex_idx,
-                emissive_texture_idx: emissive_tex_idx,
-                occlusion_texture_idx: occlusion_tex_idx,
-                metallic_factor,
-                roughness_factor,
-                emissive_factor,
-                alpha_cutoff: alpha_cutoff_from_material(&mat),
-            });
+            source_meshes[mesh.index()].push((
+                primitive.index() as u32,
+                MeshData {
+                    vertices,
+                    secondary_tex_coords,
+                    indices,
+                    texture_idx: tex_idx,
+                    normal_texture_idx: normal_tex_idx,
+                    metallic_roughness_texture_idx: mr_tex_idx,
+                    specular_glossiness_factor,
+                    emissive_texture_idx: emissive_tex_idx,
+                    occlusion_texture_idx: occlusion_tex_idx,
+                    metallic_factor,
+                    roughness_factor,
+                    emissive_factor,
+                    alpha_mode: alpha_mode_from_material(&mat),
+                    alpha_cutoff: alpha_cutoff_from_material(&mat),
+                    alpha_coverage_mips,
+                    double_sided: mat.double_sided(),
+                    transmission,
+                    layered_pbr,
+                },
+            ));
         }
     }
 
-    if meshes.is_empty() { return None; }
+    let (meshes, mesh_transforms, mesh_cast_shadows, mesh_sources) =
+        share_scene_mesh_instances(&gltf, source_meshes);
+    if meshes.is_empty() {
+        return None;
+    }
+    let (bbox_min, bbox_max) = model_bounds(&meshes, &mesh_transforms);
     Some(StagedModel {
-        model: ModelData { meshes, bbox_min, bbox_max },
+        model: ModelData {
+            meshes,
+            mesh_transforms,
+            mesh_cast_shadows,
+            mesh_sources,
+            source_geometry_sha256,
+            bbox_min,
+            bbox_max,
+        },
         textures: staged_textures,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn stage_image_variants(
+    image_index: usize,
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    is_normal: bool,
+    is_srgb: bool,
+    mask_only: bool,
+    coverage_references: Option<&[f32]>,
+    staged: &mut Vec<crate::staging::StagedTexture>,
+    mask_indices: &mut std::collections::HashMap<MaskTextureVariantKey, u32>,
+) -> u32 {
+    use crate::staging::StagedTexture;
+    let mut primary = None;
+    if !mask_only {
+        staged.push(StagedTexture {
+            data: rgba.clone(),
+            width,
+            height,
+            is_normal,
+            is_srgb: !is_normal && is_srgb,
+            alpha_coverage_reference: None,
+        });
+        primary = Some(staged.len() as u32);
+    }
+    if let Some(references) = coverage_references {
+        for reference in references {
+            staged.push(StagedTexture {
+                data: rgba.clone(),
+                width,
+                height,
+                is_normal: false,
+                is_srgb: true,
+                alpha_coverage_reference: Some(*reference),
+            });
+            mask_indices.insert((image_index, reference.to_bits()), staged.len() as u32);
+            primary.get_or_insert(staged.len() as u32);
+        }
+    }
+    primary.unwrap_or(0)
+}
+
 pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
     let gltf = gltf::Gltf::from_slice(data).ok()?;
+    emit_unsupported_material_extension_diagnostics(&gltf, "<memory glTF>");
 
     // Get buffer data (for .glb, embedded; for .gltf, inline base64)
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
@@ -1052,10 +1497,10 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
             }
         }
     }
+    let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
-    let mut meshes = Vec::new();
-    let mut bbox_min = [f32::MAX; 3];
-    let mut bbox_max = [f32::MIN; 3];
+    let mut source_meshes: Vec<Vec<(u32, MeshData)>> =
+        (0..gltf.meshes().count()).map(|_| Vec::new()).collect();
 
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
@@ -1066,35 +1511,69 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 None => continue,
             };
 
-            let normals: Vec<[f32; 3]> = reader.read_normals()
+            let normals: Vec<[f32; 3]> = reader
+                .read_normals()
                 .map(|iter| iter.collect())
                 .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
 
-            let tex_coords: Vec<[f32; 2]> = reader.read_tex_coords(0)
+            let tex_coords: Vec<[f32; 2]> = reader
+                .read_tex_coords(0)
                 .map(|iter| iter.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+            let tangents: Vec<[f32; 4]> = reader
+                .read_tangents()
+                .map(|iter| iter.map(sanitize_imported_tangent).collect())
+                .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
+            let joint_vals: Option<Vec<[u16; 4]>> =
+                reader.read_joints(0).map(|iter| iter.into_u16().collect());
+            let weight_vals: Option<Vec<[f32; 4]>> =
+                reader.read_weights(0).map(|iter| iter.into_f32().collect());
 
-            // Material base color
-            let base_color = primitive.material().pbr_metallic_roughness()
-                .base_color_factor();
+            // Material base color. The plain CPU-only loader intentionally
+            // leaves texture runtime IDs empty, but it must still preserve
+            // authored bucket and physical-extension metadata.
+            let mat = primitive.material();
+            let base_color = mat.pbr_metallic_roughness().base_color_factor();
+            let transmission = match transmission_from_material(&mat, None) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!("{error}");
+                    return None;
+                }
+            };
+            let layered_pbr = match layered_pbr_from_material(&gltf, &mat, None) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!("{error}");
+                    return None;
+                }
+            };
+            let secondary_tex_coords =
+                retain_material_tex_coords_1(transmission, layered_pbr, positions.len(), || {
+                    reader
+                        .read_tex_coords(1)
+                        .map(|iter| iter.into_f32().collect())
+                });
             let color = [base_color[0], base_color[1], base_color[2], base_color[3]];
 
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
                 let p = positions[i];
-                for k in 0..3 {
-                    if p[k] < bbox_min[k] { bbox_min[k] = p[k]; }
-                    if p[k] > bbox_max[k] { bbox_max[k] = p[k]; }
-                }
-                // Read skin data if available
-                let joint_vals: Option<Vec<[u16; 4]>> = reader.read_joints(0)
-                    .map(|iter| iter.into_u16().collect());
-                let weight_vals: Option<Vec<[f32; 4]>> = reader.read_weights(0)
-                    .map(|iter| iter.into_f32().collect());
                 let jv = if let Some(ref j) = joint_vals {
-                    [j[i][0] as f32, j[i][1] as f32, j[i][2] as f32, j[i][3] as f32]
-                } else { [0.0; 4] };
-                let wv = if let Some(ref w) = weight_vals { w[i] } else { [0.0; 4] };
+                    [
+                        j[i][0] as f32,
+                        j[i][1] as f32,
+                        j[i][2] as f32,
+                        j[i][3] as f32,
+                    ]
+                } else {
+                    [0.0; 4]
+                };
+                let wv = if let Some(ref w) = weight_vals {
+                    w[i]
+                } else {
+                    [0.0; 4]
+                };
 
                 vertices.push(Vertex3D {
                     position: p,
@@ -1103,7 +1582,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                     uv: tex_coords[i],
                     joints: jv,
                     weights: wv,
-                    tangent: [0.0; 4],
+                    tangent: tangents[i],
                 });
             }
 
@@ -1112,12 +1591,47 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 None => (0..positions.len() as u32).collect(),
             };
 
-            meshes.push(MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3], alpha_cutoff: 0.0 });
+            source_meshes[mesh.index()].push((
+                primitive.index() as u32,
+                MeshData {
+                    vertices,
+                    secondary_tex_coords,
+                    indices,
+                    texture_idx: None,
+                    normal_texture_idx: None,
+                    metallic_roughness_texture_idx: None,
+                    specular_glossiness_factor: None,
+                    emissive_texture_idx: None,
+                    occlusion_texture_idx: None,
+                    metallic_factor: 0.0,
+                    roughness_factor: 1.0,
+                    emissive_factor: [0.0; 3],
+                    alpha_mode: alpha_mode_from_material(&mat),
+                    alpha_cutoff: alpha_cutoff_from_material(&mat),
+                    alpha_coverage_mips: false,
+                    double_sided: mat.double_sided(),
+                    transmission,
+                    layered_pbr,
+                },
+            ));
         }
     }
 
-    if meshes.is_empty() { return None; }
-    Some(ModelData { meshes, bbox_min, bbox_max })
+    let (meshes, mesh_transforms, mesh_cast_shadows, mesh_sources) =
+        share_scene_mesh_instances(&gltf, source_meshes);
+    if meshes.is_empty() {
+        return None;
+    }
+    let (bbox_min, bbox_max) = model_bounds(&meshes, &mesh_transforms);
+    Some(ModelData {
+        meshes,
+        mesh_transforms,
+        mesh_cast_shadows,
+        mesh_sources,
+        source_geometry_sha256,
+        bbox_min,
+        bbox_max,
+    })
 }
 
 /// Convert a KHR_materials_pbrSpecularGlossiness (diffuse + specular
@@ -1133,51 +1647,259 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
 /// specular color becomes their base_color; dielectrics carry their
 /// diffuse color through at metallic ≈ 0.
 ///
-/// Map glTF alpha mode + cutoff to a single shader cutoff value.
-/// OPAQUE → 0.0 (fragment shader's `< cutoff` discard never fires).
-/// MASK   → material-authored cutoff (default 0.5 per glTF spec).
-/// BLEND  → treated as MASK @ 0.5 since we don't yet have a sorted
-///          transparent pipeline. Better than silently rendering
-///          foliage + fabric as fully opaque — an alpha-cutout leaf
-///          card is at least the right *shape*.
+fn alpha_mode_from_material(mat: &gltf::Material) -> crate::models::MaterialAlphaMode {
+    match mat.alpha_mode() {
+        gltf::material::AlphaMode::Opaque => crate::models::MaterialAlphaMode::Opaque,
+        gltf::material::AlphaMode::Mask => crate::models::MaterialAlphaMode::Mask,
+        gltf::material::AlphaMode::Blend => crate::models::MaterialAlphaMode::Blend,
+    }
+}
+
+/// MASK keeps its authored cutoff (0.5 by spec default). OPAQUE and
+/// BLEND do not use binary coverage and therefore carry no cutoff.
 fn alpha_cutoff_from_material(mat: &gltf::Material) -> f32 {
     match mat.alpha_mode() {
         gltf::material::AlphaMode::Opaque => 0.0,
         gltf::material::AlphaMode::Mask => mat.alpha_cutoff().unwrap_or(0.5),
-        gltf::material::AlphaMode::Blend => 0.5,
+        gltf::material::AlphaMode::Blend => 0.0,
     }
 }
 
-/// Fake KHR_materials_transmission as a near-mirror dielectric.
-///
-/// We don't implement real refractive transmission (no back-buffer
-/// refraction pass, no thin-walled/volume distinction), so a
-/// transmission=0.9 glass pane loads as a plain diffuse white surface
-/// that drowns the 4% Fresnel specular in a bright diffuse term — the
-/// classic "painted white window" look.
-///
-/// As a stand-in we force heavy transmission materials to behave like
-/// chrome: metallic=1 so f0=base_color (not 0.04), roughness ≤ 0.05
-/// so reflections stay crisp, and a mild (0.85×) tint on base_color
-/// so pure-white glass doesn't read as perfectly reflective chrome.
-/// Not physically correct for glass — real glass only reflects 4% at
-/// normal incidence — but it matches how windows *read* in photos
-/// (reflecting sky/buildings) far better than a flat diffuse surface.
-fn apply_transmission_hack(
-    transmission: f32,
-    base_color: &mut [f32; 4],
-    metallic: &mut f32,
-    roughness: &mut f32,
-) {
-    if transmission > 0.5 {
-        *metallic = 1.0;
-        *roughness = roughness.min(0.05);
-        base_color[0] *= 0.85;
-        base_color[1] *= 0.85;
-        base_color[2] *= 0.85;
-        base_color[3] = 1.0;
+fn multiply_rgba(lhs: [f32; 4], rhs: [f32; 4]) -> [f32; 4] {
+    [
+        lhs[0] * rhs[0],
+        lhs[1] * rhs[1],
+        lhs[2] * rhs[2],
+        lhs[3] * rhs[3],
+    ]
+}
+
+fn sanitize_imported_tangent(tangent: [f32; 4]) -> [f32; 4] {
+    if tangent.iter().all(|component| component.is_finite()) {
+        tangent
+    } else {
+        // Tangents are optional in glTF. Treat a malformed optional tangent
+        // as missing so every renderer path receives the same finite sentinel
+        // instead of relying on backend-specific NaN behavior.
+        [0.0; 4]
     }
 }
+
+type MaskTextureVariantKey = (usize, u32);
+
+fn register_gltf_image_with_mask_variants(
+    renderer: &mut crate::renderer::Renderer,
+    image_index: usize,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    is_normal: bool,
+    is_srgb: bool,
+    coverage_references: Option<&[f32]>,
+    mask_only: bool,
+    variants: &mut std::collections::HashMap<MaskTextureVariantKey, u32>,
+) -> u32 {
+    let mut primary =
+        if mask_only {
+            None
+        } else {
+            Some(renderer.register_texture_kind_with_color_space(
+                width, height, rgba, is_normal, is_srgb, None,
+            ))
+        };
+    if let Some(references) = coverage_references {
+        for reference in references {
+            let variant = renderer.register_texture_kind_with_alpha_coverage(
+                width,
+                height,
+                rgba,
+                false,
+                Some(*reference),
+            );
+            variants.insert((image_index, reference.to_bits()), variant);
+            primary.get_or_insert(variant);
+        }
+    }
+    primary.unwrap_or(0)
+}
+
+/// Texture-space alpha reference for a MASK material. The shader compares
+/// `texture alpha * base factor alpha` against the authored cutoff, so the
+/// mip generator must bake coverage at `cutoff / factor`. Values above one
+/// intentionally mean that no source texel can survive.
+fn mask_base_color_coverage_reference(mat: &gltf::Material<'_>) -> Option<(usize, f32)> {
+    if mat.alpha_mode() != gltf::material::AlphaMode::Mask {
+        return None;
+    }
+    let pbr = mat.pbr_metallic_roughness();
+    let (image_index, factor_alpha) = if let Some(info) = pbr.base_color_texture() {
+        (info.texture().source().index(), pbr.base_color_factor()[3])
+    } else {
+        let spec_gloss = mat.pbr_specular_glossiness()?;
+        let info = spec_gloss.diffuse_texture()?;
+        (
+            info.texture().source().index(),
+            spec_gloss.diffuse_factor()[3],
+        )
+    };
+    let cutoff = alpha_cutoff_from_material(mat).max(0.0);
+    if cutoff <= 0.0 {
+        return None;
+    }
+    let reference = if factor_alpha > 0.0 {
+        cutoff / factor_alpha
+    } else {
+        2.0
+    };
+    Some((image_index, reference))
+}
+
+#[cfg(any(not(target_os = "android"), test))]
+fn mask_texture_coverage_references(
+    gltf: &gltf::Gltf,
+) -> std::collections::BTreeMap<usize, Vec<f32>> {
+    let mut by_image: std::collections::BTreeMap<usize, std::collections::BTreeMap<u32, f32>> =
+        Default::default();
+    for material in gltf.materials() {
+        if let Some((image_index, reference)) = mask_base_color_coverage_reference(&material) {
+            by_image
+                .entry(image_index)
+                .or_default()
+                .insert(reference.to_bits(), reference);
+        }
+    }
+    by_image
+        .into_iter()
+        .map(|(image, references)| (image, references.into_values().collect()))
+        .collect()
+}
+
+fn target_mask_texture_coverage_references(
+    gltf: &gltf::Gltf,
+) -> std::collections::BTreeMap<usize, Vec<f32>> {
+    // Android retains the established one-mip safety path until current wgpu
+    // multi-level uploads are qualified on hardware. Do not mark authored
+    // level-zero alpha as coverage data when no lower mip can exist.
+    #[cfg(target_os = "android")]
+    {
+        let _ = gltf;
+        Default::default()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        if mask_coverage_setting_enabled(std::env::var("BLOOM_MASK_COVERAGE").ok().as_deref()) {
+            mask_texture_coverage_references(gltf)
+        } else {
+            Default::default()
+        }
+    }
+}
+
+#[cfg(any(not(target_os = "android"), test))]
+fn mask_coverage_setting_enabled(value: Option<&str>) -> bool {
+    !value
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "off" | "false" | "disabled"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Images referenced exclusively as the base color of one or more MASK
+/// materials can let their first coverage chain stand in for the otherwise
+/// unreachable ordinary chain. Shared material inputs retain both semantics.
+fn mask_only_texture_images(
+    gltf: &gltf::Gltf,
+    coverage_images: impl IntoIterator<Item = usize>,
+) -> std::collections::HashSet<usize> {
+    let mut mask_only: std::collections::HashSet<usize> = coverage_images.into_iter().collect();
+    for mat in gltf.materials() {
+        let pbr = mat.pbr_metallic_roughness();
+        if mask_base_color_coverage_reference(&mat).is_none() {
+            if let Some(info) = pbr.base_color_texture() {
+                mask_only.remove(&info.texture().source().index());
+            } else if let Some(info) = mat
+                .pbr_specular_glossiness()
+                .and_then(|spec_gloss| spec_gloss.diffuse_texture())
+            {
+                mask_only.remove(&info.texture().source().index());
+            }
+        }
+        if let Some(info) = pbr.metallic_roughness_texture() {
+            mask_only.remove(&info.texture().source().index());
+        }
+        if let Some(info) = mat.normal_texture() {
+            mask_only.remove(&info.texture().source().index());
+        }
+        if let Some(info) = mat.emissive_texture() {
+            mask_only.remove(&info.texture().source().index());
+        }
+        if let Some(info) = mat.occlusion_texture() {
+            mask_only.remove(&info.texture().source().index());
+        }
+        if let Some(info) = mat
+            .transmission()
+            .and_then(|transmission| transmission.transmission_texture())
+        {
+            mask_only.remove(&info.texture().source().index());
+        }
+        if let Some(info) = mat.volume().and_then(|volume| volume.thickness_texture()) {
+            mask_only.remove(&info.texture().source().index());
+        }
+    }
+    mask_only
+}
+
+fn base_color_texture_selection(
+    mat: &gltf::Material<'_>,
+    ordinary: &[u32],
+    mask_variants: &std::collections::HashMap<MaskTextureVariantKey, u32>,
+) -> (Option<u32>, bool) {
+    let pbr = mat.pbr_metallic_roughness();
+    let image_index = pbr
+        .base_color_texture()
+        .map(|info| info.texture().source().index())
+        .or_else(|| {
+            mat.pbr_specular_glossiness()
+                .and_then(|spec_gloss| spec_gloss.diffuse_texture())
+                .map(|info| info.texture().source().index())
+        });
+    let Some(image_index) = image_index else {
+        return (None, false);
+    };
+    if let Some((_, reference)) = mask_base_color_coverage_reference(mat) {
+        if let Some(index) = mask_variants.get(&(image_index, reference.to_bits())) {
+            return (Some(*index), true);
+        }
+    }
+    (ordinary.get(image_index).copied(), false)
+}
+
+fn specular_glossiness_texture_selection(
+    spec_gloss: &gltf::material::PbrSpecularGlossiness<'_>,
+    runtime_texture_indices: &[u32],
+) -> Option<(u32, [f32; 4])> {
+    let info = spec_gloss.specular_glossiness_texture()?;
+    let runtime_texture_idx = runtime_texture_indices
+        .get(info.texture().source().index())
+        .copied()?;
+    let specular = spec_gloss.specular_factor();
+    Some((
+        runtime_texture_idx,
+        [
+            specular[0],
+            specular[1],
+            specular[2],
+            spec_gloss.glossiness_factor(),
+        ],
+    ))
+}
+
+#[cfg(test)]
+#[path = "models_gltf_tests.rs"]
+mod alpha_mode_tests;
 
 /// Reference: Khronos glTF sample specGloss→metallicRoughness
 /// converter (https://github.com/KhronosGroup/glTF/pull/1355).
@@ -1193,9 +1915,8 @@ fn specgloss_to_metalrough(diffuse: [f32; 4], specular: [f32; 3]) -> ([f32; 4], 
     // reference: mapping perceived brightness split between diffuse
     // and specular back to a single metallic parameter.
     let a = dielectric_specular;
-    let b = diffuse_max * one_minus_dielectric / dielectric_specular.max(epsilon)
-          + specular_max
-          - 2.0 * dielectric_specular;
+    let b = diffuse_max * one_minus_dielectric / dielectric_specular.max(epsilon) + specular_max
+        - 2.0 * dielectric_specular;
     let c = dielectric_specular - specular_max;
     let discriminant = (b * b - 4.0 * a * c).max(0.0);
     let metallic = if specular_max < dielectric_specular {
@@ -1206,75 +1927,20 @@ fn specgloss_to_metalrough(diffuse: [f32; 4], specular: [f32; 3]) -> ([f32; 4], 
 
     // base_color = mix(diffuse, specular, metallic²) with the diffuse
     // branch scaled to undo the dielectric energy split.
-    let diffuse_branch_scale = one_minus_dielectric
-        / (1.0 - metallic * dielectric_specular).max(epsilon);
+    let diffuse_branch_scale =
+        one_minus_dielectric / (1.0 - metallic * dielectric_specular).max(epsilon);
     let metal_weight = metallic * metallic;
     let lerp = |a: f32, b: f32, t: f32| a * (1.0 - t) + b * t;
     let r = lerp(diffuse[0] * diffuse_branch_scale, specular[0], metal_weight);
     let g = lerp(diffuse[1] * diffuse_branch_scale, specular[1], metal_weight);
     let bl = lerp(diffuse[2] * diffuse_branch_scale, specular[2], metal_weight);
-    ([r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), bl.clamp(0.0, 1.0), diffuse[3]], metallic)
+    (
+        [
+            r.clamp(0.0, 1.0),
+            g.clamp(0.0, 1.0),
+            bl.clamp(0.0, 1.0),
+            diffuse[3],
+        ],
+        metallic,
+    )
 }
-
-/// Replace the extension on a URI (keeps directories / query strings
-/// untouched). Used to fall back from `foo.png` → `foo.dds` when a
-/// glTF references a PNG URI that isn't on disk but the DDS sibling is.
-fn swap_extension(uri: &str, new_ext: &str) -> String {
-    let q = uri.find('?').unwrap_or(uri.len());
-    let (path, query) = uri.split_at(q);
-    let new_path = match path.rfind('.') {
-        Some(dot) if dot > path.rfind('/').unwrap_or(0) => {
-            format!("{}.{}", &path[..dot], new_ext)
-        }
-        _ => format!("{}.{}", path, new_ext),
-    };
-    format!("{}{}", new_path, query)
-}
-
-/// Decode a texture byte slice into RGBA8 pixels + dimensions. Tries
-/// DDS first when the URI extension suggests it (for asset packs like
-/// Lumberyard Bistro that ship BC-compressed textures), falling back
-/// to the `image` crate for PNG/JPEG/etc. Returns None on failure.
-fn decode_texture_bytes(bytes: &[u8], uri: &str) -> Option<(Vec<u8>, u32, u32)> {
-    let is_dds = uri.to_ascii_lowercase().ends_with(".dds")
-        || bytes.len() >= 4 && &bytes[..4] == b"DDS ";
-    if is_dds {
-        if let Ok(dds) = image_dds::ddsfile::Dds::read(bytes) {
-            // Decode mip 0 → RGBA8. image_from_dds handles the common
-            // BC1–BC7 formats; anything it can't decode falls through
-            // to the image crate which will almost certainly fail too.
-            if let Ok(rgba) = image_dds::image_from_dds(&dds, 0) {
-                let (w, h) = (rgba.width(), rgba.height());
-                return Some((rgba.into_raw(), w, h));
-            }
-        }
-    }
-    let img = image::load_from_memory(bytes).ok()?;
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width(), rgba.height());
-    Some((rgba.into_raw(), w, h))
-}
-
-fn base64_decode(input: &str, output: &mut Vec<u8>) {
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for &b in input.as_bytes() {
-        let val = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' | b'\n' | b'\r' => continue,
-            _ => continue,
-        };
-        buf = (buf << 6) | val as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            output.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-}
-

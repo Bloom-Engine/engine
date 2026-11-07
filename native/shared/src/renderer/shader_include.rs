@@ -28,7 +28,10 @@ pub struct BakedSource<'a> {
 }
 impl<'a> ShaderSource for BakedSource<'a> {
     fn fetch(&self, path: &str) -> Option<&str> {
-        self.entries.iter().find(|(p, _)| *p == path).map(|(_, s)| *s)
+        self.entries
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, s)| *s)
     }
 }
 
@@ -62,12 +65,17 @@ pub fn abi_version_of(source: &str) -> u32 {
 /// Recursively resolve `#include "..."` directives in `entry_path`'s
 /// source, returning the fully-expanded WGSL. Each included file is
 /// emitted exactly once even if referenced multiple times.
-pub fn process(
-    source: &dyn ShaderSource, entry_path: &str,
-) -> Result<String, IncludeError> {
+pub fn process(source: &dyn ShaderSource, entry_path: &str) -> Result<String, IncludeError> {
     let mut out = String::new();
     let mut seen = HashSet::new();
-    expand(source, entry_path, entry_path, &mut out, &mut seen, &mut Vec::new())?;
+    expand(
+        source,
+        entry_path,
+        entry_path,
+        &mut out,
+        &mut seen,
+        &mut Vec::new(),
+    )?;
     Ok(out)
 }
 
@@ -92,20 +100,21 @@ fn expand(
     seen.insert(current_path.to_string());
     stack.push(current_path.to_string());
 
-    let body = source.fetch(current_path).ok_or_else(|| IncludeError::Missing {
-        referrer: referrer.to_string(),
-        included: current_path.to_string(),
-    })?;
+    let body = source
+        .fetch(current_path)
+        .ok_or_else(|| IncludeError::Missing {
+            referrer: referrer.to_string(),
+            included: current_path.to_string(),
+        })?;
 
     for (line_idx, line) in body.lines().enumerate() {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("#include") {
-            let include_path = parse_include_arg(rest).ok_or_else(|| {
-                IncludeError::MalformedDirective {
+            let include_path =
+                parse_include_arg(rest).ok_or_else(|| IncludeError::MalformedDirective {
                     referrer: current_path.to_string(),
                     line: format!("line {}: {}", line_idx + 1, line),
-                }
-            })?;
+                })?;
             // We emit a banner so WGSL error messages carry enough
             // context back to which file broke.
             out.push_str(&format!("// --- begin include: {} ---\n", include_path));

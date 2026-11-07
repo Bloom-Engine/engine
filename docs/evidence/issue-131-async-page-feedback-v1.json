@@ -1,0 +1,94 @@
+{
+  "schema": "bloom-virtual-geometry-async-page-feedback-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "660190b38de2845b6ac90093d42873f8dee0ae8a",
+  "date": "2026-08-26",
+  "feedback": {
+    "readback_slots": 2,
+    "counter_bytes_per_slot": 48,
+    "request_bytes": 16,
+    "default_max_requests_per_slot": 4096,
+    "bytes_per_default_slot": 65584,
+    "total_default_readback_bytes": 131168,
+    "selector_capacity_clamped": true,
+    "mapping_after_queue_submission": true,
+    "render_loop_waits": 0,
+    "busy_slots_skip_capture": true,
+    "out_of_order_camera_completions_rejected": true
+  },
+  "pending_queue": {
+    "default_max_unique_groups": 8192,
+    "default_group_attempts_per_frame": 256,
+    "canonical_identity": "mesh-generation-and-source-cluster",
+    "newest_camera_feedback_first": true,
+    "malformed_requests_rejected": true,
+    "generation_stale_requests_rejected": true,
+    "budget_blocked_requests_retained": true,
+    "atomic_group_uploads": true,
+    "pool_byte_page_eviction_budgets_preserved": true,
+    "resident_ancestor_remains_visible": true
+  },
+  "default_path": {
+    "explicit_opt_in": true,
+    "ordinary_readback_buffers": 0,
+    "ordinary_feedback_copies": 0,
+    "ordinary_mappings": 0,
+    "ordinary_page_uploads": 0,
+    "native_no_models_source_path_changed": false
+  },
+  "metal_streaming_oracle": {
+    "backend": "metal",
+    "missing_leaf_groups": 2,
+    "initial_requests": 2,
+    "mapping_observed_in_flight": true,
+    "upload_pages_per_frame": 1,
+    "first_frame_groups_resolved": 1,
+    "first_frame_groups_retained": 1,
+    "budget_stall_recorded": true,
+    "second_frame_groups_resolved_total": 2,
+    "final_selected_cluster_table_indices": [4, 5, 6, 7],
+    "final_missing_page_requests": 0,
+    "final_fallback_groups": 0
+  },
+  "qualification": {
+    "shared_unit_tests_passed": 455,
+    "shared_unit_tests_ignored": 1,
+    "golden_tests_passed": 77,
+    "golden_tests_ignored": 2,
+    "focused_async_streaming_metal_test": "pass",
+    "production_virtual_four_mrt_metal_test": "pass",
+    "native_no_default_check": "pass",
+    "wasm_web_models3d_check": "pass",
+    "format": "pass",
+    "diff_check": "pass",
+    "shared_scoped_correctness_suspicious_performance_clippy": "pass",
+    "shared_general_clippy": {
+      "status": "pre_existing_failures_only",
+      "slice_diagnostics": 0,
+      "pre_existing_diagnostics": 8,
+      "pre_existing_files": [
+        "native/shared/src/input.rs",
+        "native/shared/src/renderer/mod.rs",
+        "native/shared/src/string_header.rs",
+        "native/shared/src/shadows.rs"
+      ]
+    },
+    "file_size_ratchet": {
+      "status": "pre_existing_failures_only",
+      "slice_files_over_ceiling": 0,
+      "pre_existing_files_over_ceiling": [
+        "native/shared/src/renderer/shaders/post.rs",
+        "native/shared/src/renderer/shaders/ssgi.rs",
+        "native/shared/tests/golden_render/temporal_history.rs"
+      ]
+    }
+  },
+  "acceptance_boxes_changed": 0,
+  "remaining": [
+    "asynchronous issue-136 store and index IO",
+    "conservative previous-frame virtual Hi-Z",
+    "approved Bistro motion and parity corpus",
+    "10-million-source-triangle stress asset",
+    "integrated and discrete Metal Vulkan and Direct3D 12 qualification"
+  ]
+}

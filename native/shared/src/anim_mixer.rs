@@ -49,13 +49,26 @@ pub struct AnimMixer {
 impl Default for AnimMixer {
     fn default() -> Self {
         Self {
-            cur_clip: 0, cur_time: 0.0, cur_speed: 1.0, cur_loop: true,
-            prev_clip: 0, prev_time: 0.0, prev_speed: 1.0, prev_loop: true,
-            fade_t: 0.0, fade_dur: 0.0,
-            layer_clip: -1, layer_time: 0.0, layer_speed: 1.0, layer_loop: false,
-            layer_weight: 0.0, layer_mask_root: -1,
-            root_motion: false, root_delta: [0.0; 3],
-            finished: false, started: false,
+            cur_clip: 0,
+            cur_time: 0.0,
+            cur_speed: 1.0,
+            cur_loop: true,
+            prev_clip: 0,
+            prev_time: 0.0,
+            prev_speed: 1.0,
+            prev_loop: true,
+            fade_t: 0.0,
+            fade_dur: 0.0,
+            layer_clip: -1,
+            layer_time: 0.0,
+            layer_speed: 1.0,
+            layer_loop: false,
+            layer_weight: 0.0,
+            layer_mask_root: -1,
+            root_motion: false,
+            root_delta: [0.0; 3],
+            finished: false,
+            started: false,
         }
     }
 }

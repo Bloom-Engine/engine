@@ -1,0 +1,71 @@
+{
+  "schema": "bloom-texture-store-incremental-evidence-v1",
+  "issue": 136,
+  "qualified_revision": "d24f17ecd60ba958c8c32a081577577185405461",
+  "contract": {
+    "recipe": "bloom-texture",
+    "recipe_version": 1,
+    "artifact": "bc7-dds",
+    "source_file_hash_in_build_key": true,
+    "texture_semantics_in_build_key": true,
+    "profile_in_build_key": true,
+    "content_addressed_chunks": true,
+    "atomic_manifest_install": true,
+    "strict_dds_validation": true,
+    "mixed_kind_index": true,
+    "indexed_texture_runtime_loading": false
+  },
+  "incremental_regression": {
+    "source_textures": 2,
+    "unrelated_geometry_assets": 1,
+    "initial_index_entries": 3,
+    "initial_unique_chunks": 3,
+    "unchanged_cache_hit": true,
+    "unchanged_chunk_writes": 0,
+    "unchanged_manifest_writes": 0,
+    "edited_texture_chunk_writes": 1,
+    "edited_texture_manifest_writes": 1,
+    "edited_build_key_changed": true,
+    "edited_artifact_hash_changed": true,
+    "unrelated_texture_manifest_byte_identical": true,
+    "unrelated_texture_chunk_byte_identical": true,
+    "unrelated_geometry_manifest_byte_identical": true,
+    "unrelated_geometry_chunk_byte_identical": true,
+    "installed_index_unchanged_before_rebuild": true,
+    "stale_index_rejected": true,
+    "explicit_index_rebuild_writes": 1,
+    "corrupt_texture_chunk_rejected": true
+  },
+  "semantic_regression": {
+    "linear_and_normal_build_keys_distinct": true,
+    "identical_linear_bc7_bytes_deduplicated": true,
+    "profiled_inspection": "pass"
+  },
+  "native_mixed_kind_regression": {
+    "geometry_loaded_from_mixed_index": true,
+    "texture_entry_ignored_by_geometry_loader": true,
+    "unknown_asset_kinds_fail_closed": true
+  },
+  "qualification": {
+    "cooker_release_tests_passed": 37,
+    "native_release_tests_passed": 472,
+    "native_release_tests_ignored": 1,
+    "strict_clippy": "pass",
+    "format": "pass",
+    "diff_check": "pass",
+    "file_line_gate": {
+      "status": "pre-existing-failures",
+      "unrelated_failures": 5,
+      "changed_files_over_limit": 0
+    }
+  },
+  "renderer_runtime_delta": {
+    "passes": 0,
+    "draws": 0,
+    "buffers": 0,
+    "textures": 0,
+    "bindings": 0,
+    "shader_branches": 0,
+    "pixels_changed": false
+  }
+}

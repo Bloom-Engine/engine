@@ -1,0 +1,93 @@
+{
+  "schema": "bloom-virtual-temporal-material-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "1b4d82816c09f6a544fd8e3d4db77801e84f0804",
+  "instance_abi": {
+    "bytes": 208,
+    "traversal_prefix_bytes": 128,
+    "previous_model_bytes": 64,
+    "model_tint_bytes": 16,
+    "current_affine_finite_required": true,
+    "previous_affine_finite_required": true,
+    "current_invertible_required": true,
+    "tint_finite_required": true
+  },
+  "selection_abi": {
+    "bytes": 32,
+    "dense_instance_index": true,
+    "stable_instance_id_reserved_for_requests": true,
+    "extra_lookup_passes": 0
+  },
+  "material_binding": {
+    "complete_mapping_required": true,
+    "default_source_slot_supported": true,
+    "duplicate_rejected_atomically": true,
+    "missing_rejected_atomically": true,
+    "unused_rejected_atomically": true,
+    "zero_id_rejected_atomically": true,
+    "unbound_traversal_rejected_before_dispatch": true,
+    "per_frame_shader_lookups_added": 0
+  },
+  "metal_oracle": {
+    "backend": "metal",
+    "stable_instance_ids": [501, 777],
+    "dense_instance_indices": [0, 1],
+    "selected_clusters": 8,
+    "decoded_corners": 24,
+    "source_material_slots": [3, 9],
+    "global_material_ids": [101, 202],
+    "current_translation_x": [0.0, 10.0],
+    "previous_translation_x": [-2.0, 8.0],
+    "current_world_match": true,
+    "previous_world_match": true,
+    "tint_match": true,
+    "inverse_transpose_normal_match": true,
+    "gpu_cluster_table_match": true
+  },
+  "default_path": {
+    "engine_state_fields_added": 0,
+    "renderer_fields_added": 0,
+    "model_manager_fields_added": 0,
+    "passes_added": 0,
+    "draws_added": 0,
+    "buffers_constructed": 0,
+    "bindings_added": 0,
+    "shader_branches_added": 0,
+    "pixels_changed": false
+  },
+  "qualification": {
+    "quick_lane": "pass",
+    "quick_lane_seconds": 72,
+    "shared_unit_tests_passed": 403,
+    "shared_unit_tests_ignored": 1,
+    "negotiated_device_tests_passed": 1,
+    "virtual_geometry_tests_passed": 24,
+    "golden_tests_passed": 59,
+    "golden_tests_ignored": 2,
+    "render_target_tests_passed": 4,
+    "visibility_parity_tests_passed": 2,
+    "visibility_runtime_tests_passed": 2,
+    "cooker_tests_passed": 29,
+    "quality_governance_tests_passed": 39,
+    "visual_fault_engine_tests_passed": 3,
+    "strict_production_clippy": "pass",
+    "format": "pass",
+    "contracts_ffi_file_ratchet": "pass",
+    "wasm_no_default_check": "pass",
+    "wasm_models3d_check": "pass",
+    "native_models3d_check": "pass",
+    "no_default_optional_dependency_boundary": "pass"
+  },
+  "acceptance_boxes_changed": 0,
+  "remaining": [
+    "visibility ID namespacing and raw virtual raster",
+    "exact PBR material composition and every established MRT",
+    "current and previous view-projection composition",
+    "bounded submission on adapters without indirect-count support",
+    "conservative previous-frame Hi-Z occlusion",
+    "asynchronous request feedback and artifact streaming",
+    "crack and temporal image corpus",
+    "10-million-triangle stress and total GPU timing",
+    "integrated and discrete adapter qualification"
+  ]
+}

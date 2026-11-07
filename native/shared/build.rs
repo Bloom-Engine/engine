@@ -4,10 +4,74 @@
 //! the `bloom_jolt` C++ shim (and JoltPhysics, via its own CMakeLists) via the
 //! `cmake` crate and emits link directives so rustc picks up both archives.
 
+// The split-sum BRDF table is a constant: generate it here, once per build,
+// instead of in every app's startup (see src/renderer/brdf_lut.rs).
+#[path = "src/renderer/brdf_lut.rs"]
+mod brdf_lut;
+
+fn write_brdf_lut() {
+    println!("cargo:rerun-if-changed=src/renderer/brdf_lut.rs");
+    let texels = brdf_lut::build_brdf_lut(brdf_lut::BRDF_LUT_SIZE);
+    let bytes: Vec<u8> = texels.iter().flat_map(|t| t.to_le_bytes()).collect();
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("brdf_lut.bin");
+    std::fs::write(&out, bytes).expect("write brdf_lut.bin");
+}
+
 fn main() {
     // Always re-run when these change.
     println!("cargo:rerun-if-changed=build.rs");
+    write_brdf_lut();
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_JOLT");
+
+    // SH-055 — `fold_scene_inputs` cfg. GPUs that cap `maxBindGroups` at 4 —
+    // WebGPU/wasm (EN-063) and Android (Adreno et al.) — can't host the group-4
+    // SceneInputs bind group, so the renderer folds those seven bindings into
+    // group 0. Both platforms share the identical fold; emit one cfg so every
+    // fold site reads as a single intent instead of scattering `any(wasm32,
+    // android)`. (Must run before the jolt-feature early return below.)
+    println!("cargo:rustc-check-cfg=cfg(fold_scene_inputs)");
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_arch == "wasm32" || target_os == "android" {
+        println!("cargo:rustc-cfg=fold_scene_inputs");
+    }
+
+    // SH-055 — `lean_mrt` cfg (Android only). Adreno GPUs are tile-based with a
+    // small on-chip cache (GMEM); main_hdr_pass's 4 simultaneous color targets
+    // (hdr+material+velocity+albedo, ~20 bytes/pixel) measured as a
+    // content-independent GPU cost on a Pixel 4a (Adreno 618) — a classic GMEM-
+    // overflow signature. `material` only feeds SSR (off on Android) and
+    // hardware-ray-traced path tracing (unavailable on Adreno 618); `albedo`
+    // only feeds SSGI-modulation and SSAO-alpha-weighting (both off on
+    // Android) in the scene-compose shader. Both are genuinely unread when
+    // Android's render profile runs, so main_hdr_pass drops them to `None`
+    // targets (see `RenderPassContext::check_compatible` in wgpu-core — a
+    // pipeline target and its render-pass attachment must both be `None` at
+    // the same index; the material's WGSL keeps writing `out.material`/
+    // `out.albedo` unchanged, those writes are just discarded with no backing
+    // attachment). `velocity` stays — Android keeps TAA on, which reprojects
+    // via motion vectors. wasm is NOT included: no Adreno-specific GMEM data
+    // for WebGPU/browser GPUs, so this stays narrower than `fold_scene_inputs`.
+    println!("cargo:rustc-check-cfg=cfg(lean_mrt)");
+    if target_os == "android" {
+        println!("cargo:rustc-cfg=lean_mrt");
+    }
+
+    // SH-055 — `mobile_lights` cfg (Android only). The froxel *clustered*
+    // point-light path reads the per-froxel light list from storage buffers
+    // once per fragment. On Adreno 618 those SSBO reads are cache-hostile and,
+    // multiplied by foliage overdraw, measured as ~230ms/frame — the single
+    // largest cost in the whole frame (SurfaceFlinger-measured 3.1→10.1 fps
+    // just from switching it off). The plain UBO-array loop it replaces is the
+    // exact semantic reference the clustered path is built to match (enforced
+    // by the many_point_lights golden), so for scenes within the UBO's
+    // point-light capacity there is no visible difference. Android therefore
+    // defaults to the plain loop; `BLOOM_SKIP=clustered_on` forces the froxel
+    // path back on for A/B measurement.
+    println!("cargo:rustc-check-cfg=cfg(mobile_lights)");
+    if target_os == "android" {
+        println!("cargo:rustc-cfg=mobile_lights");
+    }
 
     if std::env::var_os("CARGO_FEATURE_JOLT").is_none() {
         return;
@@ -52,9 +116,7 @@ fn build_jolt() {
     // when prebuilts are present, useful for hacking on the C++ shim.
     let from_source = std::env::var_os("BLOOM_JOLT_FROM_SOURCE").is_some();
     if !from_source {
-        if let Some(prebuilt_dir) =
-            find_prebuilt_dir(&manifest_dir, &target_os, &target_arch)
-        {
+        if let Some(prebuilt_dir) = find_prebuilt_dir(&manifest_dir, &target_os, &target_arch) {
             link_prebuilt(&prebuilt_dir, &target_os);
             emit_cxx_runtime_link(&target_os);
             return;
@@ -68,9 +130,18 @@ fn build_jolt() {
         );
     }
 
-    println!("cargo:rerun-if-changed={}", shim_dir.join("CMakeLists.txt").display());
-    println!("cargo:rerun-if-changed={}", shim_dir.join("include/bloom_jolt.h").display());
-    println!("cargo:rerun-if-changed={}", shim_dir.join("src/bloom_jolt.cpp").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        shim_dir.join("CMakeLists.txt").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        shim_dir.join("include/bloom_jolt.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        shim_dir.join("src/bloom_jolt.cpp").display()
+    );
 
     // Build into a stable, short path next to the shim itself rather than the
     // per-build OUT_DIR. Two reasons:
@@ -82,9 +153,17 @@ fn build_jolt() {
     //   2. The Jolt build is expensive and identical across every cargo target
     //      hash — caching it once per profile lets `cargo clean` not nuke a
     //      multi-minute compile.
+    // Apple simulators share target_os/target_arch with the device (only the
+    // "sim" ABI tells them apart), so they need their own cache: a shared one
+    // hands simulator objects to a device link and ld rejects the platform.
+    let sim_suffix = if std::env::var("CARGO_CFG_TARGET_ABI").as_deref() == Ok("sim") {
+        "-sim"
+    } else {
+        ""
+    };
     let dst = shim_dir
         .join("build")
-        .join(format!("{}-{}", target_os, target_arch));
+        .join(format!("{}-{}{}", target_os, target_arch, sim_suffix));
 
     let lib_ext = if target_os == "windows" { "lib" } else { "a" };
     let lib_prefix = if target_os == "windows" { "" } else { "lib" };
@@ -114,7 +193,10 @@ fn build_jolt() {
         let _ = cfg.build();
     }
 
-    println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        dst.join("lib").display()
+    );
     println!("cargo:rustc-link-lib=static=bloom_jolt");
     println!("cargo:rustc-link-lib=static=Jolt");
 
@@ -229,7 +311,8 @@ fn link_prebuilt(dir: &std::path::Path, target_os: &str) {
     );
     println!(
         "cargo:rerun-if-changed={}",
-        dir.join(format!("{}Jolt.{}", lib_prefix, lib_ext)).display()
+        dir.join(format!("{}Jolt.{}", lib_prefix, lib_ext))
+            .display()
     );
 
     println!("cargo:rustc-link-search=native={}", dir.display());

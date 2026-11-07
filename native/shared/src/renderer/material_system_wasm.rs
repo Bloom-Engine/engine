@@ -1,7 +1,7 @@
 //! wasm32-only material bind-group helpers, split out of
 //! `material_system.rs` to keep that file under the 2000-line policy (the
 //! same reason `material_system_tests.rs` is a `#[path]` child). The whole
-//! module is gated `#[cfg(target_arch = "wasm32")]` at its declaration in
+//! module is gated `#[cfg(fold_scene_inputs)]` at its declaration in
 //! `renderer/mod.rs`, so nothing here compiles on native.
 
 /// EN-063 — wasm32-only per_frame bind group builder: the PerFrame UBO
@@ -28,14 +28,38 @@ pub(crate) fn build_per_frame_bg_wasm(
         label: Some("material_per_frame_bg"),
         layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0,     resource: per_frame_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: B,     resource: wgpu::BindingResource::TextureView(scene_color_view) },
-            wgpu::BindGroupEntry { binding: B + 1, resource: wgpu::BindingResource::Sampler(scene_color_samp) },
-            wgpu::BindGroupEntry { binding: B + 2, resource: wgpu::BindingResource::TextureView(scene_depth_view) },
-            wgpu::BindGroupEntry { binding: B + 3, resource: wgpu::BindingResource::Sampler(scene_depth_samp) },
-            wgpu::BindGroupEntry { binding: B + 4, resource: wgpu::BindingResource::TextureView(impulse_view) },
-            wgpu::BindGroupEntry { binding: B + 5, resource: wgpu::BindingResource::Sampler(impulse_samp) },
-            wgpu::BindGroupEntry { binding: B + 6, resource: wgpu::BindingResource::TextureView(motion_vectors_view) },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: per_frame_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: B,
+                resource: wgpu::BindingResource::TextureView(scene_color_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: B + 1,
+                resource: wgpu::BindingResource::Sampler(scene_color_samp),
+            },
+            wgpu::BindGroupEntry {
+                binding: B + 2,
+                resource: wgpu::BindingResource::TextureView(scene_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: B + 3,
+                resource: wgpu::BindingResource::Sampler(scene_depth_samp),
+            },
+            wgpu::BindGroupEntry {
+                binding: B + 4,
+                resource: wgpu::BindingResource::TextureView(impulse_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: B + 5,
+                resource: wgpu::BindingResource::Sampler(impulse_samp),
+            },
+            wgpu::BindGroupEntry {
+                binding: B + 6,
+                resource: wgpu::BindingResource::TextureView(motion_vectors_view),
+            },
         ],
     })
 }

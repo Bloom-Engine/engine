@@ -2,7 +2,7 @@
 # Build Bloom Engine for Web
 #
 # Usage:
-#   ./native/web/build.sh [game.ts] [--output dist/]
+#   bloom-web [game.ts] [--output dist/]
 #
 # Steps:
 #   1. Build bloom_web.wasm via wasm-pack
@@ -18,9 +18,49 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENGINE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CALLER_DIR="$(pwd)"
 WEB_CRATE="$SCRIPT_DIR"
-OUTPUT_DIR="${2:-$ENGINE_DIR/dist/web}"
-GAME_FILE="$1"
+OUTPUT_DIR=""
+GAME_FILE=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output)
+      if [ "$#" -lt 2 ]; then
+        echo "ERROR: --output requires a directory"
+        exit 2
+      fi
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --output=*)
+      OUTPUT_DIR="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: bloom-web [game.ts] [--output dist/]"
+      exit 0
+      ;;
+    -*)
+      echo "ERROR: unknown option: $1"
+      exit 2
+      ;;
+    *)
+      if [ -n "$GAME_FILE" ]; then
+        echo "ERROR: only one game entry file may be supplied"
+        exit 2
+      fi
+      GAME_FILE="$1"
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$OUTPUT_DIR" ]; then
+  OUTPUT_DIR="$CALLER_DIR/dist/web"
+elif [ "${OUTPUT_DIR#/}" = "$OUTPUT_DIR" ]; then
+  OUTPUT_DIR="$CALLER_DIR/$OUTPUT_DIR"
+fi
 
 # Resolve the game file to an absolute path NOW, while still in the caller's
 # working directory — the build cd's into the web crate before compiling, so a

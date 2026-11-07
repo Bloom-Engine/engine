@@ -49,16 +49,16 @@ pub struct PlanarReflectionProbe {
     pub plane_y: f32,
     /// Unit normal of the plane in world space. The mirror matrix
     /// reflects across `n · p = d`, where `d = n · (0, plane_y, 0)`.
-    pub normal:  [f32; 3],
+    pub normal: [f32; 3],
     /// Texture extent — width = height for a square probe; both
     /// dimensions get rounded to ≥ 16 px in `new` so a tiny RT can't
     /// crash the renderer.
     pub resolution: u32,
 
-    pub color_rt:    wgpu::Texture,
-    pub color_view:  wgpu::TextureView,
-    pub depth_rt:    wgpu::Texture,
-    pub depth_view:  wgpu::TextureView,
+    pub color_rt: wgpu::Texture,
+    pub color_view: wgpu::TextureView,
+    pub depth_rt: wgpu::Texture,
+    pub depth_view: wgpu::TextureView,
 
     /// Dummy G-buffer attachments for the user-material probe pass.
     /// Opaque-profile material pipelines target the full 4-attachment
@@ -67,12 +67,12 @@ pub struct PlanarReflectionProbe {
     /// wgpu validates pipeline targets against pass attachments
     /// exactly. Only the hdr result is kept; these three are cleared
     /// each frame and their stores discarded.
-    pub aux_material_rt:   wgpu::Texture,
+    pub aux_material_rt: wgpu::Texture,
     pub aux_material_view: wgpu::TextureView,
-    pub aux_velocity_rt:   wgpu::Texture,
+    pub aux_velocity_rt: wgpu::Texture,
     pub aux_velocity_view: wgpu::TextureView,
-    pub aux_albedo_rt:     wgpu::Texture,
-    pub aux_albedo_view:   wgpu::TextureView,
+    pub aux_albedo_rt: wgpu::Texture,
+    pub aux_albedo_view: wgpu::TextureView,
 }
 
 impl PlanarReflectionProbe {
@@ -84,12 +84,7 @@ impl PlanarReflectionProbe {
     ///     reflected into the probe doesn't clamp to LDR
     ///   - depth: `Depth32Float` so the mirrored draws can z-test
     ///     against each other without a separate downsample
-    pub fn new(
-        device: &wgpu::Device,
-        plane_y: f32,
-        normal:  [f32; 3],
-        resolution: u32,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, plane_y: f32, normal: [f32; 3], resolution: u32) -> Self {
         // Clamp absurd inputs — a 0-px texture is illegal in wgpu
         // and a 16k-px probe would cost more than the rest of the
         // frame combined. 16..=4096 covers every realistic case.
@@ -97,20 +92,27 @@ impl PlanarReflectionProbe {
 
         let color_rt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("planar_reflection_color"),
-            size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: res,
+                height: res,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: super::formats::HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let color_view = color_rt.create_view(&Default::default());
 
         let depth_rt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("planar_reflection_depth"),
-            size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: res,
+                height: res,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -126,7 +128,11 @@ impl PlanarReflectionProbe {
         let make_aux = |label: &str, format: wgpu::TextureFormat| {
             let tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: res,
+                    height: res,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -137,12 +143,18 @@ impl PlanarReflectionProbe {
             let view = tex.create_view(&Default::default());
             (tex, view)
         };
-        let (aux_material_rt, aux_material_view) =
-            make_aux("planar_reflection_aux_material", super::formats::MATERIAL_FORMAT);
-        let (aux_velocity_rt, aux_velocity_view) =
-            make_aux("planar_reflection_aux_velocity", super::formats::VELOCITY_FORMAT);
-        let (aux_albedo_rt, aux_albedo_view) =
-            make_aux("planar_reflection_aux_albedo", wgpu::TextureFormat::Rgba8Unorm);
+        let (aux_material_rt, aux_material_view) = make_aux(
+            "planar_reflection_aux_material",
+            super::formats::MATERIAL_FORMAT,
+        );
+        let (aux_velocity_rt, aux_velocity_view) = make_aux(
+            "planar_reflection_aux_velocity",
+            super::formats::VELOCITY_FORMAT,
+        );
+        let (aux_albedo_rt, aux_albedo_view) = make_aux(
+            "planar_reflection_aux_albedo",
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
 
         // Normalise the supplied normal — caller may pass a non-unit
         // vector; downstream math (specifically the reflection
@@ -150,11 +162,19 @@ impl PlanarReflectionProbe {
         let n = normalise(normal);
 
         Self {
-            plane_y, normal: n, resolution: res,
-            color_rt, color_view, depth_rt, depth_view,
-            aux_material_rt, aux_material_view,
-            aux_velocity_rt, aux_velocity_view,
-            aux_albedo_rt, aux_albedo_view,
+            plane_y,
+            normal: n,
+            resolution: res,
+            color_rt,
+            color_view,
+            depth_rt,
+            depth_view,
+            aux_material_rt,
+            aux_material_view,
+            aux_velocity_rt,
+            aux_velocity_view,
+            aux_albedo_rt,
+            aux_albedo_view,
         }
     }
 }
@@ -174,12 +194,14 @@ pub fn reflection_matrix(plane_y: f32, normal: [f32; 3]) -> [[f32; 4]; 4] {
     let d = n[1] * plane_y;
     // Standard Householder-style reflection across the plane.
     // Column-major; multiplies p as `R * p` (post-mul).
-    let nx = n[0]; let ny = n[1]; let nz = n[2];
+    let nx = n[0];
+    let ny = n[1];
+    let nz = n[2];
     [
-        [1.0 - 2.0 * nx * nx, -2.0 * nx * ny,       -2.0 * nx * nz,       0.0],
-        [-2.0 * ny * nx,        1.0 - 2.0 * ny * ny, -2.0 * ny * nz,       0.0],
-        [-2.0 * nz * nx,       -2.0 * nz * ny,        1.0 - 2.0 * nz * nz, 0.0],
-        [2.0 * nx * d,          2.0 * ny * d,         2.0 * nz * d,         1.0],
+        [1.0 - 2.0 * nx * nx, -2.0 * nx * ny, -2.0 * nx * nz, 0.0],
+        [-2.0 * ny * nx, 1.0 - 2.0 * ny * ny, -2.0 * ny * nz, 0.0],
+        [-2.0 * nz * nx, -2.0 * nz * ny, 1.0 - 2.0 * nz * nz, 0.0],
+        [2.0 * nx * d, 2.0 * ny * d, 2.0 * nz * d, 1.0],
     ]
 }
 
@@ -235,10 +257,7 @@ pub fn inv_proj_for(proj: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 /// For Bloom's column-major / post-mul convention, applying the
 /// inverse-transpose of `view` to a plane `(N, d)` equates to the
 /// standard direct-3D / OpenGL formulation.
-pub fn world_plane_to_eye_space(
-    view: [[f32; 4]; 4],
-    plane_world: [f32; 4],
-) -> [f32; 4] {
+pub fn world_plane_to_eye_space(view: [[f32; 4]; 4], plane_world: [f32; 4]) -> [f32; 4] {
     let inv = mat4_invert(view);
     // Inverse-transpose, column-major. Multiplying the *transpose* of
     // `inv` by the plane vector is the same as multiplying `inv`
@@ -268,10 +287,7 @@ pub fn world_plane_to_eye_space(
 /// `plane_eye_space` is `(Nx, Ny, Nz, d)` such that points on the
 /// plane satisfy `N · p_eye + d = 0`. Use `world_plane_to_eye_space`
 /// to convert from a world-space plane.
-pub fn oblique_proj(
-    proj: [[f32; 4]; 4],
-    plane_eye_space: [f32; 4],
-) -> [[f32; 4]; 4] {
+pub fn oblique_proj(proj: [[f32; 4]; 4], plane_eye_space: [f32; 4]) -> [[f32; 4]; 4] {
     let c = plane_eye_space;
 
     // Far-plane corner in clip space is in the direction of (sgn(c.x),
@@ -283,11 +299,14 @@ pub fn oblique_proj(
     let inv_p = mat4_invert(proj);
     let q = mat4_mul_vec4(&inv_p, &q_clip);
 
-    // Scale `c` so the near-plane crosses through the supplied plane:
-    //   M = (2 / dot(c, q)) · c
-    // Then the new third row of P (which controls the depth output) is
-    //   P_row2 = M - P_row3
-    // (P_row3 is the standard perspective w-row, all stays the same.)
+    // Scale `c` so the near plane crosses through the supplied plane. wgpu
+    // uses D3D/Metal depth (`0 <= z <= w`), so the replacement z row is:
+    //
+    //   P_row2 = c / dot(c, q)
+    //
+    // The common OpenGL form, `2c / dot(c,q) - P_row3`, instead targets
+    // `-w <= z <= w`. Using it here moves the wrong clip plane and can reject
+    // every above-water draw from a mirrored camera.
     let denom = c[0] * q[0] + c[1] * q[1] + c[2] * q[2] + c[3] * q[3];
     if denom.abs() < 1e-10 {
         // Degenerate plane orientation w.r.t. the frustum — leave
@@ -295,21 +314,16 @@ pub fn oblique_proj(
         // reflection still renders, just without near-plane clipping.
         return proj;
     }
-    let scale = 2.0 / denom;
+    let scale = 1.0 / denom;
     let m = [c[0] * scale, c[1] * scale, c[2] * scale, c[3] * scale];
 
     // proj is column-major: proj[col][row]. The "third row" we want
-    // to replace is at row index 2 across all four columns. The
-    // "fourth row" is at row index 3. New row-2 = M - row3 — but
-    // since wgpu's clip-space z range is [0, 1] (not [-1, 1] like
-    // OpenGL), the depth-rescaling pre-step is `M - P_row3` exactly
-    // as in Lengyel's original derivation; the [-1, 1] vs [0, 1]
-    // difference is absorbed by the scale.
+    // to replace is at row index 2 across all four columns.
     let mut out = proj;
-    out[0][2] = m[0] - proj[0][3];
-    out[1][2] = m[1] - proj[1][3];
-    out[2][2] = m[2] - proj[2][3];
-    out[3][2] = m[3] - proj[3][3];
+    out[0][2] = m[0];
+    out[1][2] = m[1];
+    out[2][2] = m[2];
+    out[3][2] = m[3];
     out
 }
 
@@ -352,7 +366,11 @@ mod tests {
         let r = reflection_matrix(2.0, [0.0, 1.0, 0.0]);
         let p = [0.0_f32, 10.0, 0.0, 1.0];
         let out = mat4_mul_vec4(&r, &p);
-        assert!((out[1] - (-6.0)).abs() < 1e-4, "y reflected across y=2 (got {})", out[1]);
+        assert!(
+            (out[1] - (-6.0)).abs() < 1e-4,
+            "y reflected across y=2 (got {})",
+            out[1]
+        );
     }
 
     /// Camera position helper agrees with applying the matrix to a
@@ -397,15 +415,15 @@ mod tests {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: None,
             force_fallback_adapter: true,
-        })).ok()?;
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("planar-reflection-test-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                ..Default::default()
-            },
-        )).ok()?;
+        }))
+        .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("planar-reflection-test-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            ..Default::default()
+        }))
+        .ok()?;
         Some((device, queue))
     }
 
@@ -415,7 +433,9 @@ mod tests {
     /// `Renderer::dispatch_planar_reflections`.
     #[test]
     fn probe_creation_allocates_hdr_and_depth_attachments() {
-        let Some((device, _queue)) = try_create_device() else { return; };
+        let Some((device, _queue)) = try_create_device() else {
+            return;
+        };
         let probe = PlanarReflectionProbe::new(&device, 0.5, [0.0, 1.0, 0.0], 256);
         assert_eq!(probe.resolution, 256, "resolution clamped to caller value");
         assert_eq!(probe.normal, [0.0, 1.0, 0.0], "normalised +Y stays +Y");
@@ -429,16 +449,17 @@ mod tests {
     /// Tiny resolutions are clamped up to 16 px to keep wgpu happy.
     #[test]
     fn probe_resolution_clamps_minimum() {
-        let Some((device, _queue)) = try_create_device() else { return; };
+        let Some((device, _queue)) = try_create_device() else {
+            return;
+        };
         let probe = PlanarReflectionProbe::new(&device, 0.0, [0.0, 1.0, 0.0], 4);
         assert_eq!(probe.resolution, 16, "clamps to 16 px floor");
     }
 
     /// EN-011 V2 — oblique projection clips a point on the wrong side
-    /// of the supplied plane. Point ABOVE the eye-space plane should
-    /// project inside the [-w, w] z range (clip-space-z divides to
-    /// [0, 1] in wgpu); point BELOW the plane projects with z > w
-    /// (i.e. ndc.z > 1 in wgpu) so the rasterizer clips it.
+    /// of the supplied plane. A point ON the plane must map to z=0,
+    /// point ABOVE it must project inside the wgpu [0, w] depth range,
+    /// and point BELOW it must project outside that range.
     ///
     /// Setup: identity view (eye-space == world-space), a horizontal
     /// plane y = 0 (so eye-space plane = (0, 1, 0, 0)), and a perspective
@@ -448,12 +469,22 @@ mod tests {
     fn oblique_proj_clips_below_plane() {
         use crate::renderer::util::mat4_perspective;
         // Standard perspective matching mat4_perspective conventions.
-        let proj = mat4_perspective(70.0_f32.to_radians(), 16.0/9.0, 0.1, 100.0);
+        let proj = mat4_perspective(70.0_f32.to_radians(), 16.0 / 9.0, 0.1, 100.0);
         // Horizontal plane y = 0 in eye-space, normal +Y, points above
         // satisfy y > 0 → N·p + d > 0 (kept). The plane equation
         // (Nx, Ny, Nz, d) for "y >= 0 is above" is (0, 1, 0, 0).
         let plane_eye = [0.0_f32, 1.0, 0.0, 0.0];
         let oblique = oblique_proj(proj, plane_eye);
+
+        // This assertion distinguishes wgpu's [0,1] replacement from the
+        // familiar OpenGL formula, which incorrectly maps the plane to z=-w.
+        let p_on_plane = [3.0_f32, 0.0, -10.0, 1.0];
+        let clip_on_plane = mat4_mul_vec4(&oblique, &p_on_plane);
+        assert!(
+            clip_on_plane[2].abs() < 1e-5,
+            "oblique plane is the wgpu z=0 near plane (got z={})",
+            clip_on_plane[2]
+        );
 
         // A point in eye space ABOVE the plane, in front of camera:
         // y = +5 (above), z = -10 (in front, right-handed view).
@@ -461,10 +492,17 @@ mod tests {
         let clip_above = mat4_mul_vec4(&oblique, &p_above);
         // wgpu / D3D / Metal clip space: visible when 0 <= z <= w.
         // For a point above the plane, z/w should be inside [0, 1].
-        assert!(clip_above[3] > 0.0, "point above plane has positive w (got {})", clip_above[3]);
+        assert!(
+            clip_above[3] > 0.0,
+            "point above plane has positive w (got {})",
+            clip_above[3]
+        );
         let ndc_z_above = clip_above[2] / clip_above[3];
-        assert!(ndc_z_above >= 0.0 && ndc_z_above <= 1.0,
-            "above-plane point ndc.z within [0,1] (got {})", ndc_z_above);
+        assert!(
+            ndc_z_above >= 0.0 && ndc_z_above <= 1.0,
+            "above-plane point ndc.z within [0,1] (got {})",
+            ndc_z_above
+        );
 
         // A point BELOW the plane: y = -5 (below), z = -10 (in front).
         // Oblique projection moves the near plane to coincide with
@@ -474,12 +512,12 @@ mod tests {
         // the fragment.
         let p_below = [3.0_f32, -5.0, -10.0, 1.0];
         let clip_below = mat4_mul_vec4(&oblique, &p_below);
-        let visible = clip_below[3] > 0.0
-            && clip_below[2] >= 0.0
-            && clip_below[2] <= clip_below[3];
-        assert!(!visible,
+        let visible = clip_below[3] > 0.0 && clip_below[2] >= 0.0 && clip_below[2] <= clip_below[3];
+        assert!(
+            !visible,
             "below-plane point should be clipped; got clip = ({}, {}, {}, {})",
-            clip_below[0], clip_below[1], clip_below[2], clip_below[3]);
+            clip_below[0], clip_below[1], clip_below[2], clip_below[3]
+        );
     }
 
     /// `world_plane_to_eye_space` round-trip: a horizontal world plane
@@ -491,9 +529,13 @@ mod tests {
         let plane_world = [0.0_f32, 1.0, 0.0, 0.0]; // y = 0 plane
         let plane_eye = world_plane_to_eye_space(IDENTITY_MAT4, plane_world);
         for i in 0..4 {
-            assert!((plane_eye[i] - plane_world[i]).abs() < 1e-5,
+            assert!(
+                (plane_eye[i] - plane_world[i]).abs() < 1e-5,
                 "identity view leaves plane unchanged (comp {}: {} vs {})",
-                i, plane_eye[i], plane_world[i]);
+                i,
+                plane_eye[i],
+                plane_world[i]
+            );
         }
     }
 }

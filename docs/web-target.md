@@ -25,14 +25,14 @@ Both game logic and rendering run in WebAssembly. A thin JS glue layer (`native/
 
 ### Prerequisites
 
-- [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/): `cargo install wasm-pack`
-- [Perry compiler](../../perry/perry): built from source
+- [wasm-pack](https://crates.io/crates/wasm-pack): `cargo install wasm-pack`
+- [Perry compiler](https://github.com/PerryTS/perry): built from source
 - wasm-opt (optional): `cargo install wasm-opt`
 
 ### Quick Build
 
 ```bash
-./native/web/build.sh path/to/game/main.ts
+npm exec -- bloom-web path/to/game/main.ts --output dist/web
 ```
 
 This runs:
@@ -122,12 +122,11 @@ if (getPlatform() === Platform.WEB) {
 
 ## Browser Support
 
-- **Chrome 113+**: WebGPU (best performance)
-- **Firefox 141+**: WebGPU
-- **Safari**: WebGPU in Technology Preview; WebGL fallback available
-- **Edge 113+**: WebGPU
-
-The wgpu backend supports both WebGPU and WebGL. WebGL is used automatically as a fallback on browsers without WebGPU support.
+Use a current release of Chrome, Edge, Firefox, or Safari. WebGPU rollout
+versions differ by operating system and hardware, so the authoritative support
+matrix is maintained by [MDN](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API#browser_compatibility),
+not duplicated here. The wgpu backend automatically uses WebGL as a fallback
+when WebGPU is unavailable.
 
 ## How It Works
 
@@ -145,4 +144,8 @@ Perry compiles game TypeScript to one WASM module. Bloom's Rust backend compiles
 
 ### Shared Code
 
-About two-thirds of Bloom's Rust code is in `native/shared/` — the renderer, audio mixer, text renderer, model loader, scene graph. This code compiles identically for native and WASM. Only the platform layer (~3300 lines across `native/web/src/`: `lib.rs`, `input_ffi.rs`, `material_ffi.rs`, `physics_ffi.rs`, `render_settings.rs`) is web-specific.
+About two-thirds of Bloom's Rust code is in `native/shared/` — the renderer,
+audio mixer, text renderer, model loader, and scene graph. This code compiles
+identically for native and WASM. The platform layer under `native/web/src/` is
+web-specific; its size is intentionally not duplicated here because it changes
+with the FFI surface.

@@ -1,0 +1,97 @@
+{
+  "schema": "bloom-virtual-visibility-pbr-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "9b3130f8b3a11c9c2b80fdd6aa882093e0b9c550",
+  "selected_record": {
+    "bytes": 32,
+    "absolute_cluster_table_index": true,
+    "absolute_physical_page_byte_base": true,
+    "vertex_encoding_flag_shift": 28,
+    "vertex_encoding_bits": 2,
+    "cluster_generation_owner_sentinel": true,
+    "mesh_table_fetch_in_raster_or_shading": false,
+    "multi_mesh_float_quantized_oracle": "pass"
+  },
+  "device_contract": {
+    "visibility_vertex_storage_buffers": 4,
+    "complete_pbr_fragment_storage_buffers": 8,
+    "max_bind_groups_required": 5,
+    "native_color_attachments_required": 4,
+    "production_renderer_layout_pipeline_creation": "pass",
+    "original_nine_storage_buffer_layout_rejected": true
+  },
+  "reconstruction": {
+    "perspective_correct_barycentrics": true,
+    "current_clip": true,
+    "previous_clip": true,
+    "world_position": true,
+    "inverse_transpose_normal": true,
+    "mirrored_tangent_handedness": true,
+    "uv0": true,
+    "vertex_color_times_instance_tint": true,
+    "generation_safe_material_id": true,
+    "front_face_state": true,
+    "helper_lane_gradients": true,
+    "authoritative_scene_evaluator": "shade_main_scene",
+    "native_scene_outputs": 4
+  },
+  "metal_oracle": {
+    "backend": "metal",
+    "raster_and_probe_same_command_stream": true,
+    "covered_pixels_nonzero": true,
+    "background_pixels_nonzero": true,
+    "compatibility_ids_observed": 0,
+    "background_collision_observed": false,
+    "all_reconstructed_lanes_match_cpu_oracle": true
+  },
+  "default_path": {
+    "engine_state_fields_added": 0,
+    "renderer_fields_added": 0,
+    "model_manager_fields_added": 0,
+    "passes_registered": 0,
+    "draws_added": 0,
+    "virtual_resources_constructed": 0,
+    "pixels_changed": false
+  },
+  "qualification": {
+    "quick_lane": "pass",
+    "quick_lane_seconds": 122,
+    "shared_unit_tests_passed": 410,
+    "shared_unit_tests_ignored": 1,
+    "negotiated_device_tests_passed": 1,
+    "virtual_geometry_tests_passed": 29,
+    "golden_tests_passed": 59,
+    "golden_tests_ignored": 2,
+    "render_target_tests_passed": 4,
+    "visibility_parity_tests_passed": 2,
+    "visibility_runtime_tests_passed": 2,
+    "cooker_tests_passed": 29,
+    "quality_governance_tests_passed": 39,
+    "visual_fault_engine_tests_passed": 3,
+    "strict_production_clippy": "pass",
+    "format": "pass",
+    "contracts_ffi_file_ratchet": "pass",
+    "wasm_web_check": "pass",
+    "example_inventory": "pass"
+  },
+  "hardware_visual_capture": {
+    "cases_built_and_captured": [
+      "pbr-spheres-high",
+      "damaged-helmet",
+      "sponza-interior"
+    ],
+    "approved_portable_baselines_present": false,
+    "visual_comparison_status": "unavailable",
+    "visual_pass_claimed": false,
+    "baseline_installed_or_modified": false
+  },
+  "acceptance_boxes_changed": 0,
+  "remaining": [
+    "production virtual ownership routing and four-MRT composition",
+    "bounded non-indirect-count submission fallback",
+    "conservative previous-frame Hi-Z",
+    "asynchronous index resolution and streaming feedback",
+    "Bistro crack and temporal comparison against approved baselines",
+    "10-million-triangle stress and integrated/discrete GPU timing"
+  ]
+}

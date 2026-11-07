@@ -1,0 +1,72 @@
+{
+  "schema": "bloom-visibility-mask-compatibility-evidence-v1",
+  "issue": 27,
+  "qualified_revision": "f6518405a13b615d6f7708534f4b02887e3d5b02",
+  "decision": {
+    "mask_cutout_owner": "forward-compatibility",
+    "visibility_v1_admitted": false,
+    "future_alpha_visibility_requires_independent_qualification": true
+  },
+  "workload": {
+    "width": 160,
+    "height": 128,
+    "moving_visibility_eligible_draws": 32,
+    "moving_layered_compatibility_draws": 6,
+    "moving_mask_compatibility_draws": 1,
+    "minimum_reported_compatibility_draws": 7,
+    "mask_texture_extent": [2, 2],
+    "mask_opaque_texels": 2,
+    "mask_transparent_texels": 2,
+    "mask_overlaps_visibility_geometry": true
+  },
+  "adapter": {
+    "name": "Apple M1 Max",
+    "device_type": "integratedgpu",
+    "backend": "metal"
+  },
+  "parity": {
+    "final_rgba8": {
+      "changed_components": 187,
+      "components": 81920,
+      "maximum_code_delta": 1,
+      "mean_code_delta": 0.00228271
+    },
+    "hdr_rgba16f": {
+      "changed_components": 1747,
+      "components": 81920,
+      "maximum_absolute_delta": 0.000854492,
+      "mean_absolute_delta": 0.000004231930
+    },
+    "material_rg8": {
+      "changed_components": 36,
+      "components": 40960,
+      "maximum_code_delta": 1,
+      "mean_code_delta": 0.000878906
+    },
+    "velocity_rg16f": {
+      "changed_components": 55,
+      "components": 40960,
+      "maximum_absolute_delta": 0.000003815,
+      "mean_absolute_delta": 0.000000005122,
+      "reference_nonzero_components_minimum": 257
+    },
+    "albedo_rgba8": {
+      "changed_components": 76,
+      "components": 81920,
+      "maximum_code_delta": 1,
+      "mean_code_delta": 0.000927734
+    }
+  },
+  "qualification": {
+    "release_visibility_buffer_parity_tests": 2,
+    "failures": 0,
+    "mask_compatibility_count_is_regression_gated": true,
+    "final_and_four_mrt_parity": "pass"
+  },
+  "remaining": [
+    "identical-camera Bistro and full effects corpus",
+    "low-overdraw and representative admitted-workload performance",
+    "discrete and integrated/tile-based adapters",
+    "default activation remains rejected"
+  ]
+}

@@ -1,0 +1,162 @@
+{
+  "schema": "bloom-vsm-debug-views-evidence-v1",
+  "issue": 132,
+  "revision": "840eb49fa3190183c01cae29d81945045fe69ea5",
+  "environment": {
+    "adapter": "Apple M1 Max",
+    "backend": "Metal",
+    "quality_preset": 3,
+    "render_scale": 1.0,
+    "width": 800,
+    "height": 450,
+    "fixed_timestep_seconds": 0.016666667
+  },
+  "palette": {
+    "order": [
+      "free",
+      "miss-unrendered",
+      "invalidated",
+      "clip-level-0",
+      "clip-level-1",
+      "clip-level-2"
+    ],
+    "colors": [
+      "#080808",
+      "#ffb423",
+      "#ff37be",
+      "#46d26e",
+      "#4696ff",
+      "#be64ff"
+    ],
+    "legend_sha256": "6d9b0f90af459fff1bc8c48dcd367c699aee9fc0771b4c39cf8b233002868eb0"
+  },
+  "captures": {
+    "miss": {
+      "fixture": "quality-motion --vsm-dynamic",
+      "warmup_frames": 1,
+      "measured_frames": 1,
+      "requirement": "miss-unrendered",
+      "passed": true,
+      "failures": [],
+      "virtual_sha256": "089c3d0da0ce515757566b5a44aa9a659a27158ef906857d4ce172cc8243587d",
+      "physical_sha256": "de2660b4e7241015975f38c8dd39c1c6729ab032bf0fc9d8cb849c774ed0df07",
+      "report_sha256": "0b63d9a40ae51f43dd8201fad3a1fa157e02893d17b298ef54dae4f87c6a431b",
+      "page_cells": {
+        "free": 2848,
+        "miss_unrendered": 212,
+        "invalidated": 0,
+        "clip_level_0": 5,
+        "clip_level_1": 7,
+        "clip_level_2": 0,
+        "unknown": 0
+      },
+      "state": {
+        "resident": 224,
+        "dirty": 212,
+        "cache_hits": 224,
+        "cache_misses": 0,
+        "invalidated_events": 4,
+        "rendered": 8
+      }
+    },
+    "invalidation": {
+      "fixture": "quality-motion --vsm-dynamic --vsm-light-motion",
+      "warmup_frames": 1,
+      "measured_frames": 28,
+      "captured_fixture_frame": 30,
+      "requirement": "invalidated",
+      "passed": true,
+      "failures": [],
+      "virtual_sha256": "3c5a57bc3e88c81ab2c30dcf36b046a6688383bd46e22a05b83771ea979da7b0",
+      "physical_sha256": "16f1779a9ad96bb314abf2918fe6cf68e8968c8a96211e077311d15e15f22410",
+      "report_sha256": "fa3098a68ca4cbb3b334fb2abab16efa928ca5c5577ef2a979210e64006022a3",
+      "page_cells": {
+        "free": 2836,
+        "miss_unrendered": 126,
+        "invalidated": 102,
+        "clip_level_0": 4,
+        "clip_level_1": 4,
+        "clip_level_2": 0,
+        "unknown": 0
+      },
+      "state": {
+        "resident": 236,
+        "dirty": 228,
+        "requested_pages": 224,
+        "cache_hits": 212,
+        "cache_misses": 12,
+        "invalidated_events": 105,
+        "rendered": 8
+      },
+      "per_light_cost": {
+        "light": 0,
+        "kind": "directional",
+        "requested_pages": 224,
+        "cache_hits": 212,
+        "cache_misses": 12,
+        "invalidated_pages": 105,
+        "rendered_pages": 8,
+        "resident_pages": 236,
+        "dirty_pages": 228,
+        "clipmap_level_rebases": 0,
+        "dynamic_overlay_draws": 8,
+        "physical_depth_bytes_owned": 16448256,
+        "shared_pool_bytes": 17842176,
+        "shared_metadata_staging_bytes": 2109648,
+        "render_budget_pages": 8
+      }
+    },
+    "static": {
+      "fixture": "quality-motion --vsm-contact-detail",
+      "warmup_frames": 120,
+      "measured_frames": 1,
+      "requirement": "three settled clip levels",
+      "passed": true,
+      "failures": [],
+      "virtual_sha256": "27252efced8e7ba900e95d5a204427f81a0958b179913dc0e43c4d99cf798aec",
+      "physical_sha256": "5d8e1a785f5154f0123a13d79ecadd599460ce029547b04d42a7a7e649cb7331",
+      "report_sha256": "7e9d6dedeff5df6d2e61040d07ff9efc052d5b0da880c813f59befa25f8e0ac0",
+      "page_cells": {
+        "free": 2848,
+        "miss_unrendered": 0,
+        "invalidated": 0,
+        "clip_level_0": 144,
+        "clip_level_1": 64,
+        "clip_level_2": 16,
+        "unknown": 0
+      },
+      "state": {
+        "resident": 224,
+        "dirty": 0,
+        "cache_hits": 224,
+        "cache_misses": 0,
+        "invalidated_events": 0,
+        "rendered": 0
+      }
+    }
+  },
+  "regression": {
+    "quality_contract": "pass",
+    "strict_clippy_correctness_suspicious_performance": "pass",
+    "debug_oracle_tests_passed": 7,
+    "rust_debug_semantic_tests_passed": 2,
+    "headless_device_negotiation": "pass",
+    "shared_unit_tests_passed": 349,
+    "shared_unit_tests_ignored": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_policy_ignored": 2,
+    "render_target_tests_passed": 4,
+    "quality_tests_passed": 39,
+    "wasm_check": "pass",
+    "canonical_examples_passed": 20,
+    "quick_lane": "pass"
+  },
+  "production_render_path_changes": {
+    "shaders": 0,
+    "passes": 0,
+    "resources": 0,
+    "bindings": 0,
+    "draws": 0,
+    "page_policy": 0
+  }
+}

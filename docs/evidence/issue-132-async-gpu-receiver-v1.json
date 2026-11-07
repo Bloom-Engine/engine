@@ -1,0 +1,154 @@
+{
+  "schema": "bloom-directional-vsm-async-gpu-receiver-experiment-v1",
+  "issue": 132,
+  "validated_revision": "ad6e7c625c4350589d0dc5346845505ac1e6b31b",
+  "default_off_revision": "9fe0371a8c020e56289cff5555f9110f048677d0",
+  "performance_qualification": "rejected",
+  "current_default": "fixed-cpu",
+  "gpu_backend_activation": "explicit-BLOOM_VSM_GPU_RECEIVER=1",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end",
+    "os": "macOS 26.5"
+  },
+  "runtime_contract": {
+    "minimum_receiver_bounds": 1024,
+    "maximum_receiver_bounds": 4096,
+    "workgroup_size": 64,
+    "coverage_entries": 3072,
+    "coverage_bytes": 12288,
+    "maximum_bounds_bytes": 131072,
+    "params_bytes": 496,
+    "readback_buffers": 2,
+    "same_frame_blocking_readback": false,
+    "production_poll": "Poll",
+    "projection_transition_backend": "fixed-cpu-transition",
+    "missing_page_fallback": "csm",
+    "validation": "complete-ordered-demand-vector-exact",
+    "validation_failure": "disable-gpu-backend-and-retain-fixed-cpu-oracle",
+    "small_scene_resources": 0,
+    "default_off_resources": 0
+  },
+  "stress_fixture": {
+    "flag": "--vsm-gpu-receivers",
+    "camera_visible_receiver_bounds": 1140,
+    "motion": "continuous-sub-page",
+    "visual_geometry": "receive-only-and-below-ground",
+    "bounds_capacity": 2048,
+    "bounds_bytes": 65536,
+    "coverage_bytes": 12288,
+    "readback_bytes": 24576,
+    "params_bytes": 496,
+    "total_gpu_receiver_bytes": 102896,
+    "dispatches": 36,
+    "completions": 35,
+    "validation_failures": 0,
+    "validated": true,
+    "backend_at_capture": "gpu-async-lagged"
+  },
+  "image_comparisons": {
+    "large_moving_gpu_vs_cpu": {
+      "reference_sha256": "c1fb8f376d576f2355bbdb66e1491fe4a6a65a80c62ad0f2fbf47fbd3bbc035c",
+      "candidate_sha256": "17b55995a087feb27e51b2feb000a903e07da2a0f81cda138fce9f891853b06b",
+      "rmse_luminance": 0.000018280,
+      "ssim_luminance": 1.0,
+      "percent_above_0_02": 0.0,
+      "mean_oklab_delta": 0.000000223,
+      "mean_edge_delta": 0.000000204
+    },
+    "small_vsm_vs_prior_milestone": {
+      "reference_sha256": "2b56fb91d5b20386d15d098484aaf33b0f2dbb945eacc01070eda06881c4815d",
+      "candidate_sha256": "9f145de8c09a7cf127a86f89b2874e785c925c47d5e472f4bb020f2b3d6336bf",
+      "rmse_luminance": 0.000006212,
+      "ssim_luminance": 1.0,
+      "percent_above_0_02": 0.0,
+      "gpu_receiver_bytes": 0,
+      "gpu_receiver_dispatches": 0
+    },
+    "vsm_disabled_vs_prior_milestone": {
+      "reference_sha256": "b8f8c0c308f13138e5f3c2d329199b3d00503a8a34914c077eb471b11610e3f6",
+      "candidate_sha256": "3a1a65759c3f174f94656c826276b0c32f53eda78b3c48fda64ed2261b870a21",
+      "rmse_luminance": 0.000006775,
+      "ssim_luminance": 1.0,
+      "percent_above_0_02": 0.0,
+      "gpu_total_bytes": 0,
+      "gpu_receiver_dispatches": 0
+    }
+  },
+  "preliminary_indirect_large_workload_performance": {
+    "control": "BLOOM_VSM_GPU_RECEIVER=0",
+    "candidate": "capability-and-workload-gated-gpu",
+    "wall_frame_mean_ms": {
+      "control": 4539.346179,
+      "candidate": 4470.161396,
+      "absolute_delta": -69.184783
+    },
+    "cpu_frame_mean_ms": {
+      "control": 18.615338,
+      "candidate": 18.306413,
+      "absolute_delta": -0.308925
+    },
+    "gpu_frame_mean_ms": {
+      "control": 40.886617,
+      "candidate": 37.220795,
+      "absolute_delta": -3.665822
+    },
+    "shadow_cpu_mean_ms": {
+      "control": 0.637508,
+      "candidate": 0.386642,
+      "absolute_delta": -0.250866
+    },
+    "virtual_page_cpu_mean_ms": {
+      "control": 0.034791,
+      "candidate": 0.034375,
+      "absolute_delta": -0.000416
+    },
+    "presentation_throttled": true,
+    "attribution_verdict": "insufficient"
+  },
+  "direct_pass_performance": {
+    "receiver_bounds": 1140,
+    "fixed_cpu_shadow_pass_delta_ms": 0.250866,
+    "gpu_dense_mark_ms": 0.485908,
+    "experimental_gpu_rank_ms": 0.436717,
+    "experimental_gpu_compact_ms": 0.504675,
+    "experimental_combined_one_pass_ms": 1.510075,
+    "gpu_compaction_candidate": "discarded-before-commit",
+    "automatic_activation": "rejected",
+    "reason": "direct GPU cost exceeds removed CPU cost"
+  },
+  "rejected_lower_threshold": {
+    "receiver_bounds": 285,
+    "candidate_threshold": 256,
+    "runs_per_backend": 3,
+    "decision": "rejected-keep-fixed-cpu",
+    "reason": "gpu-timestamp-inflation-from-per-frame-readback",
+    "selected_minimum_receiver_bounds": null
+  },
+  "qualification": {
+    "quick_lane": "pass",
+    "duration_seconds": 53,
+    "ffi_schema_parity": "pass",
+    "format": "pass",
+    "strict_clippy": "pass",
+    "file_size_ratchet": "pass",
+    "wasm32_web_feature_check": "pass",
+    "shared_unit_tests_passed": 345,
+    "shared_unit_tests_ignored": 1,
+    "headless_device_tests_passed": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "focused_vsm_tests_passed": 38,
+    "canonical_examples": 20
+  },
+  "remaining": [
+    "GPU-resident request compaction and page scheduling without dense readback",
+    "GPU page-caster culling and submission",
+    "spot and point virtual projections with shared arbitration",
+    "Bistro, small-pool, contact-detail, and 100-light qualification",
+    "quality-tier rollout"
+  ]
+}

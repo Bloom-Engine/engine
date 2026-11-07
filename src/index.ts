@@ -33,6 +33,10 @@ export {
   runGame,
   setProfilerEnabled, getProfilerFrameCpuUs, getProfilerFrameGpuUs,
   printProfilerSummary, getProfilerOverlay, getProfilerFrameHistory,
+  getMaterialBindingCapabilities, getRendererCapabilities, getImportedRefractionMode,
+  setTransparencyCompositionMode, getTransparencyCompositionMode,
+  getActiveTransparencyCompositionMode,
+  setMaterialBindingTierOverride,
   splatImpulse, setMaterialParams,
 } from './core/index';
 
@@ -40,6 +44,10 @@ export type {
   Rect, Camera2D, Camera3D,
   Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4,
   RayHit, FrustumPlanes,
+  MaterialBindingTier, MaterialBindingCapabilityReport,
+  RendererCapabilityTier, RendererSystemPaths, RendererCapabilityReport,
+  ImportedRefractionMode,
+  TransparencyCompositionMode, ActiveTransparencyCompositionMode,
 } from './core/index';
 
 // Vec2, Vec3, Vec4 as types come from core, as values (constructors) from math
@@ -67,12 +75,15 @@ export {
 } from './audio/index';
 
 export {
-  loadTexture, unloadTexture, drawTexture, drawTexturePro, drawTextureRec,
+  loadTexture, createTextureRgba8, unloadTexture, drawTexture, drawTexturePro, drawTextureRec,
   getTextureWidth, getTextureHeight, loadImage,
   imageResize, imageCrop, imageFlipH, imageFlipV, loadTextureFromImage,
   genTextureMipmaps, setTextureFilter, FILTER_LINEAR, FILTER_NEAREST,
+  TEXTURE_KIND_COLOR, TEXTURE_KIND_NORMAL, TEXTURE_KIND_DATA,
   loadTextureAsync, stageTextures, commitTexture,
-  loadRenderTexture, unloadRenderTexture, beginTextureMode, endTextureMode, getRenderTextureTexture,
+  loadRenderTexture, loadRenderTextureKind, unloadRenderTexture,
+  renderTextureGlsl, renderTextureSobel,
+  beginTextureMode, endTextureMode, getRenderTextureTexture,
 } from './textures/index';
 
 export {
@@ -128,14 +139,21 @@ export {
   createSceneNode, destroySceneNode,
   setSceneNodeVisible, setSceneNodeCastShadow, setSceneNodeReceiveShadow,
   setSceneNodeGiOnly,
+  setSceneNodeRenderLayer,
   setSceneNodeParent, setSceneNodeTransform,
   updateSceneNodeGeometry,
-  setSceneNodeColor, setSceneNodePbr, setSceneNodeTexture, setSceneNodeWaterMaterial, pickSceneAll,
+  setSceneNodeColor, setSceneNodePbr, setSceneNodeMaterial, setSceneNodeTexture,
+  setSceneNodeMaterialTextureHandles,
+  setSceneNodeMaterialTextureTransform, setSceneNodeMaterialTextureStrengths,
+  MATERIAL_TEXTURE_SLOT_BASE_COLOR, MATERIAL_TEXTURE_SLOT_NORMAL,
+  MATERIAL_TEXTURE_SLOT_METALLIC_ROUGHNESS, MATERIAL_TEXTURE_SLOT_EMISSIVE,
+  MATERIAL_TEXTURE_SLOT_OCCLUSION,
+  setSceneNodeWaterMaterial, pickSceneAll,
   getSceneNodeTransform, getSceneNodeBounds,
   setSceneNodeUserData, getSceneNodeUserData,
   getSceneNodeCount,
   registerFrameCallback, unregisterFrameCallback,
-  addDirectionalLight, addPointLight,
+  addDirectionalLight, addPointLight, addShadowedPointLight, addShadowedSpotLight,
   extrudePolygon, subtractBox,
   pickScene,
   enableShadows, disableShadows, dumpShadowMap,
@@ -146,7 +164,11 @@ export {
   projectToScreen,
 } from './scene/index';
 
-export type { SceneNodeHandle, PbrMaterial, PickHit } from './scene/index';
+export type {
+  SceneNodeHandle, PbrMaterial, LayeredPbrMaterial,
+  ClearcoatMaterial, SpecularMaterial, SheenMaterial,
+  AnisotropyMaterial, IridescenceMaterial, PickHit,
+} from './scene/index';
 
 export {
   createPhysicsWorld, setGravity, setPhysicsTimestep,

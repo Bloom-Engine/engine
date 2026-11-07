@@ -29,14 +29,18 @@
 
 import {
   initWindow, closeWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
+  captureFrameToPng,
   clearBackground, setEnvClearFromHdr, setTargetFPS, getDeltaTime, getFPS, getTime,
+  getCommandLineArgs, resize,
   isKeyDown, isKeyPressed,
   getMouseDeltaX, getMouseDeltaY,
   disableCursor, enableCursor,
+  setSsrEnabled,
   beginMode3D, endMode3D,
   setFog, setChromaticAberration, setVignette, setFilmGrain, setSunShafts,
   setAutoExposure, setEnvIntensity, setDepthOfField,
 } from "bloom/core";
+import { parseQualityRun, QualityRun } from "bloom/quality";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
 
@@ -51,7 +55,7 @@ import {
 import {
   createSceneNode, setSceneNodeTransform,
   updateSceneNodeGeometry,
-  setSceneNodeColor, setSceneNodePbr,
+  setSceneNodeColor, setSceneNodePbr, setSceneNodeMaterial,
   setSceneNodeCastShadow, setSceneNodeReceiveShadow,
   enableShadows, dumpShadowMap,
   addDirectionalLight, addPointLight,
@@ -84,6 +88,7 @@ const TWO_PI = 6.28318530;
 
 let headlessSpecPath = "";
 let headlessOutPath = "";
+let headlessModelPath = "assets/DamagedHelmet.glb";
 let headlessMode = false;
 let headlessCamX = 0.0;
 let headlessCamY = 0.0;
@@ -102,16 +107,20 @@ let interactiveCaptureFrames = 0;
 let interactiveCapturePath = "";
 let headlessShadows = false;
 let shadowMapDumpPath = "";
+let ssrEnabled = true;
 
-declare const process: { argv: string[] };
-const argv: string[] = process.argv;
-for (let i = 2; i < argv.length; i = i + 1) {
+const argv: string[] = getCommandLineArgs();
+const qualityConfig = parseQualityRun(argv);
+for (let i = 0; i < argv.length; i = i + 1) {
   if (argv[i] === "--spec" && i + 1 < argv.length) {
     headlessSpecPath = argv[i + 1];
     headlessMode = true;
   } else if (argv[i] === "--out" && i + 1 < argv.length) {
     headlessOutPath = argv[i + 1];
-  } else if (argv[i] === "--camera" && i + 9 < argv.length) {
+  } else if (argv[i] === "--model" && i + 1 < argv.length) {
+    headlessModelPath = argv[i + 1];
+    headlessMode = true;
+  } else if (argv[i] === "--camera" && i + 7 < argv.length) {
     // --camera px py pz tx ty tz fov
     // Primary path for headless mode — avoids JSON array access
     // which has known Perry LLVM backend issues (see Phase 5 notes).
@@ -138,6 +147,8 @@ for (let i = 2; i < argv.length; i = i + 1) {
     headlessShadows = true;
   } else if (argv[i] === "--dump-shadow-map" && i + 1 < argv.length) {
     shadowMapDumpPath = argv[i + 1];
+  } else if (argv[i] === "--no-ssr") {
+    ssrEnabled = false;
   }
 }
 
@@ -231,8 +242,11 @@ function placeSphere(
   roughness: number, metalness: number,
 ): number {
   const node = placeNode(sphereHandle, 0, px, py, pz, scale, scale, scale);
-  setSceneNodeColor(node, cr * 255, cg * 255, cb * 255);
-  setSceneNodePbr(node, roughness, metalness);
+  setSceneNodeMaterial(node, {
+    color: [cr * 255, cg * 255, cb * 255],
+    roughness,
+    metalness,
+  });
   return node;
 }
 
@@ -243,8 +257,11 @@ function placeCube(
   roughness: number, metalness: number,
 ): number {
   const node = placeNode(cubeHandle, 0, px, py, pz, sx, sy, sz);
-  setSceneNodeColor(node, cr * 255, cg * 255, cb * 255);
-  setSceneNodePbr(node, roughness, metalness);
+  setSceneNodeMaterial(node, {
+    color: [cr * 255, cg * 255, cb * 255],
+    roughness,
+    metalness,
+  });
   // Thin horizontal slabs (floors) should receive but not cast
   // shadows — otherwise they fill the shadow map with their own
   // depth and everything reads as "in shadow of the ground".
@@ -507,7 +524,7 @@ function setupGround(): void {
 let gltfModel = { handle: 0, meshCount: 0, materialCount: 0, transform: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] };
 
 function setupGltfModel(): void {
-  gltfModel = loadModel("assets/DamagedHelmet.glb");
+  gltfModel = loadModel(headlessMode ? headlessModelPath : "assets/DamagedHelmet.glb");
   // Pedestal (still rendered via scene graph)
   placeCube(0, 0.1, -30, 6, 0.2, 6, 0.15, 0.15, 0.17, 0.9, 0.0);
 }
@@ -557,7 +574,10 @@ const zoneNames: string[] = [
 const winW = headlessResW > 0 ? headlessResW : SCREEN_W;
 const winH = headlessResH > 0 ? headlessResH : SCREEN_H;
 initWindow(winW, winH, "Bloom Renderer Test", 0);
+if (qualityConfig !== null) resize(winW, winH, winW, winH);
 setTargetFPS(60);
+setSsrEnabled(ssrEnabled);
+let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qualityConfig) : null;
 if (!headlessMode) {
   disableCursor();
 }
@@ -627,14 +647,19 @@ if (headlessShadows) {
 
 let headlessFrame = 0;
 const HEADLESS_WARMUP_FRAMES = 30;
+let qualitySimulationTime = 0.0;
 
 while (!windowShouldClose()) {
-  const dt = getDeltaTime();
-  const t = getTime();
+  const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
+  const dt = qualityRun !== null ? qualityRun.deltaTime() : getDeltaTime();
+  const t = qualityRun !== null ? qualitySimulationTime : getTime();
+  qualitySimulationTime = qualitySimulationTime + dt;
 
   // ---- Camera controls ----
 
-  if (headlessMode) {
+  if (qualityCapture && qualityRun !== null) {
+    qualityRun.requestCapture();
+  } else if (qualityRun === null && headlessMode) {
     // No input — the spec's camera pose is applied directly below.
   } else if (cursorLocked) {
     camYaw = camYaw - getMouseDeltaX() * MOUSE_SENS;
@@ -779,10 +804,6 @@ while (!windowShouldClose()) {
       fovy: headlessFov,
       projection: "perspective",
     });
-    // TEMP: visual sanity check — a bright cube at origin. If this
-    // shows but the glTF helmet doesn't, the issue is in the glTF
-    // model load, not the render pass.
-    drawCube({ x: 0, y: 0, z: 0 }, 0.8, 0.8, 0.8, { r: 255, g: 100, b: 100, a: 255 });
     if (gltfModel.handle !== 0) {
       drawModel(gltfModel, { x: 0, y: 0, z: 0 }, 1.0, { r: 255, g: 255, b: 255, a: 255 });
     }
@@ -823,10 +844,10 @@ while (!windowShouldClose()) {
   // Headless: after warmup frames, capture the frame to --out and
   // exit. We request the screenshot BEFORE endDrawing() so the
   // renderer's pending-screenshot path picks it up during present.
-  if (headlessMode) {
+  if (headlessMode && qualityRun === null) {
     headlessFrame = headlessFrame + 1;
     if (headlessFrame === HEADLESS_WARMUP_FRAMES && headlessOutPath.length > 0) {
-      takeScreenshot(headlessOutPath);
+      captureFrameToPng(headlessOutPath);
       if (shadowMapDumpPath.length > 0) {
         dumpShadowMap(shadowMapDumpPath);
       }
@@ -835,7 +856,7 @@ while (!windowShouldClose()) {
       endDrawing();
       break;
     }
-  } else if (interactiveCaptureFrames > 0) {
+  } else if (qualityRun === null && interactiveCaptureFrames > 0) {
     headlessFrame = headlessFrame + 1;
     if (headlessFrame === interactiveCaptureFrames) {
       takeScreenshot(interactiveCapturePath);
@@ -847,6 +868,9 @@ while (!windowShouldClose()) {
   }
 
   endDrawing();
+  if (qualityRun !== null && qualityRun.endFrame()) {
+    break;
+  }
 }
 
 // Clean shutdown — headless mode relies on this so the PNG flushes

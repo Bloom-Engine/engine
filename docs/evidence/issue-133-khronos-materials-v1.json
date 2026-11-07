@@ -1,0 +1,127 @@
+{
+  "schema": "bloom-khronos-material-qualification-evidence-v1",
+  "issue": 133,
+  "qualified_revision": "b40d28b3f52332fc210f1382fa9cb4efa5450f8f",
+  "commits": {
+    "pinned_qualification": "d2032b0",
+    "static_node_volume_scale": "b40d28b"
+  },
+  "adapter": {
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end",
+    "ray_query": true
+  },
+  "corpus": {
+    "repository": "https://github.com/KhronosGroup/glTF-Sample-Assets",
+    "revision": "2bac6f8c57bf471df0d2a1e8a8ec023c7801dddf",
+    "assets": {
+      "alpha-blend-mode": {
+        "name": "AlphaBlendModeTest",
+        "license": "CC-BY-4.0",
+        "sha256": "37c3577d143071b42dd46e9d942b157837eb25c6340112171d7faecaa987b14e"
+      },
+      "transmission": {
+        "name": "TransmissionTest",
+        "license": "CC0-1.0",
+        "sha256": "dd9732dae5517f8605ad4324d78b077b969c3e8357c056280d0a4e4b67797d15"
+      },
+      "attenuation": {
+        "name": "AttenuationTest",
+        "license": "CC-BY-4.0",
+        "sha256": "7ca161b7f8a9e4b2ac1f7f75816b5848bb31f3b4c226c4cb731b487c8809b756"
+      },
+      "transmission-order": {
+        "name": "TransmissionOrderTest",
+        "license": "CC0-1.0",
+        "sha256": "d904b6cd6c83792fd4a4d9ad4f0366bde76a63e347541c465f2ad4c5baf22a21"
+      }
+    }
+  },
+  "isolated_static_node_scale_correction": {
+    "control_revision": "d2032b0",
+    "control_attenuation_sha256": "8643da1ff400f0d3a5829df11798afb925243ff9c7cf6da4039504986b62ab1e",
+    "corrected_attenuation_sha256": "a2a1b2c3c5a4969e708f09566dbc476a602e007a996152bcd2f857c55c46df50",
+    "control_node_scale_chroma_ramp": [36, 39, 36, 37, 39],
+    "corrected_node_scale_chroma_ramp": [18, 29, 36, 41, 42],
+    "control_semantic_gate": "fail",
+    "corrected_semantic_gate": "pass",
+    "diff": {
+      "width": 1920,
+      "height": 1440,
+      "rmse_luminance": 0.004399808,
+      "ssim_luminance": 0.998071194,
+      "percent_above_0_02": 2.013852835,
+      "mean_oklab_delta": 0.000606760,
+      "mean_edge_delta": 0.000184952,
+      "changed_region": "five AttenuationTest Node Scale row cubes"
+    },
+    "unchanged_control_sha256": {
+      "alpha-blend-mode": "6fc0ca56217f87f1edf6e9ff99403b417fe8b0bad3a84747eb9837bbc8e92043",
+      "transmission": "46f840a1700483cfad8b4ab5a674e5f2e6772eca637e891bc5aac03233bee1c0",
+      "transmission-order": "bc92a884c41b4e349642222620776855190850f1a34373975dcd490ee5e1525b"
+    }
+  },
+  "final_run": {
+    "automation_status": "pass",
+    "review_state": "candidate-human-review-required",
+    "runs_per_case": 2,
+    "all_byte_exact": true,
+    "supported_field_diagnostics": 0,
+    "cases": {
+      "alpha-blend-mode": {
+        "capture_sha256": "6fc0ca56217f87f1edf6e9ff99403b417fe8b0bad3a84747eb9837bbc8e92043",
+        "semantic_gate": "green-checks",
+        "status": "pass"
+      },
+      "transmission": {
+        "capture_sha256": "46f840a1700483cfad8b4ab5a674e5f2e6772eca637e891bc5aac03233bee1c0",
+        "semantic_gate": "material-variation",
+        "status": "pass"
+      },
+      "attenuation": {
+        "capture_sha256": "a2a1b2c3c5a4969e708f09566dbc476a602e007a996152bcd2f857c55c46df50",
+        "semantic_gate": "attenuation-node-scale-ramp",
+        "node_scale_chroma_ramp": [18, 29, 36, 41, 42],
+        "status": "pass"
+      },
+      "transmission-order": {
+        "capture_sha256": "bc92a884c41b4e349642222620776855190850f1a34373975dcd490ee5e1525b",
+        "semantic_gate": "material-variation",
+        "status": "pass"
+      }
+    }
+  },
+  "runtime_contract": {
+    "transmission_uniform_bytes_before": 96,
+    "transmission_uniform_bytes_after": 96,
+    "added_render_passes": 0,
+    "added_draws": 0,
+    "added_gpu_allocations": 0,
+    "added_texture_samples": 0,
+    "added_bindings": 0,
+    "added_shader_branches": 0,
+    "cpu_material_scalars_per_mesh": 1,
+    "joint_weight_accessor_collection": "moved outside vertex loop"
+  },
+  "qualification": {
+    "shared_tests_runnable_passed": 329,
+    "shared_tests_ignored": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "native_models3d_check": "pass",
+    "wasm32_web_check": "pass",
+    "ffi_schema_parity": "pass",
+    "format": "pass",
+    "file_size_ratchet": "pass",
+    "quality_governance_tests_passed": 17,
+    "visual_diff_fault_tests_passed": 3,
+    "cooker_tests_passed": 17,
+    "khronos_cases_passed": 4
+  },
+  "remaining": [
+    "explicit human reference-image approval",
+    "approved baseline installation remains intentionally separate"
+  ]
+}

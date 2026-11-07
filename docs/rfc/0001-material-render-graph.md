@@ -1,6 +1,12 @@
 # RFC 0001 — Material system & render graph
 
-**Status:** Implemented — Phases 1–8 + 10 shipped (ABI v3); Phase 3's pool is built but not wired (still Phase 3b); Phase 9 (water) is game-side. See §10 for as-built divergences.
+**Status:** Implemented — Phases 1–8 + 10 shipped (ABI v3); the compiled
+resource/version/lifetime plan and transient allocator shipped in issue #129;
+Phase 9 (water) is game-side. See §10 and
+[`docs/compiled-render-graph.md`](../compiled-render-graph.md) for the current
+graph contract. Capability-tiered stable material/texture IDs and global
+resource lookup shipped in issue #130; see
+[`docs/material-texture-indirection.md`](../material-texture-indirection.md).
 **Author:** Ralph + Claude (pair)
 **Target version:** 0.x → 0.(x+1), no public breakage for games on the existing
 `drawModel` / `drawCube` / `loadModel` / `loadModelAnimation` APIs.
@@ -299,8 +305,21 @@ struct TranslucentOut {
 };
 ```
 
-The material descriptor (§3) specifies which profile the shader uses. The
-graph routes translucent draws to passes with single-target attachments.
+Fast-changing translucent materials may also provide an optional
+`fs_reactive` fragment entry returning:
+
+```wgsl
+struct ReactiveTranslucentOut {
+  @location(0) hdr:      vec4<f32>,
+  @location(1) reactive: f32, // authored 0..1 TAA rejection coverage
+};
+```
+
+`fs_main` remains mandatory and must produce the same HDR result. The material
+descriptor (§3) specifies which profile the shader uses. Ordinary translucent
+draws keep their single-target attachment. A submitted `fs_reactive` material
+lazily selects the two-target sibling, which unions coverage into an R8 target;
+no shader-source inference from color or alpha is performed.
 
 ### 1.9 Shared header
 
@@ -593,19 +612,21 @@ spec. The version check lives in `renderer/shader_include.rs` +
 Phase 2b — complete". Node names and the scheduler shape differ from §2 —
 see §10.)
 
-### Phase 3 — Transient resource pool 🟡 built, not wired
+### Phase 3 — Transient resource pool ✅ compiled lifetime plan wired
 
 - [x] `renderer/transient.rs`: `TransientDesc`, pool with reference
       counting (aliasing was dropped — reuse only).
-- [ ] Ssao, ssgi, ssr, bloom mip chain, TAA history → all declared as
+- [x] Typed graph resources distinguish persistent/temporal imports from
+      transient allocations and compute first/last use.
+- [x] Resize handling for compiled transients goes through a cached physical
+      allocation plan.
+- [x] Conservative aliasing is enabled for compatible, non-overlapping
       transients.
-- [ ] Resize handling goes through the pool; the renderer's member fields
-      shrink.
 
-**Acceptance:** GPU memory usage reduced (target: 20%+ on 1080p scene),
-SELFTEST identical. **Not yet met** — the pool exists with unit tests, but
-in the live graph `Transient(u32)` ids are ordering tokens over persistent
-renderer fields ("Phase 3b" per `transient.rs`).
+**Acceptance:** rendered output remains unchanged. Current live constraints
+and measured aliasing results are documented in
+[`docs/compiled-render-graph.md`](../compiled-render-graph.md); persistent
+post-FX/history targets intentionally do not alias.
 
 ### Phase 4 — Translucency buckets + scene snapshot
 
@@ -863,7 +884,7 @@ The shooter is the primary test harness. Water is the forcing function.
 
 ---
 
-## 10. As-built divergences (audit 2026-07-16)
+## 10. As-built divergences (audits 2026-07-16 and 2026-07-23)
 
 The design shipped, but the code moved past this spec in places. The
 proposal sections above are left as written; this section is the map from
@@ -901,8 +922,11 @@ spec to reality. Ground truth: `native/shared/shaders/material_abi.wgsl`
   sub-graphs `material_pass` and `overlay_2d`. (§2.3's `main_hdr`/`ssao`/
   `taa`/`scene_compose`/`tonemap` names never existed as built.)
 - `TransientDesc` has no `id` field (separate `TransientId` handle), adds
-  `mips`/`samples`, and the pool ref-counts and reuses but does **not**
-  alias.
+  `mips`/`samples`. Issue #129 superseded the original frame-local
+  declaration with a typed, versioned compiler, cached topology, lifetime
+  planner, and conservative physical alias allocator. The retained renderer
+  now binds closures directly to cached pass positions; its legacy scheduler
+  remains only for unit compatibility tests.
 
 **API (§3):**
 - `loadMaterial` takes a `MaterialDesc` object (`{shader, bucket}`), not a

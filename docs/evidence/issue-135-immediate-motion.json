@@ -1,0 +1,45 @@
+{
+  "schema": "bloom-temporal-motion-evidence-v1",
+  "issue": 135,
+  "producer": "immediate-primitives",
+  "comparison_base": "5d5d9a1e4e15b991111984a8cefd5d9b1307d15e",
+  "adapter": "Apple M1 Max",
+  "backend": "Metal",
+  "motion_sequence": {
+    "meaningful_motion_pixels": 7234,
+    "movement_mean": 15.8512,
+    "frame_four_mean": 0.4309,
+    "frame_four_outlier_fraction": 0.007599,
+    "severe_trail_frames": 0,
+    "stable_flicker": 0.4695
+  },
+  "performance": {
+    "resolution": [1920, 1080],
+    "warmup_frames": 300,
+    "measured_frames": 900,
+    "runs_per_revision": 3,
+    "before": {
+      "render_submit_mean_ms": [2.234708, 2.239589, 2.244215],
+      "render_submit_p50_ms": [2.341041, 2.350833, 2.350458],
+      "render_submit_p95_ms": [2.556375, 2.60725, 2.587625],
+      "render_submit_p99_ms": [3.43775, 3.792833, 3.775958],
+      "prepare_mean_ms": [0.034143, 0.035865, 0.033959]
+    },
+    "after": {
+      "render_submit_mean_ms": [2.232462, 2.236045, 2.243486],
+      "render_submit_p50_ms": [2.390333, 2.3855, 2.370917],
+      "render_submit_p95_ms": [2.606375, 2.612417, 2.600292],
+      "render_submit_p99_ms": [3.376, 3.61725, 3.632875],
+      "prepare_mean_ms": [0.039801, 0.038652, 0.035247]
+    },
+    "steady_upload_bytes_per_frame_before": 23264,
+    "steady_upload_bytes_per_frame_after": 23264
+  },
+  "resources": {
+    "three_primitive_cpu_capacity_bytes": 1728,
+    "gpu_bytes": 0,
+    "added_passes": 0,
+    "added_draws": 0,
+    "vertex_stride_change_bytes": 0
+  }
+}

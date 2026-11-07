@@ -1,0 +1,118 @@
+{
+  "schema": "bloom-virtual-geometry-renderer-integration-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "3a0e900267f6a0b8d9a1caa174de7e046e3a2fa7",
+  "date": "2026-08-26",
+  "renderer_ownership": {
+    "explicit_opt_in": true,
+    "visibility_shade_mode_required": true,
+    "owns_page_pool": true,
+    "owns_hierarchy_selector": true,
+    "owns_draw_emitter": true,
+    "owns_visibility_raster": true,
+    "owns_virtual_pbr_consumer": true,
+    "current_frame_submission": true,
+    "explicit_disable": true
+  },
+  "default_path": {
+    "virtual_owner_enabled": false,
+    "virtual_resources_allocated": 0,
+    "virtual_passes_recorded": 0,
+    "no_models_visibility_preparation_source_identical": true,
+    "empty_registered_submission_pixel_exact": true
+  },
+  "integrated_path": {
+    "shared_rg32uint_visibility_target": true,
+    "traversal_and_emission_before_depth": true,
+    "virtual_raster_after_ordinary_depth": true,
+    "ordinary_and_virtual_ids_disjoint": true,
+    "authoritative_scene_evaluator": "shade_main_scene",
+    "production_mrt_outputs": 4,
+    "virtual_shading_before_forward_compatibility": true,
+    "target_resize_rebuilds_bind_group": true,
+    "whole_batch_failure_is_closed": true,
+    "current_frame_raster_gate_prevents_stale_composition": true
+  },
+  "metal_runtime_oracle": {
+    "backend": "metal",
+    "empty_batch_pixel_exact": true,
+    "fixture_pages": 1,
+    "fixture_clusters": 1,
+    "fixture_instances": 1,
+    "changed_pixels_greater_than": 256,
+    "changes_inside_expected_region": true,
+    "unrelated_ordinary_and_compatibility_pixels_exact": true,
+    "runtime_active_meshes": 1,
+    "runtime_gpu_bytes_nonzero": true,
+    "steady_state_visibility_target_creations": 0,
+    "steady_state_visibility_bind_group_creations": 0
+  },
+  "qualification": {
+    "shared_unit_tests_passed": 448,
+    "shared_unit_tests_ignored": 1,
+    "filtered_virtual_geometry_tests_passed": 29,
+    "negotiated_device_tests_passed": 1,
+    "golden_tests_passed": 77,
+    "golden_tests_ignored": 2,
+    "render_target_tests_passed": 4,
+    "visibility_parity_tests_passed": 2,
+    "visibility_runtime_tests_passed": 1,
+    "visibility_shading_runtime_tests_passed": 1,
+    "doc_tests_ignored": 2,
+    "quality_governance_tests_passed": 39,
+    "visual_fault_engine_tests_passed": 3,
+    "cooker_tests_passed": 29,
+    "example_inventory_count": 20,
+    "strict_production_clippy": "pass",
+    "format": "pass",
+    "wasm_web_check": "pass",
+    "ci_inventory": "pass",
+    "ffi_schema_parity": "pass",
+    "file_size_ratchet": {
+      "status": "pre_existing_failures_only",
+      "slice_files_over_ceiling": 0,
+      "pre_existing_files_over_ceiling": [
+        "native/shared/src/renderer/shaders/post.rs",
+        "native/shared/src/renderer/shaders/ssgi.rs",
+        "native/shared/tests/golden_render/temporal_history.rs"
+      ]
+    }
+  },
+  "default_path_performance": {
+    "machine": "Apple M1 Max",
+    "backend": "metal",
+    "resolution": [1280, 720],
+    "warmup_frames": 180,
+    "measured_frames": 600,
+    "paired_windows": 2,
+    "opposite_order": true,
+    "baseline_revision": "b92668f23f45b076660af56a92e4d72ab9c1599f",
+    "candidate_revision": "3a0e900267f6a0b8d9a1caa174de7e046e3a2fa7",
+    "render_submit_average_ms": {
+      "baseline_mean": 2.262720,
+      "candidate_mean": 2.255512,
+      "baseline_p50": 2.468188,
+      "candidate_p50": 2.488000,
+      "baseline_p95": 2.949605,
+      "candidate_p95": 3.052396,
+      "baseline_p99": 4.161605,
+      "candidate_p99": 4.094459
+    },
+    "candidate_delta_percent": {
+      "mean": -0.32,
+      "p50": 0.80,
+      "p95": 3.48,
+      "p99": -1.61
+    },
+    "interpretation": "effectively flat within host noise; no performance win claimed"
+  },
+  "acceptance_boxes_changed": 0,
+  "remaining": [
+    "cooked compatibility-record routing without holes",
+    "asynchronous missing-page feedback and streaming",
+    "conservative previous-frame Hi-Z",
+    "approved Bistro motion and parity corpus",
+    "10-million-source-triangle stress asset",
+    "integrated and discrete Metal Vulkan and Direct3D 12 qualification"
+  ]
+}

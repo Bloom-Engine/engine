@@ -21,7 +21,7 @@ const ROOT = path.join(__dirname, '..');
 const LIMIT = 2000;
 const BASELINE_PATH = path.join(__dirname, 'file-lines-baseline.json');
 
-const INCLUDE_DIRS = ['src', 'native', 'tools', 'examples'];
+const INCLUDE_DIRS = ['src', 'native', 'tools', 'examples', 'crates'];
 const EXTENSIONS = new Set(['.rs', '.ts', '.js', '.swift', '.wgsl']);
 const EXCLUDE = [
   /node_modules\//,

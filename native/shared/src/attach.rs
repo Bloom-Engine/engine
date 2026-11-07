@@ -74,6 +74,70 @@ pub struct AttachParams {
     pub physical_h: u32,
     pub format: FormatPreference,
 }
+fn request_device(
+    instance: &wgpu::Instance,
+    compatible_surface: Option<&wgpu::Surface<'_>>,
+) -> Result<
+    (
+        wgpu::Adapter,
+        wgpu::Device,
+        wgpu::Queue,
+        crate::renderer::device_negotiation::DeviceNegotiationReport,
+    ),
+    String,
+> {
+    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface,
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))
+    .map_err(|e| format!("no compatible adapter: {e}"))?;
+
+    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let negotiated = block_on(
+        crate::renderer::device_negotiation::request_device_with_fallback(
+            &adapter,
+            crate::renderer::device_negotiation::DeviceRequestOptions {
+                allow_ray_query: !force_sw_gi,
+                profile: if cfg!(target_os = "android") {
+                    crate::renderer::device_negotiation::DeviceRequestProfile::FoldedMobile
+                } else {
+                    crate::renderer::device_negotiation::DeviceRequestProfile::NativeFull
+                },
+            },
+        ),
+    )?;
+    eprintln!(
+        "bloom: renderer device negotiation = {}",
+        negotiated.report.report_json()
+    );
+    Ok((
+        adapter,
+        negotiated.device,
+        negotiated.queue,
+        negotiated.report,
+    ))
+}
+
+/// Build the same production renderer without a presentation surface.
+/// Used only by explicit batch/headless hosts, which need exact pixels and
+/// must not depend on window-system DPI or drawable availability.
+pub fn attach_headless_engine(
+    backends: wgpu::Backends,
+    width: u32,
+    height: u32,
+) -> Result<EngineState, String> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let (_adapter, device, queue, negotiation) = request_device(&instance, None)?;
+    let mut renderer = Renderer::new_headless(device, queue, width.max(1), height.max(1));
+    renderer.set_device_negotiation_report(negotiation.report_json());
+    Ok(EngineState::new(renderer))
+}
 
 /// Build a fully-configured [`EngineState`] that renders into a
 /// host-owned surface. This is the GPU half of `bloom_init_window` with
@@ -101,121 +165,7 @@ pub unsafe fn attach_engine(
         .create_surface_unsafe(target)
         .map_err(|e| format!("create_surface failed: {e}"))?;
 
-    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        compatible_surface: Some(&surface),
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .map_err(|e| format!("no compatible adapter: {e}"))?;
-
-    // Optional device features, requested only when the adapter offers
-    // them (mirrors bloom_init_window): GPU-timestamp profiling, BC
-    // texture compression, and HW ray query for the GI probe path.
-    let supported = adapter.features();
-    let mut required_features = wgpu::Features::empty();
-    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-        required_features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-    }
-    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-    if !force_sw_gi && supported.contains(rt_mask) {
-        required_features |= rt_mask;
-    }
-    // PT-2: texture binding array + non-uniform indexing for textured
-    // path-trace hit shading (mirrors bloom_init_window).
-    let pt_tex_mask = wgpu::Features::TEXTURE_BINDING_ARRAY
-        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
-    if supported.contains(pt_tex_mask) {
-        required_features |= pt_tex_mask;
-    }
-    let experimental_features = if required_features.intersects(rt_mask) {
-        // wgpu 29 requires this explicit opt-in token for EXPERIMENTAL_*
-        // features. Apple-Silicon Metal ray query has been stable since
-        // wgpu v25, so the documented UB risk is acceptable here.
-        unsafe { wgpu::ExperimentalFeatures::enabled() }
-    } else {
-        wgpu::ExperimentalFeatures::disabled()
-    };
-
-    // The material ABI declares 5 bind groups; wgpu defaults to 4. Every
-    // real backend supports >= 7.
-    let adapter_limits = adapter.limits();
-    let mut required_limits = wgpu::Limits::default();
-    required_limits.max_bind_groups = 5;
-
-    // A user material's fragment stage binds more sampled textures than
-    // wgpu's default permits — 19 against a default cap of 16, once the
-    // scene/GI inputs sit alongside the material's own maps.
-    //
-    // Only the fallback below ever picked up the adapter's real limits, and
-    // it runs solely when request_device *fails*. On macOS the default
-    // request succeeds at 16, so the shortfall surfaced much later, as an
-    // abort inside create_pipeline_layout('user_material') — the shooter
-    // could not open on macOS at all. (iOS escaped it by luck: its first
-    // request fails on an unrelated limit, so it always retried with the
-    // adapter's limits and got the headroom as a side effect.)
-    //
-    // Ask for what the adapter actually offers on the limits the material
-    // system leans on, never dropping below wgpu's defaults.
-    required_limits.max_sampled_textures_per_shader_stage = required_limits
-        .max_sampled_textures_per_shader_stage
-        .max(adapter_limits.max_sampled_textures_per_shader_stage);
-    required_limits.max_samplers_per_shader_stage = required_limits
-        .max_samplers_per_shader_stage
-        .max(adapter_limits.max_samplers_per_shader_stage);
-    // PT-2: binding arrays have their own element budget, default 0.
-    if required_features.contains(pt_tex_mask) {
-        required_limits.max_binding_array_elements_per_shader_stage =
-            adapter_limits.max_binding_array_elements_per_shader_stage;
-    }
-    // PT-4: the path-trace kernel binds 9 storage buffers (accum +
-    // moments + reservoir ping-pongs on top of instance/geo data);
-    // the wgpu default limit is 8.
-    required_limits.max_storage_buffers_per_shader_stage = required_limits
-        .max_storage_buffers_per_shader_stage
-        .max(adapter_limits.max_storage_buffers_per_shader_stage.min(16));
-
-    if required_features.intersects(rt_mask) {
-        required_limits =
-            required_limits.using_minimum_supported_acceleration_structure_values();
-    }
-
-    let device_desc = wgpu::DeviceDescriptor {
-        label: Some("bloom_device"),
-        required_features,
-        required_limits: required_limits.clone(),
-        experimental_features,
-        ..Default::default()
-    };
-
-    // Some constrained mobile GPUs (e.g. A18) report a feature/limit set
-    // they then refuse at device-create time. Retry once with the
-    // adapter's own reported limits + no optional features before giving
-    // up — matches the iOS init path's fallback.
-    let (device, queue) = match block_on(adapter.request_device(&device_desc)) {
-        Ok(pair) => pair,
-        Err(first) => {
-            let fallback = wgpu::DeviceDescriptor {
-                label: Some("bloom_device_fallback"),
-                required_features: wgpu::Features::empty(),
-                required_limits: {
-                    let mut l = adapter.limits();
-                    l.max_bind_groups = l.max_bind_groups.max(5);
-                    l
-                },
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                ..Default::default()
-            };
-            block_on(adapter.request_device(&fallback)).map_err(|second| {
-                format!("request_device failed: {first}; fallback: {second}")
-            })?
-        }
-    };
+    let (adapter, device, queue, negotiation) = request_device(&instance, Some(&surface))?;
 
     let surface_caps = surface.get_capabilities(&adapter);
     if surface_caps.formats.is_empty() {
@@ -251,7 +201,7 @@ pub unsafe fn attach_engine(
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(
+    let mut renderer = Renderer::new(
         device,
         queue,
         surface,
@@ -259,5 +209,6 @@ pub unsafe fn attach_engine(
         params.logical_w.max(1),
         params.logical_h.max(1),
     );
+    renderer.set_device_negotiation_report(negotiation.report_json());
     Ok(EngineState::new(renderer))
 }

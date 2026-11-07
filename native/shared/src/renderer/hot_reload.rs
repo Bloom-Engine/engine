@@ -29,10 +29,10 @@ use super::material_pipeline::{Bucket, FragmentProfile};
 /// rebuild it when the file changes.
 #[derive(Clone)]
 pub struct FileMaterialDesc {
-    pub path:             PathBuf,
-    pub profile:          FragmentProfile,
-    pub bucket:           Bucket,
-    pub reads_scene:      bool,
+    pub path: PathBuf,
+    pub profile: FragmentProfile,
+    pub bucket: Bucket,
+    pub reads_scene: bool,
     /// EN-001 — preserved across reloads so a file-backed instanced
     /// material continues to opt into the per-instance vertex layout
     /// after hot reload.
@@ -83,7 +83,10 @@ impl MaterialHotReload {
         //     without the `hot-reload` feature), which drops `notify`
         //     from the dep tree entirely (EN-008)
         #[cfg(all(not(target_arch = "wasm32"), feature = "hot-reload"))]
-        let watcher = if std::env::var("BLOOM_NO_HOT_RELOAD").map(|v| v == "1").unwrap_or(false) {
+        let watcher = if std::env::var("BLOOM_NO_HOT_RELOAD")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             None
         } else {
             use notify::{Event, EventKind};
@@ -140,7 +143,9 @@ impl MaterialHotReload {
                 paths.push(p);
             }
         }
-        if paths.is_empty() { return Vec::new(); }
+        if paths.is_empty() {
+            return Vec::new();
+        }
 
         let now = Instant::now();
         let mut last = self.last_event.lock().expect("hot_reload poisoned");
@@ -152,7 +157,9 @@ impl MaterialHotReload {
             // returns the realpath, sometimes the symlink path.
             let p = std::fs::canonicalize(&raw).unwrap_or(raw);
             if let Some(t) = last.get(&p) {
-                if now.duration_since(*t) < DEBOUNCE_WINDOW { continue; }
+                if now.duration_since(*t) < DEBOUNCE_WINDOW {
+                    continue;
+                }
             }
             last.insert(p.clone(), now);
             if let Some(handles) = self.by_path.get(&p) {
@@ -188,7 +195,9 @@ impl MaterialHotReload {
                 None => return,
             };
             let mut watched = self.watched_dirs.lock().expect("hot_reload poisoned");
-            if watched.contains(&dir) { return; }
+            if watched.contains(&dir) {
+                return;
+            }
             if let Some(w) = self._watcher.as_mut() {
                 if let Err(e) = w.watch(&dir, RecursiveMode::NonRecursive) {
                     eprintln!("[hot_reload] failed to watch {dir:?}: {e:?}");
@@ -211,10 +220,10 @@ mod tests {
 
     fn desc(path: &str) -> FileMaterialDesc {
         FileMaterialDesc {
-            path:             PathBuf::from(path),
-            profile:          FragmentProfile::Translucent,
-            bucket:           Bucket::Refractive,
-            reads_scene:      true,
+            path: PathBuf::from(path),
+            profile: FragmentProfile::Translucent,
+            bucket: Bucket::Refractive,
+            reads_scene: true,
             wants_instancing: false,
         }
     }
@@ -223,13 +232,16 @@ mod tests {
     fn drain_returns_registered_handle_for_event_path() {
         let mut hr = MaterialHotReload::new();
         let p = PathBuf::from("/tmp/bloom_test_water.wgsl");
-        hr.register(7, FileMaterialDesc {
-            path:             p.clone(),
-            profile:          FragmentProfile::Translucent,
-            bucket:           Bucket::Refractive,
-            reads_scene:      true,
-            wants_instancing: false,
-        });
+        hr.register(
+            7,
+            FileMaterialDesc {
+                path: p.clone(),
+                profile: FragmentProfile::Translucent,
+                bucket: Bucket::Refractive,
+                reads_scene: true,
+                wants_instancing: false,
+            },
+        );
         // canonicalize() in drain_pending falls back to the raw path
         // when the file doesn't exist, so this resolves to itself.
         hr.test_inject_event(p.clone());
@@ -308,10 +320,10 @@ mod tests {
         hr.register(
             42,
             FileMaterialDesc {
-                path:             canonical.clone(),
-                profile:          FragmentProfile::Translucent,
-                bucket:           Bucket::Refractive,
-                reads_scene:      true,
+                path: canonical.clone(),
+                profile: FragmentProfile::Translucent,
+                bucket: Bucket::Refractive,
+                reads_scene: true,
                 wants_instancing: false,
             },
         );
@@ -322,7 +334,11 @@ mod tests {
         // canonical, so the two line up.
         hr.test_inject_event(canonical.clone());
         let pending = hr.drain_pending();
-        assert_eq!(pending.len(), 1, "registered descriptor surfaced exactly once");
+        assert_eq!(
+            pending.len(),
+            1,
+            "registered descriptor surfaced exactly once"
+        );
         assert_eq!(pending[0].0, 42);
         assert_eq!(pending[0].1.path, canonical);
         assert_eq!(pending[0].1.bucket, Bucket::Refractive);
@@ -366,13 +382,16 @@ mod tests {
         let canonical = std::fs::canonicalize(&tmp).expect("canonicalize tmp");
 
         let mut hr = MaterialHotReload::new();
-        hr.register(99, FileMaterialDesc {
-            path:             canonical.clone(),
-            profile:          FragmentProfile::Opaque,
-            bucket:           Bucket::Opaque,
-            reads_scene:      false,
-            wants_instancing: false,
-        });
+        hr.register(
+            99,
+            FileMaterialDesc {
+                path: canonical.clone(),
+                profile: FragmentProfile::Opaque,
+                bucket: Bucket::Opaque,
+                reads_scene: false,
+                wants_instancing: false,
+            },
+        );
 
         // Give the OS a moment to register the watch, then rewrite and
         // wait past the debounce.
@@ -383,7 +402,8 @@ mod tests {
         let pending = hr.drain_pending();
         assert!(
             pending.iter().any(|(h, _)| *h == 99),
-            "notify should have fired for {:?}", canonical,
+            "notify should have fired for {:?}",
+            canonical,
         );
         let _ = std::fs::remove_file(&tmp);
     }

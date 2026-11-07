@@ -1,0 +1,118 @@
+{
+  "schema": "bloom-virtual-geometry-bistro-runtime-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "5c26c6ab92e913949f15b68f8709c0504bc39f29",
+  "workload": {
+    "scene": "BistroReference.gltf",
+    "placements": 1176,
+    "virtual_placements": 1074,
+    "compatibility_placements": 102,
+    "eligible_source_triangles": 2803489,
+    "width": 640,
+    "height": 360,
+    "warmup_frames": 180,
+    "outbound_motion_frames": 30,
+    "return_motion_frames": 30,
+    "settle_frames": 30
+  },
+  "artifact": {
+    "format_version": 2,
+    "vertex_encoding": "quantized32",
+    "file_bytes": 261628080,
+    "clusters": 115375,
+    "pages": 3832,
+    "root_pages": 909,
+    "root_resident_page_bytes": 58229152,
+    "maximum_lod_level": 7,
+    "payload_sha256": "561efc237a8e210c2788a23f03e12bcc506370b7e24d9a51de2501d69ae7e179",
+    "source_closure_sha256": "5ac44350964992261184fee6db70f0962da1baf974f50d2bd8c367463c731289"
+  },
+  "corrections": {
+    "atomic_multilevel_replacement_union": true,
+    "terminal_refinable_partition_boundary": true,
+    "transformed_aabb_frustum_planes": true,
+    "atomic_group_common_outside_plane": true,
+    "opaque_two_face_raster_matches_ordinary_path": true,
+    "alpha_masked_compatibility_owned": true,
+    "runtime_base_color_factor_baked": true,
+    "specular_glossiness_conversion_matches_runtime": true
+  },
+  "pixel_gate": {
+    "ordinary_vs_virtual": {
+      "mean_rgb": 7.135473090277777,
+      "ssim": 0.8142484899590658,
+      "clearly_lit_missing_geometry_fraction": 0.00001736111111111111
+    },
+    "virtual_direct_vs_returned": {
+      "mean_rgb": 0.00031394675925925926,
+      "ssim": 0.9999914039358605,
+      "clearly_lit_missing_geometry_fraction": 0.0
+    },
+    "thresholds": {
+      "maximum_ordinary_virtual_mean_rgb": 8.0,
+      "minimum_ordinary_virtual_ssim": 0.8,
+      "maximum_missing_geometry_fraction": 0.005,
+      "minimum_camera_return_ssim": 0.985
+    },
+    "staged_regression_sensitivity": [
+      {
+        "state": "original_multilevel_hierarchy",
+        "mean_rgb": 10.7369,
+        "ssim": 0.76937,
+        "gate": "fail"
+      },
+      {
+        "state": "hierarchy_and_face_fixed_without_material_factor",
+        "mean_rgb": 9.3034,
+        "ssim": 0.79258,
+        "gate": "fail"
+      },
+      {
+        "state": "all_corrections",
+        "mean_rgb": 7.135473090277777,
+        "ssim": 0.8142484899590658,
+        "gate": "pass"
+      }
+    ]
+  },
+  "runtime_snapshot": {
+    "backend": "metal",
+    "adapter": "Apple M1 Max",
+    "physical_pool_capacity_bytes": 134217728,
+    "resident_pages": 1957,
+    "pending_groups": 0,
+    "selected_clusters": 10689,
+    "refined_groups": 595,
+    "fallback_groups": 0,
+    "missing_current_pages": 0,
+    "cone_culled_clusters": 69,
+    "frustum_culled_groups": 2027,
+    "occlusion_culled_groups": 523,
+    "selected_overflow": 0,
+    "request_overflow": 0,
+    "invalid_records": 0,
+    "depth_limit_fallbacks": 0
+  },
+  "qualification": {
+    "detailed_bistro_gate": "pass",
+    "shared_library_tests_passed": 459,
+    "shared_library_tests_ignored": 1,
+    "focused_virtual_geometry_tests_passed": 39,
+    "gpu_golden_tests_passed": 77,
+    "gpu_golden_tests_ignored": 2,
+    "cooker_tests_passed": 31,
+    "cooker_strict_clippy": "pass",
+    "shared_strict_clippy": "pass",
+    "wasm_web_check": "pass",
+    "native_no_default_features_check": "pass",
+    "format": "pass",
+    "diff_whitespace": "pass",
+    "new_file_size_overages": 0,
+    "unrelated_preexisting_file_size_overages": 3
+  },
+  "remaining": [
+    "10-million-source-triangle residency stress",
+    "asynchronous issue-136 store and index IO",
+    "integrated discrete and cross-backend timing"
+  ]
+}

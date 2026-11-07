@@ -1,0 +1,2705 @@
+{
+  "schema": "bloom-layered-pbr-reference",
+  "version": 4,
+  "previous_contract_version": 3,
+  "model": "version-3 layered PBR + KHR_materials_iridescence",
+  "spectral_integration": "Belcour/Barla Fourier sensitivity, orders 0 through 2",
+  "interfaces": "air / dielectric thin film / dielectric-or-approximated-conductor base",
+  "diffuse_complement": "reciprocal view/light transmission from max-channel blended dielectric Fresnel",
+  "inactive_path": "factor zero or thickness zero is exactly the version-3 evaluator",
+  "color_space": "linear Rec.709, bounded to physical reflectance [0,1]",
+  "furnace_integration": "96x192 deterministic anisotropic GGX-VNDF, Charlie, clearcoat, and cosine samples",
+  "samples": [
+    {
+      "id": "v3-inactive-v0.1",
+      "base_color": [
+        0.08,
+        0.3,
+        0.75
+      ],
+      "metallic": 0.35,
+      "perceptual_roughness": 0.36,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 0.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.55,
+      "sheen_color": [
+        0.3,
+        0.55,
+        0.9
+      ],
+      "anisotropy_strength": 0.7,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.662089,
+        0.606352,
+        0.523609
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.702686,
+        0.739583,
+        0.380778
+      ],
+      "direct_diffuse": [
+        0.001846,
+        0.006923,
+        0.017308
+      ],
+      "direct_base_specular": [
+        0.001871,
+        0.00454,
+        0.009998
+      ],
+      "direct_sheen_specular": [
+        0.061194,
+        0.112189,
+        0.183583
+      ],
+      "direct_clearcoat_specular": [
+        0.000068,
+        0.000068,
+        0.000068
+      ],
+      "direct_brdf_cos": [
+        0.03249,
+        0.06186,
+        0.105478
+      ],
+      "direct_pdf": 0.052151,
+      "white_furnace_reflectance": [
+        0.389383,
+        0.497523,
+        0.667259
+      ]
+    },
+    {
+      "id": "v3-inactive-v0.5",
+      "base_color": [
+        0.08,
+        0.3,
+        0.75
+      ],
+      "metallic": 0.35,
+      "perceptual_roughness": 0.36,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 0.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.55,
+      "sheen_color": [
+        0.3,
+        0.55,
+        0.9
+      ],
+      "anisotropy_strength": 0.7,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.045862,
+        0.029107,
+        0.0501
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.05856,
+        0.107561,
+        0.686039
+      ],
+      "direct_diffuse": [
+        0.010263,
+        0.038485,
+        0.096213
+      ],
+      "direct_base_specular": [
+        0.006194,
+        0.015027,
+        0.033093
+      ],
+      "direct_sheen_specular": [
+        0.03015,
+        0.055276,
+        0.090451
+      ],
+      "direct_clearcoat_specular": [
+        0.000022,
+        0.000022,
+        0.000022
+      ],
+      "direct_brdf_cos": [
+        0.023315,
+        0.054405,
+        0.109889
+      ],
+      "direct_pdf": 0.098881,
+      "white_furnace_reflectance": [
+        0.144489,
+        0.304295,
+        0.61185
+      ]
+    },
+    {
+      "id": "v3-inactive-v1.0",
+      "base_color": [
+        0.08,
+        0.3,
+        0.75
+      ],
+      "metallic": 0.35,
+      "perceptual_roughness": 0.36,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 0.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.55,
+      "sheen_color": [
+        0.3,
+        0.55,
+        0.9
+      ],
+      "anisotropy_strength": 0.7,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.009947,
+        0.039985,
+        0.018709
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.015807,
+        0.301009,
+        0.677863
+      ],
+      "direct_diffuse": [
+        0.010695,
+        0.040105,
+        0.100262
+      ],
+      "direct_base_specular": [
+        0.022956,
+        0.055665,
+        0.122567
+      ],
+      "direct_sheen_specular": [
+        0.000916,
+        0.00168,
+        0.002749
+      ],
+      "direct_clearcoat_specular": [
+        0.000089,
+        0.000089,
+        0.000089
+      ],
+      "direct_brdf_cos": [
+        0.017328,
+        0.048769,
+        0.112834
+      ],
+      "direct_pdf": 0.108402,
+      "white_furnace_reflectance": [
+        0.096266,
+        0.246767,
+        0.553476
+      ]
+    },
+    {
+      "id": "dielectric-thin-100nm-v0.1",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 100.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.568123,
+        0.599209,
+        0.559489
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.792066,
+        0.736502,
+        0.467696
+      ],
+      "direct_diffuse": [
+        0.05977,
+        0.05977,
+        0.05977
+      ],
+      "direct_base_specular": [
+        0.0,
+        0.000252,
+        0.000148
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.029885,
+        0.030011,
+        0.029959
+      ],
+      "direct_pdf": 0.065502,
+      "white_furnace_reflectance": [
+        0.463693,
+        0.497719,
+        0.462565
+      ]
+    },
+    {
+      "id": "dielectric-thin-100nm-v0.5",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 100.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.014771,
+        0.050831,
+        0.029999
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.305423,
+        0.4635,
+        0.344246
+      ],
+      "direct_diffuse": [
+        0.142046,
+        0.142046,
+        0.142046
+      ],
+      "direct_base_specular": [
+        0.0,
+        0.000089,
+        0.000055
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.071023,
+        0.071067,
+        0.07105
+      ],
+      "direct_pdf": 0.154008,
+      "white_furnace_reflectance": [
+        0.451986,
+        0.485991,
+        0.466066
+      ]
+    },
+    {
+      "id": "dielectric-thin-100nm-v1.0",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 100.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.0,
+        0.017835,
+        0.012456
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.257122,
+        0.438132,
+        0.411267
+      ],
+      "direct_diffuse": [
+        0.146442,
+        0.146442,
+        0.146442
+      ],
+      "direct_base_specular": [
+        0.0,
+        0.000364,
+        0.000198
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.073221,
+        0.073403,
+        0.07332
+      ],
+      "direct_pdf": 0.157635,
+      "white_furnace_reflectance": [
+        0.451763,
+        0.469474,
+        0.463832
+      ]
+    },
+    {
+      "id": "dielectric-mid-400nm-v0.1",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.662089,
+        0.606352,
+        0.523609
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.894784,
+        0.887647,
+        0.252886
+      ],
+      "direct_diffuse": [
+        0.050431,
+        0.050431,
+        0.050431
+      ],
+      "direct_base_specular": [
+        0.0,
+        0.000465,
+        0.000438
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.025216,
+        0.025448,
+        0.025435
+      ],
+      "direct_pdf": 0.05769,
+      "white_furnace_reflectance": [
+        0.515461,
+        0.467275,
+        0.409656
+      ]
+    },
+    {
+      "id": "dielectric-mid-400nm-v0.5",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.045862,
+        0.029107,
+        0.0501
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.474684,
+        0.334131,
+        0.462025
+      ],
+      "direct_diffuse": [
+        0.142265,
+        0.142265,
+        0.142265
+      ],
+      "direct_base_specular": [
+        0.000013,
+        0.00018,
+        0.000133
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.071139,
+        0.071222,
+        0.071199
+      ],
+      "direct_pdf": 0.152493,
+      "white_furnace_reflectance": [
+        0.471774,
+        0.457588,
+        0.475846
+      ]
+    },
+    {
+      "id": "dielectric-mid-400nm-v1.0",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.009947,
+        0.039985,
+        0.018709
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.41117,
+        0.551516,
+        0.446539
+      ],
+      "direct_diffuse": [
+        0.143249,
+        0.143249,
+        0.143249
+      ],
+      "direct_base_specular": [
+        0.0,
+        0.000568,
+        0.000728
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.071625,
+        0.071909,
+        0.071989
+      ],
+      "direct_pdf": 0.155679,
+      "white_furnace_reflectance": [
+        0.439781,
+        0.470276,
+        0.451801
+      ]
+    },
+    {
+      "id": "dielectric-thick-800nm-v0.1",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 800.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.654599,
+        0.527167,
+        0.634405
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        1.0,
+        0.302151,
+        0.83819
+      ],
+      "direct_diffuse": [
+        0.049448,
+        0.049448,
+        0.049448
+      ],
+      "direct_base_specular": [
+        0.000159,
+        0.000297,
+        0.00027
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.024804,
+        0.024873,
+        0.024859
+      ],
+      "direct_pdf": 0.058004,
+      "white_furnace_reflectance": [
+        0.488303,
+        0.424534,
+        0.503972
+      ]
+    },
+    {
+      "id": "dielectric-thick-800nm-v0.5",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 800.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.0,
+        0.088814,
+        0.045734
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.178569,
+        0.646447,
+        0.435889
+      ],
+      "direct_diffuse": [
+        0.130904,
+        0.130904,
+        0.130904
+      ],
+      "direct_base_specular": [
+        0.000009,
+        0.000137,
+        0.000093
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.065457,
+        0.065521,
+        0.065499
+      ],
+      "direct_pdf": 0.151721,
+      "white_furnace_reflectance": [
+        0.416463,
+        0.485418,
+        0.456133
+      ]
+    },
+    {
+      "id": "dielectric-thick-800nm-v1.0",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 800.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.0,
+        0.034664,
+        0.020762
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.326216,
+        0.529558,
+        0.456851
+      ],
+      "direct_diffuse": [
+        0.138173,
+        0.138173,
+        0.138173
+      ],
+      "direct_base_specular": [
+        0.00056,
+        0.000243,
+        0.000428
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.069366,
+        0.069208,
+        0.0693
+      ],
+      "direct_pdf": 0.156351,
+      "white_furnace_reflectance": [
+        0.433061,
+        0.464999,
+        0.452283
+      ]
+    },
+    {
+      "id": "iridescence-half-strength-v0.1",
+      "base_color": [
+        0.65,
+        0.18,
+        0.05
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.45,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 0.5,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.662089,
+        0.606352,
+        0.523609
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.912794,
+        0.670544,
+        0.510706
+      ],
+      "direct_diffuse": [
+        0.069595,
+        0.019272,
+        0.005353
+      ],
+      "direct_base_specular": [
+        0.000983,
+        0.001814,
+        0.001766
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.035289,
+        0.010543,
+        0.003559
+      ],
+      "direct_pdf": 0.061035,
+      "white_furnace_reflectance": [
+        0.389653,
+        0.240885,
+        0.189638
+      ]
+    },
+    {
+      "id": "iridescence-half-strength-v0.5",
+      "base_color": [
+        0.65,
+        0.18,
+        0.05
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.45,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 0.5,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.045862,
+        0.029107,
+        0.0501
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.585977,
+        0.042231,
+        0.052953
+      ],
+      "direct_diffuse": [
+        0.157947,
+        0.043739,
+        0.01215
+      ],
+      "direct_base_specular": [
+        0.000492,
+        0.000885,
+        0.000776
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.079219,
+        0.022312,
+        0.006463
+      ],
+      "direct_pdf": 0.150422,
+      "white_furnace_reflectance": [
+        0.523825,
+        0.176785,
+        0.089743
+      ]
+    },
+    {
+      "id": "iridescence-half-strength-v1.0",
+      "base_color": [
+        0.65,
+        0.18,
+        0.05
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.45,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 0.5,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.009947,
+        0.039985,
+        0.018709
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.528916,
+        0.180515,
+        0.021591
+      ],
+      "direct_diffuse": [
+        0.159189,
+        0.044083,
+        0.012245
+      ],
+      "direct_base_specular": [
+        0.00161,
+        0.002778,
+        0.003107
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.0804,
+        0.023431,
+        0.007676
+      ],
+      "direct_pdf": 0.155421,
+      "white_furnace_reflectance": [
+        0.506615,
+        0.170919,
+        0.067545
+      ]
+    },
+    {
+      "id": "film-ior-air-v0.1",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.0,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        1.0,
+        0.781742,
+        0.90238
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        1.0,
+        0.876488,
+        0.96808
+      ],
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.000579,
+        0.000512,
+        0.000488
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.000289,
+        0.000256,
+        0.000244
+      ],
+      "direct_pdf": 0.000293,
+      "white_furnace_reflectance": [
+        0.550395,
+        0.470725,
+        0.437272
+      ]
+    },
+    {
+      "id": "film-ior-air-v0.5",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.0,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.044855,
+        0.092847,
+        0.170385
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.504945,
+        0.572077,
+        0.666639
+      ],
+      "direct_diffuse": [
+        0.108516,
+        0.108516,
+        0.108516
+      ],
+      "direct_base_specular": [
+        0.000196,
+        0.000177,
+        0.000184
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.054356,
+        0.054347,
+        0.05435
+      ],
+      "direct_pdf": 0.1417,
+      "white_furnace_reflectance": [
+        0.397695,
+        0.441601,
+        0.49722
+      ]
+    },
+    {
+      "id": "film-ior-air-v1.0",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.0,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.036664,
+        0.035217,
+        0.041575
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.548442,
+        0.547764,
+        0.550744
+      ],
+      "direct_diffuse": [
+        0.124903,
+        0.124903,
+        0.124903
+      ],
+      "direct_base_specular": [
+        0.000876,
+        0.000763,
+        0.000659
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.062889,
+        0.062833,
+        0.062781
+      ],
+      "direct_pdf": 0.153486,
+      "white_furnace_reflectance": [
+        0.444362,
+        0.442396,
+        0.447633
+      ]
+    },
+    {
+      "id": "film-ior-high-v0.1",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 2.0,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.659182,
+        0.693983,
+        0.581592
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.675233,
+        0.462573,
+        0.850838
+      ],
+      "direct_diffuse": [
+        0.035219,
+        0.035219,
+        0.035219
+      ],
+      "direct_base_specular": [
+        0.00371,
+        0.000475,
+        0.002084
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.019464,
+        0.017847,
+        0.018651
+      ],
+      "direct_pdf": 0.051415,
+      "white_furnace_reflectance": [
+        0.526472,
+        0.527024,
+        0.431197
+      ]
+    },
+    {
+      "id": "film-ior-high-v0.5",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 2.0,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.267494,
+        0.154106,
+        0.111026
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.027345,
+        0.371209,
+        0.496824
+      ],
+      "direct_diffuse": [
+        0.084599,
+        0.084599,
+        0.084599
+      ],
+      "direct_base_specular": [
+        0.001261,
+        0.000168,
+        0.000758
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.04293,
+        0.042383,
+        0.042678
+      ],
+      "direct_pdf": 0.128241,
+      "white_furnace_reflectance": [
+        0.518542,
+        0.39911,
+        0.366305
+      ]
+    },
+    {
+      "id": "film-ior-high-v1.0",
+      "base_color": [
+        0.55,
+        0.55,
+        0.55
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.3,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 2.0,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.229898,
+        0.039239,
+        0.158108
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.078007,
+        0.592756,
+        0.258282
+      ],
+      "direct_diffuse": [
+        0.088613,
+        0.088613,
+        0.088613
+      ],
+      "direct_base_specular": [
+        0.005502,
+        0.00074,
+        0.002849
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.047057,
+        0.044676,
+        0.045731
+      ],
+      "direct_pdf": 0.13585,
+      "white_furnace_reflectance": [
+        0.500515,
+        0.304858,
+        0.422634
+      ]
+    },
+    {
+      "id": "gold-conductor-film-v0.1",
+      "base_color": [
+        1.0,
+        0.71,
+        0.29
+      ],
+      "metallic": 1.0,
+      "perceptual_roughness": 0.28,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.45,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.577917,
+        0.586039,
+        0.626008
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.999525,
+        0.505674,
+        0.830455
+      ],
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.010791,
+        0.007545,
+        0.000783
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.005396,
+        0.003772,
+        0.000391
+      ],
+      "direct_pdf": 0.000222,
+      "white_furnace_reflectance": [
+        0.88537,
+        0.461777,
+        0.61283
+      ]
+    },
+    {
+      "id": "gold-conductor-film-v0.5",
+      "base_color": [
+        1.0,
+        0.71,
+        0.29
+      ],
+      "metallic": 1.0,
+      "perceptual_roughness": 0.28,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.45,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.047927,
+        0.065078,
+        0.076619
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.999726,
+        0.652514,
+        0.36766
+      ],
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.00373,
+        0.002557,
+        0.000244
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.001865,
+        0.001278,
+        0.000122
+      ],
+      "direct_pdf": 0.000529,
+      "white_furnace_reflectance": [
+        0.979045,
+        0.640761,
+        0.349244
+      ]
+    },
+    {
+      "id": "gold-conductor-film-v1.0",
+      "base_color": [
+        1.0,
+        0.71,
+        0.29
+      ],
+      "metallic": 1.0,
+      "perceptual_roughness": 0.28,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.45,
+      "iridescence_thickness_nm": 400.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.04134,
+        0.035816,
+        0.028277
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.99991,
+        0.651406,
+        0.067639
+      ],
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.015019,
+        0.010679,
+        0.001375
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.00751,
+        0.005339,
+        0.000688
+      ],
+      "direct_pdf": 0.007545,
+      "white_furnace_reflectance": [
+        0.98945,
+        0.650463,
+        0.06642
+      ]
+    },
+    {
+      "id": "mixed-metal-film-v0.1",
+      "base_color": [
+        0.8,
+        0.12,
+        0.03
+      ],
+      "metallic": 0.5,
+      "perceptual_roughness": 0.42,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 0.85,
+      "iridescence_ior": 1.35,
+      "iridescence_thickness_nm": 520.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.528907,
+        0.61551,
+        0.646456
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.335471,
+        0.656921,
+        0.637624
+      ],
+      "direct_diffuse": [
+        0.040613,
+        0.006092,
+        0.001523
+      ],
+      "direct_base_specular": [
+        0.016951,
+        0.000621,
+        0.001242
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.028782,
+        0.003357,
+        0.001383
+      ],
+      "direct_pdf": 0.038303,
+      "white_furnace_reflectance": [
+        0.474632,
+        0.278635,
+        0.232186
+      ]
+    },
+    {
+      "id": "mixed-metal-film-v0.5",
+      "base_color": [
+        0.8,
+        0.12,
+        0.03
+      ],
+      "metallic": 0.5,
+      "perceptual_roughness": 0.42,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 0.85,
+      "iridescence_ior": 1.35,
+      "iridescence_thickness_nm": 520.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.05312,
+        0.08104,
+        0.040104
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.74992,
+        0.176975,
+        0.044229
+      ],
+      "direct_diffuse": [
+        0.094043,
+        0.014106,
+        0.003527
+      ],
+      "direct_base_specular": [
+        0.007214,
+        0.00035,
+        0.000567
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.050628,
+        0.007228,
+        0.002047
+      ],
+      "direct_pdf": 0.112936,
+      "white_furnace_reflectance": [
+        0.666815,
+        0.142363,
+        0.05465
+      ]
+    },
+    {
+      "id": "mixed-metal-film-v1.0",
+      "base_color": [
+        0.8,
+        0.12,
+        0.03
+      ],
+      "metallic": 0.5,
+      "perceptual_roughness": 0.42,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 0.85,
+      "iridescence_ior": 1.35,
+      "iridescence_thickness_nm": 520.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.016573,
+        0.017018,
+        0.034755
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.707121,
+        0.033768,
+        0.027485
+      ],
+      "direct_diffuse": [
+        0.097408,
+        0.014611,
+        0.003653
+      ],
+      "direct_base_specular": [
+        0.028367,
+        0.000982,
+        0.001854
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.062887,
+        0.007797,
+        0.002753
+      ],
+      "direct_pdf": 0.12998,
+      "white_furnace_reflectance": [
+        0.672667,
+        0.071474,
+        0.041426
+      ]
+    },
+    {
+      "id": "colored-specular-film-v0.1",
+      "base_color": [
+        0.15,
+        0.4,
+        0.8
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.38,
+      "ior": 1.76,
+      "specular_factor": 0.7,
+      "specular_color": [
+        1.2,
+        0.6,
+        0.25
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.25,
+      "iridescence_thickness_nm": 310.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.691399,
+        0.614941,
+        0.642847
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.790687,
+        0.7146,
+        0.857002
+      ],
+      "direct_diffuse": [
+        0.01175,
+        0.031332,
+        0.062664
+      ],
+      "direct_base_specular": [
+        0.001287,
+        0.000292,
+        0.000238
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.006518,
+        0.015812,
+        0.031451
+      ],
+      "direct_pdf": 0.05176,
+      "white_furnace_reflectance": [
+        0.378355,
+        0.348743,
+        0.443338
+      ]
+    },
+    {
+      "id": "colored-specular-film-v0.5",
+      "base_color": [
+        0.15,
+        0.4,
+        0.8
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.38,
+      "ior": 1.76,
+      "specular_factor": 0.7,
+      "specular_color": [
+        1.2,
+        0.6,
+        0.25
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.25,
+      "iridescence_thickness_nm": 310.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.154096,
+        0.064834,
+        0.041015
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.282583,
+        0.401645,
+        0.753203
+      ],
+      "direct_diffuse": [
+        0.03011,
+        0.080293,
+        0.160585
+      ],
+      "direct_base_specular": [
+        0.000453,
+        0.000099,
+        0.000113
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.015281,
+        0.040196,
+        0.080349
+      ],
+      "direct_pdf": 0.144532,
+      "white_furnace_reflectance": [
+        0.231659,
+        0.314316,
+        0.551436
+      ]
+    },
+    {
+      "id": "colored-specular-film-v1.0",
+      "base_color": [
+        0.15,
+        0.4,
+        0.8
+      ],
+      "metallic": 0.0,
+      "perceptual_roughness": 0.38,
+      "ior": 1.76,
+      "specular_factor": 0.7,
+      "specular_color": [
+        1.2,
+        0.6,
+        0.25
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.25,
+      "iridescence_thickness_nm": 310.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.025973,
+        0.005948,
+        0.011664
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.082405,
+        0.253139,
+        0.752961
+      ],
+      "direct_diffuse": [
+        0.034366,
+        0.091642,
+        0.183285
+      ],
+      "direct_base_specular": [
+        0.00237,
+        0.000571,
+        0.000307
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.018368,
+        0.046107,
+        0.091796
+      ],
+      "direct_pdf": 0.157161,
+      "white_furnace_reflectance": [
+        0.140497,
+        0.3014,
+        0.599567
+      ]
+    },
+    {
+      "id": "clearcoat-over-film-v0.1",
+      "base_color": [
+        0.7,
+        0.08,
+        0.02
+      ],
+      "metallic": 0.1,
+      "perceptual_roughness": 0.5,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 450.0,
+      "clearcoat_factor": 0.8,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.610876,
+        0.555246,
+        0.571265
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        1.0,
+        0.524434,
+        0.577815
+      ],
+      "direct_diffuse": [
+        0.0347,
+        0.003966,
+        0.000991
+      ],
+      "direct_base_specular": [
+        0.002952,
+        0.00129,
+        0.000211
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000041,
+        0.000041,
+        0.000041
+      ],
+      "direct_brdf_cos": [
+        0.018846,
+        0.002648,
+        0.000622
+      ],
+      "direct_pdf": 0.039991,
+      "white_furnace_reflectance": [
+        0.60283,
+        0.498247,
+        0.505667
+      ]
+    },
+    {
+      "id": "clearcoat-over-film-v0.5",
+      "base_color": [
+        0.7,
+        0.08,
+        0.02
+      ],
+      "metallic": 0.1,
+      "perceptual_roughness": 0.5,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 450.0,
+      "clearcoat_factor": 0.8,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.012591,
+        0.036479,
+        0.087304
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.446902,
+        0.037976,
+        0.063802
+      ],
+      "direct_diffuse": [
+        0.126759,
+        0.014487,
+        0.003622
+      ],
+      "direct_base_specular": [
+        0.00303,
+        0.001099,
+        0.000158
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000013,
+        0.000013,
+        0.000013
+      ],
+      "direct_brdf_cos": [
+        0.064901,
+        0.007799,
+        0.001896
+      ],
+      "direct_pdf": 0.139908,
+      "white_furnace_reflectance": [
+        0.495429,
+        0.131922,
+        0.114991
+      ]
+    },
+    {
+      "id": "clearcoat-over-film-v1.0",
+      "base_color": [
+        0.7,
+        0.08,
+        0.02
+      ],
+      "metallic": 0.1,
+      "perceptual_roughness": 0.5,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 1.3,
+      "iridescence_thickness_nm": 450.0,
+      "clearcoat_factor": 0.8,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.046086,
+        0.025048,
+        0.005492
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.725042,
+        0.04815,
+        0.011522
+      ],
+      "direct_diffuse": [
+        0.133635,
+        0.015273,
+        0.003818
+      ],
+      "direct_base_specular": [
+        0.00809,
+        0.004335,
+        0.001036
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000053,
+        0.000053,
+        0.000053
+      ],
+      "direct_brdf_cos": [
+        0.070889,
+        0.009831,
+        0.002454
+      ],
+      "direct_pdf": 0.148391,
+      "white_furnace_reflectance": [
+        0.536953,
+        0.108023,
+        0.049483
+      ]
+    },
+    {
+      "id": "all-v4-lobes-v0.1",
+      "base_color": [
+        0.05,
+        0.2,
+        0.6
+      ],
+      "metallic": 0.35,
+      "perceptual_roughness": 0.36,
+      "ior": 1.7,
+      "specular_factor": 0.8,
+      "specular_color": [
+        1.1,
+        0.7,
+        0.4
+      ],
+      "iridescence_factor": 0.9,
+      "iridescence_ior": 1.38,
+      "iridescence_thickness_nm": 560.0,
+      "clearcoat_factor": 0.65,
+      "sheen_color": [
+        0.2,
+        0.55,
+        0.9
+      ],
+      "anisotropy_strength": 0.75,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        0.597674,
+        0.631945,
+        0.617433
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.594419,
+        0.776201,
+        0.520871
+      ],
+      "direct_diffuse": [
+        0.000956,
+        0.003825,
+        0.011474
+      ],
+      "direct_base_specular": [
+        0.000187,
+        0.002572,
+        0.006868
+      ],
+      "direct_sheen_specular": [
+        0.037291,
+        0.10255,
+        0.167809
+      ],
+      "direct_clearcoat_specular": [
+        0.00008,
+        0.00008,
+        0.00008
+      ],
+      "direct_brdf_cos": [
+        0.019257,
+        0.054513,
+        0.093115
+      ],
+      "direct_pdf": 0.051592,
+      "white_furnace_reflectance": [
+        0.396941,
+        0.500253,
+        0.642878
+      ]
+    },
+    {
+      "id": "all-v4-lobes-v0.5",
+      "base_color": [
+        0.05,
+        0.2,
+        0.6
+      ],
+      "metallic": 0.35,
+      "perceptual_roughness": 0.36,
+      "ior": 1.7,
+      "specular_factor": 0.8,
+      "specular_color": [
+        1.1,
+        0.7,
+        0.4
+      ],
+      "iridescence_factor": 0.9,
+      "iridescence_ior": 1.38,
+      "iridescence_thickness_nm": 560.0,
+      "clearcoat_factor": 0.65,
+      "sheen_color": [
+        0.2,
+        0.55,
+        0.9
+      ],
+      "anisotropy_strength": 0.75,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.130439,
+        0.049472,
+        0.057843
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.11185,
+        0.111567,
+        0.400507
+      ],
+      "direct_diffuse": [
+        0.005645,
+        0.022582,
+        0.067745
+      ],
+      "direct_base_specular": [
+        0.000657,
+        0.010185,
+        0.023493
+      ],
+      "direct_sheen_specular": [
+        0.01867,
+        0.051342,
+        0.084014
+      ],
+      "direct_clearcoat_specular": [
+        0.000026,
+        0.000026,
+        0.000026
+      ],
+      "direct_brdf_cos": [
+        0.012499,
+        0.042067,
+        0.087639
+      ],
+      "direct_pdf": 0.100042,
+      "white_furnace_reflectance": [
+        0.120082,
+        0.206064,
+        0.473659
+      ]
+    },
+    {
+      "id": "all-v4-lobes-v1.0",
+      "base_color": [
+        0.05,
+        0.2,
+        0.6
+      ],
+      "metallic": 0.35,
+      "perceptual_roughness": 0.36,
+      "ior": 1.7,
+      "specular_factor": 0.8,
+      "specular_color": [
+        1.1,
+        0.7,
+        0.4
+      ],
+      "iridescence_factor": 0.9,
+      "iridescence_ior": 1.38,
+      "iridescence_thickness_nm": 560.0,
+      "clearcoat_factor": 0.65,
+      "sheen_color": [
+        0.2,
+        0.55,
+        0.9
+      ],
+      "anisotropy_strength": 0.75,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.0,
+        0.036428,
+        0.030378
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.0,
+        0.21107,
+        0.476054
+      ],
+      "direct_diffuse": [
+        0.0063,
+        0.0252,
+        0.075599
+      ],
+      "direct_base_specular": [
+        0.003004,
+        0.027063,
+        0.092809
+      ],
+      "direct_sheen_specular": [
+        0.0004,
+        0.001101,
+        0.001802
+      ],
+      "direct_clearcoat_specular": [
+        0.000105,
+        0.000105,
+        0.000105
+      ],
+      "direct_brdf_cos": [
+        0.004905,
+        0.026734,
+        0.085157
+      ],
+      "direct_pdf": 0.102474,
+      "white_furnace_reflectance": [
+        0.052773,
+        0.169542,
+        0.41547
+      ]
+    },
+    {
+      "id": "zero-thickness-inactive-v0.1",
+      "base_color": [
+        0.3,
+        0.6,
+        0.9
+      ],
+      "metallic": 0.2,
+      "perceptual_roughness": 0.4,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 2.0,
+      "iridescence_thickness_nm": 0.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.1,
+      "raw_dielectric_thin_film_fresnel": [
+        1.0,
+        0.765295,
+        0.821588
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        1.0,
+        0.874931,
+        0.969991
+      ],
+      "direct_diffuse": [
+        0.023822,
+        0.041555,
+        0.053824
+      ],
+      "direct_base_specular": [
+        0.003213,
+        0.005308,
+        0.007403
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.013517,
+        0.023431,
+        0.030613
+      ],
+      "direct_pdf": 0.052372,
+      "white_furnace_reflectance": [
+        0.338642,
+        0.42668,
+        0.500074
+      ]
+    },
+    {
+      "id": "zero-thickness-inactive-v0.5",
+      "base_color": [
+        0.3,
+        0.6,
+        0.9
+      ],
+      "metallic": 0.2,
+      "perceptual_roughness": 0.4,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 2.0,
+      "iridescence_thickness_nm": 0.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 0.5,
+      "raw_dielectric_thin_film_fresnel": [
+        0.284527,
+        0.107902,
+        0.145491
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.615212,
+        0.629541,
+        0.919658
+      ],
+      "direct_diffuse": [
+        0.051804,
+        0.090367,
+        0.117048
+      ],
+      "direct_base_specular": [
+        0.001369,
+        0.002262,
+        0.003156
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.026587,
+        0.046315,
+        0.060102
+      ],
+      "direct_pdf": 0.128779,
+      "white_furnace_reflectance": [
+        0.269412,
+        0.440812,
+        0.575989
+      ]
+    },
+    {
+      "id": "zero-thickness-inactive-v1.0",
+      "base_color": [
+        0.3,
+        0.6,
+        0.9
+      ],
+      "metallic": 0.2,
+      "perceptual_roughness": 0.4,
+      "ior": 1.5,
+      "specular_factor": 1.0,
+      "specular_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "iridescence_factor": 1.0,
+      "iridescence_ior": 2.0,
+      "iridescence_thickness_nm": 0.0,
+      "clearcoat_factor": 0.0,
+      "sheen_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anisotropy_strength": 0.0,
+      "n_dot_v": 1.0,
+      "raw_dielectric_thin_film_fresnel": [
+        0.054091,
+        0.040813,
+        0.043639
+      ],
+      "raw_conductor_thin_film_fresnel": [
+        0.310278,
+        0.600345,
+        0.900388
+      ],
+      "direct_diffuse": [
+        0.052938,
+        0.092346,
+        0.11961
+      ],
+      "direct_base_specular": [
+        0.005079,
+        0.00839,
+        0.011701
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.029008,
+        0.050368,
+        0.065655
+      ],
+      "direct_pdf": 0.137504,
+      "white_furnace_reflectance": [
+        0.252142,
+        0.431625,
+        0.57371
+      ]
+    }
+  ]
+}

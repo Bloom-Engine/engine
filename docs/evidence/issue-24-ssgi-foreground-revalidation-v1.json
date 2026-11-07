@@ -1,0 +1,116 @@
+{
+  "schema": "bloom-issue-24-ssgi-foreground-revalidation-v1",
+  "issues": [24, 135],
+  "qualified_revision": "6677c28c44e52bdfea5c36f937ee0bf539e2edd8",
+  "accepted_ssgi_baseline_revision": "b92668f23f45b076660af56a92e4d72ab9c1599f",
+  "qualification_date": "2026-08-29",
+  "qualification_worktree": "clean-detached",
+  "hardware": {
+    "adapter": "Apple M1 Max",
+    "backend": "Metal",
+    "device_profile": "native-full",
+    "ssgi_trace_backend": "hw-ray-query"
+  },
+  "scene": {
+    "name": "BistroReference.gltf",
+    "sha256": "217b6cf37bfb435eb6d164a6107e19f69f4bbf4d1bfb022713aa7076a8752927",
+    "placements": 1176
+  },
+  "deterministic_temporal_matrix": {
+    "schema": "bloom-bistro-temporal-matrix-v1",
+    "artifact_sha256": "23d08be2b7db20a0d12be64c1bbd002015ed0bbbef12e7d988ab8da3a8b543d5",
+    "size": "512x288",
+    "sequence_frames": 32,
+    "largest_component_limit_pixels": 32,
+    "full": {
+      "temporal_max_channel_range_mean_8bit": 2.1295166015625,
+      "adjacent_mean_absolute_rgb_8bit": 0.13804526198010006,
+      "adjacent_mean_absolute_luma_8bit": 0.1412847922267025,
+      "largest_component_over_8_levels_pixels": 25,
+      "changed_pixel_ratio": 0.0015190972222222222,
+      "first_frame_sha256": "af760f7efec6933b23d537d7cf003e1c4c2b9cd3fd18ec43a97f9834a8dc7dc9",
+      "last_frame_sha256": "312f9063fc406635ae887ff80274e64daac9d137c6ffada8415599210f112c59"
+    },
+    "control_reductions_relative_to_full": {
+      "no_taa": {
+        "temporal_range_mean": 0.9419795547912487,
+        "adjacent_rgb_mean": 0.9811311884234665,
+        "largest_component": 0.92
+      },
+      "no_ssgi": {
+        "temporal_range_mean": 0.04439030604120897,
+        "adjacent_rgb_mean": 0.0241158414026732,
+        "largest_component": 0.0
+      },
+      "no_ssr": {
+        "temporal_range_mean": -0.003665488360243385,
+        "adjacent_rgb_mean": -0.036531117955956205,
+        "largest_component": -0.08000000000000007
+      },
+      "no_occlusion": {
+        "temporal_range_mean": -0.00003821534346037936,
+        "adjacent_rgb_mean": 0.0001283628559098915,
+        "largest_component": 0.0
+      }
+    },
+    "result": "pass"
+  },
+  "foreground": {
+    "executable_sha256": "e7e8ba551364efe63b9188c78860af76ad2348e1c1abeddba80c3f64a82d6d8b",
+    "perry_version": "0.5.1512",
+    "output_size": "1600x900",
+    "render_scale": 1.0,
+    "quality_preset": 4,
+    "taa": true,
+    "ssgi": true,
+    "ssr": true,
+    "sharpen": false,
+    "motion_blur": false,
+    "path": "bright-area and paving camera-motion sweep",
+    "diagnostic_capture_requested": false,
+    "reviewer_result": "looking good all around!",
+    "result": "pass"
+  },
+  "performance": {
+    "method": "five alternating release runs per revision on one machine",
+    "synthetic_hiz_256x256_probe_total_gpu_us": {
+      "baseline_runs": [702.020, 630.310, 682.258, 656.259, 699.590],
+      "candidate_runs": [638.855, 744.220, 662.301, 669.066, 555.273],
+      "baseline_median": 682.258,
+      "candidate_median": 662.301,
+      "delta_us": -19.957,
+      "delta_percent": -2.925,
+      "image_metrics_identical": true
+    },
+    "detailed_bistro_probe_total_gpu_us": {
+      "baseline_runs": [6839.359, 6318.394, 6083.785, 6749.101, 6371.515],
+      "candidate_runs": [6266.866, 6613.458, 5813.281, 6341.061, 6068.041],
+      "baseline_median": 6371.515,
+      "candidate_median": 6266.866,
+      "delta_us": -104.649,
+      "delta_percent": -1.642
+    },
+    "result": "no-measured-regression"
+  },
+  "tests": {
+    "release_library": {
+      "passed": 482,
+      "failed": 0,
+      "ignored": 1
+    },
+    "release_gpu_golden": {
+      "passed": 79,
+      "failed": 0,
+      "ignored": 2
+    },
+    "profiled_endpoint_runs": {
+      "passed": 10,
+      "failed": 0
+    },
+    "profiled_synthetic_runs": {
+      "passed": 10,
+      "failed": 0
+    }
+  },
+  "conclusion": "Current HEAD preserves the accepted SSGI fixes through later visibility and virtual-geometry work. The former red/bright projection is absent, the permanent temporal gate passes, foreground motion is accepted, and no GPU regression is measured."
+}

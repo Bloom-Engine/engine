@@ -1,0 +1,102 @@
+{
+  "schema": "bloom-issue-127-pt-motion-requalification-v1",
+  "issues": [127],
+  "qualification_date": "2026-08-30",
+  "qualified_renderer_revision": "09ad0b755af9f10083712327d7f0edb1d88f228b",
+  "hardware": {
+    "adapter": "Apple M1 Max",
+    "backend": "Metal",
+    "device_type": "IntegratedGpu",
+    "ray_query_required": true,
+    "texture_arrays_enabled": true
+  },
+  "canonical_oracle": {
+    "test": "qualify_pt_oracle_hardware",
+    "result": "pass",
+    "goldens_updated": false,
+    "progressive": {
+      "frames": 300,
+      "repeats": 3,
+      "mean_rgba": 0.101040,
+      "mean_rgb": 0.134720,
+      "outlier_pixels_percent": 0.038147,
+      "max_error": 69,
+      "ssim": 0.998132777,
+      "render_ms": [699, 582, 629],
+      "metrics_identical_across_repeats": true
+    },
+    "realtime_motion": {
+      "frames": 48,
+      "repeats": 3,
+      "mean_rgba": 0.040993,
+      "mean_rgb": 0.054657,
+      "outlier_pixels_percent": 0.012207,
+      "max_error": 48,
+      "ssim": 0.999404554,
+      "render_ms": [126, 137, 111],
+      "metrics_identical_across_repeats": true
+    },
+    "negative_controls": {
+      "brdf_energy": {
+        "rejected": true,
+        "mean_rgba": 5.299,
+        "mean_limit": 4.0,
+        "outlier_pixels_percent": 0.0824,
+        "max_error": 78,
+        "ssim": 0.995500
+      },
+      "reprojection": {
+        "rejected": true,
+        "mean_rgba": 6.441,
+        "mean_limit": 6.0,
+        "outlier_pixels_percent": 6.0760,
+        "outlier_limit_percent": 1.0,
+        "max_error": 146,
+        "ssim": 0.910582
+      }
+    }
+  },
+  "focused_temporal_corpus": {
+    "passed": 4,
+    "failed": 0,
+    "svgf_capture": {
+      "accepted_history_texels": 10984,
+      "valid_reprojection_texels": 10989,
+      "accumulated_texels": 10989,
+      "total_texels": 16384,
+      "non_finite_hdr_pixels": 0,
+      "max_luminance": 0.3492
+    },
+    "rigid_motion": {
+      "movement_mean": 5.2560,
+      "initial_mean": 0.9633,
+      "frame4_mean": 0.4950,
+      "frame4_outliers_percent": 0.0,
+      "trail_frames": 0,
+      "stable_flicker": 0.1426,
+      "moving_texels": 855,
+      "retained_history_texels": 45,
+      "rejected_texels": 810,
+      "unclassified_moving_texels": 0
+    },
+    "reset": {
+      "camera_cut_max_error": 0,
+      "mode_toggle_max_error": 0,
+      "non_seed_history_texels": 0
+    },
+    "lighting": {
+      "on": {
+        "change_mean": 26.3755,
+        "frame12_outliers_percent": 0.0,
+        "stable_flicker": 1.0126
+      },
+      "off": {
+        "change_mean": 20.5130,
+        "frame12_outliers_percent": 0.0,
+        "stable_flicker": 1.7008
+      }
+    }
+  },
+  "remaining_gate": "DX12 or Vulkan ray-query hardware qualification",
+  "conclusion": "The current renderer preserves deterministic progressive and realtime PT behavior on Metal, rejects transport and reprojection faults, and bounds camera, rigid-object, reset, and lighting temporal behavior. Cross-backend hardware coverage remains open."
+}

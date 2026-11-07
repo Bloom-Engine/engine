@@ -32,14 +32,19 @@ impl Renderer {
         scene: &crate::scene::SceneGraph,
         profiler: &mut crate::profiler::Profiler,
     ) {
-        if self.planar_probes.iter().all(|p| p.is_none()) { return; }
+        if self.planar_probes.iter().all(|p| p.is_none()) {
+            return;
+        }
         // Scene-graph nodes render into the probe too (they share the
         // Vertex3D layout and the scene material bind-group layout), so a
         // fully retained-mode game gets real water reflections as well.
-        let scene_draws = scene.reflect_draw_list();
+        let scene_draws = scene.reflect_draw_list_with_refraction(self.imported_refraction_enabled);
         if self.material_system.commands.is_empty()
             && self.model_draw_commands.is_empty()
-            && scene_draws.is_empty() { return; }
+            && scene_draws.is_empty()
+        {
+            return;
+        }
 
         // EN-011 — lazily build the single-target reflection pipeline + buffers
         // used to render cached models (trees/house) into the probe with a
@@ -48,20 +53,24 @@ impl Renderer {
         const REFLECT_STRIDE: u64 = 256;
         const REFLECT_MAX_DRAWS: usize = 1024;
         if self.reflect_scene_pipeline.is_none() {
-            let model_dyn_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("reflect_model_dyn_layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0, visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: std::num::NonZeroU64::new(128),
-                    },
-                    count: None,
-                }],
-            });
+            let model_dyn_layout =
+                self.device
+                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("reflect_model_dyn_layout"),
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: true,
+                                min_binding_size: std::num::NonZeroU64::new(128),
+                            },
+                            count: None,
+                        }],
+                    });
             let shadow_tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-                binding, visibility: wgpu::ShaderStages::FRAGMENT,
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Depth,
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -69,65 +78,92 @@ impl Renderer {
                 },
                 count: None,
             };
-            let light_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("reflect_light_layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false, min_binding_size: None,
-                        },
-                        count: None,
+            let light_layout =
+                self.device
+                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("reflect_light_layout"),
+                        entries: &[
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Uniform,
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                            // Shadow cascades + comparison sampler so the mirrored
+                            // scene is sun-shadowed like the real one (the probe
+                            // previously rendered everything fully lit, which made
+                            // water reflections disagree with the scene above them).
+                            shadow_tex_entry(1),
+                            shadow_tex_entry(2),
+                            shadow_tex_entry(3),
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 4,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Sampler(
+                                    wgpu::SamplerBindingType::Comparison,
+                                ),
+                                count: None,
+                            },
+                        ],
+                    });
+            let shader = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("reflect_scene_shader"),
+                    source: wgpu::ShaderSource::Wgsl(REFLECT_SCENE_WGSL.into()),
+                });
+            let pl = self
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("reflect_scene_pl"),
+                    bind_group_layouts: &[
+                        Some(&model_dyn_layout),
+                        Some(&light_layout),
+                        Some(&self.scene_material_layout),
+                    ],
+                    immediate_size: 0,
+                });
+            let pipeline = self
+                .device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("reflect_scene_pipeline"),
+                    layout: Some(&pl),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_reflect"),
+                        buffers: &[Vertex3D::desc()],
+                        compilation_options: Default::default(),
                     },
-                    // Shadow cascades + comparison sampler so the mirrored
-                    // scene is sun-shadowed like the real one (the probe
-                    // previously rendered everything fully lit, which made
-                    // water reflections disagree with the scene above them).
-                    shadow_tex_entry(1),
-                    shadow_tex_entry(2),
-                    shadow_tex_entry(3),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                        count: None,
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_reflect"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: None,
+                        ..Default::default()
                     },
-                ],
-            });
-            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("reflect_scene_shader"),
-                source: wgpu::ShaderSource::Wgsl(REFLECT_SCENE_WGSL.into()),
-            });
-            let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("reflect_scene_pl"),
-                bind_group_layouts: &[Some(&model_dyn_layout), Some(&light_layout), Some(&self.scene_material_layout)],
-                immediate_size: 0,
-            });
-            let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("reflect_scene_pipeline"),
-                layout: Some(&pl),
-                vertex: wgpu::VertexState {
-                    module: &shader, entry_point: Some("vs_reflect"),
-                    buffers: &[Vertex3D::desc()], compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader, entry_point: Some("fs_reflect"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None, ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT, depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: Default::default(), bias: Default::default(),
-                }),
-                multisample: Default::default(), multiview_mask: None, cache: None,
-            });
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                });
             let model_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("reflect_model_buf"),
                 size: REFLECT_STRIDE * REFLECT_MAX_DRAWS as u64,
@@ -135,29 +171,55 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             let model_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("reflect_model_bg"), layout: &model_dyn_layout,
+                label: Some("reflect_model_bg"),
+                layout: &model_dyn_layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &model_buf, offset: 0, size: std::num::NonZeroU64::new(128),
+                        buffer: &model_buf,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(128),
                     }),
                 }],
             });
             // sun_dir + sun_color + ambient + cam_pos + shadow_splits (5 vec4)
             // + 3 cascade mat4s = 80 + 192 = 272 bytes.
             let light_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("reflect_light_buf"), size: 272,
+                label: Some("reflect_light_buf"),
+                size: 272,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             let light_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("reflect_light_bg"), layout: &light_layout,
+                label: Some("reflect_light_bg"),
+                layout: &light_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: light_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: light_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.shadow_map.depth_views[0],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.shadow_map.depth_views[1],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.shadow_map.depth_views[2],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler),
+                    },
                 ],
             });
             self.reflect_scene_pipeline = Some(pipeline);
@@ -165,6 +227,7 @@ impl Renderer {
             self.reflect_model_bg = Some(model_bg);
             self.reflect_light_buf = Some(light_buf);
             self.reflect_light_bg = Some(light_bg);
+            self.created_pipelines(1);
         }
         // Sun/ambient + shadow data for the reflection shading (same values
         // as the main pass, so the mirrored scene is lit AND shadowed like
@@ -192,7 +255,8 @@ impl Renderer {
                 }
             }
             if let Some(buf) = &self.reflect_light_buf {
-                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&light_data));
+                self.queue
+                    .write_buffer(buf, 0, bytemuck::cast_slice(&light_data));
             }
         }
 
@@ -202,7 +266,12 @@ impl Renderer {
         // surface).
         let mut excluded: std::collections::HashSet<material_system::MaterialHandle> =
             std::collections::HashSet::new();
-        for (i, probe_link) in self.material_system.material_reflection_probe.iter().enumerate() {
+        for (i, probe_link) in self
+            .material_system
+            .material_reflection_probe
+            .iter()
+            .enumerate()
+        {
             if probe_link.is_some() {
                 excluded.insert((i + 1) as material_system::MaterialHandle);
             }
@@ -210,43 +279,50 @@ impl Renderer {
 
         // Cache main-pass per-view inputs once outside the loop.
         let main_view = self.current_view_matrix;
-        let proj      = self.current_proj_matrix;
-        let cam_pos   = self.current_camera_pos;
+        let proj = self.current_proj_matrix;
+        let cam_pos = self.current_camera_pos;
 
         // Snapshot the existing PerView uniforms by reconstructing
         // the same struct material_system_begin_frame writes — we
         // need a fresh copy per probe to swap view/view_proj.
         let base_per_view = material_system::PerViewUniforms {
-            view:           main_view,
+            view: main_view,
             proj,
-            view_proj:      self.current_vp_matrix,
+            view_proj: self.current_vp_matrix,
             // EN-022 fix: velocity reference (prev unjittered VP +
             // current jitter), so material shaders computing
             // `prev_view_proj * world` get true zero velocity on
             // static geometry instead of TAA jitter-delta noise.
             prev_view_proj: self.velocity_ref_vp,
-            inv_proj:       self.current_inv_proj_matrix,
+            inv_proj: self.current_inv_proj_matrix,
             camera_pos: [
-                cam_pos[0], cam_pos[1], cam_pos[2],
+                cam_pos[0],
+                cam_pos[1],
+                cam_pos[2],
                 self.lighting_uniforms.camera_pos[3],
             ],
             camera_dir: [0.0, 0.0, -1.0, 70.0_f32.to_radians()],
-            ambient:    self.lighting_uniforms.ambient,
-            fog:        [self.fog_color[0], self.fog_color[1], self.fog_color[2], self.fog_density],
-            sun_dir:    self.lighting_uniforms.light_dir,
-            sun_color:  self.lighting_uniforms.light_color,
-            dir_light_count:   self.lighting_uniforms.dir_light_count,
-            dir_lights:        std::array::from_fn(|i| material_system::PerViewDirLight {
+            ambient: self.lighting_uniforms.ambient,
+            fog: [
+                self.fog_color[0],
+                self.fog_color[1],
+                self.fog_color[2],
+                self.fog_density,
+            ],
+            sun_dir: self.lighting_uniforms.light_dir,
+            sun_color: self.lighting_uniforms.light_color,
+            dir_light_count: self.lighting_uniforms.dir_light_count,
+            dir_lights: std::array::from_fn(|i| material_system::PerViewDirLight {
                 direction: self.lighting_uniforms.dir_lights[i].direction,
-                color:     self.lighting_uniforms.dir_lights[i].color,
+                color: self.lighting_uniforms.dir_lights[i].color,
             }),
             point_light_count: self.lighting_uniforms.point_light_count,
-            point_lights:      std::array::from_fn(|i| material_system::PerViewPointLight {
+            point_lights: std::array::from_fn(|i| material_system::PerViewPointLight {
                 position: self.lighting_uniforms.point_lights[i].position,
-                color:    self.lighting_uniforms.point_lights[i].color,
+                color: self.lighting_uniforms.point_lights[i].color,
             }),
-            shadow_splits:   self.lighting_uniforms.shadow_cascade_splits,
-            shadow_view:     self.lighting_uniforms.shadow_view_matrix,
+            shadow_splits: self.lighting_uniforms.shadow_cascade_splits,
+            shadow_view: self.lighting_uniforms.shadow_view_matrix,
             shadow_cascades: self.lighting_uniforms.shadow_cascade_vps,
         };
 
@@ -254,21 +330,34 @@ impl Renderer {
         // commands view while iterating, so collect the work first.
         let probe_count = self.planar_probes.len();
         for i in 0..probe_count {
-            let (plane_y, normal, color_view, depth_view,
-                 aux_material_view, aux_velocity_view, aux_albedo_view) =
-                match &self.planar_probes[i] {
-                    Some(p) => (p.plane_y, p.normal, p.color_view.clone(), p.depth_view.clone(),
-                                p.aux_material_view.clone(), p.aux_velocity_view.clone(),
-                                p.aux_albedo_view.clone()),
-                    None => continue,
-                };
+            let (
+                plane_y,
+                normal,
+                color_view,
+                depth_view,
+                aux_material_view,
+                aux_velocity_view,
+                aux_albedo_view,
+            ) = match &self.planar_probes[i] {
+                Some(p) => (
+                    p.plane_y,
+                    p.normal,
+                    p.color_view.clone(),
+                    p.depth_view.clone(),
+                    p.aux_material_view.clone(),
+                    p.aux_velocity_view.clone(),
+                    p.aux_albedo_view.clone(),
+                ),
+                None => continue,
+            };
             let view_buf = match self.planar_probe_view_buffers[i].as_ref() {
-                Some(b) => b, None => continue,
+                Some(b) => b,
+                None => continue,
             };
 
             // Mirror the camera + recompute view_proj for the probe.
             let mirror_view = planar_reflection::mirrored_view(main_view, plane_y, normal);
-            let mirror_cam  = planar_reflection::mirrored_camera_pos(cam_pos, plane_y, normal);
+            let mirror_cam = planar_reflection::mirrored_camera_pos(cam_pos, plane_y, normal);
 
             // EN-011 V2 — oblique near-plane clip. Replace the
             // projection's near plane with the water plane (in
@@ -286,15 +375,15 @@ impl Renderer {
             // reflection has rolled it through the view).
             let d_w = -(normal[0] * 0.0 + normal[1] * plane_y + normal[2] * 0.0);
             let plane_world = [normal[0], normal[1], normal[2], d_w];
-            let plane_eye   = planar_reflection::world_plane_to_eye_space(mirror_view, plane_world);
+            let plane_eye = planar_reflection::world_plane_to_eye_space(mirror_view, plane_world);
             let mirror_proj = planar_reflection::oblique_proj(proj, plane_eye);
-            let mirror_vp   = mat4_multiply(mirror_proj, mirror_view);
+            let mirror_vp = mat4_multiply(mirror_proj, mirror_view);
 
             let mut per_view = base_per_view;
-            per_view.view      = mirror_view;
-            per_view.proj      = mirror_proj;
+            per_view.view = mirror_view;
+            per_view.proj = mirror_proj;
             per_view.view_proj = mirror_vp;
-            per_view.inv_proj  = planar_reflection::inv_proj_for(mirror_proj);
+            per_view.inv_proj = planar_reflection::inv_proj_for(mirror_proj);
             per_view.camera_pos[0] = mirror_cam[0];
             per_view.camera_pos[1] = mirror_cam[1];
             per_view.camera_pos[2] = mirror_cam[2];
@@ -302,7 +391,8 @@ impl Renderer {
             // — TAA reprojection isn't meaningful for the reflection
             // probe (we don't temporally accumulate it), so this is
             // benign.
-            self.queue.write_buffer(view_buf, 0, bytemuck::bytes_of(&per_view));
+            self.queue
+                .write_buffer(view_buf, 0, bytemuck::bytes_of(&per_view));
 
             // EN-011 V2 — rebuild the per-probe PerView bind group with
             // the live env / BRDF / shadow views. V1 bound 1×1 stub
@@ -327,40 +417,111 @@ impl Renderer {
             // shadow views, the per-probe UBO) are all stable objects;
             // env (re)loads and probe creation clear the cache slot.
             if self.planar_probe_view_bgs[i].is_none() {
-                let sky_view_owned: Option<wgpu::TextureView> = self.sky_texture
+                let sky_view_owned: Option<wgpu::TextureView> = self
+                    .sky_texture
                     .as_ref()
                     .map(|t| t.create_view(&Default::default()));
                 let env_view: &wgpu::TextureView = sky_view_owned
                     .as_ref()
                     .unwrap_or(&self.scene_env_default_view);
-                let diffuse_view_owned: Option<wgpu::TextureView> = self.env_diffuse_texture
+                let diffuse_view_owned: Option<wgpu::TextureView> = self
+                    .env_diffuse_texture
                     .as_ref()
                     .map(|t| t.create_view(&Default::default()));
                 let env_diffuse_view: &wgpu::TextureView = diffuse_view_owned
                     .as_ref()
                     .unwrap_or(&self.scene_env_default_view);
-                self.planar_probe_view_bgs[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("planar_probe_per_view_bg_live"),
-                    layout: &self.material_system.layouts.per_view,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: view_buf.as_entire_binding() },
-                        // env (specular) tex + sampler
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(env_view) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
-                        // env diffuse tex
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(env_diffuse_view) },
-                        // BRDF LUT tex + sampler
-                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
-                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
-                        // 3 shadow cascades — same depth views the main
-                        // pass binds, so the reflection picks up sun
-                        // shadows without re-rendering the cascades.
-                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                    ],
-                }));
+                let mut entries = vec![
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: view_buf.as_entire_binding(),
+                    },
+                    // env (specular) tex + sampler
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(env_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.env_sampler),
+                    },
+                    // env diffuse tex
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(env_diffuse_view),
+                    },
+                    // BRDF LUT tex + sampler
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler),
+                    },
+                    // 3 shadow cascades — same depth views the main
+                    // pass binds, so the reflection picks up sun
+                    // shadows without re-rendering the cascades.
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.shadow_map.depth_views[0],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.shadow_map.depth_views[1],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.shadow_map.depth_views[2],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler),
+                    },
+                ];
+                if self.shadow_map.virtual_map.requested() {
+                    entries.extend([
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(
+                                self.shadow_map
+                                    .virtual_map
+                                    .page_table_view()
+                                    .expect("requested VSM requires a page table"),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: wgpu::BindingResource::TextureView(
+                                self.shadow_map
+                                    .virtual_map
+                                    .physical_array_view()
+                                    .expect("requested VSM requires physical pages"),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 12,
+                            resource: self
+                                .shadow_map
+                                .virtual_map
+                                .sampling_params_buffer()
+                                .expect("requested VSM requires sampling parameters")
+                                .as_entire_binding(),
+                        },
+                    ]);
+                }
+                self.planar_probe_view_bgs[i] =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("planar_probe_per_view_bg_live"),
+                        layout: &self.material_system.layouts.per_view,
+                        entries: &entries,
+                    }));
             }
             let probe_view_bg = self.planar_probe_view_bgs[i].as_ref().unwrap();
 
@@ -384,14 +545,26 @@ impl Renderer {
                     // mirror its bind pose at the origin. Skinned models
                     // (enemies) were never reflected on the old immediate
                     // path either, so skipping preserves that.
-                    if cmd.skinned { continue; }
+                    if cmd.skinned {
+                        continue;
+                    }
                     let slot = reflect_draws.len();
-                    if slot >= REFLECT_MAX_DRAWS { break; }
-                    let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) else { continue };
-                    if cmd.mesh_idx >= meshes.len() { continue; }
+                    if slot >= REFLECT_MAX_DRAWS {
+                        break;
+                    }
+                    let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) else {
+                        continue;
+                    };
+                    if cmd.mesh_idx >= meshes.len() {
+                        continue;
+                    }
                     let mesh = &meshes[cmd.mesh_idx];
-                    let (wmin, wmax) =
-                        transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
+                    if mesh.alpha_mode == MaterialAlphaMode::Blend
+                        || (self.imported_refraction_enabled && mesh.transmission.is_active())
+                    {
+                        continue;
+                    }
+                    let (wmin, wmax) = transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
                     if wmin[0] <= wmax[0]
                         && crate::scene::aabb_outside_frustum(&mirror_planes, wmin, wmax)
                     {
@@ -406,7 +579,9 @@ impl Renderer {
                 }
                 for (i, (_vb, _ib, _ic, _bg, model, wmin, wmax)) in scene_draws.iter().enumerate() {
                     let slot = reflect_draws.len() + node_slots.len();
-                    if slot >= REFLECT_MAX_DRAWS { break; }
+                    if slot >= REFLECT_MAX_DRAWS {
+                        break;
+                    }
                     if wmin[0] <= wmax[0]
                         && crate::scene::aabb_outside_frustum(&mirror_planes, *wmin, *wmax)
                     {
@@ -423,14 +598,18 @@ impl Renderer {
                     self.queue.write_buffer(model_buf, 0, &staged);
                 }
             }
-
             // Clear the probe to transparent black. Geometry fragments write
             // alpha 1, so the water shader can blend the probe over its analytic
             // sky by alpha (a=0 → no reflected geometry → show the sky dome).
-            let clear_color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+            let clear_color = wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            };
 
             let view_bg = probe_view_bg;
-            let cache   = &self.model_gpu_cache;
+            let cache = &self.model_gpu_cache;
             let mat_sys = &self.material_system;
             let refl_pipeline = self.reflect_scene_pipeline.as_ref();
             let refl_model_bg = self.reflect_model_bg.as_ref();
@@ -490,13 +669,13 @@ impl Renderer {
                     multiview_mask: None,
                 });
                 mat_sys.dispatch_with_view(
-                    &mut pass, view_bg,
+                    &mut pass,
+                    view_bg,
                     // Excluded: probe-linked materials (the water plane
                     // itself) and anything flagged not-probe-visible
                     // (authoring control — e.g. sub-pixel instanced
                     // grass in a 512² probe).
-                    |handle| !excluded.contains(&handle)
-                        && mat_sys.material_probe_visible(handle),
+                    |handle| !excluded.contains(&handle) && mat_sys.material_probe_visible(handle),
                     // EN-011 V2 — swap to each material's sibling
                     // pipeline with cull_mode flipped Front→Back.
                     // Reflection mirrors world-space, which inverts
@@ -517,8 +696,9 @@ impl Renderer {
                             if idx < meshes.len() {
                                 let mesh = &meshes[idx];
                                 return Some((
-                                    &mesh.vb, &mesh.ib, mesh.index_count,
-                                    mesh.local_min, mesh.local_max,
+                                    self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count),
+                                    mesh.local_min,
+                                    mesh.local_max,
                                 ));
                             }
                         }
@@ -565,11 +745,16 @@ impl Renderer {
                             if let Some(Some(meshes)) = cache.get(handle) {
                                 if *midx < meshes.len() {
                                     let mesh = &meshes[*midx];
+                                    let draw =
+                                        self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
                                     pass.set_bind_group(0, rmbg, &[*slot * REFLECT_STRIDE as u32]);
                                     pass.set_bind_group(2, &mesh.material_bg, &[]);
-                                    pass.set_vertex_buffer(0, mesh.vb.slice(..));
-                                    pass.set_index_buffer(mesh.ib.slice(..), wgpu::IndexFormat::Uint32);
-                                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                                    pass.set_vertex_buffer(0, draw.vertex.slice(..));
+                                    pass.set_index_buffer(
+                                        draw.index.slice(..),
+                                        wgpu::IndexFormat::Uint32,
+                                    );
+                                    pass.draw_indexed(draw.index_range(), draw.base_vertex, 0..1);
                                 }
                             }
                         }

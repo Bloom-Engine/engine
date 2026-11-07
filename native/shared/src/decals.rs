@@ -49,7 +49,12 @@ pub struct DecalStyle {
 
 impl Default for DecalStyle {
     fn default() -> Self {
-        Self { frame: 0.0, color: [1.0; 4], life: 0.0, fade: 0.0 }
+        Self {
+            frame: 0.0,
+            color: [1.0; 4],
+            life: 0.0,
+            fade: 0.0,
+        }
     }
 }
 
@@ -107,9 +112,15 @@ impl DecalManager {
         life: f32,
         fade: f32,
     ) {
-        if self.capacity == 0 { return; }
+        if self.capacity == 0 {
+            return;
+        }
         let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        let nn = if len > 1e-5 { [n[0] / len, n[1] / len, n[2] / len] } else { [0.0, 1.0, 0.0] };
+        let nn = if len > 1e-5 {
+            [n[0] / len, n[1] / len, n[2] / len]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
         // Spherical encode. el is the angle off +Y; az is the heading in XZ.
         let el = nn[1].clamp(-1.0, 1.0).acos();
         let az = nn[2].atan2(nn[0]);
@@ -123,7 +134,9 @@ impl DecalManager {
                 pos[1] + nn[1] * 0.002,
                 pos[2] + nn[2] * 0.002,
             ],
-            az, el, roll,
+            az,
+            el,
+            roll,
             size,
             color,
             frame,
@@ -149,7 +162,9 @@ impl DecalManager {
                 self.decals.swap_remove(i);
                 // The ring cursor indexes into a Vec that just shrank; clamp it
                 // or the next spawn writes out of bounds.
-                if self.next >= self.decals.len().max(1) { self.next = 0; }
+                if self.next >= self.decals.len().max(1) {
+                    self.next = 0;
+                }
                 continue;
             }
             i += 1;
@@ -160,26 +175,30 @@ impl DecalManager {
             let alpha = if d.fade > 0.0 && d.life != f32::MAX {
                 let remaining = d.life - d.age;
                 (remaining / d.fade).clamp(0.0, 1.0)
-            } else { 1.0 };
+            } else {
+                1.0
+            };
             let o = i * 12;
-            self.packed[o]      = d.pos[0];
-            self.packed[o + 1]  = d.pos[1];
-            self.packed[o + 2]  = d.pos[2];
-            self.packed[o + 3]  = d.roll;
-            self.packed[o + 4]  = d.size;
-            self.packed[o + 5]  = d.color[0];
-            self.packed[o + 6]  = d.color[1];
-            self.packed[o + 7]  = d.color[2];
-            self.packed[o + 8]  = d.color[3] * alpha;
-            self.packed[o + 9]  = d.frame;   // extra.x
-            self.packed[o + 10] = d.az;      // extra.y
-            self.packed[o + 11] = d.el;      // extra.z
+            self.packed[o] = d.pos[0];
+            self.packed[o + 1] = d.pos[1];
+            self.packed[o + 2] = d.pos[2];
+            self.packed[o + 3] = d.roll;
+            self.packed[o + 4] = d.size;
+            self.packed[o + 5] = d.color[0];
+            self.packed[o + 6] = d.color[1];
+            self.packed[o + 7] = d.color[2];
+            self.packed[o + 8] = d.color[3] * alpha;
+            self.packed[o + 9] = d.frame; // extra.x
+            self.packed[o + 10] = d.az; // extra.y
+            self.packed[o + 11] = d.el; // extra.z
         }
         self.live = self.decals.len() as u32;
         self.live
     }
 
-    pub fn packed(&self) -> &[f32] { &self.packed }
+    pub fn packed(&self) -> &[f32] {
+        &self.packed
+    }
 
     pub fn clear(&mut self) {
         self.decals.clear();
@@ -189,7 +208,9 @@ impl DecalManager {
 }
 
 impl Default for DecalManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -201,7 +222,16 @@ mod tests {
         let mut m = DecalManager::new();
         m.init(4, 1);
         for i in 0..10 {
-            m.spawn([i as f32, 0.0, 0.0], [0.0, 1.0, 0.0], 0.2, 0.0, 0.0, [1.0; 4], 0.0, 0.0);
+            m.spawn(
+                [i as f32, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                0.2,
+                0.0,
+                0.0,
+                [1.0; 4],
+                0.0,
+                0.0,
+            );
         }
         assert_eq!(m.update(0.016), 4);
     }
@@ -220,7 +250,9 @@ mod tests {
         let mut m = DecalManager::new();
         m.init(8, 1);
         m.spawn([0.0; 3], [0.0, 1.0, 0.0], 0.2, 0.0, 0.0, [1.0; 4], 0.0, 0.0);
-        for _ in 0..100 { m.update(1.0); }
+        for _ in 0..100 {
+            m.update(1.0);
+        }
         assert_eq!(m.live, 1);
     }
 

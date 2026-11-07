@@ -1,0 +1,122 @@
+{
+  "schema": "bloom-vsm-caster-coverage-evidence-v1",
+  "issue": 132,
+  "revision": "862981fd378e03f000109794091382d3d743bc14",
+  "environment": {
+    "adapter": "Apple M1 Max",
+    "backend": "Metal",
+    "quality_preset": 3,
+    "render_scale": 1.0,
+    "width": 1600,
+    "height": 900,
+    "warmup_frames": 120,
+    "measured_frames": 120,
+    "fixed_timestep_seconds": 0.016666667
+  },
+  "oracle": {
+    "schema": "bloom-vsm-caster-coverage-v1",
+    "change_threshold": 0.023529411764705882,
+    "passed": true,
+    "failures": [],
+    "images": {
+      "full": {
+        "sha256": "14a278adfd772c22dad5f3ccacd93114a7f0a9a6fe8601c30a3de368260947da"
+      },
+      "alpha_control": {
+        "sha256": "fe28ee07835353051ce38757c72e870a72bcda362c4d5f08079e2d4500cf1a15"
+      },
+      "skinned_later": {
+        "sha256": "e48a9de1ce94a8aa3dc1eb15e440bd1de22512ba37c49e5a3ba005030504d9a2"
+      },
+      "full_repeat": {
+        "sha256": "2bff4a206cdf5ce5ae5da299e0a2315099b6bec56e373363f709fbc3bd40180e"
+      }
+    },
+    "alpha_tested": {
+      "roi_normalized": [0.12, 0.68, 0.45, 0.83],
+      "roi_pixels": 71280,
+      "changed_pixels": 19931,
+      "changed_ratio": 0.2796156004489338,
+      "difference_mean": 0.03310681351642788,
+      "changed_difference_p95": 0.17870901960784324,
+      "occupied_rows": 113,
+      "segments_per_occupied_row": 4.646017699115045,
+      "changed_bounding_fill": 0.3083384900990099
+    },
+    "skinned": {
+      "roi_normalized": [0.27, 0.78, 0.45, 0.98],
+      "roi_pixels": 51840,
+      "changed_pixels": 4465,
+      "changed_ratio": 0.0861304012345679,
+      "difference_mean": 0.010765376195231165,
+      "changed_difference_p95": 0.20138431372549015,
+      "occupied_rows": 180,
+      "segments_per_occupied_row": 3.922222222222222,
+      "changed_bounding_fill": 0.08673271173271173
+    }
+  },
+  "telemetry": {
+    "full": {
+      "requested": true,
+      "capability_eligible": true,
+      "enabled": true,
+      "active": true,
+      "selection_reason": "high-tier-vsm",
+      "dynamic_fallback_mode": "bounded-page-overlay-with-csm",
+      "dynamic_overlay_pages": 153,
+      "dynamic_overlay_rendered_pages": 4,
+      "dynamic_overlay_draws": 8,
+      "dynamic_overlay_deferred_pages": 119,
+      "page_cutout_draws": 4,
+      "page_skinned_draws": 4,
+      "dynamic_overlay_page_budget": 4,
+      "dynamic_overlay_draw_budget": 64,
+      "physical_capacity": 256,
+      "gpu_total_bytes": 19951824,
+      "resident": 224,
+      "dirty": 119,
+      "pending_render": 4
+    },
+    "alpha_control": {
+      "active": true,
+      "page_cutout_draws": 0,
+      "page_skinned_draws": 4
+    },
+    "skinned_later": {
+      "active": true,
+      "page_cutout_draws": 4,
+      "page_skinned_draws": 4
+    }
+  },
+  "performance_observation_ms": {
+    "wall_frame_mean": 14.257172,
+    "cpu_frame_mean": 10.686424,
+    "cpu_frame_p50": 4.690206,
+    "gpu_frame_mean": 43.955573,
+    "gpu_frame_p50": 38.430835,
+    "render_total_cpu": 5.380608,
+    "shadow_cpu": 0.198471,
+    "shadow_gpu": 4.083594,
+    "virtual_shadow_pages_cpu": 0.040564,
+    "virtual_shadow_pages_gpu": 3.721886,
+    "main_hdr_gpu": 3.543747
+  },
+  "repeat_tolerance": {
+    "max_absolute_rgb": 0.003921568,
+    "pixels_over_0_02_ratio": 0.0,
+    "luminance_rmse": 0.000006899,
+    "ssim": 1.0,
+    "oklab_mean_delta": 0.000000039,
+    "edge_rmse": 0.000000051
+  },
+  "regression": {
+    "quick_lane": "pass",
+    "shared_tests_passed": 348,
+    "shared_tests_ignored": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_policy_ignored": 2,
+    "render_target_tests_passed": 4,
+    "caster_oracle_tests_passed": 5,
+    "canonical_examples_passed": 20
+  }
+}

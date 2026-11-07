@@ -1,0 +1,142 @@
+{
+  "schema": "bloom-directional-vsm-clipmap-evidence-v1",
+  "issue": 132,
+  "qualified_revision": "38615844851e4cf09fe499e161e8b6863f6725b7",
+  "control_revision": "6b4c256bcf055204cee1af4f627274729077f43d",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end"
+  },
+  "fixture": {
+    "dynamic_example": "examples/quality-motion --vsm-dynamic",
+    "static_example": "examples/sponza",
+    "warmup_frames": 120,
+    "measured_frames": 120,
+    "fixed_timestep": 0.016666667,
+    "quality_preset": 3,
+    "render_scale": 1.0
+  },
+  "projection": {
+    "kind": "camera-centered-page-snapped-clipmap",
+    "levels": 3,
+    "virtual_pages_per_axis": 32,
+    "sampling_uniform_bytes": 208,
+    "sub_page_matrix_stability": "pass",
+    "scene_depth_containment": "pass",
+    "missing_page_fallback": "csm"
+  },
+  "budgets": {
+    "dynamic_overlay_pages_per_frame": 4,
+    "dynamic_overlay_draws_per_frame": 64,
+    "physical_pages": 256,
+    "physical_bytes": 17842176,
+    "gpu_overhead_bytes": 2109648,
+    "gpu_total_bytes": 19951824
+  },
+  "final_dynamic_telemetry": {
+    "mode": "bounded-page-overlay-with-csm",
+    "demand_source": "receiver-bounds",
+    "demand_pages": 224,
+    "resident_pages": 224,
+    "dynamic_guarded_pages": 153,
+    "dynamic_rendered_pages": 4,
+    "dynamic_overlay_draws": 8,
+    "dynamic_deferred_demand_pages": 119,
+    "dirty_pages": 119,
+    "denied_pages": 0,
+    "evictions": 0
+  },
+  "final_static_telemetry": {
+    "demand_pages": 224,
+    "resident_pages": 224,
+    "dirty_pages": 0,
+    "denied_pages": 0,
+    "evictions": 0,
+    "rendered_pages": 0
+  },
+  "image_comparisons": {
+    "dynamic_repeat_widest": {
+      "reference_sha256": "8b7b82ff5d7ebba9a14d2a1cb1a62b0eec67dfdfa5927e288ed06b51552e8bad",
+      "candidate_sha256": "417eb3ca333bf25ed5592605a91cac2169f108610543c5fda090095847559b0c",
+      "rmse_luminance": 0.000021062,
+      "ssim_luminance": 0.999999940,
+      "percent_above_0_02": 0.0,
+      "mean_oklab_delta": 0.000000213,
+      "mean_edge_delta": 0.000000215
+    },
+    "fitted_to_clipmap_dynamic": {
+      "reference_sha256": "528ddebc1fc7cc37837d2e828bb4a53b9ec5180189e4e17fa47266cbe87628bb",
+      "candidate_sha256": "8b7b82ff5d7ebba9a14d2a1cb1a62b0eec67dfdfa5927e288ed06b51552e8bad",
+      "rmse_luminance": 0.006658406,
+      "ssim_luminance": 0.994245768,
+      "percent_above_0_02": 2.517916679,
+      "mean_oklab_delta": 0.001265500,
+      "mean_edge_delta": 0.001250187
+    },
+    "fitted_to_clipmap_static_sponza": {
+      "reference_sha256": "1ebe3b987d5c660aa5ec35e90b8cddbb7e82deb9a166fc90d625c216b982a6f2",
+      "candidate_sha256": "131e71c7d3252ee8e7d6e0c803887fb87b1969644dee0c38af99794e6bd1d6d7",
+      "rmse_luminance": 0.005528215,
+      "ssim_luminance": 0.996063292,
+      "percent_above_0_02": 1.700208306,
+      "mean_oklab_delta": 0.002201730,
+      "mean_edge_delta": 0.001407787
+    },
+    "vsm_disabled_control": {
+      "reference_sha256": "bec4978d1ab779e553047007e1a87e3543dd670fc180c75ff8182ade17995e0e",
+      "candidate_sha256": "6135b1bbdae7341e783e4a73fc306e7d69429540a09d0df65c928014c049f8f9",
+      "rmse_luminance": 0.000013567,
+      "ssim_luminance": 1.0,
+      "percent_above_0_02": 0.0,
+      "mean_oklab_delta": 0.000000107,
+      "mean_edge_delta": 0.000000109
+    }
+  },
+  "performance": {
+    "control_runs": 4,
+    "clipmap_runs": 3,
+    "median_wall_ms": {
+      "control": 13.760610,
+      "clipmap": 13.025648,
+      "absolute_delta": -0.734962
+    },
+    "median_shadow_cpu_ms": {
+      "control": 0.180561,
+      "clipmap": 0.172756,
+      "absolute_delta": -0.007805
+    },
+    "median_shadow_gpu_ms": {
+      "control": 4.100516,
+      "clipmap": 4.029285,
+      "absolute_delta": -0.071231
+    },
+    "median_virtual_page_cpu_ms": 0.031248,
+    "median_virtual_page_gpu_ms": 3.696149
+  },
+  "qualification": {
+    "ffi_schema_parity": "pass",
+    "format": "pass",
+    "strict_clippy": "pass",
+    "file_size_ratchet": "pass",
+    "native_release_check": "pass",
+    "wasm32_web_feature_check": "pass",
+    "shared_unit_tests_passed": 336,
+    "shared_unit_tests_ignored": 1,
+    "headless_device_tests_passed": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "focused_vsm_tests_passed": 29,
+    "visual_review": "pass-no-page-rectangles-or-missing-shadows"
+  },
+  "remaining": [
+    "rolling or toroidal page-table preservation across clipmap rebase",
+    "moving-camera and moving-light transition qualification",
+    "GPU request compaction and caster submission",
+    "spot and point virtual projections with shared arbitration",
+    "Bistro, small-pool, contact-detail, and 100-light qualification",
+    "quality-tier rollout"
+  ]
+}

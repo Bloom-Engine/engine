@@ -61,8 +61,8 @@ impl FrameCallbackSystem {
             let mut indices: Vec<usize> = (0..self.callbacks.len()).collect();
             indices.sort_by_key(|&i| self.callbacks[i].priority);
 
-            let old_callbacks: Vec<_> = self.callbacks.drain(..).collect();
-            let old_ids: Vec<_> = self.ids.drain(..).collect();
+            let old_callbacks = std::mem::take(&mut self.callbacks);
+            let old_ids = std::mem::take(&mut self.ids);
             for &i in &indices {
                 self.callbacks.push(FrameCallback {
                     priority: old_callbacks[i].priority,

@@ -1,10 +1,10 @@
+use bloom_shared::audio::{parse_mp3, parse_ogg, parse_wav};
 use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
-use bloom_shared::string_header::{str_from_header, alloc_perry_string};
-use bloom_shared::audio::{parse_wav, parse_ogg, parse_mp3};
+use bloom_shared::string_header::{alloc_perry_string, str_from_header};
 
-use std::sync::OnceLock;
 use std::os::unix::io::RawFd;
+use std::sync::OnceLock;
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut GAMEPAD_FD: RawFd = -1;
@@ -22,49 +22,48 @@ fn bloom_resolve_asset_path(path: &str) -> std::borrow::Cow<'_, str> {
 // docs for the contract; tools/validate-ffi.js checks parity in CI.
 bloom_shared::define_core_ffi!();
 
-
 /// Map X11 keysym to Bloom key code.
 fn map_keycode(keysym: u32) -> usize {
     match keysym {
         0x61..=0x7a => (keysym - 0x61 + 65) as usize, // a-z → A-Z (65-90)
-        0x41..=0x5a => keysym as usize,                 // A-Z direct
-        0x30..=0x39 => keysym as usize,                 // 0-9
-        0xff52 => 256,  // XK_Up
-        0xff54 => 257,  // XK_Down
-        0xff51 => 258,  // XK_Left
-        0xff53 => 259,  // XK_Right
-        0x20 => 32,     // space
-        0xff0d => 265,  // XK_Return → Bloom ENTER
-        0xff1b => 27,   // XK_Escape
-        0xff09 => 9,    // XK_Tab
-        0xff08 => 8,    // XK_BackSpace
-        0xffff => 127,  // XK_Delete
-        0xff63 => 260,  // XK_Insert
-        0xff50 => 261,  // XK_Home
-        0xff57 => 262,  // XK_End
-        0xff55 => 263,  // XK_Page_Up
-        0xff56 => 264,  // XK_Page_Down
-        0xffe1 => 280,  // XK_Shift_L
-        0xffe2 => 281,  // XK_Shift_R
-        0xffe3 => 282,  // XK_Control_L
-        0xffe4 => 283,  // XK_Control_R
-        0xffe9 => 284,  // XK_Alt_L
-        0xffea => 285,  // XK_Alt_R
-        0xffeb => 286,  // XK_Super_L
-        0xffec => 287,  // XK_Super_R
+        0x41..=0x5a => keysym as usize,               // A-Z direct
+        0x30..=0x39 => keysym as usize,               // 0-9
+        0xff52 => 256,                                // XK_Up
+        0xff54 => 257,                                // XK_Down
+        0xff51 => 258,                                // XK_Left
+        0xff53 => 259,                                // XK_Right
+        0x20 => 32,                                   // space
+        0xff0d => 265,                                // XK_Return → Bloom ENTER
+        0xff1b => 27,                                 // XK_Escape
+        0xff09 => 9,                                  // XK_Tab
+        0xff08 => 8,                                  // XK_BackSpace
+        0xffff => 127,                                // XK_Delete
+        0xff63 => 260,                                // XK_Insert
+        0xff50 => 261,                                // XK_Home
+        0xff57 => 262,                                // XK_End
+        0xff55 => 263,                                // XK_Page_Up
+        0xff56 => 264,                                // XK_Page_Down
+        0xffe1 => 280,                                // XK_Shift_L
+        0xffe2 => 281,                                // XK_Shift_R
+        0xffe3 => 282,                                // XK_Control_L
+        0xffe4 => 283,                                // XK_Control_R
+        0xffe9 => 284,                                // XK_Alt_L
+        0xffea => 285,                                // XK_Alt_R
+        0xffeb => 286,                                // XK_Super_L
+        0xffec => 287,                                // XK_Super_R
         // Function keys
-        0xffbe => 112,  // XK_F1
-        0xffbf => 113,  // XK_F2
-        0xffc0 => 114,  // XK_F3
-        0xffc1 => 115,  // XK_F4
-        0xffc2 => 116,  // XK_F5
-        0xffc3 => 117,  // XK_F6
-        0xffc4 => 118,  // XK_F7
-        0xffc5 => 119,  // XK_F8
-        0xffc6 => 120,  // XK_F9
-        0xffc7 => 121,  // XK_F10
-        0xffc8 => 122,  // XK_F11
-        0xffc9 => 123,  // XK_F12
+        0xffbe => 112, // XK_F1
+        0xffbf => 113, // XK_F2
+        0xffc0 => 114, // XK_F3
+        0xffc1 => 115, // XK_F4
+        0xffc2 => 116, // XK_F5
+        0xffc3 => 117, // XK_F6
+        0xffc4 => 118, // XK_F7
+        0xffc5 => 119, // XK_F8
+        0xffc6 => 120, // XK_F9
+        0xffc7 => 121, // XK_F10
+        0xffc8 => 122, // XK_F11
+        0xffc9 => 123, // XK_F12
         _ => 0,
     }
 }
@@ -97,22 +96,27 @@ mod x11_impl {
     static mut WM_PROTOCOLS: x11::xlib::Atom = 0;
     static mut WM_DELETE_WINDOW: x11::xlib::Atom = 0;
 
-    pub fn wm_protocols_atom() -> x11::xlib::Atom { unsafe { WM_PROTOCOLS } }
-    pub fn wm_delete_window_atom() -> x11::xlib::Atom { unsafe { WM_DELETE_WINDOW } }
+    pub fn wm_protocols_atom() -> x11::xlib::Atom {
+        unsafe { WM_PROTOCOLS }
+    }
+    pub fn wm_delete_window_atom() -> x11::xlib::Atom {
+        unsafe { WM_DELETE_WINDOW }
+    }
 
     pub fn set_fullscreen(fullscreen: bool) {
         unsafe {
             // BLOOM_NO_FULLSCREEN=1 hard-disables the fullscreen path so
             // benchmark harnesses on a 4K monitor don't silently 4× their
             // pixel count when an inherited fullscreen Space leaks in.
-            if NO_FULLSCREEN && fullscreen { return; }
-            if DISPLAY.is_null() || X11_WINDOW == 0 { return; }
+            if NO_FULLSCREEN && fullscreen {
+                return;
+            }
+            if DISPLAY.is_null() || X11_WINDOW == 0 {
+                return;
+            }
 
-            let wm_state = x11::xlib::XInternAtom(
-                DISPLAY,
-                b"_NET_WM_STATE\0".as_ptr() as *const _,
-                0,
-            );
+            let wm_state =
+                x11::xlib::XInternAtom(DISPLAY, b"_NET_WM_STATE\0".as_ptr() as *const _, 0);
             let wm_fullscreen = x11::xlib::XInternAtom(
                 DISPLAY,
                 b"_NET_WM_STATE_FULLSCREEN\0".as_ptr() as *const _,
@@ -145,7 +149,9 @@ mod x11_impl {
     }
 
     pub fn toggle_fullscreen() {
-        unsafe { set_fullscreen(!IS_FULLSCREEN); }
+        unsafe {
+            set_fullscreen(!IS_FULLSCREEN);
+        }
     }
 
     /// Returns (physical_w, physical_h). Caller's `width`/`height`
@@ -177,8 +183,13 @@ mod x11_impl {
             // XMapWindow, it'll appear far off the visible desktop.
             let origin_x: i32 = if headless { -20000 } else { 0 };
             X11_WINDOW = x11::xlib::XCreateSimpleWindow(
-                DISPLAY, root,
-                origin_x, 0, phys_w, phys_h, 0,
+                DISPLAY,
+                root,
+                origin_x,
+                0,
+                phys_w,
+                phys_h,
+                0,
                 x11::xlib::XBlackPixel(DISPLAY, screen),
                 x11::xlib::XWhitePixel(DISPLAY, screen),
             );
@@ -186,23 +197,29 @@ mod x11_impl {
             let title_cstr = std::ffi::CString::new(title).unwrap();
             x11::xlib::XStoreName(DISPLAY, X11_WINDOW, title_cstr.as_ptr());
 
-            x11::xlib::XSelectInput(DISPLAY, X11_WINDOW,
-                x11::xlib::ExposureMask | x11::xlib::KeyPressMask | x11::xlib::KeyReleaseMask |
-                x11::xlib::ButtonPressMask | x11::xlib::ButtonReleaseMask |
-                x11::xlib::PointerMotionMask | x11::xlib::StructureNotifyMask);
+            x11::xlib::XSelectInput(
+                DISPLAY,
+                X11_WINDOW,
+                x11::xlib::ExposureMask
+                    | x11::xlib::KeyPressMask
+                    | x11::xlib::KeyReleaseMask
+                    | x11::xlib::ButtonPressMask
+                    | x11::xlib::ButtonReleaseMask
+                    | x11::xlib::PointerMotionMask
+                    | x11::xlib::StructureNotifyMask,
+            );
 
             // Opt into the WM close protocol before mapping, so the titlebar
             // ✕ / Alt-F4 arrives as a ClientMessage we can turn into
             // `windowShouldClose()` instead of the WM dropping our X
             // connection and Xlib exit(1)-ing the game mid-frame.
-            WM_PROTOCOLS = x11::xlib::XInternAtom(
-                DISPLAY, b"WM_PROTOCOLS\0".as_ptr() as *const _, 0);
-            WM_DELETE_WINDOW = x11::xlib::XInternAtom(
-                DISPLAY, b"WM_DELETE_WINDOW\0".as_ptr() as *const _, 0);
+            WM_PROTOCOLS =
+                x11::xlib::XInternAtom(DISPLAY, b"WM_PROTOCOLS\0".as_ptr() as *const _, 0);
+            WM_DELETE_WINDOW =
+                x11::xlib::XInternAtom(DISPLAY, b"WM_DELETE_WINDOW\0".as_ptr() as *const _, 0);
             if WM_DELETE_WINDOW != 0 {
                 let mut protocols = [WM_DELETE_WINDOW];
-                x11::xlib::XSetWMProtocols(
-                    DISPLAY, X11_WINDOW, protocols.as_mut_ptr(), 1);
+                x11::xlib::XSetWMProtocols(DISPLAY, X11_WINDOW, protocols.as_mut_ptr(), 1);
             }
 
             if !headless {
@@ -213,8 +230,14 @@ mod x11_impl {
         }
     }
 
-    pub fn set_no_fullscreen(no_fs: bool) { unsafe { NO_FULLSCREEN = no_fs; } }
-    pub fn is_headless() -> bool { unsafe { HEADLESS } }
+    pub fn set_no_fullscreen(no_fs: bool) {
+        unsafe {
+            NO_FULLSCREEN = no_fs;
+        }
+    }
+    pub fn is_headless() -> bool {
+        unsafe { HEADLESS }
+    }
 
     /// Read the current display's DPI scale factor. Computed from
     /// physical screen dimensions (pixels / mm). Snapped to the
@@ -228,7 +251,9 @@ mod x11_impl {
         unsafe {
             let pixels = x11::xlib::XDisplayWidth(display, screen) as f64;
             let mm = x11::xlib::XDisplayWidthMM(display, screen) as f64;
-            if mm <= 0.0 || pixels <= 0.0 { return 1.0; }
+            if mm <= 0.0 || pixels <= 0.0 {
+                return 1.0;
+            }
             let dpi = pixels / (mm / 25.4);
             // 96 DPI = scale 1.0. Snap to 0.25 steps.
             let raw = (dpi / 96.0).max(1.0).min(4.0);
@@ -236,25 +261,39 @@ mod x11_impl {
         }
     }
 
-    pub fn display() -> *mut x11::xlib::Display { unsafe { DISPLAY } }
-    pub fn window() -> x11::xlib::Window { unsafe { X11_WINDOW } }
+    pub fn display() -> *mut x11::xlib::Display {
+        unsafe { DISPLAY }
+    }
+    pub fn window() -> x11::xlib::Window {
+        unsafe { X11_WINDOW }
+    }
 
     pub fn set_window_title(title: &str) {
         unsafe {
-            if DISPLAY.is_null() || X11_WINDOW == 0 { return; }
-            let cstr = match std::ffi::CString::new(title) { Ok(c) => c, Err(_) => return };
+            if DISPLAY.is_null() || X11_WINDOW == 0 {
+                return;
+            }
+            let cstr = match std::ffi::CString::new(title) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
             x11::xlib::XStoreName(DISPLAY, X11_WINDOW, cstr.as_ptr());
             // Modern WMs honour _NET_WM_NAME (UTF-8) over the legacy
             // WM_NAME (Latin-1) set by XStoreName, so write both.
-            let net_wm_name = x11::xlib::XInternAtom(
-                DISPLAY, b"_NET_WM_NAME\0".as_ptr() as *const _, 0);
-            let utf8_string = x11::xlib::XInternAtom(
-                DISPLAY, b"UTF8_STRING\0".as_ptr() as *const _, 0);
+            let net_wm_name =
+                x11::xlib::XInternAtom(DISPLAY, b"_NET_WM_NAME\0".as_ptr() as *const _, 0);
+            let utf8_string =
+                x11::xlib::XInternAtom(DISPLAY, b"UTF8_STRING\0".as_ptr() as *const _, 0);
             if net_wm_name != 0 && utf8_string != 0 {
                 x11::xlib::XChangeProperty(
-                    DISPLAY, X11_WINDOW, net_wm_name, utf8_string, 8,
+                    DISPLAY,
+                    X11_WINDOW,
+                    net_wm_name,
+                    utf8_string,
+                    8,
                     x11::xlib::PropModeReplace,
-                    title.as_ptr(), title.len() as i32,
+                    title.as_ptr(),
+                    title.len() as i32,
                 );
             }
             x11::xlib::XFlush(DISPLAY);
@@ -267,7 +306,9 @@ mod x11_impl {
     /// premultiplied-alpha packed into the low 32 bits of a long.
     pub fn set_window_icon(path: &str) {
         unsafe {
-            if DISPLAY.is_null() || X11_WINDOW == 0 { return; }
+            if DISPLAY.is_null() || X11_WINDOW == 0 {
+                return;
+            }
             let img = match image::open(path) {
                 Ok(i) => i.to_rgba8(),
                 Err(_) => return,
@@ -284,12 +325,15 @@ mod x11_impl {
                 let argb = (a << 24) | (r << 16) | (g << 8) | b;
                 buf.push(argb as std::os::raw::c_long);
             }
-            let net_wm_icon = x11::xlib::XInternAtom(
-                DISPLAY, b"_NET_WM_ICON\0".as_ptr() as *const _, 0);
-            let cardinal = x11::xlib::XInternAtom(
-                DISPLAY, b"CARDINAL\0".as_ptr() as *const _, 0);
+            let net_wm_icon =
+                x11::xlib::XInternAtom(DISPLAY, b"_NET_WM_ICON\0".as_ptr() as *const _, 0);
+            let cardinal = x11::xlib::XInternAtom(DISPLAY, b"CARDINAL\0".as_ptr() as *const _, 0);
             x11::xlib::XChangeProperty(
-                DISPLAY, X11_WINDOW, net_wm_icon, cardinal, 32,
+                DISPLAY,
+                X11_WINDOW,
+                net_wm_icon,
+                cardinal,
+                32,
                 x11::xlib::PropModeReplace,
                 buf.as_ptr() as *const u8,
                 buf.len() as i32,
@@ -302,11 +346,13 @@ mod x11_impl {
     /// trick for "hide the cursor". Subsequent calls reuse the cached
     /// cursor since X11 leaks Cursor handles otherwise.
     unsafe fn ensure_hidden_cursor() -> x11::xlib::Cursor {
-        if HIDDEN_CURSOR != 0 { return HIDDEN_CURSOR; }
+        if HIDDEN_CURSOR != 0 {
+            return HIDDEN_CURSOR;
+        }
         let pixmap = x11::xlib::XCreatePixmap(DISPLAY, X11_WINDOW, 1, 1, 1);
         let mut color: x11::xlib::XColor = std::mem::zeroed();
-        let cursor = x11::xlib::XCreatePixmapCursor(
-            DISPLAY, pixmap, pixmap, &mut color, &mut color, 0, 0);
+        let cursor =
+            x11::xlib::XCreatePixmapCursor(DISPLAY, pixmap, pixmap, &mut color, &mut color, 0, 0);
         x11::xlib::XFreePixmap(DISPLAY, pixmap);
         HIDDEN_CURSOR = cursor;
         cursor
@@ -314,7 +360,9 @@ mod x11_impl {
 
     pub fn hide_cursor() {
         unsafe {
-            if DISPLAY.is_null() || X11_WINDOW == 0 || CURSOR_HIDDEN { return; }
+            if DISPLAY.is_null() || X11_WINDOW == 0 || CURSOR_HIDDEN {
+                return;
+            }
             let c = ensure_hidden_cursor();
             x11::xlib::XDefineCursor(DISPLAY, X11_WINDOW, c);
             x11::xlib::XFlush(DISPLAY);
@@ -324,7 +372,9 @@ mod x11_impl {
 
     pub fn show_cursor() {
         unsafe {
-            if DISPLAY.is_null() || X11_WINDOW == 0 || !CURSOR_HIDDEN { return; }
+            if DISPLAY.is_null() || X11_WINDOW == 0 || !CURSOR_HIDDEN {
+                return;
+            }
             x11::xlib::XUndefineCursor(DISPLAY, X11_WINDOW);
             x11::xlib::XFlush(DISPLAY);
             CURSOR_HIDDEN = false;
@@ -335,7 +385,9 @@ mod x11_impl {
     /// the motion handler can compute deltas relative to the warp target.
     pub fn warp_to_center() {
         unsafe {
-            if DISPLAY.is_null() || X11_WINDOW == 0 { return; }
+            if DISPLAY.is_null() || X11_WINDOW == 0 {
+                return;
+            }
             let mut attrs: x11::xlib::XWindowAttributes = std::mem::zeroed();
             x11::xlib::XGetWindowAttributes(DISPLAY, X11_WINDOW, &mut attrs);
             let cx = attrs.width / 2;
@@ -362,9 +414,15 @@ mod x11_impl {
         }
     }
 
-    pub fn is_relative_mode() -> bool { unsafe { RELATIVE_MODE } }
-    pub fn warp_center_x() -> i32 { unsafe { WARP_CENTER_X } }
-    pub fn warp_center_y() -> i32 { unsafe { WARP_CENTER_Y } }
+    pub fn is_relative_mode() -> bool {
+        unsafe { RELATIVE_MODE }
+    }
+    pub fn warp_center_x() -> i32 {
+        unsafe { WARP_CENTER_X }
+    }
+    pub fn warp_center_y() -> i32 {
+        unsafe { WARP_CENTER_Y }
+    }
 
     /// Apply the requested cursor shape (the same 0..=6 enum macOS uses
     /// in NSCursor calls). XCreateFontCursor uses cursor-font glyph
@@ -372,8 +430,12 @@ mod x11_impl {
     /// so repeat calls don't leak server-side state.
     pub fn apply_cursor_shape(shape: u32) {
         unsafe {
-            if DISPLAY.is_null() || X11_WINDOW == 0 || CURSOR_HIDDEN { return; }
-            if shape == LAST_APPLIED_SHAPE { return; }
+            if DISPLAY.is_null() || X11_WINDOW == 0 || CURSOR_HIDDEN {
+                return;
+            }
+            if shape == LAST_APPLIED_SHAPE {
+                return;
+            }
             // X11 cursor-font glyph indices (from cursorfont.h).
             // 0 = default arrow → XC_left_ptr (68)
             // 1 = pointing hand → XC_hand2     (60)
@@ -411,10 +473,8 @@ mod x11_impl {
 
                 match event.type_ {
                     x11::xlib::KeyPress => {
-                        let keysym = x11::xlib::XLookupKeysym(
-                            &mut event.key as *mut _ as *mut _,
-                            0,
-                        );
+                        let keysym =
+                            x11::xlib::XLookupKeysym(&mut event.key as *mut _ as *mut _, 0);
                         let bloom_key = map_keycode(keysym as u32);
                         if bloom_key > 0 {
                             engine().input.set_key_down(bloom_key);
@@ -442,10 +502,8 @@ mod x11_impl {
                         }
                     }
                     x11::xlib::KeyRelease => {
-                        let keysym = x11::xlib::XLookupKeysym(
-                            &mut event.key as *mut _ as *mut _,
-                            0,
-                        );
+                        let keysym =
+                            x11::xlib::XLookupKeysym(&mut event.key as *mut _ as *mut _, 0);
                         let bloom_key = map_keycode(keysym as u32);
                         if bloom_key > 0 {
                             engine().input.set_key_up(bloom_key);
@@ -466,7 +524,9 @@ mod x11_impl {
                                 warp_to_center();
                             }
                         } else {
-                            engine().input.set_mouse_position(motion.x as f64, motion.y as f64);
+                            engine()
+                                .input
+                                .set_mouse_position(motion.x as f64, motion.y as f64);
                         }
                     }
                     x11::xlib::ButtonPress => {
@@ -538,7 +598,12 @@ mod x11_impl {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8, fullscreen: f64) {
+pub extern "C" fn bloom_init_window(
+    width: f64,
+    height: f64,
+    title_ptr: *const u8,
+    fullscreen: f64,
+) {
     let title = str_from_header(title_ptr);
 
     #[cfg(target_os = "linux")]
@@ -568,107 +633,49 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
         let surface = unsafe {
             let raw_window = raw_window_handle::RawWindowHandle::Xlib(
-                raw_window_handle::XlibWindowHandle::new(x11_impl::window())
+                raw_window_handle::XlibWindowHandle::new(x11_impl::window()),
             );
             let raw_display = raw_window_handle::RawDisplayHandle::Xlib(
                 raw_window_handle::XlibDisplayHandle::new(
                     std::ptr::NonNull::new(x11_impl::display() as *mut _),
                     0,
-                )
+                ),
             );
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: Some(raw_display),
-                raw_window_handle: raw_window,
-            }).expect("Failed to create surface")
+            instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: Some(raw_display),
+                    raw_window_handle: raw_window,
+                })
+                .expect("Failed to create surface")
         };
 
         let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
             ..Default::default()
-        })).expect("No adapter found");
+        }))
+        .expect("No adapter found");
 
-        // Ticket 007b: HW ray-query via VK_KHR_ray_query on RT-capable
-        // desktop Linux GPUs. Older integrated GPUs will fall back to
-        // the SW path through this gate.
-        let supported = adapter.features();
         let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-        let mut required_features = wgpu::Features::empty();
-        // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
-        // can record GPU timings. Optional — profiler falls back to CPU-only
-        // when the adapter doesn't grant it.
-        if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-            required_features |= wgpu::Features::TIMESTAMP_QUERY;
-        }
-        // Cooked BC7 textures (bloom-cook) upload compressed when the
-        // adapter has BC support; without it they CPU-decode at load.
-        if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-            required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-        }
-        if !force_sw_gi && supported.contains(rt_mask) {
-            required_features |= rt_mask;
-        }
-        // PT-2: texture binding array + non-uniform indexing for textured
-        // path-trace hit shading. Both or neither (the kernel indexes the
-        // array with a per-thread material id).
-        let pt_tex_mask = wgpu::Features::TEXTURE_BINDING_ARRAY
-            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
-        if supported.contains(pt_tex_mask) {
-            required_features |= pt_tex_mask;
-        }
-        let experimental_features = if required_features.intersects(rt_mask) {
-            unsafe { wgpu::ExperimentalFeatures::enabled() }
-        } else {
-            wgpu::ExperimentalFeatures::disabled()
-        };
-        let mut required_limits = wgpu::Limits::default();
-        // The material ABI declares 5 bind groups (PerFrame, PerView,
-        // PerMaterial, PerDraw, SceneInputs). wgpu's default limit is
-        // 4. Vulkan supports at least 7 here, so 5 is universally safe.
-        required_limits.max_bind_groups = 5;
-        // The refractive/translucent material profile binds up to 19
-        // sampled textures in the fragment stage (5 material maps + env/
-        // BRDF/3 shadow cascades/env-diffuse + planar reflection + 3 texture
-        // arrays + the group-4 scene_color/scene_depth/impulse/motion inputs).
-        // wgpu's default is 16. Raise to whatever the adapter actually
-        // supports — every real Vulkan/GL GPU exposes ≥128 — so opaque/
-        // transparent materials are unaffected and refractive ones link.
-        let adapter_limits = adapter.limits();
-        required_limits.max_sampled_textures_per_shader_stage = required_limits
-            .max_sampled_textures_per_shader_stage
-            .max(adapter_limits.max_sampled_textures_per_shader_stage);
-        required_limits.max_samplers_per_shader_stage = required_limits
-            .max_samplers_per_shader_stage
-            .max(adapter_limits.max_samplers_per_shader_stage);
-        // PT-2: binding arrays have their own element budget, default 0.
-        // Take whatever the adapter offers; the renderer checks the
-        // granted value against its fixed array size before compiling
-        // the textured kernel variant.
-        if required_features.contains(pt_tex_mask) {
-            required_limits.max_binding_array_elements_per_shader_stage =
-                adapter_limits.max_binding_array_elements_per_shader_stage;
-        }
-        // PT-4: the path-trace kernel binds 9 storage buffers (accum +
-        // moments + reservoir ping-pongs on top of instance/geo data);
-        // the wgpu default limit is 8.
-        required_limits.max_storage_buffers_per_shader_stage = required_limits
-            .max_storage_buffers_per_shader_stage
-            .max(adapter_limits.max_storage_buffers_per_shader_stage.min(16));
-        if required_features.intersects(rt_mask) {
-            required_limits = required_limits
-                .using_minimum_supported_acceleration_structure_values();
-        }
-        let (device, queue) = pollster_block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("bloom_device"),
-                required_features,
-                required_limits,
-                experimental_features,
-                ..Default::default()
-            },
-        )).expect("Failed to create device");
+        let negotiated = pollster_block_on(
+            bloom_shared::renderer::device_negotiation::request_device_with_fallback(
+                &adapter,
+                bloom_shared::renderer::device_negotiation::DeviceRequestOptions {
+                    allow_ray_query: !force_sw_gi,
+                    profile:
+                        bloom_shared::renderer::device_negotiation::DeviceRequestProfile::NativeFull,
+                },
+            ),
+        )
+        .unwrap_or_else(|error| panic!("Failed to create renderer device: {error}"));
+        eprintln!(
+            "bloom: renderer device negotiation = {}",
+            negotiated.report.report_json()
+        );
+        let negotiation_report = negotiated.report.report_json();
+        let device = negotiated.device;
+        let queue = negotiated.queue;
 
         let surface_caps = surface.get_capabilities(&adapter);
         let format = surface_caps.formats[0];
@@ -680,8 +687,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             // COPY_SRC: bloom_take_screenshot reads the swapchain back;
             // without it the readback copy is a validation error that
             // aborts the process the first time a game calls it.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
             width: phys_w,
             height: phys_h,
@@ -692,8 +698,18 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = Renderer::new(device, queue, surface, surface_config, width as u32, height as u32);
-        unsafe { let _ = ENGINE.set(EngineState::new(renderer)); }
+        let mut renderer = Renderer::new(
+            device,
+            queue,
+            surface,
+            surface_config,
+            width as u32,
+            height as u32,
+        );
+        renderer.set_device_negotiation_report(negotiation_report);
+        unsafe {
+            let _ = ENGINE.set(EngineState::new(renderer));
+        }
 
         if fullscreen != 0.0 {
             x11_impl::set_fullscreen(true);
@@ -732,7 +748,8 @@ pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f
 #[no_mangle]
 pub extern "C" fn bloom_resize(phys_w: f64, phys_h: f64, log_w: f64, log_h: f64) {
     if let Some(eng) = unsafe { ENGINE.get_mut() } {
-        eng.renderer.resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
+        eng.renderer
+            .resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
     }
 }
 
@@ -750,7 +767,11 @@ pub extern "C" fn bloom_close_window() {
 
 #[no_mangle]
 pub extern "C" fn bloom_window_should_close() -> f64 {
-    if engine().should_close { 1.0 } else { 0.0 }
+    if engine().should_close {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -760,13 +781,18 @@ fn poll_linux_gamepad() {
         if GAMEPAD_FD < 0 {
             let path = b"/dev/input/js0\0";
             // Open non-blocking
-            GAMEPAD_FD = libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY | libc::O_NONBLOCK);
+            GAMEPAD_FD = libc::open(
+                path.as_ptr() as *const libc::c_char,
+                libc::O_RDONLY | libc::O_NONBLOCK,
+            );
             if GAMEPAD_FD >= 0 {
                 engine().input.gamepad_available = true;
                 engine().input.gamepad_axis_count = 6;
             }
         }
-        if GAMEPAD_FD < 0 { return; }
+        if GAMEPAD_FD < 0 {
+            return;
+        }
 
         // Linux joystick event structure
         #[repr(C)]
@@ -784,7 +810,9 @@ fn poll_linux_gamepad() {
                 &mut event as *mut _ as *mut libc::c_void,
                 std::mem::size_of::<JsEvent>(),
             );
-            if n != std::mem::size_of::<JsEvent>() as isize { break; }
+            if n != std::mem::size_of::<JsEvent>() as isize {
+                break;
+            }
 
             let type_masked = event.event_type & 0x7f; // strip JS_EVENT_INIT
             if type_masked == 1 {
@@ -823,8 +851,12 @@ pub extern "C" fn bloom_begin_drawing() {
 pub extern "C" fn bloom_end_drawing() {
     // Pump geisterhand BEFORE end_frame. Mirrors macOS — the screenshot
     // function re-renders inline using the captured VP + vertex buffers.
-    extern "C" { fn perry_geisterhand_pump(); }
-    unsafe { perry_geisterhand_pump(); }
+    extern "C" {
+        fn perry_geisterhand_pump();
+    }
+    unsafe {
+        perry_geisterhand_pump();
+    }
 
     engine().end_frame();
 }
@@ -884,7 +916,9 @@ fn alsa_audio_thread(mut renderer: Option<bloom_shared::audio::AudioRenderer>) {
     let mut mix_buf = vec![0.0f32; frames * channels as usize];
 
     while AUDIO_RUNNING.load(Ordering::SeqCst) {
-        for s in mix_buf.iter_mut() { *s = 0.0; }
+        for s in mix_buf.iter_mut() {
+            *s = 0.0;
+        }
 
         // Renderer is moved into this thread at spawn — no shared
         // engine state is touched from here (see audio/mod.rs contract).
@@ -994,7 +1028,10 @@ pub extern "C" fn bloom_open_file_dialog(filter_ptr: *const u8, title_ptr: *cons
     }
 }
 #[no_mangle]
-pub extern "C" fn bloom_save_file_dialog(default_name_ptr: *const u8, title_ptr: *const u8) -> *const u8 {
+pub extern "C" fn bloom_save_file_dialog(
+    default_name_ptr: *const u8,
+    title_ptr: *const u8,
+) -> *const u8 {
     let default_name = str_from_header(default_name_ptr);
     let title = str_from_header(title_ptr);
     let dialog = rfd::FileDialog::new()
@@ -1006,14 +1043,31 @@ pub extern "C" fn bloom_save_file_dialog(default_name_ptr: *const u8, title_ptr:
     }
 }
 #[no_mangle]
-pub extern "C" fn bloom_get_platform() -> f64 { 4.0 }
+pub extern "C" fn bloom_get_platform() -> f64 {
+    4.0
+}
 
 /// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag), from $LANG/$LC_*.
 #[no_mangle]
 pub extern "C" fn bloom_get_language() -> f64 {
-    fn pack(code: &str) -> f64 { let l = code.to_ascii_lowercase(); let b = l.as_bytes(); if b.len() >= 2 { (b[0] as f64) * 256.0 + (b[1] as f64) } else { 25966.0 } }
-    let v = std::env::var("LANG").or_else(|_| std::env::var("LC_ALL")).or_else(|_| std::env::var("LC_MESSAGES")).unwrap_or_default();
-    if v.len() >= 2 && !v.starts_with('C') && !v.starts_with("POSIX") { pack(&v) } else { 25966.0 }
+    fn pack(code: &str) -> f64 {
+        let l = code.to_ascii_lowercase();
+        let b = l.as_bytes();
+        if b.len() >= 2 {
+            (b[0] as f64) * 256.0 + (b[1] as f64)
+        } else {
+            25966.0
+        }
+    }
+    let v = std::env::var("LANG")
+        .or_else(|_| std::env::var("LC_ALL"))
+        .or_else(|_| std::env::var("LC_MESSAGES"))
+        .unwrap_or_default();
+    if v.len() >= 2 && !v.starts_with('C') && !v.starts_with("POSIX") {
+        pack(&v)
+    } else {
+        25966.0
+    }
 }
 
 // ============================================================
@@ -1044,22 +1098,22 @@ pub extern "C" fn bloom_get_language() -> f64 {
 // 3D→2D Projection (for UI overlays positioned in 3D space)
 // ============================================================
 
-
 // ============================================================
 // Scene picking (raycasting)
 // ============================================================
-
 
 // ============================================================
 // Thread-safe staging (for async asset loading via Perry threads)
 // ============================================================
 
 fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
-    use std::task::{Context, Poll, Wake, Waker};
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
     struct NoopWaker;
-    impl Wake for NoopWaker { fn wake(self: Arc<Self>) {} }
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
     let waker = Waker::from(Arc::new(NoopWaker));
     let mut cx = Context::from_waker(&waker);
     let mut future = unsafe { Pin::new_unchecked(Box::new(future)) };
@@ -1070,8 +1124,6 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
         }
     }
 }
-
-
 
 // Q6: Multi-hit picking
 // ============================================================
@@ -1090,7 +1142,6 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 // underlying renderer methods, so these wrappers are platform-agnostic.
 // ============================================================
 
-
 // ============================================================
 // Profiler — CPU phase timings (always available) + GPU timestamps
 // (when the adapter supports TIMESTAMP_QUERY). Disabled by default.
@@ -1106,9 +1157,7 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 /// surface bloom is already drawing into.
 fn bloom_register_geisterhand_screenshot() {
     extern "C" {
-        fn perry_geisterhand_register_screenshot_capture(
-            f: extern "C" fn(*mut usize) -> *mut u8,
-        );
+        fn perry_geisterhand_register_screenshot_capture(f: extern "C" fn(*mut usize) -> *mut u8);
     }
     unsafe {
         perry_geisterhand_register_screenshot_capture(bloom_screenshot_capture);
@@ -1124,48 +1173,45 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
     let eng = engine();
 
     eng.renderer.screenshot_requested = true;
-    eng.scene.prepare(
-        &eng.renderer.device,
-        &eng.renderer.queue,
-        &eng.renderer.vp_matrix(),
-        &eng.renderer.prev_vp_matrix,
-        eng.renderer.uniform_3d_layout(),
-        // Screenshot capture renders everything the camera might see —
-        // never occlusion-cull a one-shot capture.
-        None,
-    );
-    eng.scene.prepare_materials(&eng.renderer);
+    // Screenshot capture renders everything the camera might see —
+    // never occlusion-cull a one-shot capture.
+    eng.renderer.prepare_scene_graph(&mut eng.scene, false);
     {
         let t = eng.get_time() as f32;
         let dt = eng.delta_time as f32;
         eng.renderer.material_system_begin_frame(t, dt);
     }
-    eng.renderer.end_frame_with_scene(&mut eng.scene, &mut eng.profiler);
+    eng.renderer
+        .end_frame_with_scene(&mut eng.scene, &mut eng.profiler);
 
     match eng.renderer.screenshot_data.take() {
-        Some((width, height, rgba)) => {
-            match encode_png(width, height, &rgba) {
-                Some(png_data) => {
-                    let len = png_data.len();
-                    let ptr = unsafe { libc::malloc(len) as *mut u8 };
-                    if ptr.is_null() {
-                        unsafe { *out_len = 0; }
-                        return std::ptr::null_mut();
-                    }
+        Some((width, height, rgba)) => match encode_png(width, height, &rgba) {
+            Some(png_data) => {
+                let len = png_data.len();
+                let ptr = unsafe { libc::malloc(len) as *mut u8 };
+                if ptr.is_null() {
                     unsafe {
-                        std::ptr::copy_nonoverlapping(png_data.as_ptr(), ptr, len);
-                        *out_len = len;
+                        *out_len = 0;
                     }
-                    ptr
+                    return std::ptr::null_mut();
                 }
-                None => {
-                    unsafe { *out_len = 0; }
-                    std::ptr::null_mut()
+                unsafe {
+                    std::ptr::copy_nonoverlapping(png_data.as_ptr(), ptr, len);
+                    *out_len = len;
                 }
+                ptr
             }
-        }
+            None => {
+                unsafe {
+                    *out_len = 0;
+                }
+                std::ptr::null_mut()
+            }
+        },
         None => {
-            unsafe { *out_len = 0; }
+            unsafe {
+                *out_len = 0;
+            }
             std::ptr::null_mut()
         }
     }

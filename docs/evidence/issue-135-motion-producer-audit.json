@@ -1,0 +1,77 @@
+{
+  "schema": "bloom-temporal-motion-evidence-v1",
+  "issue": 135,
+  "producer": "remaining-engine-motion-producers",
+  "comparison_base": "6921e4146fa46f09f57ddb314f3dbed56ab8c07e",
+  "qualified_revision": "53ce363cf33f7ddd305f078d7a7f95bd54b820d5",
+  "adapter": "Apple M1 Max",
+  "backend": "Metal",
+  "motion_sequences": {
+    "legacy_skinned": {
+      "meaningful_motion_pixels": 10214,
+      "movement_mean": 28.0587,
+      "frame_four_outlier_fraction": 0.008713,
+      "severe_trail_frames": 0,
+      "stable_flicker": 0.4927
+    },
+    "unkeyed_editor_skin": {
+      "meaningful_motion_pixels": 10214,
+      "movement_mean": 30.0509,
+      "frame_four_outlier_fraction": 0.008636,
+      "severe_trail_frames": 0,
+      "stable_flicker": 0.5114,
+      "post_gap_motion_pixels": 0,
+      "two_joint_cpu_capacity_bytes": 448
+    },
+    "procedural_foliage_wind": {
+      "meaningful_motion_pixels": 7348
+    },
+    "static_decal_spawn": {
+      "movement_mean": 5.6502,
+      "frame_four_outlier_fraction": 0.006393,
+      "severe_trail_frames": 0
+    },
+    "static_decal_expiry": {
+      "movement_mean": 5.6851,
+      "frame_four_outlier_fraction": 0.005157,
+      "severe_trail_frames": 0
+    },
+    "procedural_cloud_field_change": {
+      "movement_mean": 9.3560,
+      "frame_four_outlier_fraction": 0.011368,
+      "severe_trail_frames": 0,
+      "stable_flicker": 1.5439
+    }
+  },
+  "performance": {
+    "resolution": [1920, 1080],
+    "warmup_frames": 300,
+    "measured_frames": 900,
+    "alternating_runs_per_revision": 4,
+    "before": {
+      "render_submit_mean_ms": [3.219333, 2.242543, 2.220985, 2.241560],
+      "render_submit_p50_ms": [2.779375, 2.456041, 2.457292, 2.441041],
+      "render_submit_p95_ms": [7.605250, 2.755958, 2.695250, 2.672291],
+      "render_submit_p99_ms": [12.868459, 3.350459, 2.934417, 3.622667],
+      "prepare_mean_ms": [0.128309, 0.048898, 0.046537, 0.046111]
+    },
+    "after": {
+      "render_submit_mean_ms": [2.299320, 2.221371, 2.220672, 2.233175],
+      "render_submit_p50_ms": [2.525375, 2.465625, 2.452459, 2.473541],
+      "render_submit_p95_ms": [3.513208, 2.764208, 2.693667, 2.741166],
+      "render_submit_p99_ms": [4.365250, 3.799875, 3.812625, 3.315375],
+      "prepare_mean_ms": [0.064853, 0.050508, 0.046952, 0.049146]
+    },
+    "steady_upload_bytes_per_frame_before": 23264,
+    "steady_upload_bytes_per_frame_after": 23264
+  },
+  "resources": {
+    "ordinary_frame_additional_gpu_bytes": 0,
+    "ordinary_frame_added_passes": 0,
+    "ordinary_frame_added_draws": 0,
+    "ordinary_frame_added_upload_bytes": 0,
+    "unkeyed_skin_added_gpu_bytes": 0,
+    "unkeyed_skin_added_passes": 0,
+    "unkeyed_skin_added_draws": 0
+  }
+}

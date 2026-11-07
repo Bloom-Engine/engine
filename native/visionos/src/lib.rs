@@ -742,59 +742,11 @@ unsafe extern "C" fn scene_will_connect(
         Err(_) => panic!("[bloom-visionos] No GPU adapter found"),
     };
 
-    // Ticket 007b: HW ray-query on RT-capable tvOS hardware (A13+).
-    let supported = adapter.features();
-    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-    let mut required_features = wgpu::Features::empty();
-    // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
-    // can record GPU timings. Optional — profiler falls back to CPU-only
-    // when the adapter doesn't grant it.
-    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-        required_features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-    // Cooked BC7 textures (bloom-cook) upload compressed when the
-    // adapter has BC support; without it they CPU-decode at load.
-    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-    }
-    if !force_sw_gi && supported.contains(rt_mask) {
-        required_features |= rt_mask;
-    }
-    let experimental_features = if required_features.intersects(rt_mask) {
-        unsafe { wgpu::ExperimentalFeatures::enabled() }
-    } else {
-        wgpu::ExperimentalFeatures::disabled()
-    };
-    // Base the requested limits on what the adapter actually advertises so we
-    // never ask for more than the backend can grant. The tvOS/iOS *simulators*
-    // cap several limits below wgpu's desktop default() — notably
-    // max_inter_stage_shader_variables (15 vs 16) — which makes request_device
-    // fail with LimitsExceeded. On real Apple TV hardware adapter.limits()
-    // meets or exceeds default(), so behaviour there is unchanged.
-    let adapter_limits = adapter.limits();
-    let mut required_limits = wgpu::Limits::default();
-    required_limits.max_inter_stage_shader_variables = required_limits
-        .max_inter_stage_shader_variables
-        .min(adapter_limits.max_inter_stage_shader_variables);
-    if required_features.intersects(rt_mask) {
-        required_limits = required_limits
-            .using_minimum_supported_acceleration_structure_values();
-    }
-    let (device, queue) = match pollster_block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("bloom_device"),
-            required_features,
-            required_limits,
-            experimental_features,
-            ..Default::default()
-        },
-    )) {
-        Ok(dq) => dq,
-        Err(e) => panic!("[bloom-visionos] Failed to create device: {e}"),
-    };
+    let negotiated = request_renderer_device(&adapter);
+    let negotiation_report = negotiated.report.report_json();
+    eprintln!("[bloom-visionos] renderer device negotiation = {negotiation_report}");
+    let device = negotiated.device;
+    let queue = negotiated.queue;
 
     let surface_caps = surface.get_capabilities(&adapter);
     // Use non-sRGB format to match game's sRGB color space (colors are specified as sRGB 0-255)
@@ -814,7 +766,8 @@ unsafe extern "C" fn scene_will_connect(
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
+    let mut renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
+    renderer.set_device_negotiation_report(negotiation_report);
     let _ = ENGINE.set(EngineState::new(renderer));
     std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-visionos] ENGINE created on main thread\n").ok();
 }
@@ -1035,56 +988,11 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
         ..Default::default()
     })).expect("[bloom-visionos] No GPU adapter found");
 
-    // Ticket 007b: HW ray-query on RT-capable tvOS hardware (A13+).
-    let supported = adapter.features();
-    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-    let mut required_features = wgpu::Features::empty();
-    // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
-    // can record GPU timings. Optional — profiler falls back to CPU-only
-    // when the adapter doesn't grant it.
-    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-        required_features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-    // Cooked BC7 textures (bloom-cook) upload compressed when the
-    // adapter has BC support; without it they CPU-decode at load.
-    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-    }
-    if !force_sw_gi && supported.contains(rt_mask) {
-        required_features |= rt_mask;
-    }
-    let experimental_features = if required_features.intersects(rt_mask) {
-        unsafe { wgpu::ExperimentalFeatures::enabled() }
-    } else {
-        wgpu::ExperimentalFeatures::disabled()
-    };
-    // Base the requested limits on what the adapter actually advertises so we
-    // never ask for more than the backend can grant. The tvOS/iOS *simulators*
-    // cap several limits below wgpu's desktop default() — notably
-    // max_inter_stage_shader_variables (15 vs 16) — which makes request_device
-    // fail with LimitsExceeded. On real Apple TV hardware adapter.limits()
-    // meets or exceeds default(), so behaviour there is unchanged.
-    let adapter_limits = adapter.limits();
-    let mut required_limits = wgpu::Limits::default();
-    required_limits.max_inter_stage_shader_variables = required_limits
-        .max_inter_stage_shader_variables
-        .min(adapter_limits.max_inter_stage_shader_variables);
-    if required_features.intersects(rt_mask) {
-        required_limits = required_limits
-            .using_minimum_supported_acceleration_structure_values();
-    }
-    let (device, queue) = pollster_block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("bloom_device"),
-            required_features,
-            required_limits,
-            experimental_features,
-            ..Default::default()
-        },
-    )).expect("[bloom-visionos] Failed to create device");
+    let negotiated = request_renderer_device(&adapter);
+    let negotiation_report = negotiated.report.report_json();
+    eprintln!("[bloom-visionos] renderer device negotiation = {negotiation_report}");
+    let device = negotiated.device;
+    let queue = negotiated.queue;
 
     let surface_caps = surface.get_capabilities(&adapter);
     let format = surface_caps.formats.iter()
@@ -1103,7 +1011,8 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
+    let mut renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
+    renderer.set_device_negotiation_report(negotiation_report);
     let _ = ENGINE.set(EngineState::new(renderer));
     let _ = std::fs::write("/tmp/bloom_tvos_debug.txt", format!("ENGINE created\nformat={:?}\nsize={}x{}\n", format, pixel_width, pixel_height));
 }
@@ -1296,6 +1205,25 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
             }
         }
     }
+}
+
+fn request_renderer_device(
+    adapter: &wgpu::Adapter,
+) -> bloom_shared::renderer::device_negotiation::NegotiatedDevice {
+    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    pollster_block_on(
+        bloom_shared::renderer::device_negotiation::request_device_with_fallback(
+            adapter,
+            bloom_shared::renderer::device_negotiation::DeviceRequestOptions {
+                allow_ray_query: !force_sw_gi,
+                profile:
+                    bloom_shared::renderer::device_negotiation::DeviceRequestProfile::NativeFull,
+            },
+        ),
+    )
+    .unwrap_or_else(|error| panic!("[bloom-visionos] Failed to create renderer device: {error}"))
 }
 
 // ============================================================

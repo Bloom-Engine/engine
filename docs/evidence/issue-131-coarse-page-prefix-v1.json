@@ -1,0 +1,61 @@
+{
+  "schema": "bloom-virtual-geometry-coarse-pages-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "fe92915450dce3d45acc6a0192b4b9b0c3e3290c",
+  "contract": {
+    "coarse_roots_are_cluster_prefix": true,
+    "coarse_roots_are_page_prefix": true,
+    "mixed_root_streamable_pages_allowed": false,
+    "mixed_lod_pages_allowed": false,
+    "atomic_ranges_remapped": true,
+    "strict_reader_validates_placement": true
+  },
+  "deterministic_static_asset": {
+    "path": "examples/renderer-test/assets/DamagedHelmet.glb",
+    "requested_levels": 8,
+    "root_clusters": 100,
+    "root_level": 3,
+    "root_pages": 8,
+    "root_cluster_payload_bytes": 468570,
+    "root_page_payload_bytes": 469360,
+    "root_page_packing_overhead_bytes": 790,
+    "fixed_page_slot_upper_bound_bytes": 524288,
+    "page_budget_bytes": 65536,
+    "maximum_page_bytes": 65472,
+    "total_pages": 48,
+    "total_payload_bytes": 2937040,
+    "file_bytes": 3021168,
+    "payload_sha256": "176aba193c2a0c4d8ac3910a3c4c9db4b661f5a0d8a234a5574317c8a51d6d30",
+    "artifact_sha256": "da0f68d731ca42a95a54e8ff157a62315a71dfa5c78d62b2bccd8ec59c0124f7",
+    "independent_cooks_byte_identical": true,
+    "strict_inspection": "pass"
+  },
+  "default_leaf_regression": {
+    "artifact_sha256": "df089b23324fe8a8e00842a80b44894fd27b276c9124b8ff81dd77f8cf7b2cd2",
+    "matches_qualified_milestone": true
+  },
+  "qualification": {
+    "release_tests_passed": 17,
+    "strict_clippy": "pass",
+    "format": "pass",
+    "mixed_page_class_corruption_rejected": true
+  },
+  "shipping_runtime_delta": {
+    "passes": 0,
+    "draws": 0,
+    "buffers": 0,
+    "images": 0,
+    "allocations": 0,
+    "bindings": 0,
+    "shader_branches": 0,
+    "engine_dependencies": 0,
+    "pixels_changed": false
+  },
+  "remaining": [
+    "runtime allocation and staging overhead",
+    "residency and eviction budgets",
+    "missing-page ancestor fallback",
+    "GPU traversal and culling",
+    "runtime visual and performance qualification"
+  ]
+}
