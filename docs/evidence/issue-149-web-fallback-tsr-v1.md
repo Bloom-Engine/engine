@@ -100,3 +100,20 @@ WASM reports existing target-specific unused-code warnings.
 This advances the Web/fallback acceptance criterion for issues #149, #128,
 and #135. It is not closure of the parent quality goal: hosted Vulkan hardware
 evidence and the remaining representative-scene/platform matrix still remain.
+
+## Recalibration (2026-11-07)
+
+The same code no longer reproduces the numbers above. With Chrome 156 and its
+SwiftShader WebGPU adapter, on the macos-15 CI runner and on an Apple Silicon
+Mac alike, every revision from `d8d47fa` (the commit that recorded them) to
+the current head measures the same values:
+
+| Metric | `d8d47fa` and later | Old limit | New limit |
+|---|---:|---:|---:|
+| Fractional-to-native RGB frame RMSE | 0.0324 | 0.030 | 0.035 |
+| Fractional-to-native motion-derivative RMSE | 0.0365 | 0.027 | 0.040 |
+
+A bisect over `d8d47fa..30b3426` found no commit that changes them, so the
+difference is the browser's software rasterizer rather than Bloom. The limits
+keep about 10% headroom over the current measurement, so a renderer
+regression still fails the gate.
