@@ -88,6 +88,7 @@ pub struct EngineState {
 
 impl EngineState {
     pub fn new(renderer: Renderer) -> Self {
+        crate::audio::report_memory();
         let now = Instant::now();
         let quality_fixed_timestep_value = std::env::var("BLOOM_QUALITY_FIXED_TIMESTEP").ok();
         let quality_fixed_timestep =
@@ -181,6 +182,8 @@ impl EngineState {
     }
 
     pub fn end_frame(&mut self) {
+        // the frame's new glyphs, once, before it is drawn
+        self.text.upload(&mut self.renderer);
         if self.direct_2d_mode {
             // Fast path for pure-2D games: render direct to the swapchain,
             // skipping scene prep, shadow maps, HDR/tonemap, SSAO, bloom,
@@ -231,6 +234,8 @@ impl EngineState {
 
         self.profiler.frame_end(&self.renderer.device);
         self.input.end_frame();
+        // after the frame was drawn: the glyph atlas grows if this frame filled it
+        self.text.end_frame();
 
         // Vsync (PresentMode::Fifo, the wgpu default) already caps frame rate.
         // Only apply CPU sleep-based cap when vsync is not active.
