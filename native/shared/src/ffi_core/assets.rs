@@ -440,6 +440,22 @@ macro_rules! __bloom_ffi_assets {
             $crate::string_header::alloc_perry_string(&value)
         }
 
+        // The user's preferred languages (BCP 47, most preferred first), for
+        // navigator.languages and game translations; see locale.rs.
+        #[no_mangle]
+        pub extern "C" fn bloom_preferred_language_count() -> f64 {
+            $crate::locale::preferred_languages().len() as f64
+        }
+
+        #[no_mangle]
+        pub extern "C" fn bloom_preferred_language(index: f64) -> *const u8 {
+            let value = $crate::locale::preferred_languages()
+                .into_iter()
+                .nth(index.max(0.0) as usize)
+                .unwrap_or_default();
+            $crate::string_header::alloc_perry_string(&value)
+        }
+
         // bloom_file_exists  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {

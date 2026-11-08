@@ -2162,6 +2162,18 @@ pub fn bloom_command_line_arg_count() -> f64 {
 }
 
 #[no_mangle]
+pub fn bloom_preferred_language_count() -> f64 {
+    // A web build runs in a real browser, whose navigator.languages is the answer.
+    0.0
+}
+
+#[no_mangle]
+pub fn bloom_preferred_language(_index: f64) -> f64 {
+    // Unreachable: the count is zero (see bloom_command_line_arg).
+    0.0
+}
+
+#[no_mangle]
 pub fn bloom_command_line_arg(_index: f64) -> f64 {
     // `count()` is always zero on web, so this ABI-compatible sentinel is
     // unreachable through the public helper. Web has no Perry string

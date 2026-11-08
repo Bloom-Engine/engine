@@ -55,6 +55,8 @@ declare function bloom_set_output_scale(scale: number): number;
 declare function bloom_launch_process(cmd: string, args: string, cwd: string): number;
 declare function bloom_command_line_arg_count(): number;
 declare function bloom_command_line_arg(index: number): string;
+declare function bloom_preferred_language_count(): number;
+declare function bloom_preferred_language(index: number): string;
 declare function bloom_get_output_scale(): number;
 declare function bloom_get_render_scale(): number;
 declare function bloom_set_upscale_mode(mode: number): number;
@@ -1542,6 +1544,20 @@ export function launchProcess(cmd: string, args: string[], cwd: string): number 
     joined = joined + args[i];
   }
   return bloom_launch_process(cmd, joined, cwd);
+}
+
+/**
+ * The user's preferred languages as BCP 47 tags ("de-DE", "en-US"), most
+ * preferred first: the system list on Apple platforms (including a per-app
+ * language picked in iOS/tvOS Settings), the system locale on Android and
+ * Windows, LANG/LANGUAGE elsewhere. Empty when nothing is known, and on web
+ * (use navigator.languages there).
+ */
+export function getPreferredLanguages(): string[] {
+  const count = Math.max(0, Math.floor(bloom_preferred_language_count()));
+  const langs: string[] = new Array(count);
+  for (let i = 0; i < count; i++) langs[i] = bloom_preferred_language(i);
+  return langs;
 }
 
 /** Return the native process argv. Index 0 is the executable path. */

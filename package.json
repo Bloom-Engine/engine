@@ -2086,6 +2086,18 @@
           "returns": "string"
         },
         {
+          "name": "bloom_preferred_language_count",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_preferred_language",
+          "params": [
+            "f64"
+          ],
+          "returns": "string"
+        },
+        {
           "name": "bloom_set_output_scale",
           "params": [
             "f64"

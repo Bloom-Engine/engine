@@ -17,6 +17,7 @@ pub mod ffi;
 pub mod ffi_core;
 pub mod handles;
 pub mod input;
+pub mod locale;
 #[cfg(feature = "models3d")]
 pub mod models_cooked_scene;
 pub mod renderer;
