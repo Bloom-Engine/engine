@@ -124,7 +124,16 @@ impl AudioMixer {
     /// from audio init, before the callback starts firing; the returned
     /// renderer must only be used from that one thread.
     pub fn take_renderer(&mut self) -> Option<AudioRenderer> {
-        self.renderer.take()
+        let renderer = self.renderer.take();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(r) = renderer.as_ref() {
+            if std::env::var_os("BLOOM_AUDIO_STATS").is_some()
+                || std::env::var_os("BLOOM_AUDIO_DUMP").is_some()
+            {
+                report_stats(r.stats());
+            }
+        }
+        renderer
     }
 
     fn send(&mut self, cmd: Cmd) {
@@ -1223,3 +1232,100 @@ mod tests {
         );
     }
 }
+
+/// `BLOOM_AUDIO_STATS=1`: every 5 s, what the render thread did since the
+/// last report (blocks, blocks mixed slower than real time, the slowest mix,
+/// clipped samples, streamed-music underruns).
+#[cfg(not(target_arch = "wasm32"))]
+fn report_stats(stats: std::sync::Arc<render::AudioStats>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let _ = std::thread::Builder::new()
+        .name("bloom-audio-stats".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            eprintln!(
+                "bloom audio: blocks={} late={} max_mix_us={} clipped={} underruns={}",
+                stats.blocks.swap(0, Relaxed),
+                stats.late.swap(0, Relaxed),
+                stats.max_mix_us.swap(0, Relaxed),
+                stats.clipped.swap(0, Relaxed),
+                stats.underruns.swap(0, Relaxed),
+            );
+            // BLOOM_AUDIO_DUMP=<file>: append the output so far (raw f32 stereo, 44.1 kHz)
+            if let (Some(dump), Some(path)) =
+                (stats.dump.as_ref(), std::env::var_os("BLOOM_AUDIO_DUMP"))
+            {
+                // swap in an empty buffer allocated beforehand, so the render
+                // thread never finds the dump without room
+                let fresh = Vec::with_capacity(44_100 * 2 * 60);
+                let samples: Vec<f32> = match dump.lock() {
+                    Ok(mut d) => std::mem::replace(&mut *d, fresh),
+                    Err(_) => continue,
+                };
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+                    let _ = f.write_all(&bytes);
+                }
+            }
+        });
+}
+
+/// `BLOOM_MEM_STATS=1`: the process's physical memory footprint once a second
+/// (Apple platforms), to watch for growth.
+#[cfg(target_vendor = "apple")]
+pub fn report_memory() {
+    #[repr(C)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+        rest: [u64; 16],
+    }
+    extern "C" {
+        static mach_task_self_: u32;
+        fn task_info(task: u32, flavor: i32, info: *mut TaskVmInfo, count: *mut u32) -> i32;
+    }
+    if std::env::var_os("BLOOM_MEM_STATS").is_none() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("bloom-mem-stats".into())
+        .spawn(|| loop {
+            let mut info: TaskVmInfo = unsafe { std::mem::zeroed() };
+            let mut count = (std::mem::size_of::<TaskVmInfo>() / 4) as u32;
+            // TASK_VM_INFO = 22
+            let ok = unsafe { task_info(mach_task_self_, 22, &mut info, &mut count) } == 0;
+            if ok {
+                eprintln!(
+                    "bloom mem: footprint {} MB, graphics (device) {} MB",
+                    info.phys_footprint >> 20,
+                    info.device >> 20
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        });
+}
+#[cfg(not(target_vendor = "apple"))]
+pub fn report_memory() {}

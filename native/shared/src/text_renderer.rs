@@ -65,6 +65,11 @@ fn generate_sdf(bitmap: &[u8], w: u32, h: u32, spread: f32) -> Vec<u8> {
     sdf
 }
 
+/// The SDF atlas keeps its size; the bitmap atlas grows (see `end_frame`).
+const SDF_ATLAS_SIZE: u32 = 1024;
+/// The bitmap atlas starts at 1024 and doubles up to this when a frame fills it.
+const MAX_ATLAS_SIZE: u32 = 2048;
+
 pub struct TextRenderer {
     fonts: Vec<Font>,
     glyph_cache: HashMap<(usize, char, u32), GlyphInfo>,
@@ -78,6 +83,14 @@ pub struct TextRenderer {
     atlas_dirty: bool,
     /// One-shot guard for the atlas-full warning.
     atlas_overflow_warned: bool,
+    /// A glyph didn't fit this frame: the atlas grows (or starts over) in `end_frame`.
+    atlas_full: bool,
+    /// Rows written since the last upload (`upload` sends only these), and whether the
+    /// texture must be sent whole (new size, cleared).
+    dirty_rows: Option<(u32, u32)>,
+    atlas_resized: bool,
+    /// Advances for measuring, without rasterizing (logical-size glyphs filled the atlas).
+    advances: HashMap<(usize, char, u32), f32>,
     // SDF atlas (separate from bitmap atlas)
     sdf_glyph_cache: HashMap<(usize, char), GlyphInfo>,
     sdf_atlas_data: Vec<u8>,
@@ -104,6 +117,10 @@ impl TextRenderer {
             atlas_bind_group_idx: None,
             atlas_dirty: false,
             atlas_overflow_warned: false,
+            atlas_full: false,
+            dirty_rows: None,
+            atlas_resized: false,
+            advances: HashMap::new(),
             sdf_glyph_cache: HashMap::new(),
             sdf_atlas_data: Vec::new(),
             sdf_atlas_cursor_x: 0,
@@ -133,6 +150,10 @@ impl TextRenderer {
             atlas_bind_group_idx: None,
             atlas_dirty: true,
             atlas_overflow_warned: false,
+            atlas_full: false,
+            dirty_rows: None,
+            atlas_resized: false,
+            advances: HashMap::new(),
             sdf_glyph_cache: HashMap::new(),
             sdf_atlas_data: vec![0u8; (atlas_width * atlas_height * 4) as usize],
             sdf_atlas_cursor_x: 0,
@@ -149,10 +170,13 @@ impl TextRenderer {
         self.fonts.len() - 1
     }
 
-    fn rasterize_glyph(&mut self, font_idx: usize, ch: char, size: u32) -> &GlyphInfo {
+    /// Rasterize a glyph into the atlas (cached). When it doesn't fit, nothing is stored this
+    /// frame (the glyph isn't drawn once) and the atlas grows at the end of the frame: growing or
+    /// clearing mid-frame would move glyphs the frame's earlier quads already point at.
+    fn rasterize_glyph(&mut self, font_idx: usize, ch: char, size: u32) {
         let key = (font_idx, ch, size);
-        if self.glyph_cache.contains_key(&key) {
-            return &self.glyph_cache[&key];
+        if self.glyph_cache.contains_key(&key) || self.atlas_full {
+            return;
         }
 
         let font = &self.fonts[font_idx];
@@ -161,24 +185,21 @@ impl TextRenderer {
         let gw = metrics.width as u32;
         let gh = metrics.height as u32;
 
-        if self.atlas_cursor_x + gw > self.atlas_width {
-            self.atlas_cursor_x = 0;
-            self.atlas_cursor_y += self.atlas_row_height;
-            self.atlas_row_height = 0;
+        let mut cx = self.atlas_cursor_x;
+        let mut cy = self.atlas_cursor_y;
+        let mut row = self.atlas_row_height;
+        if cx + gw > self.atlas_width {
+            cx = 0;
+            cy += row;
+            row = 0;
         }
-
-        // Round-2 audit F5: the atlas used to overflow SILENTLY — writes
-        // were clipped by the bounds check below and the quads then
-        // sampled wrapped UVs (garbage glyphs). Warn once so the failure
-        // mode is named; grow-or-evict is the durable follow-up.
-        if self.atlas_cursor_y + gh > self.atlas_height && !self.atlas_overflow_warned {
-            self.atlas_overflow_warned = true;
-            eprintln!(
-                "bloom text: glyph atlas ({}x{}) is full — new glyphs will render corrupted \
-                 until eviction lands (too many distinct size/char combinations)",
-                self.atlas_width, self.atlas_height
-            );
+        if cy + gh > self.atlas_height || gw > self.atlas_width {
+            self.atlas_full = true;
+            return;
         }
+        self.atlas_cursor_x = cx;
+        self.atlas_cursor_y = cy;
+        self.atlas_row_height = row;
 
         let ax = self.atlas_cursor_x;
         let ay = self.atlas_cursor_y;
@@ -197,6 +218,8 @@ impl TextRenderer {
             }
         }
 
+        let (r0, r1) = self.dirty_rows.unwrap_or((ay, ay + gh));
+        self.dirty_rows = Some((r0.min(ay), r1.max(ay + gh)));
         self.atlas_cursor_x += gw + 1;
         if gh + 1 > self.atlas_row_height {
             self.atlas_row_height = gh + 1;
@@ -215,33 +238,110 @@ impl TextRenderer {
                 y_offset: metrics.ymin as f32,
             },
         );
-
-        &self.glyph_cache[&key]
     }
 
-    fn ensure_atlas_uploaded(&mut self, renderer: &mut Renderer) {
-        if !self.atlas_dirty {
+    /// A glyph's advance at a pixel size, from the font's metrics (cached; nothing rasterized).
+    fn advance(&mut self, font_idx: usize, ch: char, size: u32) -> f32 {
+        let key = (font_idx, ch, size);
+        if let Some(a) = self.advances.get(&key) {
+            return *a;
+        }
+        if self.advances.len() > 50_000 {
+            self.advances.clear();
+        }
+        let a = self.fonts[font_idx].metrics(ch, size as f32).advance_width;
+        self.advances.insert(key, a);
+        a
+    }
+
+    /// Once a frame: a glyph that didn't fit doubles the atlas (up to MAX_ATLAS_SIZE), keeping
+    /// what's in it; at the largest size it starts over. The next frame rasterizes what it needs.
+    pub fn end_frame(&mut self) {
+        if !self.atlas_full {
             return;
         }
-
-        match self.atlas_bind_group_idx {
-            None => {
-                let idx = renderer.register_texture_no_mips(
-                    self.atlas_width,
-                    self.atlas_height,
-                    &self.atlas_data,
-                );
-                self.atlas_bind_group_idx = Some(idx);
+        self.atlas_full = false;
+        self.atlas_dirty = true;
+        if self.atlas_width < MAX_ATLAS_SIZE {
+            let (ow, oh) = (self.atlas_width, self.atlas_height);
+            let (nw, nh) = (ow * 2, oh * 2);
+            let mut data = vec![0u8; (nw * nh * 4) as usize];
+            for row in 0..oh {
+                let src = (row * ow * 4) as usize;
+                let dst = (row * nw * 4) as usize;
+                data[dst..dst + (ow * 4) as usize]
+                    .copy_from_slice(&self.atlas_data[src..src + (ow * 4) as usize]);
             }
-            Some(idx) => {
-                renderer.replace_texture_no_mips(
+            self.atlas_data = data;
+            self.atlas_width = nw;
+            self.atlas_height = nh;
+            self.atlas_resized = true;
+            eprintln!(
+                "bloom text: glyph atlas grew to {nw}x{nh} ({} glyphs)",
+                self.glyph_cache.len()
+            );
+            return;
+        }
+        if !self.atlas_overflow_warned {
+            self.atlas_overflow_warned = true;
+            eprintln!(
+                "bloom text: glyph atlas ({}x{}) full; starting it over",
+                self.atlas_width, self.atlas_height
+            );
+        }
+        self.glyph_cache.clear();
+        self.atlas_data.iter_mut().for_each(|b| *b = 0);
+        self.atlas_cursor_x = 0;
+        self.atlas_cursor_y = 0;
+        self.atlas_row_height = 0;
+        self.atlas_resized = true;
+    }
+
+    /// The atlas texture exists (the first draw registers it); its contents go up once a frame
+    /// in `upload`, before the frame is drawn. Uploading on every draw call that added a glyph
+    /// staged a full atlas copy each time, which ran an iPhone out of GPU memory.
+    fn ensure_atlas_uploaded(&mut self, renderer: &mut Renderer) {
+        if self.atlas_bind_group_idx.is_none() {
+            let idx = renderer.register_texture_no_mips(
+                self.atlas_width,
+                self.atlas_height,
+                &self.atlas_data,
+            );
+            self.atlas_bind_group_idx = Some(idx);
+            self.atlas_dirty = false;
+            self.dirty_rows = None;
+            self.atlas_resized = false;
+        }
+    }
+
+    /// Send this frame's new glyphs to the GPU: the changed rows, or the whole atlas after it
+    /// grew or was cleared. Called once a frame before rendering.
+    pub fn upload(&mut self, renderer: &mut Renderer) {
+        let Some(idx) = self.atlas_bind_group_idx else {
+            return;
+        };
+        if self.atlas_resized {
+            renderer.replace_texture_no_mips(
+                idx,
+                self.atlas_width,
+                self.atlas_height,
+                &self.atlas_data,
+            );
+        } else if let Some((y0, y1)) = self.dirty_rows {
+            let y1 = y1.min(self.atlas_height);
+            if y1 > y0 {
+                let row = (self.atlas_width * 4) as usize;
+                renderer.write_texture_rows(
                     idx,
                     self.atlas_width,
-                    self.atlas_height,
-                    &self.atlas_data,
+                    y0,
+                    y1 - y0,
+                    &self.atlas_data[y0 as usize * row..y1 as usize * row],
                 );
             }
         }
+        self.atlas_resized = false;
+        self.dirty_rows = None;
         self.atlas_dirty = false;
     }
 
@@ -262,8 +362,7 @@ impl TextRenderer {
                 width += spacing;
             }
             first = false;
-            let glyph = self.rasterize_glyph(idx, ch, size);
-            width += glyph.advance;
+            width += self.advance(idx, ch, size);
         }
         width as f64
     }
@@ -374,6 +473,9 @@ impl TextRenderer {
                 }
 
                 cursor_x += glyph.advance * inv_dpi;
+            } else {
+                // not in the atlas this frame (it was full): keep the spacing
+                cursor_x += self.advance(idx, ch, phys_size) * inv_dpi;
             }
         }
     }
@@ -381,6 +483,7 @@ impl TextRenderer {
     pub fn unload_font(&mut self, font_idx: usize) {
         if font_idx > 0 && font_idx < self.fonts.len() {
             self.glyph_cache.retain(|k, _| k.0 != font_idx);
+            self.advances.retain(|k, _| k.0 != font_idx);
             self.sdf_glyph_cache.retain(|k, _| k.0 != font_idx);
         }
     }
@@ -409,7 +512,7 @@ impl TextRenderer {
         };
 
         // Place in SDF atlas
-        if self.sdf_atlas_cursor_x + gw > self.atlas_width {
+        if self.sdf_atlas_cursor_x + gw > SDF_ATLAS_SIZE {
             self.sdf_atlas_cursor_x = 0;
             self.sdf_atlas_cursor_y += self.sdf_atlas_row_height;
             self.sdf_atlas_row_height = 0;
@@ -421,7 +524,7 @@ impl TextRenderer {
         for row in 0..gh {
             for col in 0..gw {
                 let src = ((row * gw + col) * 4) as usize;
-                let dst = (((ay + row) * self.atlas_width + ax + col) * 4) as usize;
+                let dst = (((ay + row) * SDF_ATLAS_SIZE + ax + col) * 4) as usize;
                 if src + 3 < sdf_data.len() && dst + 3 < self.sdf_atlas_data.len() {
                     self.sdf_atlas_data[dst] = sdf_data[src];
                     self.sdf_atlas_data[dst + 1] = sdf_data[src + 1];
@@ -459,20 +562,12 @@ impl TextRenderer {
         }
         match self.sdf_atlas_bind_group_idx {
             None => {
-                let idx = renderer.register_texture(
-                    self.atlas_width,
-                    self.atlas_height,
-                    &self.sdf_atlas_data,
-                );
+                let idx =
+                    renderer.register_texture(SDF_ATLAS_SIZE, SDF_ATLAS_SIZE, &self.sdf_atlas_data);
                 self.sdf_atlas_bind_group_idx = Some(idx);
             }
             Some(idx) => {
-                renderer.update_texture(
-                    idx,
-                    self.atlas_width,
-                    self.atlas_height,
-                    &self.sdf_atlas_data,
-                );
+                renderer.update_texture(idx, SDF_ATLAS_SIZE, SDF_ATLAS_SIZE, &self.sdf_atlas_data);
             }
         }
         self.sdf_atlas_dirty = false;
@@ -520,8 +615,8 @@ impl TextRenderer {
             (a / 255.0) as f32,
         ];
 
-        let aw = self.atlas_width as f32;
-        let ah = self.atlas_height as f32;
+        let aw = SDF_ATLAS_SIZE as f32;
+        let ah = SDF_ATLAS_SIZE as f32;
 
         let mut cursor_x = x as f32;
         let mut first = true;

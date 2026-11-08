@@ -905,6 +905,12 @@ pub extern "C" fn bloom_end_drawing() {
 #[no_mangle]
 pub extern "C" fn bloom_init_audio() {
     unsafe {
+        // Started once: a second call (several Web Audio objects each ask
+        // for the device) would start a second output unit pulling from the
+        // same renderer, each playing every other block: crackling noise.
+        if AUDIO_UNIT.is_some() {
+            return;
+        }
         // Hand the render half to the audio thread before the callback
         // can fire. Idempotent: a second init keeps the existing renderer.
         if AUDIO_RENDERER.is_none() {

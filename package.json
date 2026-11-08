@@ -462,6 +462,15 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_render_emoji",
+          "params": [
+            "string",
+            "f64",
+            "string"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_unload_font",
           "params": [
             "f64"

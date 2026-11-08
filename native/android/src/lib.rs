@@ -476,7 +476,10 @@ pub extern "C" fn bloom_end_drawing() {
 
 #[no_mangle]
 pub extern "C" fn bloom_init_audio() {
-    AUDIO_RUNNING.store(true, Ordering::SeqCst);
+    // started once: a second call would open a second output stream
+    if AUDIO_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     // Move the render half into the audio thread; the engine keeps only
     // the command-producing control half.
     let renderer = engine().audio.take_renderer();

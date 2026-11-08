@@ -14,9 +14,9 @@
 //! Looping restarts the decoder from byte 0 inside the worker, so a loop
 //! seam never underruns the ring.
 
-use super::spsc::Consumer;
 #[cfg(not(target_arch = "wasm32"))]
-use super::spsc::{self, Producer};
+use super::spsc;
+use super::spsc::{Consumer, Producer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -46,6 +46,10 @@ const RING_CHUNKS: usize = 4;
 /// Render-side handle to a running stream.
 pub struct StreamConsumer {
     pub rx: Consumer<StreamMsg>,
+    /// Played-out chunk buffers go back to the worker for reuse, so the
+    /// audio thread never frees (or the worker allocates) a chunk in steady
+    /// state: a `free` on the render thread can wait on the allocator lock.
+    pub recycle: Producer<Vec<f32>>,
     /// Set to stop the worker (dropped voice, stop_music, engine teardown).
     pub stop: Arc<AtomicBool>,
 }
@@ -93,13 +97,15 @@ pub fn start_at(
     skip: usize,
 ) -> StreamConsumer {
     let (tx, rx) = spsc::channel(RING_CHUNKS + 1);
+    // Room for every chunk in flight, so a recycle push never fails.
+    let (recycle, reuse) = spsc::channel(RING_CHUNKS + 4);
     let stop = Arc::new(AtomicBool::new(false));
     let stop_worker = stop.clone();
     std::thread::Builder::new()
         .name("bloom-music-decode".into())
-        .spawn(move || run_worker(kind, &bytes, looping, skip, tx, &stop_worker))
+        .spawn(move || run_worker(kind, &bytes, looping, skip, tx, reuse, &stop_worker))
         .expect("spawn music decode worker");
-    StreamConsumer { rx, stop }
+    StreamConsumer { rx, recycle, stop }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -109,8 +115,20 @@ fn run_worker(
     looping: bool,
     mut skip: usize,
     mut tx: Producer<StreamMsg>,
+    mut reuse: Consumer<Vec<f32>>,
     stop: &AtomicBool,
 ) {
+    // A chunk buffer: one the renderer handed back, or a new one.
+    let mut fresh = move || -> Vec<f32> {
+        match reuse.pop() {
+            Some(mut v) => {
+                v.clear();
+                v.reserve(CHUNK_SAMPLES);
+                v
+            }
+            None => Vec::with_capacity(CHUNK_SAMPLES),
+        }
+    };
     // Push with backpressure: the ring fills ~1.5s ahead, then we sleep.
     // 20ms poll keeps the worker essentially idle while the ring is full.
     let mut push = |msg: StreamMsg| -> bool {
@@ -131,9 +149,9 @@ fn run_worker(
 
     loop {
         let completed = match kind {
-            StreamKind::Ogg => decode_ogg(bytes, stop, &mut skip, &mut push),
+            StreamKind::Ogg => decode_ogg(bytes, stop, &mut skip, &mut push, &mut fresh),
             #[cfg(feature = "mp3")]
-            StreamKind::Mp3 => decode_mp3(bytes, stop, &mut skip, &mut push),
+            StreamKind::Mp3 => decode_mp3(bytes, stop, &mut skip, &mut push, &mut fresh),
         };
         if !completed || !looping {
             break;
@@ -151,12 +169,13 @@ fn decode_ogg(
     stop: &AtomicBool,
     skip: &mut usize,
     push: &mut dyn FnMut(StreamMsg) -> bool,
+    fresh: &mut dyn FnMut() -> Vec<f32>,
 ) -> bool {
     let Ok(mut reader) = lewton::inside_ogg::OggStreamReader::new(std::io::Cursor::new(bytes))
     else {
         return false;
     };
-    let mut chunk: Vec<f32> = Vec::with_capacity(CHUNK_SAMPLES);
+    let mut chunk: Vec<f32> = fresh();
     while let Ok(Some(packet)) = reader.read_dec_packet_itl() {
         if stop.load(Ordering::Relaxed) {
             return false;
@@ -169,7 +188,7 @@ fn decode_ogg(
             chunk.push(s as f32 / 32768.0);
         }
         if chunk.len() >= CHUNK_SAMPLES {
-            let full = std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK_SAMPLES));
+            let full = std::mem::replace(&mut chunk, fresh());
             if !push(StreamMsg::Chunk(full)) {
                 return false;
             }
@@ -187,9 +206,10 @@ fn decode_mp3(
     stop: &AtomicBool,
     skip: &mut usize,
     push: &mut dyn FnMut(StreamMsg) -> bool,
+    fresh: &mut dyn FnMut() -> Vec<f32>,
 ) -> bool {
     let mut decoder = minimp3::Decoder::new(std::io::Cursor::new(bytes));
-    let mut chunk: Vec<f32> = Vec::with_capacity(CHUNK_SAMPLES);
+    let mut chunk: Vec<f32> = fresh();
     loop {
         if stop.load(Ordering::Relaxed) {
             return false;
@@ -204,7 +224,7 @@ fn decode_mp3(
                     chunk.push(s as f32 / 32768.0);
                 }
                 if chunk.len() >= CHUNK_SAMPLES {
-                    let full = std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK_SAMPLES));
+                    let full = std::mem::replace(&mut chunk, fresh());
                     if !push(StreamMsg::Chunk(full)) {
                         return false;
                     }
