@@ -3,13 +3,71 @@ use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
 use bloom_shared::string_header::{alloc_perry_string, str_from_header};
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut NATIVE_WINDOW: *mut libc::c_void = std::ptr::null_mut();
 static AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
+/// The app is in the background: the stream is paused and nothing is mixed, so
+/// music picks up where it was when the app comes back.
+static AUDIO_PAUSED: AtomicBool = AtomicBool::new(false);
 static mut ASSET_BASE_PATH: Option<String> = None;
+
+/// Device pixels, as on iOS: set once the Activity reports its display metrics
+/// (`nativeSetDisplayMetrics`). The screen size the game sees is then the
+/// surface's pixel size and `getDisplayScale()` is the display density.
+/// Without it (an Activity that doesn't report them) the screen is half the
+/// surface's size, the layout Bloom Jump was made for.
+static NATIVE_PIXELS: AtomicBool = AtomicBool::new(false);
+/// The surface's new pixel size (`w << 32 | h`) from `surfaceChanged`, applied
+/// by the game thread at the start of its next frame; 0 = none.
+static PENDING_SIZE: AtomicU64 = AtomicU64::new(0);
+/// The surface's current pixel size (`w << 32 | h`).
+static SURFACE_SIZE: AtomicU64 = AtomicU64::new(0);
+
+fn pack_size(w: u32, h: u32) -> u64 {
+    (w as u64) << 32 | h as u64
+}
+
+/// Resize the renderer to a surface of `w` x `h` pixels (game thread).
+fn resize_to(eng: &mut EngineState, w: u32, h: u32) {
+    let (lw, lh) = logical_size(w, h);
+    eng.renderer.resize(w, h, lw, lh);
+    SURFACE_SIZE.store(pack_size(w, h), Ordering::SeqCst);
+}
+/// Back button: 1 = press Escape next frame, 2 = release it the frame after.
+static BACK_STATE: AtomicU8 = AtomicU8::new(0);
+/// The wgpu instance the device came from: a new surface (after the app comes
+/// back from the background) must be created from the same one.
+static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
+/// Set once bloom_init_window has created the engine.
+static ENGINE_READY: AtomicBool = AtomicBool::new(false);
+
+/// The surface's lifecycle between the UI thread (SurfaceHolder callbacks) and
+/// the game thread. When the app goes to the background Android destroys the
+/// surface: the game thread drops its wgpu surface (`dropped`) before the UI
+/// thread lets the window go, then waits until a new window arrives.
+struct SurfaceLife {
+    lost: bool,
+    dropped: bool,
+    window: usize,
+}
+static LIFE: Mutex<SurfaceLife> = Mutex::new(SurfaceLife {
+    lost: false,
+    dropped: false,
+    window: 0,
+});
+static LIFE_CHANGED: Condvar = Condvar::new();
+
+/// The logical (game-visible) size for a surface of `w` x `h` pixels.
+fn logical_size(w: u32, h: u32) -> (u32, u32) {
+    if NATIVE_PIXELS.load(Ordering::Relaxed) {
+        (w.max(1), h.max(1))
+    } else {
+        ((w / 2).max(1), (h / 2).max(1))
+    }
+}
 
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
@@ -154,13 +212,13 @@ pub extern "C" fn bloom_init_window(
         } else {
             (width as u32, height as u32)
         };
-        // Logical size is half of physical: the game UI (fonts, layout constants)
-        // was sized for ~1170×540 landscape (iPhone-sized); on Android's 2340×1080
-        // panel we'd otherwise render at native pixel size and everything looks
-        // half-scale. wgpu still renders to the full physical surface; only the
-        // `screen_width`/`screen_height` the game sees are halved.
-        let logical_w = (pixel_w / 2).max(1);
-        let logical_h = (pixel_h / 2).max(1);
+        // Without reported display metrics the logical size is half of physical:
+        // Bloom Jump's UI (fonts, layout constants) was sized for ~1170×540
+        // landscape (iPhone-sized); on Android's 2340×1080 panel it would
+        // otherwise look half-scale. wgpu still renders to the full physical
+        // surface; only the `screen_width`/`screen_height` the game sees are
+        // halved. With them (NATIVE_PIXELS) the game sees pixels, as on iOS.
+        let (logical_w, logical_h) = logical_size(pixel_w, pixel_h);
 
         let backends = backend_choice();
         {
@@ -307,6 +365,9 @@ pub extern "C" fn bloom_init_window(
             Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
         renderer.set_device_negotiation_report(negotiation_report);
         let _ = ENGINE.set(EngineState::new(renderer));
+        let _ = INSTANCE.set(instance);
+        SURFACE_SIZE.store(pack_size(pixel_w, pixel_h), Ordering::SeqCst);
+        ENGINE_READY.store(true, Ordering::SeqCst);
         __android_log_print(
             3,
             b"BloomEngine\0".as_ptr(),
@@ -409,46 +470,145 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
 // Touch input polling (called from Perry's Android event pump)
 // ============================================================
 
-/// Called by Perry's Android layer when a touch event occurs.
+/// Touches from the UI thread, applied by the game thread between frames
+/// (`apply_touches`): (action, x, y, pointer id).
+static TOUCHES: Mutex<Vec<(i32, f64, f64, i32)>> = Mutex::new(Vec::new());
+
+/// Called by Perry's Android layer when a touch event occurs (UI thread). The
+/// game thread reads its input state while the UI thread delivers touches, so
+/// a touch is queued and applied between frames, as on iOS where touches
+/// arrive on the game's own thread between frames. A down and up within one
+/// frame then show as a touch for exactly one frame (`release_touch`) instead
+/// of being released before the game read them.
 #[no_mangle]
 pub extern "C" fn bloom_android_on_touch(action: i32, x: f64, y: f64, pointer_index: i32) {
-    unsafe {
-        if let Some(eng) = ENGINE.get_mut() {
-            let sw = eng.screen_width();
-            let sh = eng.screen_height();
-            let lx = x * 0.5;
-            let ly = y * 0.5;
-            let msg = std::ffi::CString::new(format!(
-                "touch a={} raw=({},{}) scaled=({},{}) sw={} sh={}",
-                action, x, y, lx, ly, sw, sh
-            ))
-            .unwrap();
-            __android_log_print(3, b"BloomTouch\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
-            eng.input.set_mouse_position(lx, ly);
-            if action == 1 || action == 3 {
-                eng.input.release_touch(pointer_index as usize, lx, ly); // UP / CANCEL
-            } else {
-                eng.input.set_touch(pointer_index as usize, lx, ly, true); // DOWN / MOVE
-            }
-            match action {
-                0 => eng.input.set_mouse_button_down(0), // ACTION_DOWN
-                1 => eng.input.set_mouse_button_up(0),   // ACTION_UP
-                2 => {}                                  // ACTION_MOVE
-                _ => {}
-            }
-        }
+    if let Ok(mut q) = TOUCHES.lock() {
+        q.push((action, x, y, pointer_index));
+    }
+}
+
+/// Apply the queued touches (game thread), after `end_frame`: where iOS's
+/// touches land, between one frame and the game's input read for the next.
+/// A tap's down and up then show as one frame with the finger down, and the
+/// release in `end_frame` after it.
+fn apply_touches() {
+    if !ENGINE_READY.load(Ordering::SeqCst) {
+        return;
+    }
+    let touches = TOUCHES.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+    let eng = engine();
+    for (action, x, y, id) in touches {
+        apply_touch(eng, action, x, y, id);
+    }
+}
+
+/// Apply one queued touch (game thread).
+fn apply_touch(eng: &mut EngineState, action: i32, x: f64, y: f64, pointer_index: i32) {
+    let k = if NATIVE_PIXELS.load(Ordering::Relaxed) { 1.0 } else { 0.5 };
+    let lx = x * k;
+    let ly = y * k;
+    eng.input.set_mouse_position(lx, ly);
+    if action == 1 || action == 3 {
+        eng.input.release_touch(pointer_index as usize, lx, ly); // UP / CANCEL
+    } else {
+        eng.input.set_touch(pointer_index as usize, lx, ly, true); // DOWN / MOVE
+    }
+    match action {
+        0 => eng.input.set_mouse_button_down(0), // ACTION_DOWN
+        1 => eng.input.set_mouse_button_up(0),   // ACTION_UP
+        _ => {}                                  // MOVE, CANCEL
     }
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
+    android_frame_sync();
     engine().begin_frame();
+}
+
+/// What the UI thread asked for since the last frame, applied on the game
+/// thread before the frame starts: the Back button, a new surface size, and the
+/// surface going away (the app in the background) and coming back.
+fn android_frame_sync() {
+    if !ENGINE_READY.load(Ordering::SeqCst) {
+        return;
+    }
+    let eng = engine();
+    match BACK_STATE.load(Ordering::SeqCst) {
+        1 => {
+            eng.input.inject_key_down(27); // Key.ESCAPE
+            BACK_STATE.store(2, Ordering::SeqCst);
+        }
+        2 => {
+            eng.input.inject_key_up(27);
+            BACK_STATE.store(0, Ordering::SeqCst);
+        }
+        _ => {}
+    }
+
+    let mut life = LIFE.lock().unwrap();
+    if life.lost {
+        // Drop the wgpu surface while its window still exists, tell the UI
+        // thread, then wait (frames, timers and audio decoding stop with us)
+        // until a new window arrives or the Activity is destroyed.
+        eng.renderer.surface = None;
+        let size = SURFACE_SIZE.load(Ordering::SeqCst);
+        resize_to(eng, (size >> 32) as u32, size as u32); // an offscreen target meanwhile
+        life.dropped = true;
+        AUDIO_PAUSED.store(true, Ordering::SeqCst);
+        LIFE_CHANGED.notify_all();
+        while life.lost && !eng.should_close {
+            life = LIFE_CHANGED
+                .wait_timeout(life, std::time::Duration::from_millis(250))
+                .unwrap()
+                .0;
+        }
+        life.dropped = false;
+        AUDIO_PAUSED.store(false, Ordering::SeqCst);
+        if !life.lost && life.window != 0 {
+            let window = life.window as *mut libc::c_void;
+            if let Some(instance) = INSTANCE.get() {
+                let handle = raw_window_handle::AndroidNdkWindowHandle::new(
+                    std::ptr::NonNull::new(window).unwrap(),
+                );
+                let surface = unsafe {
+                    instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Android(
+                            raw_window_handle::AndroidDisplayHandle::new(),
+                        )),
+                        raw_window_handle: raw_window_handle::RawWindowHandle::AndroidNdk(handle),
+                    })
+                };
+                match surface {
+                    Ok(s) => {
+                        eng.renderer.surface = Some(s);
+                        let (w, h) = unsafe {
+                            (
+                                ANativeWindow_getWidth(window) as u32,
+                                ANativeWindow_getHeight(window) as u32,
+                            )
+                        };
+                        resize_to(eng, w, h); // configures the new surface
+                        PENDING_SIZE.store(0, Ordering::SeqCst);
+                    }
+                    Err(e) => log::error!("resume: create_surface failed: {e}"),
+                }
+            }
+        }
+    }
+    drop(life);
+
+    let size = PENDING_SIZE.swap(0, Ordering::SeqCst);
+    if size != 0 {
+        resize_to(eng, (size >> 32) as u32, size as u32);
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_end_drawing() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         engine().end_frame();
+        apply_touches();
     }));
     if let Err(e) = result {
         let msg = if let Some(s) = e.downcast_ref::<&str>() {
@@ -521,7 +681,9 @@ fn android_audio_thread(renderer: Option<bloom_shared::audio::AudioRenderer>) {
                 *s = 0.0;
             }
             if let Some(r) = self.renderer.as_mut() {
-                r.mix(interleaved);
+                if !AUDIO_PAUSED.load(Ordering::SeqCst) {
+                    r.mix(interleaved);
+                }
             }
             if AUDIO_RUNNING.load(Ordering::SeqCst) {
                 DataCallbackResult::Continue
@@ -543,8 +705,15 @@ fn android_audio_thread(renderer: Option<bloom_shared::audio::AudioRenderer>) {
     match stream {
         Ok(ref mut s) => {
             let _ = s.start();
-            // Keep thread alive while audio is running
+            // Keep thread alive while audio is running; pause the stream while
+            // the app is in the background
+            let mut paused = false;
             while AUDIO_RUNNING.load(Ordering::SeqCst) {
+                let want = AUDIO_PAUSED.load(Ordering::SeqCst);
+                if want != paused {
+                    paused = want;
+                    let _ = if paused { s.pause() } else { s.start() };
+                }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             let _ = s.stop();
@@ -786,7 +955,96 @@ pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSetSurf
         b"BloomEngine\0".as_ptr(),
         b"nativeSetSurface: ANativeWindow acquired\0".as_ptr(),
     );
-    bloom_android_set_native_window(window);
+    // ANativeWindow_fromSurface already holds a reference for us
+    NATIVE_WINDOW = window;
+    // After nativeSurfaceLost: the waiting game thread picks the new window up.
+    let mut life = LIFE.lock().unwrap();
+    life.window = window as usize;
+    life.lost = false;
+    LIFE_CHANGED.notify_all();
+}
+
+/// The surface is going away (the app went to the background, or the Activity
+/// is finishing). Waits until the game thread has dropped its wgpu surface,
+/// then lets the window go. Call from SurfaceHolder.Callback.surfaceDestroyed;
+/// a later nativeSetSurface resumes the game on the new surface.
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSurfaceLost(
+    _env: *mut libc::c_void,
+    _class: *mut libc::c_void,
+) {
+    let mut life = LIFE.lock().unwrap();
+    life.lost = true;
+    life.window = 0;
+    LIFE_CHANGED.notify_all();
+    if ENGINE_READY.load(Ordering::SeqCst) {
+        // a frame takes milliseconds; the bound only keeps a stuck game thread
+        // from blocking the UI thread into an ANR
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !life.dropped {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                log::warn!("nativeSurfaceLost: the game thread didn't release the surface");
+                break;
+            }
+            life = LIFE_CHANGED.wait_timeout(life, deadline - now).unwrap().0;
+        }
+    }
+    drop(life);
+    if !NATIVE_WINDOW.is_null() {
+        ANativeWindow_release(NATIVE_WINDOW);
+        NATIVE_WINDOW = std::ptr::null_mut();
+    }
+}
+
+/// The surface's new size in pixels (SurfaceHolder.Callback.surfaceChanged:
+/// rotation, split screen, a foldable opening).
+#[no_mangle]
+pub extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeOnResize(
+    _env: *mut libc::c_void,
+    _class: *mut libc::c_void,
+    width: i32,
+    height: i32,
+) {
+    if width > 0 && height > 0 {
+        PENDING_SIZE.store(pack_size(width as u32, height as u32), Ordering::SeqCst);
+    }
+}
+
+/// The display's density (pixels per dp) and the safe-area insets in pixels
+/// (system bars, display cutout). Once called, the game sees device pixels as
+/// on iOS: getScreenWidth() is the surface's width in pixels and
+/// getDisplayScale() is `density`. Call before nativeMain and whenever the
+/// insets change.
+#[no_mangle]
+pub extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSetDisplayMetrics(
+    _env: *mut libc::c_void,
+    _class: *mut libc::c_void,
+    density: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+    left: f64,
+) {
+    NATIVE_PIXELS.store(true, Ordering::SeqCst);
+    bloom_shared::display::set_display_scale(density);
+    bloom_shared::display::set_safe_area_insets(top, right, bottom, left);
+}
+
+/// The Back button. Returns false when the game is at its top level
+/// (setMenuButtonExits(true), as for the Apple TV's Menu button): the Activity
+/// then does the system's Back (leaves the app). Otherwise the game gets an
+/// Escape press and this returns true.
+#[no_mangle]
+pub extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeOnBack(
+    _env: *mut libc::c_void,
+    _class: *mut libc::c_void,
+) -> u8 {
+    if bloom_shared::display::menu_exits() || !ENGINE_READY.load(Ordering::SeqCst) {
+        return 0;
+    }
+    BACK_STATE.store(1, Ordering::SeqCst);
+    1
 }
 
 /// Run the compiled game's main() function on the game thread.
