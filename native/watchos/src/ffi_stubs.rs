@@ -456,6 +456,12 @@
 #[no_mangle] pub extern "C" fn bloom_command_line_arg(_p0: f64) -> i64 {
     0
 }
+#[no_mangle] pub extern "C" fn bloom_preferred_language_count() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_preferred_language(_p0: f64) -> i64 {
+    0
+}
 #[no_mangle] pub extern "C" fn bloom_set_output_scale(_p0: f64) -> f64 {
     0.0
 }

@@ -1,0 +1,39 @@
+name: Rust fmt and clippy
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - dev
+      - "*_impl"
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            ~/.cargo/bin
+          key: fmt-clippy-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Setup toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+          override: true
+      - name: Formatting
+        run: cargo fmt -- --check
+      - name: Check (all features)
+        run: cargo check --locked --all-features
+      - name: Clippy (all features)
+        run: cargo clippy --locked --all-features

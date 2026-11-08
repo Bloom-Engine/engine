@@ -1,0 +1,122 @@
+language: rust
+rust: nightly
+services: docker
+matrix:
+  fast_finish: true
+  allow_failures:
+  # Travis runs out of file-descriptors for some reason...
+  - env: TARGET=x86_64-apple-darwin SYSV=1
+  # These did never work
+  - env: TARGET=sparc64-unknown-linux-gnu NOSTD=1
+  # These are missing libc sysV functions:
+  - env: TARGET=x86_64-unknown-netbsd NORUN=1
+  - env: TARGET=x86_64-sun-solaris NORUN=1
+  # Android does not support SystemV shared memory?:
+  - env: TARGET=aarch64-linux-android SYSV=1
+  - env: DOCS/COVERAGE
+  include:
+  - name: "rustfmt"
+    install: rustup component add rustfmt-preview
+    script: cargo fmt --all -- --check
+  - name: "clippy"
+    install: rustup component add clippy-preview
+    script: cargo clippy -- -D clippy::pedantic
+  - name: "documentation + code coverage"
+    sudo: required
+    install:
+    - export PATH=$HOME/.cargo/bin:$PATH
+    - cargo install cargo-update || echo "cargo-update already installed"
+    - cargo install cargo-travis || echo "cargo-travis already installed"
+    - cargo install-update -a
+    script:
+    - |
+      cargo build    --verbose &&
+      cargo coverage --features "unstable" --verbose &&
+      bash <(curl -s https://codecov.io/bash) -s target/kcov
+    - |
+      cargo doc --verbose --no-deps &&
+      cargo doc-upload
+    addons:
+      apt:
+        packages:
+        - libcurl4-openssl-dev
+        - libelf-dev
+        - libdw-dev
+        - binutils-dev
+        - cmake
+  - env: SANITIZER=address
+    script: ci/run_san.sh 
+  - env: SANITIZER=memory
+    script: ci/run_san.sh
+  - env: SANITIZER=thread
+    script: ci/run_san.sh
+  - env: TARGET=aarch64-unknown-linux-gnu
+  - env: TARGET=aarch64-unknown-linux-gnu SYSV=1
+  - env: TARGET=arm-unknown-linux-gnueabi
+  - env: TARGET=arm-unknown-linux-musleabi
+  - env: TARGET=armv7-unknown-linux-gnueabihf
+  - env: TARGET=armv7-unknown-linux-musleabihf
+  - env: TARGET=i586-unknown-linux-gnu
+  - env: TARGET=i586-unknown-linux-gnu SYSV=1
+  - env: TARGET=i686-unknown-linux-gnu
+  - env: TARGET=i686-unknown-linux-gnu SYSV=1
+  - env: TARGET=i686-unknown-linux-musl
+  - env: TARGET=mips-unknown-linux-gnu
+  - env: TARGET=mips64-unknown-linux-gnuabi64
+  - env: TARGET=mips64el-unknown-linux-gnuabi64
+  - env: TARGET=mipsel-unknown-linux-gnu
+  - env: TARGET=powerpc-unknown-linux-gnu
+  - env: TARGET=powerpc64-unknown-linux-gnu
+  - env: TARGET=powerpc64-unknown-linux-gnu SYSV=1
+  - env: TARGET=powerpc64le-unknown-linux-gnu
+  - env: TARGET=sparc64-unknown-linux-gnu NOSTD=1
+  - env: TARGET=x86_64-unknown-linux-gnu
+  - env: TARGET=x86_64-unknown-linux-gnu SYSV=1
+  - env: TARGET=x86_64-unknown-linux-gnu
+    rust: stable
+  - env: TARGET=x86_64-unknown-linux-musl
+  - env: TARGET=x86_64-unknown-linux-musl SYSV=1
+  - env: TARGET=aarch64-linux-android
+  - env: TARGET=aarch64-linux-android SYSV=1
+  - env: TARGET=arm-linux-androideabi
+  - env: TARGET=armv7-linux-androideabi
+  - env: TARGET=x86_64-linux-android
+  - env: TARGET=i686-apple-darwin
+    os: osx
+  - env: TARGET=x86_64-apple-darwin
+    os: osx
+    osx_image: xcode9.2
+  - env: TARGET=x86_64-apple-darwin SYSV=1
+    os: osx
+    osx_image: xcode9.2
+  - env: TARGET=i386-apple-ios
+    os: osx
+    osx_image: xcode9.2
+  - env: TARGET=x86_64-apple-ios
+    os: osx
+    osx_image: xcode9.2
+  - env: TARGET=aarch64-apple-ios NORUN=1
+    os: osx
+    osx_image: xcode9.2
+  - env: TARGET=armv7-apple-ios NORUN=1
+    os: osx
+    osx_image: xcode9.2
+  - env: TARGET=i686-unknown-freebsd NORUN=1
+  - env: TARGET=x86_64-unknown-freebsd NORUN=1
+  - env: TARGET=x86_64-unknown-netbsd NORUN=1
+  - env: TARGET=x86_64-sun-solaris NORUN=1
+
+script:
+  - ci/run.sh
+
+env:
+  global:
+  - secure: i5Am1bhaK+6Zw/7b6uBxCPW+TYsPQ1EHaL8FMp0+KBeGtvpOIT1HsZd31C2gdvWouOVB/vjhS5qWa9YtkUw47Z7skiVRXdJfO+8ZUbH3ac8MUDc2uMrIRtEn37ncdn6IdsedD0MfqJc5BmGu9DUztHQ2oMokzEXGJINOdbadrZv8XUKNx+nlXOFXq6wQln8XhjBIFCP/JTkOr8zeuQdSH/TpaYMxsgfxwy4TSSQFRUmgUOevegcbjakeWvfd6pPiis0h275Ppykm9Jjkf7/RxL6C6uVgOZKcO7qVT/22PbrJwl5kucYelZr+gWXnxh65wyLXIy+t//6B1/3dhwuyr6U/LlxesvB8ZnS8Bt0cA4Loxh6yX/TTYTg734O56hjXRU6rlJW6RaaO6Vukv2s8kU+LhCSWijMtwRf7c2H0K1tksBT9wRZQZ06QxnR7P7jN48/QqAp1QZdT7jhXvOr8s7ROsJhbku0scUAOoNfTZ47SHjbMxGc7klI31BhaxFeaNsWAZMyIeigebhJ8gnZcPDO78J/6svBb83AgMLRPaO4l9y1png4iLdtXtkxr0S8F8pAf9VnDVSJBH6SN9/d7dRa1QwpNDpVcW52GEY5OQkVJ1Xkp9xbnW5nJpOXQIeJeix8VwsUXX289MUyPfOxDQhRCzeSExqks7P1veL+TNss=
+branches:
+  only:
+    - staging # bors r+
+    - trying  # bors try
+    - master
+notifications:
+  email:
+    on_success: never
