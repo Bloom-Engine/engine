@@ -19,7 +19,10 @@ pub fn preferred_languages() -> Vec<String> {
     if let Ok(list) = std::env::var("LANGUAGE") {
         raw.extend(list.split(':').map(str::to_string));
     }
-    if let Some(v) = ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|var| std::env::var(var).ok()) {
+    if let Some(v) = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .find_map(|var| std::env::var(var).ok())
+    {
         raw.push(v);
     }
     let mut out: Vec<String> = Vec::new();
@@ -63,7 +66,12 @@ mod platform {
         fn CFLocaleCopyPreferredLanguages() -> CFTypeRef;
         fn CFArrayGetCount(array: CFTypeRef) -> CFIndex;
         fn CFArrayGetValueAtIndex(array: CFTypeRef, idx: CFIndex) -> CFTypeRef;
-        fn CFStringGetCString(string: CFTypeRef, buffer: *mut u8, size: CFIndex, encoding: u32) -> bool;
+        fn CFStringGetCString(
+            string: CFTypeRef,
+            buffer: *mut u8,
+            size: CFIndex,
+            encoding: u32,
+        ) -> bool;
         fn CFRelease(cf: CFTypeRef);
     }
 
@@ -77,7 +85,9 @@ mod platform {
             for i in 0..CFArrayGetCount(array) {
                 let s = CFArrayGetValueAtIndex(array, i);
                 let mut buf = [0u8; 64];
-                if !s.is_null() && CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as CFIndex, UTF8) {
+                if !s.is_null()
+                    && CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as CFIndex, UTF8)
+                {
                     let len = buf.iter().position(|&b| b == 0).unwrap_or(0);
                     if let Ok(tag) = std::str::from_utf8(&buf[..len]) {
                         out.push(tag.to_string());
@@ -97,7 +107,11 @@ mod platform {
     }
 
     pub fn languages() -> Vec<String> {
-        let props: [&[u8]; 3] = [b"persist.sys.locale\0", b"ro.product.locale\0", b"persist.sys.language\0"];
+        let props: [&[u8]; 3] = [
+            b"persist.sys.locale\0",
+            b"ro.product.locale\0",
+            b"persist.sys.language\0",
+        ];
         for prop in props {
             let mut buf = [0u8; 92]; // PROP_VALUE_MAX
             let len = unsafe { __system_property_get(prop.as_ptr(), buf.as_mut_ptr()) };
@@ -122,13 +136,19 @@ mod platform {
     pub fn languages() -> Vec<String> {
         let mut buf = [0u16; 85]; // LOCALE_NAME_MAX_LENGTH
         let len = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
-        if len > 1 { vec![String::from_utf16_lossy(&buf[..len as usize - 1])] } else { Vec::new() }
+        if len > 1 {
+            vec![String::from_utf16_lossy(&buf[..len as usize - 1])]
+        } else {
+            Vec::new()
+        }
     }
 }
 
 #[cfg(not(any(target_vendor = "apple", target_os = "android", target_os = "windows")))]
 mod platform {
-    pub fn languages() -> Vec<String> { Vec::new() }
+    pub fn languages() -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
