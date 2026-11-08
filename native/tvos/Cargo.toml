@@ -34,3 +34,6 @@ image = { version = "0.25", default-features = false, features = ["hdr"] }
 
 [patch.crates-io]
 metal = { path = "metal-patched" }
+# minimp3's ring buffer: upstream 0.3.4 uses System V shared memory on tvOS,
+# and shmget is a forbidden syscall there (SIGSYS when music starts).
+slice-ring-buffer = { path = "../third_party/slice-ring-buffer" }
