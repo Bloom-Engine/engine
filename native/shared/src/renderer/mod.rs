@@ -84,6 +84,7 @@ mod lighting_upload;
 mod material_api;
 pub mod material_indirection;
 mod material_instancing;
+mod mobile_shading;
 mod model_draw;
 #[cfg(feature = "models3d")]
 mod model_material;
@@ -3452,8 +3453,11 @@ impl Renderer {
         // SH-055 diag — "ibl" in BLOOM_SKIP swaps the split-sum IBL chain
         // (equirect env samples, BRDF LUT, multi-scatter math) for a flat
         // ambient, to measure its per-fragment cost. Markers in core.rs.
-        let scene_shader_source =
-            specialized_scene_shader_source(froxel.is_some(), shadow_map.virtual_map.requested());
+        let scene_shader_source = specialized_scene_shader_source_from(
+            mobile_shading::scene_shader(SCENE_SHADER),
+            froxel.is_some(),
+            shadow_map.virtual_map.requested(),
+        );
         // SH-055 — a second module for the PREPASSED pipeline with the cutout
         // `discard` stripped (between the //PREPASS_STRIP markers in core.rs).
         // The prepassed pipeline runs depth_write=false + Equal against the
