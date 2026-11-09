@@ -46,19 +46,29 @@ static ENGINE_READY: AtomicBool = AtomicBool::new(false);
 
 /// The surface's lifecycle between the UI thread (SurfaceHolder callbacks) and
 /// the game thread. When the app goes to the background Android destroys the
-/// surface: the game thread drops its wgpu surface (`dropped`) before the UI
-/// thread lets the window go, then waits until a new window arrives.
+/// surface: the game thread drops its wgpu surface, then waits until a new
+/// window arrives.
+///
+/// Each `ANativeWindow` reference has one owner. `window` is the newest window
+/// from the UI thread, and `in_use` the one the game thread renders into; the
+/// game thread releases `in_use` when it drops the surface built on it, and
+/// whoever replaces a `window` the game thread never took releases that. So a
+/// window can't go away under a frame, even when the UI thread stops waiting
+/// for a slow game thread.
 struct SurfaceLife {
     lost: bool,
-    dropped: bool,
     window: usize,
+    in_use: usize,
 }
 static LIFE: Mutex<SurfaceLife> = Mutex::new(SurfaceLife {
     lost: false,
-    dropped: false,
     window: 0,
+    in_use: 0,
 });
 static LIFE_CHANGED: Condvar = Condvar::new();
+/// The Activity is finishing (`nativeOnDestroy`): the game thread sets its
+/// `should_close` from this at its next frame, or leaves its surface wait.
+static CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// The logical (game-visible) size for a surface of `w` x `h` pixels.
 fn logical_size(w: u32, h: u32) -> (u32, u32) {
@@ -202,7 +212,21 @@ pub extern "C" fn bloom_init_window(
             b"BloomEngine\0".as_ptr(),
             b"bloom_init_window: starting\0".as_ptr(),
         );
+        // The window nativeSetSurface handed over, else the one Perry's
+        // runtime set (bloom_android_set_native_window). The game thread owns
+        // it from here (see SurfaceLife).
+        {
+            let mut life = LIFE.lock().unwrap();
+            if life.window != 0 {
+                if !NATIVE_WINDOW.is_null() && NATIVE_WINDOW as usize != life.window {
+                    ANativeWindow_release(NATIVE_WINDOW);
+                }
+                NATIVE_WINDOW = life.window as *mut libc::c_void;
+            }
+            life.in_use = NATIVE_WINDOW as usize;
+        }
         let window = NATIVE_WINDOW;
+        NATIVE_WINDOW = std::ptr::null_mut();
         // If no native window was set, use requested dimensions with a headless surface
         let (pixel_w, pixel_h) = if !window.is_null() {
             (
@@ -450,16 +474,30 @@ pub extern "C" fn bloom_attach_hwnd(_hwnd_bits: f64, _width: f64, _height: f64) 
 #[no_mangle]
 pub extern "C" fn bloom_close_window() {
     unsafe {
+        // a host-attached window (bloom_attach_native)
         if !NATIVE_WINDOW.is_null() {
             ANativeWindow_release(NATIVE_WINDOW);
             NATIVE_WINDOW = std::ptr::null_mut();
         }
+        if let Some(eng) = ENGINE.get_mut() {
+            eng.renderer.surface = None;
+        }
+        let mut life = LIFE.lock().unwrap();
+        if life.in_use != 0 {
+            ANativeWindow_release(life.in_use as *mut libc::c_void);
+        }
+        if life.window != 0 && life.window != life.in_use {
+            ANativeWindow_release(life.window as *mut libc::c_void);
+        }
+        life.in_use = 0;
+        life.window = 0;
+        LIFE_CHANGED.notify_all();
     }
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_window_should_close() -> f64 {
-    if engine().should_close {
+    if engine().should_close || CLOSE_REQUESTED.load(Ordering::SeqCst) {
         1.0
     } else {
         0.0
@@ -495,28 +533,48 @@ fn apply_touches() {
     if !ENGINE_READY.load(Ordering::SeqCst) {
         return;
     }
-    let touches = TOUCHES.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+    let touches = TOUCHES
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default();
     let eng = engine();
     for (action, x, y, id) in touches {
         apply_touch(eng, action, x, y, id);
     }
 }
 
-/// Apply one queued touch (game thread).
+/// Apply one queued touch (game thread). `action` is MotionEvent's masked
+/// action: DOWN 0, UP 1, MOVE 2, CANCEL 3, POINTER_DOWN 5, POINTER_UP 6.
+/// The first finger also drives mouse button 0.
 fn apply_touch(eng: &mut EngineState, action: i32, x: f64, y: f64, pointer_index: i32) {
-    let k = if NATIVE_PIXELS.load(Ordering::Relaxed) { 1.0 } else { 0.5 };
+    let k = if NATIVE_PIXELS.load(Ordering::Relaxed) {
+        1.0
+    } else {
+        0.5
+    };
     let lx = x * k;
     let ly = y * k;
-    eng.input.set_mouse_position(lx, ly);
-    if action == 1 || action == 3 {
-        eng.input.release_touch(pointer_index as usize, lx, ly); // UP / CANCEL
-    } else {
-        eng.input.set_touch(pointer_index as usize, lx, ly, true); // DOWN / MOVE
-    }
+    let index = pointer_index as usize;
     match action {
-        0 => eng.input.set_mouse_button_down(0), // ACTION_DOWN
-        1 => eng.input.set_mouse_button_up(0),   // ACTION_UP
-        _ => {}                                  // MOVE, CANCEL
+        // CANCEL: the gesture is gone, every finger with it.
+        3 => {
+            for i in 0..eng.input.max_touch_points() {
+                if eng.input.is_touch_active(i) {
+                    let (tx, ty) = (eng.input.get_touch_x(i), eng.input.get_touch_y(i));
+                    eng.input.release_touch(i, tx, ty);
+                }
+            }
+            eng.input.set_mouse_button_up(0);
+            return;
+        }
+        1 | 6 => eng.input.release_touch(index, lx, ly),
+        _ => eng.input.set_touch(index, lx, ly, true),
+    }
+    eng.input.set_mouse_position(lx, ly);
+    match action {
+        0 => eng.input.set_mouse_button_down(0),
+        1 => eng.input.set_mouse_button_up(0),
+        _ => {}
     }
 }
 
@@ -541,31 +599,43 @@ fn android_frame_sync() {
         }
         2 => {
             eng.input.inject_key_up(27);
-            BACK_STATE.store(0, Ordering::SeqCst);
+            // unless nativeOnBack queued the next press meanwhile
+            let _ = BACK_STATE.compare_exchange(2, 0, Ordering::SeqCst, Ordering::SeqCst);
         }
         _ => {}
     }
 
+    if CLOSE_REQUESTED.load(Ordering::SeqCst) {
+        eng.should_close = true;
+    }
+
     let mut life = LIFE.lock().unwrap();
-    if life.lost {
-        // Drop the wgpu surface while its window still exists, tell the UI
-        // thread, then wait (frames, timers and audio decoding stop with us)
-        // until a new window arrives or the Activity is destroyed.
-        eng.renderer.surface = None;
-        let size = SURFACE_SIZE.load(Ordering::SeqCst);
-        resize_to(eng, (size >> 32) as u32, size as u32); // an offscreen target meanwhile
-        life.dropped = true;
-        AUDIO_PAUSED.store(true, Ordering::SeqCst);
-        LIFE_CHANGED.notify_all();
-        while life.lost && !eng.should_close {
-            life = LIFE_CHANGED
-                .wait_timeout(life, std::time::Duration::from_millis(250))
-                .unwrap()
-                .0;
+    if life.lost || life.window != life.in_use {
+        // Drop the wgpu surface and let its window go, tell the UI thread,
+        // then wait (frames, timers and audio decoding stop with us) until a
+        // new window arrives or the Activity is destroyed.
+        if life.in_use != 0 {
+            eng.renderer.surface = None;
+            unsafe { ANativeWindow_release(life.in_use as *mut libc::c_void) };
+            life.in_use = 0;
+            let size = SURFACE_SIZE.load(Ordering::SeqCst);
+            resize_to(eng, (size >> 32) as u32, size as u32); // an offscreen target meanwhile
+            LIFE_CHANGED.notify_all();
         }
-        life.dropped = false;
-        AUDIO_PAUSED.store(false, Ordering::SeqCst);
-        if !life.lost && life.window != 0 {
+        if life.lost {
+            AUDIO_PAUSED.store(true, Ordering::SeqCst);
+            while life.lost && !CLOSE_REQUESTED.load(Ordering::SeqCst) {
+                life = LIFE_CHANGED
+                    .wait_timeout(life, std::time::Duration::from_millis(250))
+                    .unwrap()
+                    .0;
+            }
+            AUDIO_PAUSED.store(false, Ordering::SeqCst);
+        }
+        if life.window != 0 {
+            // Sizes reported before the window is measured are stale; any
+            // reported after it are applied below.
+            PENDING_SIZE.store(0, Ordering::SeqCst);
             let window = life.window as *mut libc::c_void;
             if let Some(instance) = INSTANCE.get() {
                 let handle = raw_window_handle::AndroidNdkWindowHandle::new(
@@ -582,6 +652,7 @@ fn android_frame_sync() {
                 match surface {
                     Ok(s) => {
                         eng.renderer.surface = Some(s);
+                        life.in_use = life.window;
                         let (w, h) = unsafe {
                             (
                                 ANativeWindow_getWidth(window) as u32,
@@ -589,8 +660,8 @@ fn android_frame_sync() {
                             )
                         };
                         resize_to(eng, w, h); // configures the new surface
-                        PENDING_SIZE.store(0, Ordering::SeqCst);
                     }
+                    // Rendered offscreen; the next frame tries again.
                     Err(e) => log::error!("resume: create_surface failed: {e}"),
                 }
             }
@@ -704,15 +775,21 @@ fn android_audio_thread(renderer: Option<bloom_shared::audio::AudioRenderer>) {
 
     match stream {
         Ok(ref mut s) => {
-            let _ = s.start();
             // Keep thread alive while audio is running; pause the stream while
-            // the app is in the background
-            let mut paused = false;
+            // the app is in the background. A start or pause that fails is
+            // tried again on the next tick.
+            let mut playing = false;
             while AUDIO_RUNNING.load(Ordering::SeqCst) {
-                let want = AUDIO_PAUSED.load(Ordering::SeqCst);
-                if want != paused {
-                    paused = want;
-                    let _ = if paused { s.pause() } else { s.start() };
+                let want = !AUDIO_PAUSED.load(Ordering::SeqCst);
+                if want != playing {
+                    let done = if want { s.start() } else { s.pause() };
+                    match done {
+                        Ok(()) => playing = want,
+                        Err(e) => log::warn!(
+                            "audio: {} failed: {e:?}",
+                            if want { "start" } else { "pause" }
+                        ),
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
@@ -877,41 +954,80 @@ fn install_panic_logger() {
 
 /// An app process's stdout and stderr go to /dev/null on Android, so the
 /// game's console.log / console.error (and a Perry runtime error's report)
-/// would be lost. Both go into a pipe instead, and a thread writes each line
-/// to logcat: tag "BloomStdout", info for stdout's and stderr's alike.
+/// would be lost. Each goes into a pipe instead, and a thread writes its lines
+/// to logcat under tag "BloomStdout": stdout's at info priority, stderr's at
+/// error priority.
 fn route_stdio_to_logcat() {
+    // line-buffered, so a line shows up when it is written
+    unsafe { libc::setvbuf(stdout_file(), std::ptr::null_mut(), libc::_IOLBF, 0) };
+    route_fd_to_logcat(1, 4, "bloom-stdout");
+    route_fd_to_logcat(2, 6, "bloom-stderr");
+}
+
+/// Point `fd` at a pipe whose lines a new thread writes to logcat at
+/// `priority`. `fd` stays as it was when the pipe or the thread can't be made.
+fn route_fd_to_logcat(fd: i32, priority: i32, thread: &str) {
     unsafe {
         let mut fds = [0i32; 2];
         if libc::pipe(fds.as_mut_ptr()) != 0 {
             return;
         }
-        // line-buffered, so a line shows up when it is written
-        libc::setvbuf(stdout_file(), std::ptr::null_mut(), libc::_IOLBF, 0);
-        libc::dup2(fds[1], 1);
-        libc::dup2(fds[1], 2);
-        libc::close(fds[1]);
-        let read_fd = fds[0];
-        let _ = std::thread::Builder::new().name("bloom-stdout".into()).spawn(move || {
-            let mut buf = [0u8; 4096];
-            let mut line: Vec<u8> = Vec::new();
-            loop {
-                let n = libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
-                if n <= 0 {
-                    break;
-                }
-                for &b in &buf[..n as usize] {
-                    if b == b'\n' || line.len() >= 1000 {
-                        line.push(0);
-                        __android_log_print(4, b"BloomStdout\0".as_ptr(), b"%s\0".as_ptr(), line.as_ptr());
-                        line.clear();
-                        if b == b'\n' {
-                            continue;
-                        }
-                    }
-                    line.push(b);
+        // Above the standard descriptors, in case the host closed one of them
+        // and pipe() reused it; dup2 below must not replace the pipe's ends.
+        let [read_fd, write_fd] = fds.map(|f| {
+            let moved = libc::fcntl(f, libc::F_DUPFD_CLOEXEC, 3);
+            libc::close(f);
+            moved
+        });
+        if read_fd < 0 || write_fd < 0 {
+            for f in [read_fd, write_fd] {
+                if f >= 0 {
+                    libc::close(f);
                 }
             }
-        });
+            return;
+        }
+        // The reader first: a pipe nobody drains blocks its writers once full.
+        let reader = std::thread::Builder::new()
+            .name(thread.into())
+            .spawn(move || {
+                let mut buf = [0u8; 4096];
+                let mut line: Vec<u8> = Vec::new();
+                let emit = |line: &mut Vec<u8>| {
+                    line.push(0);
+                    __android_log_print(
+                        priority,
+                        b"BloomStdout\0".as_ptr(),
+                        b"%s\0".as_ptr(),
+                        line.as_ptr(),
+                    );
+                    line.clear();
+                };
+                loop {
+                    let n = libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+                    if n <= 0 {
+                        break;
+                    }
+                    for &b in &buf[..n as usize] {
+                        if b == b'\n' {
+                            emit(&mut line);
+                            continue;
+                        }
+                        if line.len() >= 1000 {
+                            emit(&mut line);
+                        }
+                        // %s would end the line at a NUL
+                        line.push(if b == 0 { b'?' } else { b });
+                    }
+                }
+            });
+        if reader.is_err() {
+            libc::close(read_fd);
+            libc::close(write_fd);
+            return;
+        }
+        libc::dup2(write_fd, fd);
+        libc::close(write_fd);
     }
 }
 
@@ -1005,18 +1121,21 @@ pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSetSurf
         b"BloomEngine\0".as_ptr(),
         b"nativeSetSurface: ANativeWindow acquired\0".as_ptr(),
     );
-    // ANativeWindow_fromSurface already holds a reference for us
-    NATIVE_WINDOW = window;
-    // After nativeSurfaceLost: the waiting game thread picks the new window up.
+    // ANativeWindow_fromSurface already holds a reference for us, which the
+    // game thread takes over (see SurfaceLife). A window it never took is
+    // replaced here.
     let mut life = LIFE.lock().unwrap();
+    if life.window != 0 && life.window != life.in_use {
+        ANativeWindow_release(life.window as *mut libc::c_void);
+    }
     life.window = window as usize;
     life.lost = false;
     LIFE_CHANGED.notify_all();
 }
 
 /// The surface is going away (the app went to the background, or the Activity
-/// is finishing). Waits until the game thread has dropped its wgpu surface,
-/// then lets the window go. Call from SurfaceHolder.Callback.surfaceDestroyed;
+/// is finishing). Waits until the game thread has dropped its wgpu surface and
+/// let the window go. Call from SurfaceHolder.Callback.surfaceDestroyed;
 /// a later nativeSetSurface resumes the game on the new surface.
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSurfaceLost(
@@ -1024,14 +1143,25 @@ pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSurface
     _class: *mut libc::c_void,
 ) {
     let mut life = LIFE.lock().unwrap();
+    let window = life.window;
     life.lost = true;
     life.window = 0;
     LIFE_CHANGED.notify_all();
+    if window == 0 {
+        return;
+    }
+    if window != life.in_use {
+        // the game thread never took it
+        ANativeWindow_release(window as *mut libc::c_void);
+        return;
+    }
     if ENGINE_READY.load(Ordering::SeqCst) {
-        // a frame takes milliseconds; the bound only keeps a stuck game thread
-        // from blocking the UI thread into an ANR
+        // Wait for the game thread to drop its surface, so nothing renders
+        // into the window once this returns. A frame takes milliseconds; the
+        // bound only keeps a stuck game thread from blocking the UI thread into
+        // an ANR (the game thread still holds its reference to the window).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !life.dropped {
+        while life.in_use == window {
             let now = std::time::Instant::now();
             if now >= deadline {
                 log::warn!("nativeSurfaceLost: the game thread didn't release the surface");
@@ -1039,11 +1169,6 @@ pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSurface
             }
             life = LIFE_CHANGED.wait_timeout(life, deadline - now).unwrap().0;
         }
-    }
-    drop(life);
-    if !NATIVE_WINDOW.is_null() {
-        ANativeWindow_release(NATIVE_WINDOW);
-        NATIVE_WINDOW = std::ptr::null_mut();
     }
 }
 
@@ -1138,11 +1263,9 @@ pub extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeOnDestroy(
     _env: *mut libc::c_void,
     _class: *mut libc::c_void,
 ) {
-    unsafe {
-        if let Some(eng) = ENGINE.get_mut() {
-            eng.should_close = true;
-        }
-    }
+    CLOSE_REQUESTED.store(true, Ordering::SeqCst);
+    let _life = LIFE.lock().unwrap();
+    LIFE_CHANGED.notify_all();
 }
 
 // ============================================================
