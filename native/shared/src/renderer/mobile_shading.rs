@@ -3,7 +3,7 @@
 //! forward base pass (as Unreal's mobile renderer and Unity URP have). Same
 //! inputs, outputs, lights and shadows (the sun's with the 4-tap tent
 //! filter only, chosen when the shader is built); the full shader's normal-variance
-//! roughness, BRDF LUT + multi-scatter IBL, coverage-dithered masks, cloud
+//! roughness, BRDF LUT (an analytic fit instead), coverage-dithered masks, cloud
 //! shadows and firefly caps are left out. Those cost a mobile GPU most of the
 //! main pass through register pressure, not arithmetic (Pixel 4a, Adreno
 //! 618).

@@ -2,8 +2,8 @@
 // shade_main_scene in the scene shader on mobile GPUs, the way Unreal's mobile
 // renderer and Unity URP have their own forward base pass. Same inputs,
 // outputs and lights; dropped: normal-map variance and curvature roughness
-// (Toksvig / LEADR / screen-space kernel), the BRDF LUT and multi-scatter
-// compensation (Karis's analytic environment BRDF instead, as Unreal mobile),
+// (Toksvig / LEADR / screen-space kernel), the BRDF LUT (Karis's analytic
+// environment BRDF instead, as Unreal mobile),
 // coverage-dithered alpha masks (a plain alpha test), cloud shadows and the
 // specular firefly caps. The texture reads are the canonical ones, so the
 // GPU-driven variant rewrites them like the full shader's.
@@ -142,7 +142,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // --- Image-based lighting ---
     // Karis's analytic fit of the split-sum environment BRDF ("Physically
     // Based Shading on Mobile", the one Unreal's mobile renderer uses) in
-    // place of the BRDF LUT and the multi-scatter term.
+    // place of the BRDF LUT.
     let n_dot_v = max(dot(n, v), 0.0);
     let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
     let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
@@ -150,6 +150,11 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     let a004 = min(rc.x * rc.x, exp2(-9.28 * n_dot_v)) * rc.x + rc.y;
     let env_ab = vec2<f32>(-1.04, 1.04) * a004 + rc.zw;
     let env_brdf = light_f0 * env_ab.x + vec3<f32>(env_ab.y);
+    // Multi-scatter compensation from the fit's energy, as the full shader
+    // does from the LUT's (Fdez-Aguera 2019).
+    let ess = env_ab.x + env_ab.y;
+    let f_avg = light_f0 + (vec3<f32>(1.0) - light_f0) * (1.0 / 21.0);
+    let ms = f_avg * ess / (vec3<f32>(1.0) - f_avg * (1.0 - ess)) * (1.0 - ess);
 
     let irradiance = textureSampleLevel(
         env_diffuse_tex, env_samp, seamless_equirect_uv(dir_to_equirect_uv(n)), 0.0,
@@ -162,7 +167,11 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     let ssr_own = clamp(
         lighting.dir_light_count.z * (1.0 - smoothstep(0.45, 0.70, roughness)),
         0.0, 1.0);
-    let ibl_spec = prefiltered_env * env_brdf * occlusion * (1.0 - ssr_own);
+    let spec_occ = clamp(
+        pow(n_dot_v + occlusion, exp2(-16.0 * roughness - 1.0)) - 1.0 + occlusion,
+        0.0, 1.0,
+    );
+    let ibl_spec = prefiltered_env * (env_brdf + ms) * spec_occ * (1.0 - ssr_own);
     let indirect_shadow = mix(0.35, 1.0, shadow_factor);
 
     let hdr_raw = lit + (ibl_diffuse + ibl_spec) * indirect_shadow + emissive;
