@@ -875,6 +875,54 @@ fn install_panic_logger() {
     }));
 }
 
+/// An app process's stdout and stderr go to /dev/null on Android, so the
+/// game's console.log / console.error (and a Perry runtime error's report)
+/// would be lost. Both go into a pipe instead, and a thread writes each line
+/// to logcat: tag "BloomStdout", info for stdout's and stderr's alike.
+fn route_stdio_to_logcat() {
+    unsafe {
+        let mut fds = [0i32; 2];
+        if libc::pipe(fds.as_mut_ptr()) != 0 {
+            return;
+        }
+        // line-buffered, so a line shows up when it is written
+        libc::setvbuf(stdout_file(), std::ptr::null_mut(), libc::_IOLBF, 0);
+        libc::dup2(fds[1], 1);
+        libc::dup2(fds[1], 2);
+        libc::close(fds[1]);
+        let read_fd = fds[0];
+        let _ = std::thread::Builder::new().name("bloom-stdout".into()).spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut line: Vec<u8> = Vec::new();
+            loop {
+                let n = libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+                if n <= 0 {
+                    break;
+                }
+                for &b in &buf[..n as usize] {
+                    if b == b'\n' || line.len() >= 1000 {
+                        line.push(0);
+                        __android_log_print(4, b"BloomStdout\0".as_ptr(), b"%s\0".as_ptr(), line.as_ptr());
+                        line.clear();
+                        if b == b'\n' {
+                            continue;
+                        }
+                    }
+                    line.push(b);
+                }
+            }
+        });
+    }
+}
+
+/// C's `stdout` FILE*, for setvbuf.
+unsafe fn stdout_file() -> *mut libc::FILE {
+    extern "C" {
+        static mut stdout: *mut libc::FILE;
+    }
+    stdout
+}
+
 /// JNI_OnLoad: called when System.loadLibrary() loads this .so.
 /// Disables MTE heap tagging (required for Perry NaN-boxing) and
 /// reads the asset base path from BLOOM_ASSET_PATH env var.
@@ -888,6 +936,8 @@ pub extern "C" fn JNI_OnLoad(_vm: *mut libc::c_void, _reserved: *mut libc::c_voi
             .with_max_level(log::LevelFilter::Warn)
             .with_tag("BloomWGPU"),
     );
+
+    route_stdio_to_logcat();
 
     // Perry-runtime installs its own panic hook once `main()` runs, so this one
     // gets overridden; `bloom_init_window` re-installs it (see
