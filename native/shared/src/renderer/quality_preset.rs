@@ -109,6 +109,34 @@ fn quality_preset_config(preset: u32) -> QualityPresetConfig {
 }
 
 impl Renderer {
+    /// Whether TAA also upscales when the render scale is below 1 (a temporal
+    /// upscaler: render-resolution input, history and output at the surface's
+    /// size). Off, TAA resolves at the render resolution and the upscale pass
+    /// scales its result, the order mobile renderers use (Unity URP): the
+    /// temporal pass then costs render_scale² as much, which on a phone's 2-3x
+    /// density display is most of the frame. Default off on Android, on
+    /// elsewhere. Triggers a resize, since TAA's history changes size.
+    pub fn set_temporal_upscale(&mut self, enabled: bool) {
+        if enabled != self.temporal_upscale {
+            self.temporal_upscale = enabled;
+            self.taa_current_idx = 0;
+            self.taa_frame_index = 0;
+            self.taa_history_valid = false;
+            self.taa_history_written = false;
+            let (w, h) = (self.native_width, self.native_height);
+            self.resize(w, h, self.logical_width, self.logical_height);
+        }
+    }
+
+    /// The sun shadow's filter: `true` takes 4 hardware-PCF taps (a
+    /// 3x3-texel tent: the filter mobile renderers default to, a quarter of
+    /// the cost), `false` the 16-tap Poisson disc. Default 4-tap on Android.
+    /// Applies from the current frame (dir_light_count.w).
+    pub fn set_shadow_filter_4tap(&mut self, on: bool) {
+        self.shadow_map.filter_4tap = on;
+        self.lighting_uniforms.dir_light_count[3] = if on { 1.0 } else { 0.0 };
+    }
+
     /// Apply one coherent quality tier. Resolution, temporal reconstruction,
     /// upscale filtering, sharpening, and effects change together. Individual
     /// setters remain overrides and should be called after this method.
