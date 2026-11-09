@@ -41,6 +41,8 @@ static BACK_STATE: AtomicU8 = AtomicU8::new(0);
 /// The wgpu instance the device came from: a new surface (after the app comes
 /// back from the background) must be created from the same one.
 static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
+/// The finger driving mouse button 0 (game thread), -1 = none.
+static MOUSE_POINTER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 /// Set once bloom_init_window has created the engine.
 static ENGINE_READY: AtomicBool = AtomicBool::new(false);
 
@@ -224,6 +226,11 @@ pub extern "C" fn bloom_init_window(
                 NATIVE_WINDOW = life.window as *mut libc::c_void;
             }
             life.in_use = NATIVE_WINDOW as usize;
+            // A window from bloom_android_set_native_window alone is the
+            // current one too, so frames keep it.
+            if life.window == 0 {
+                life.window = life.in_use;
+            }
         }
         let window = NATIVE_WINDOW;
         NATIVE_WINDOW = std::ptr::null_mut();
@@ -545,7 +552,8 @@ fn apply_touches() {
 
 /// Apply one queued touch (game thread). `action` is MotionEvent's masked
 /// action: DOWN 0, UP 1, MOVE 2, CANCEL 3, POINTER_DOWN 5, POINTER_UP 6.
-/// The first finger also drives mouse button 0.
+/// The finger that went down first (DOWN) drives the mouse and button 0
+/// until it lifts.
 fn apply_touch(eng: &mut EngineState, action: i32, x: f64, y: f64, pointer_index: i32) {
     let k = if NATIVE_PIXELS.load(Ordering::Relaxed) {
         1.0
@@ -565,16 +573,23 @@ fn apply_touch(eng: &mut EngineState, action: i32, x: f64, y: f64, pointer_index
                 }
             }
             eng.input.set_mouse_button_up(0);
+            MOUSE_POINTER.store(-1, Ordering::Relaxed);
             return;
         }
         1 | 6 => eng.input.release_touch(index, lx, ly),
         _ => eng.input.set_touch(index, lx, ly, true),
     }
-    eng.input.set_mouse_position(lx, ly);
-    match action {
-        0 => eng.input.set_mouse_button_down(0),
-        1 => eng.input.set_mouse_button_up(0),
-        _ => {}
+    let mouse = MOUSE_POINTER.load(Ordering::Relaxed);
+    if action == 0 {
+        MOUSE_POINTER.store(pointer_index, Ordering::Relaxed);
+        eng.input.set_mouse_position(lx, ly);
+        eng.input.set_mouse_button_down(0);
+    } else if pointer_index == mouse || mouse < 0 {
+        eng.input.set_mouse_position(lx, ly);
+        if action == 1 || action == 6 {
+            eng.input.set_mouse_button_up(0);
+            MOUSE_POINTER.store(-1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -609,65 +624,88 @@ fn android_frame_sync() {
         eng.should_close = true;
     }
 
-    let mut life = LIFE.lock().unwrap();
-    if life.lost || life.window != life.in_use {
+    // The surface's GPU work (dropping, creating, configuring) runs outside
+    // LIFE, so the UI thread's callbacks never wait on it.
+    let (lost, window, in_use) = {
+        let life = LIFE.lock().unwrap();
+        (life.lost, life.window, life.in_use)
+    };
+    if lost || window != in_use {
         // Drop the wgpu surface and let its window go, tell the UI thread,
         // then wait (frames, timers and audio decoding stop with us) until a
         // new window arrives or the Activity is destroyed.
-        if life.in_use != 0 {
+        if in_use != 0 {
             eng.renderer.surface = None;
-            unsafe { ANativeWindow_release(life.in_use as *mut libc::c_void) };
-            life.in_use = 0;
             let size = SURFACE_SIZE.load(Ordering::SeqCst);
             resize_to(eng, (size >> 32) as u32, size as u32); // an offscreen target meanwhile
+            LIFE.lock().unwrap().in_use = 0;
             LIFE_CHANGED.notify_all();
+            unsafe { ANativeWindow_release(in_use as *mut libc::c_void) };
         }
-        if life.lost {
-            AUDIO_PAUSED.store(true, Ordering::SeqCst);
-            while life.lost && !CLOSE_REQUESTED.load(Ordering::SeqCst) {
-                life = LIFE_CHANGED
-                    .wait_timeout(life, std::time::Duration::from_millis(250))
-                    .unwrap()
-                    .0;
+        let window = {
+            let mut life = LIFE.lock().unwrap();
+            if life.lost {
+                AUDIO_PAUSED.store(true, Ordering::SeqCst);
+                while life.lost && !CLOSE_REQUESTED.load(Ordering::SeqCst) {
+                    life = LIFE_CHANGED
+                        .wait_timeout(life, std::time::Duration::from_millis(250))
+                        .unwrap()
+                        .0;
+                }
+                if !CLOSE_REQUESTED.load(Ordering::SeqCst) {
+                    AUDIO_PAUSED.store(false, Ordering::SeqCst);
+                }
             }
-            AUDIO_PAUSED.store(false, Ordering::SeqCst);
-        }
-        if life.window != 0 {
+            // Take the window over before using it outside the lock.
+            life.in_use = life.window;
+            life.window
+        };
+        if window != 0 {
             // Sizes reported before the window is measured are stale; any
             // reported after it are applied below.
             PENDING_SIZE.store(0, Ordering::SeqCst);
-            let window = life.window as *mut libc::c_void;
-            if let Some(instance) = INSTANCE.get() {
+            let ptr = window as *mut libc::c_void;
+            let surface = INSTANCE.get().map(|instance| unsafe {
                 let handle = raw_window_handle::AndroidNdkWindowHandle::new(
-                    std::ptr::NonNull::new(window).unwrap(),
+                    std::ptr::NonNull::new(ptr).unwrap(),
                 );
-                let surface = unsafe {
-                    instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                        raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Android(
-                            raw_window_handle::AndroidDisplayHandle::new(),
-                        )),
-                        raw_window_handle: raw_window_handle::RawWindowHandle::AndroidNdk(handle),
-                    })
-                };
-                match surface {
-                    Ok(s) => {
-                        eng.renderer.surface = Some(s);
-                        life.in_use = life.window;
-                        let (w, h) = unsafe {
-                            (
-                                ANativeWindow_getWidth(window) as u32,
-                                ANativeWindow_getHeight(window) as u32,
-                            )
-                        };
-                        resize_to(eng, w, h); // configures the new surface
+                instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Android(
+                        raw_window_handle::AndroidDisplayHandle::new(),
+                    )),
+                    raw_window_handle: raw_window_handle::RawWindowHandle::AndroidNdk(handle),
+                })
+            });
+            match surface {
+                Some(Ok(s)) => {
+                    eng.renderer.surface = Some(s);
+                    let (w, h) = unsafe {
+                        (
+                            ANativeWindow_getWidth(ptr) as u32,
+                            ANativeWindow_getHeight(ptr) as u32,
+                        )
+                    };
+                    resize_to(eng, w, h); // configures the new surface
+                }
+                failed => {
+                    if let Some(Err(e)) = failed {
+                        log::error!("resume: create_surface failed: {e}");
                     }
-                    // Rendered offscreen; the next frame tries again.
-                    Err(e) => log::error!("resume: create_surface failed: {e}"),
+                    // Rendered offscreen; the next frame tries again while the
+                    // window is current. Hand it back, or let it go when the
+                    // UI thread has replaced it meanwhile.
+                    let mut life = LIFE.lock().unwrap();
+                    life.in_use = 0;
+                    let replaced = life.window != window;
+                    drop(life);
+                    LIFE_CHANGED.notify_all();
+                    if replaced {
+                        unsafe { ANativeWindow_release(ptr) };
+                    }
                 }
             }
         }
     }
-    drop(life);
 
     let size = PENDING_SIZE.swap(0, Ordering::SeqCst);
     if size != 0 {
@@ -1005,7 +1043,16 @@ fn route_fd_to_logcat(fd: i32, priority: i32, thread: &str) {
                 };
                 loop {
                     let n = libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+                    if n < 0
+                        && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                    {
+                        continue;
+                    }
                     if n <= 0 {
+                        if !line.is_empty() {
+                            emit(&mut line);
+                        }
+                        libc::close(read_fd);
                         break;
                     }
                     for &b in &buf[..n as usize] {
@@ -1124,11 +1171,17 @@ pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSetSurf
     // ANativeWindow_fromSurface already holds a reference for us, which the
     // game thread takes over (see SurfaceLife). A window it never took is
     // replaced here.
+    let w = window as usize;
     let mut life = LIFE.lock().unwrap();
-    if life.window != 0 && life.window != life.in_use {
-        ANativeWindow_release(life.window as *mut libc::c_void);
+    let old = life.window;
+    if old != 0 && old != life.in_use && old != w {
+        ANativeWindow_release(old as *mut libc::c_void);
     }
-    life.window = window as usize;
+    if w == life.in_use || w == old {
+        // a window already held: drop the reference fromSurface added
+        ANativeWindow_release(window);
+    }
+    life.window = w;
     life.lost = false;
     LIFE_CHANGED.notify_all();
 }
@@ -1234,6 +1287,8 @@ pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeMain(
         b"BloomEngine\0".as_ptr(),
         b"nativeMain: calling main()\0".as_ptr(),
     );
+    // a close request of an earlier Activity in this process isn't this run's
+    CLOSE_REQUESTED.store(false, Ordering::SeqCst);
     main();
     __android_log_print(
         3,
