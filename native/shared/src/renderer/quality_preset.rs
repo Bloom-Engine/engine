@@ -128,6 +128,19 @@ impl Renderer {
         }
     }
 
+    /// The fast TAA: the current pixel as rendered, history clamped to its
+    /// 5-pixel cross, one bilinear history fetch (`fs_main_fast`), instead of
+    /// the full reconstruction with its provenance and detail-lock
+    /// heuristics. The low tier of temporal AA, for TAA resolving at the
+    /// render resolution (`set_temporal_upscale(false)`). Default on Android
+    /// (Pixel 4a: 16 -> 4 ms at 0.5 render scale).
+    pub fn set_taa_fast(&mut self, on: bool) {
+        if on != self.taa_fast {
+            self.taa_fast = on;
+            self.taa_history_valid = false;
+        }
+    }
+
     /// The sun shadow's filter: `true` takes 4 hardware-PCF taps (a
     /// 3x3-texel tent: the filter mobile renderers default to, a quarter of
     /// the cost), `false` the 16-tap Poisson disc. Default 4-tap on Android.
