@@ -2260,6 +2260,7 @@ impl SceneGraph {
             None,
             None,
             0,
+            false,
         );
     }
 
@@ -2270,6 +2271,7 @@ impl SceneGraph {
         imported_refraction_enabled: bool,
         base_pipeline: &'a wgpu::RenderPipeline,
         layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
+        prepassed: bool,
     ) {
         self.render_with_material_pipeline_selection(
             pass,
@@ -2278,6 +2280,7 @@ impl SceneGraph {
             Some(base_pipeline),
             layered,
             0,
+            prepassed,
         );
     }
 
@@ -2296,23 +2299,21 @@ impl SceneGraph {
             Some(base_pipeline),
             layered,
             render_layer,
+            false,
         );
     }
 
-    fn render_with_material_pipeline_selection<'a>(
+    /// The opaque retained nodes one camera pass draws in `render_layer`, with
+    /// the vertex/index buffers of each node's active LOD. The depth prepass
+    /// and the main pass both draw exactly this set, so every main-pass
+    /// fragment finds the depth the prepass wrote for it.
+    fn opaque_node_draws<'a>(
         &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
         gpu_driven_enabled: bool,
         imported_refraction_enabled: bool,
-        base_pipeline: Option<&'a wgpu::RenderPipeline>,
-        layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
         render_layer: u32,
-    ) {
-        // The renderer enters with the ordinary scene pipeline already bound.
-        // Public callers that do not opt into specialization retain the old
-        // contract and incur no per-node pipeline selection.
-        let mut current_pipeline = base_pipeline.map(|_| (false, false));
-        for (_handle, node) in self.nodes.iter() {
+    ) -> impl Iterator<Item = (&'a SceneNode, Option<&'a LodLevel>, &'a wgpu::Buffer, &'a wgpu::Buffer, u32)> + 'a {
+        self.nodes.iter().filter_map(move |(_handle, node)| {
             if !node.visible
                 || node.render_layer != render_layer
                 || node.gi_only
@@ -2322,19 +2323,19 @@ impl SceneGraph {
                 // attachment and must not inherit those world-only results.
                 || (render_layer == 0 && (!node.in_view_frustum || node.occluded))
             {
-                continue;
+                return None;
             }
             if gpu_driven_enabled
                 && self.gpu_driven_scene_active
                 && scene_node_gpu_driven_ready(node, imported_refraction_enabled)
             {
-                continue;
+                return None;
             }
             if node.material.alpha_mode == MaterialAlphaMode::Blend {
-                continue;
+                return None;
             }
             if imported_refraction_enabled && node.material.transmission.is_active() {
-                continue;
+                return None;
             }
             // Active LOD overrides the base buffers for the camera pass
             // (shadows/picking/BLAS keep using the base geometry).
@@ -2343,22 +2344,63 @@ impl SceneGraph {
                 .get(node.active_lod.max(0) as usize)
                 .filter(|_| node.active_lod >= 0);
             let (vb, ib, index_count) = match active_lod {
-                Some(lod) => {
-                    let (Some(vb), Some(ib)) = (lod.gpu_vb.as_ref(), lod.gpu_ib.as_ref()) else {
-                        continue;
-                    };
-                    (vb, ib, lod.gpu_index_count)
-                }
-                None => {
-                    let Some(vb) = &node.gpu_vb else { continue };
-                    let Some(ib) = &node.gpu_ib else { continue };
-                    (vb, ib, node.gpu_index_count)
-                }
+                Some(lod) => (lod.gpu_vb.as_ref()?, lod.gpu_ib.as_ref()?, lod.gpu_index_count),
+                None => (node.gpu_vb.as_ref()?, node.gpu_ib.as_ref()?, node.gpu_index_count),
             };
-            let Some(bg) = &node.gpu_uniform_bg else {
+            node.gpu_uniform_bg.as_ref()?;
+            node.gpu_material_bg.as_ref()?;
+            Some((node, active_lod, vb, ib, index_count))
+        })
+    }
+
+    /// Depth-only draws of the opaque retained nodes in the world layer, into
+    /// the depth prepass (the caller binds the depth pipeline, lighting and
+    /// joints). The main pass then shades each of their pixels once, with the
+    /// depth-equal `prepassed` pipelines, instead of every overlapping
+    /// fragment; on a tiler (Adreno) a depth-tested opaque prepass is also what
+    /// keeps early-Z working for the rest of the pass. The base material bind
+    /// group serves layered materials too: the depth stage reads only the
+    /// cutout.
+    pub(crate) fn render_depth_prepass<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        gpu_driven_enabled: bool,
+        imported_refraction_enabled: bool,
+    ) {
+        for (node, _lod, vb, ib, index_count) in
+            self.opaque_node_draws(gpu_driven_enabled, imported_refraction_enabled, 0)
+        {
+            let (Some(bg), Some(material)) = (&node.gpu_uniform_bg, &node.gpu_material_bg) else {
                 continue;
             };
-            let Some(base_material) = &node.gpu_material_bg else {
+            pass.set_bind_group(0, bg, &[]);
+            pass.set_bind_group(2, material, &[]);
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..index_count, 0, 0..1);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_material_pipeline_selection<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        gpu_driven_enabled: bool,
+        imported_refraction_enabled: bool,
+        base_pipeline: Option<&'a wgpu::RenderPipeline>,
+        layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
+        render_layer: u32,
+        prepassed: bool,
+    ) {
+        // The renderer enters with the ordinary scene pipeline already bound.
+        // Public callers that do not opt into specialization retain the old
+        // contract and incur no per-node pipeline selection.
+        let mut current_pipeline = base_pipeline.map(|_| (false, false));
+        for (node, active_lod, vb, ib, index_count) in
+            self.opaque_node_draws(gpu_driven_enabled, imported_refraction_enabled, render_layer)
+        {
+            let (Some(bg), Some(base_material)) = (&node.gpu_uniform_bg, &node.gpu_material_bg)
+            else {
                 continue;
             };
             let layered_material = layered.and_then(|_| node.gpu_layered_material_bg.as_ref());
@@ -2377,7 +2419,7 @@ impl SceneGraph {
                 let key = (layered_material.is_some(), uses_uv1);
                 if current_pipeline != Some(key) {
                     if let (Some(layered), Some(_)) = (layered, layered_material) {
-                        pass.set_pipeline(layered.opaque_pipeline(uses_uv1, false));
+                        pass.set_pipeline(layered.opaque_pipeline(uses_uv1, prepassed));
                     } else {
                         pass.set_pipeline(base_pipeline);
                     }

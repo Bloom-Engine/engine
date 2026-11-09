@@ -146,6 +146,13 @@ impl Renderer {
         let inline_visibility_recorded = false;
         #[cfg(feature = "models3d")]
         let mut virtual_visibility_recorded = false;
+        // Whether the opaque retained nodes get their depth here, and so take
+        // the depth-equal pipelines in the main pass. Not on wasm, where the
+        // prepass draws nothing (above).
+        let scene_nodes_prepassed = cfg!(not(target_arch = "wasm32"))
+            && !self.dbg_skip("prepass")
+            && !self.dbg_skip("prepass_draws")
+            && !self.dbg_skip("scene_graph");
         if !self.dbg_skip("prepass") {
             let prepass_ts = profiler.pass_timestamp_writes("depth_prepass");
             let color_attachments = [self.gpu_driven.visibility_raster_attachment()];
@@ -237,6 +244,15 @@ impl Renderer {
                             pass.draw_indexed(draw.index_range(), draw.base_vertex, 0..1);
                         }
                     }
+                }
+                // The opaque retained nodes, so the main pass shades each of
+                // their pixels once (see Scene::render_depth_prepass).
+                if !self.dbg_skip("scene_graph") {
+                    scene.render_depth_prepass(
+                        &mut pass,
+                        self.gpu_driven.submitting(),
+                        self.imported_refraction_enabled,
+                    );
                 }
                 #[cfg(feature = "models3d")]
                 if virtual_visibility_prepared {
@@ -652,17 +668,25 @@ impl Renderer {
                     }
                 }
 
-                // Retained scene-graph nodes are not in the prepass, so they still need
-                // the depth-writing pipeline.
+                // Retained scene-graph nodes went through the depth prepass with
+                // the cached models (`scene_nodes_prepassed`): shade each pixel
+                // once with the depth-equal pipelines. Without the prepass
+                // (wasm, or a diagnostic skip) they keep the depth-writing one.
                 if !self.dbg_skip("scene_graph") {
                     // SH-055 diag
-                    pass.set_pipeline(&self.scene_pipeline);
+                    let scene_pipeline = if scene_nodes_prepassed {
+                        &self.scene_pipeline_prepassed
+                    } else {
+                        &self.scene_pipeline
+                    };
+                    pass.set_pipeline(scene_pipeline);
                     scene.render_with_material_specializations(
                         &mut pass,
                         self.gpu_driven.submitting(),
                         self.imported_refraction_enabled,
-                        &self.scene_pipeline,
+                        scene_pipeline,
                         self.scene_layered_pbr_resources.as_ref(),
+                        scene_nodes_prepassed,
                     );
                 }
             }
