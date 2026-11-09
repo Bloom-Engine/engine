@@ -808,11 +808,7 @@ impl Renderer {
             // window, close to the prior 0.05/20-frame); at 1.0 →
             // 0.10 (~10-frame), matching native TAA. Resolving at the
             // render resolution, TAA is native to its input: scale 1.
-            let taa_scale = if self.taa_upscales() {
-                self.render_scale
-            } else {
-                1.0
-            };
+            let taa_scale = self.taa_scale();
             let alpha = taa_current_weight(self.taa_history_valid, self.taa_frame_index, taa_scale);
             // Pack authored camera motion into the otherwise-unused sign of
             // the positive TAA weight. This lets history reconstruction keep
@@ -1433,6 +1429,39 @@ impl Renderer {
                 PostFxSource::Upscale => CompositeSource::Upscale,
                 _ => CompositeSource::Composed,
             }
+        }
+    }
+
+    /// (Re)create TAA's output/history targets for a surface of `width` x
+    /// `height` and a render extent of `rw` x `rh`: surface size when TAA also
+    /// upscales (TSR), else the render resolution (see taa_upscales). Resets
+    /// the history and the jitter sequence.
+    pub(super) fn recreate_taa_targets(&mut self, width: u32, height: u32, rw: u32, rh: u32) {
+        let (taa_w, taa_h) = if self.taa_upscales() {
+            (width, height)
+        } else {
+            (rw, rh)
+        };
+        let (taa_t, taa_v) = super::create_taa_textures(&self.device, taa_w, taa_h);
+        self.taa_textures = taa_t;
+        self.taa_views = taa_v;
+        let (taa_depth_t, taa_depth_v) =
+            super::create_taa_depth_history_textures(&self.device, taa_w, taa_h);
+        self.taa_depth_history_textures = taa_depth_t;
+        self.taa_depth_history_views = taa_depth_v;
+        self.taa_current_idx = 0;
+        self.taa_frame_index = 0;
+        self.taa_history_valid = false;
+        self.taa_history_written = false;
+    }
+
+    /// TAA's own scale: the render scale when it also upscales, else 1 (it
+    /// resolves at its input's resolution).
+    pub(super) fn taa_scale(&self) -> f32 {
+        if self.taa_upscales() {
+            self.render_scale
+        } else {
+            1.0
         }
     }
 

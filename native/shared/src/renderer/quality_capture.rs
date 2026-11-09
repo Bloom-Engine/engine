@@ -6,25 +6,10 @@
 
 use std::sync::mpsc;
 
+use super::quality_readback::{QualityReadback, ReadbackKind};
 use super::util::encode_png_simple;
 use super::weighted_transparency::WEIGHTED_TRANSPARENCY_AUTO_DRAW_THRESHOLD;
 use super::Renderer;
-
-#[derive(Clone, Copy)]
-enum ReadbackKind {
-    Hdr,
-    Depth,
-    Rgba8,
-}
-
-pub(super) struct QualityReadback {
-    name: &'static str,
-    kind: ReadbackKind,
-    width: u32,
-    height: u32,
-    padded_bytes_per_row: u32,
-    buffer: wgpu::Buffer,
-}
 
 const PACKED_MRT_PIXEL_BYTES: u64 = 20;
 
@@ -284,74 +269,6 @@ fn rgba8_rgb(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) ->
 }
 
 impl Renderer {
-    fn record_quality_texture(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        texture: &wgpu::Texture,
-        name: &'static str,
-        kind: ReadbackKind,
-        aspect: wgpu::TextureAspect,
-        bytes_per_pixel: u32,
-    ) -> QualityReadback {
-        self.record_quality_texture_layer(encoder, texture, 0, name, kind, aspect, bytes_per_pixel)
-    }
-
-    /// `record_quality_texture` for one layer of an array texture.
-    #[allow(clippy::too_many_arguments)]
-    fn record_quality_texture_layer(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        texture: &wgpu::Texture,
-        layer: u32,
-        name: &'static str,
-        kind: ReadbackKind,
-        aspect: wgpu::TextureAspect,
-        bytes_per_pixel: u32,
-    ) -> QualityReadback {
-        let size = texture.size();
-        let unpadded_bytes_per_row = size.width * bytes_per_pixel;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bloom_quality_intermediate_readback"),
-            size: (padded_bytes_per_row * size.height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: layer,
-                },
-                aspect,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(size.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: size.width,
-                height: size.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        QualityReadback {
-            name,
-            kind,
-            width: size.width,
-            height: size.height,
-            padded_bytes_per_row,
-            buffer,
-        }
-    }
-
     /// Resolve logical graph resource names to the renderer-owned imports and
     /// encode their copies. Unknown names fail loudly instead of silently
     /// capturing the wrong attachment after a topology refactor.
@@ -1176,13 +1093,13 @@ impl Renderer {
         self.append_pt_temporal_diagnostic_telemetry(&mut out);
         out.push('}');
         let (taa_input_width, taa_input_height) = self.render_extent();
-        let taa_output_width = self.surface_config.width.max(1);
-        let taa_output_height = self.surface_config.height.max(1);
-        let taa_footprint_input_pixels = if self.render_scale >= 0.75 {
-            self.render_scale
-        } else {
-            0.80
-        };
+        // TAA's own output and scale: the surface and the render scale when
+        // it also upscales, else the render resolution and 1.
+        let taa_size = self.taa_textures[0].size();
+        let taa_output_width = taa_size.width.max(1);
+        let taa_output_height = taa_size.height.max(1);
+        let taa_scale = self.taa_scale();
+        let taa_footprint_input_pixels = if taa_scale >= 0.75 { taa_scale } else { 0.80 };
         let taa_footprint_output_x =
             taa_footprint_input_pixels * taa_output_width as f32 / taa_input_width.max(1) as f32;
         let taa_footprint_output_y =
@@ -1200,7 +1117,7 @@ impl Renderer {
                 &self.prev_proj_matrix_unjittered,
             );
         let taa_camera_motion_phase_active =
-            taa_camera_moving && self.render_scale >= 0.75 && self.render_scale < 0.95;
+            taa_camera_moving && taa_scale >= 0.75 && taa_scale < 0.95;
         let output_detail_uses_depth = !taa_camera_moving && !self.pt_active();
         let (
             taa_source_filter,
@@ -1208,7 +1125,7 @@ impl Renderer {
             taa_statistics_filter,
             taa_statistics_additional_samples,
             taa_composed_source_samples,
-        ) = if self.render_scale >= 0.75 && self.render_scale < 0.95 {
+        ) = if taa_scale >= 0.75 && taa_scale < 0.95 {
             (
                 "approximate-separable-lanczos2",
                 9,
@@ -1216,7 +1133,7 @@ impl Renderer {
                 0,
                 9,
             )
-        } else if self.render_scale >= 0.5 && self.render_scale < 0.75 {
+        } else if taa_scale >= 0.5 && taa_scale < 0.75 {
             (
                 "approximate-radial-lanczos2",
                 5,

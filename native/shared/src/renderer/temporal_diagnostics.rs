@@ -272,7 +272,10 @@ impl Renderer {
         bind_group: &wgpu::BindGroup,
         reactive: bool,
     ) {
-        let (width, height) = (self.surface_config.width, self.surface_config.height);
+        // TAA's own extent: the surface's, or the render resolution's when
+        // it resolves there (see taa_upscales).
+        let taa_size = self.taa_textures[0].size();
+        let (width, height) = (taa_size.width, taa_size.height);
         let resize = self
             .temporal_diagnostics
             .as_ref()

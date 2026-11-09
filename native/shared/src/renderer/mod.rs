@@ -98,6 +98,7 @@ mod pt_temporal_diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 mod quality_capture;
 mod quality_preset;
+mod quality_readback;
 mod queries;
 mod refractive_reflections;
 mod scene_pass;
@@ -802,13 +803,7 @@ pub struct Renderer {
     /// 1 = TAA on (default). When off the renderer behaves exactly
     /// as the pre-TAA pipeline did.
     pub taa_enabled: bool,
-    /// Whether TAA also upscales when the render scale is below 1 (a
-    /// temporal upscaler: render-resolution input, history and output at the
-    /// surface's size). Off, TAA resolves at the render resolution and the
-    /// upscale pass scales its result, the order mobile renderers use (Unity
-    /// URP): the temporal pass then costs render_scale² as much, which on a
-    /// phone's 2-3x density display is most of the frame. Default off on
-    /// Android, on elsewhere. See `set_temporal_upscale`.
+    /// TAA also upscales below render scale 1; see `set_temporal_upscale`.
     temporal_upscale: bool,
     /// Perspective/orthographic clip planes for begin_mode_3d. Defaults keep
     /// the historical 0.01..1000; a scene viewed from ~15 units away needs a
@@ -1349,7 +1344,6 @@ pub struct Renderer {
     pub upscale_pipeline: LazyRenderPipeline,
     pub upscale_layout: wgpu::BindGroupLayout,
     pub upscale_uniform_buffer: wgpu::Buffer,
-    /// The upscale pass's bind groups by source: composed, TAA 0, TAA 1.
     upscale_bind_group_cache: [Option<wgpu::BindGroup>; 3],
     /// 0 = bilinear (cheap), 1 = Catmull-Rom 5-tap (sharper edges).
     /// Default 1.
@@ -9011,25 +9005,7 @@ impl Renderer {
             self.hiz_views = hiz_v;
             #[cfg(feature = "models3d")]
             self.invalidate_registered_virtual_hiz(true);
-            // TAA history/output live at SURFACE size when the TAA pass is
-            // also the TSR upscaler (render res in, output res out), else at
-            // the render resolution (see taa_upscales).
-            let (taa_w, taa_h) = if self.taa_upscales() {
-                (width, height)
-            } else {
-                (rw, rh)
-            };
-            let (taa_t, taa_v) = create_taa_textures(&self.device, taa_w, taa_h);
-            self.taa_textures = taa_t;
-            self.taa_views = taa_v;
-            let (taa_depth_t, taa_depth_v) =
-                create_taa_depth_history_textures(&self.device, taa_w, taa_h);
-            self.taa_depth_history_textures = taa_depth_t;
-            self.taa_depth_history_views = taa_depth_v;
-            self.taa_current_idx = 0;
-            self.taa_frame_index = 0; // reset jitter sequence on resize
-            self.taa_history_valid = false;
-            self.taa_history_written = false;
+            self.recreate_taa_targets(width, height, rw, rh);
             let (sr_t, sr_v) = create_ssr_rt(&self.device, rw, rh);
             self.ssr_rt_texture = sr_t;
             self.ssr_rt_view = sr_v;
@@ -9329,21 +9305,6 @@ impl Renderer {
             self.taa_frame_index = 0;
             self.taa_history_valid = false;
             self.taa_history_written = false;
-        }
-    }
-
-    /// Whether TAA upscales to the surface's size (see `temporal_upscale`) or
-    /// resolves at the render resolution before the upscale pass. Triggers a
-    /// resize, since TAA's history changes size.
-    pub fn set_temporal_upscale(&mut self, enabled: bool) {
-        if enabled != self.temporal_upscale {
-            self.temporal_upscale = enabled;
-            self.taa_current_idx = 0;
-            self.taa_frame_index = 0;
-            self.taa_history_valid = false;
-            self.taa_history_written = false;
-            let (w, h) = (self.native_width, self.native_height);
-            self.resize(w, h, self.logical_width, self.logical_height);
         }
     }
 
@@ -11051,13 +11012,6 @@ impl Renderer {
         } else {
             self.shadow_map.disable();
         }
-    }
-
-    /// The sun shadow's filter: `true` takes 4 hardware-PCF taps (a
-    /// 3x3-texel tent: the filter mobile renderers default to, a quarter of
-    /// the cost), `false` the 16-tap Poisson disc. Default 4-tap on Android.
-    pub fn set_shadow_filter_4tap(&mut self, on: bool) {
-        self.shadow_map.filter_4tap = on;
     }
 
     /// Disables the ticket-004 shadow-cache and re-renders cascades
