@@ -186,9 +186,13 @@ fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32) -> vec3<f32> {
     return vec3<f32>(view_x, view_y, view_z);
 }
 
-// Mip level per march step — depends only on step_size, so it is computed
-// once per pixel in cs_main and read by every scan_direction call.
-var<private> mip_per_step: array<i32, 8>;
+// The Hi-Z mip for march step `s`: step s covers ~s * step_pixels pixels, so
+// floor(log2) of that. Computed per step rather than read from a per-pixel
+// array: a runtime-indexed private array becomes function memory in SPIR-V,
+// which mobile GPUs (Adreno) keep in scratch memory.
+fn step_mip(step_pixels: f32, s: u32) -> i32 {
+    return clamp(i32(floor(log2(max(step_pixels * f32(s), 1.0)))), 0, HIZ_MAX_MIP);
+}
 
 // March one horizon direction (both signs) and return its visibility
 // contribution in [0, 1]. Factored out of cs_main so the adaptive full-scan
@@ -204,7 +208,7 @@ fn scan_direction(angle: f32, P: vec3<f32>, N: vec3<f32>, uv: vec2<f32>,
 
     for (var s = 1u; s <= N_STEPS; s = s + 1u) {
         let offset = dir * step_size * f32(s);
-        let mip = mip_per_step[s - 1u];
+        let mip = step_mip(step_size * f32(u.size.x), s);
 
         if (!pos_on_sky) {
             let uv_pos = uv + offset;
@@ -301,14 +305,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var ao_sum = 0.0;
     let step_size = clamped_radius / f32(N_STEPS);
     let inv_radius = 1.0 / radius_ws;
-
-    // Mip-per-step: step s covers ~s * step_size * mip0_w pixels;
-    // take floor(log2(that)). Precomputed once per pixel.
-    let step_pixels = step_size * f32(u.size.x);
-    for (var s = 0u; s < N_STEPS; s = s + 1u) {
-        let d_px = step_pixels * f32(s + 1u);
-        mip_per_step[s] = clamp(i32(floor(log2(max(d_px, 1.0)))), 0, HIZ_MAX_MIP);
-    }
 
     // Split the 8-direction scan across 4 frames. Frame `phase = k`
     // samples directions { phase, phase + 4 } — complementary angles
