@@ -740,6 +740,14 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
+// The i-th neighbour of the four-pixel cross: left, right, up, down. Computed
+// rather than read from a local array: SPIR-V can't index a constant array with
+// a runtime value, so such an array becomes function memory, which mobile GPUs
+// (Adreno) keep in scratch memory.
+fn cross_offset(i: i32) -> vec2<i32> {
+    return select(vec2<i32>(0, 2 * i - 5), vec2<i32>(2 * i - 1, 0), i < 2);
+}
+
 // RGB <-> YCoCg conversions. Reversible, linear, cheap (no matrix
 // multiply). Used by the TAA neighborhood clamp so we can bound
 // history's luma (Y) against the source neighborhood's statistical
@@ -837,12 +845,8 @@ fn fs_main(in: VsOut) -> TaaOut {
     );
     var closest_coord = center_coord;
     var depth = textureLoad(depth_tex, center_coord, 0);
-    let dilation_offsets = array<vec2<i32>, 4>(
-        vec2<i32>(-1, 0), vec2<i32>(1, 0),
-        vec2<i32>(0, -1), vec2<i32>(0, 1),
-    );
     for (var i = 0; i < 4; i = i + 1) {
-        let coord = clamp(center_coord + dilation_offsets[i], vec2<i32>(0), depth_max_coord);
+        let coord = clamp(center_coord + cross_offset(i), vec2<i32>(0), depth_max_coord);
         let candidate_depth = textureLoad(depth_tex, coord, 0);
         if (candidate_depth < depth) {
             depth = candidate_depth;
@@ -1084,12 +1088,8 @@ fn fs_main(in: VsOut) -> TaaOut {
     } else {
         var m1 = rgb_to_ycocg(center_rgb);
         var m2 = m1 * m1;
-        let statistics_offsets = array<vec2<f32>, 4>(
-            vec2<f32>(-1.0, 0.0), vec2<f32>(1.0, 0.0),
-            vec2<f32>(0.0, -1.0), vec2<f32>(0.0, 1.0),
-        );
         for (var i = 0; i < 4; i = i + 1) {
-            let s_uv = src_uv + statistics_offsets[i] * statistics_texel;
+            let s_uv = src_uv + vec2<f32>(cross_offset(i)) * statistics_texel;
             let s_rgb = textureSampleLevel(composed_tex, composed_samp, s_uv, 0.0).rgb;
             let s = rgb_to_ycocg(s_rgb);
             m1 = m1 + s;

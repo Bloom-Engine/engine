@@ -290,6 +290,16 @@ fn compute_tbn(dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>,
     return mat3x3<f32>(t * invmax, b * invmax, n);
 }
 
+// The 4x4 Bayer threshold (0.5..15.5)/16 at (x, y), from the bits of x ^ y and
+// y. A table indexed by the pixel would be a local array: SPIR-V can't index a
+// constant array with a runtime value, so it becomes function memory, which
+// mobile GPUs (Adreno) keep in scratch memory.
+fn bayer4(x: u32, y: u32) -> f32 {
+    let v = x ^ y;
+    let i = ((v & 1u) << 3u) | ((y & 1u) << 2u) | (v & 2u) | ((y & 2u) >> 1u);
+    return (f32(i) + 0.5) / 16.0;
+}
+
 // Stable 4x4 Bayer threshold anchored to the source texture. Bloom's scene
 // targets are single-sample, so hardware alpha-to-coverage is unavailable;
 // this is its deterministic spatial equivalent for subpixel MASK coverage.
@@ -306,12 +316,6 @@ fn mask_coverage_threshold(
     dimensions: vec2<u32>,
     lod: f32,
 ) -> f32 {
-    let bayer = array<f32, 16>(
-         0.5 / 16.0,  8.5 / 16.0,  2.5 / 16.0, 10.5 / 16.0,
-        12.5 / 16.0,  4.5 / 16.0, 14.5 / 16.0,  6.5 / 16.0,
-         3.5 / 16.0, 11.5 / 16.0,  1.5 / 16.0,  9.5 / 16.0,
-        15.5 / 16.0,  7.5 / 16.0, 13.5 / 16.0,  5.5 / 16.0,
-    );
     let wrapped_uv = uv - floor(uv);
     // Lower alpha mips already describe the complete source footprint as one
     // coverage probability. Repeating the threshold at level-zero texel
@@ -330,7 +334,7 @@ fn mask_coverage_threshold(
     let texel = vec2<u32>(floor(wrapped_uv * mip_dimensions));
     let x = texel.x & 3u;
     let y = texel.y & 3u;
-    return bayer[y * 4u + x];
+    return bayer4(x, y);
 }
 
 fn mask_texture_lod(
@@ -436,7 +440,34 @@ fn f_schlick(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * fc;
 }
 
-// Sample a single cascade's shadow texture with 4-tap Poisson PCF.
+// 16-tap Poisson PCF in one cascade; each tap is a hardware 2x2 comparison.
+// The offsets are literal operands rather than a local array indexed by a loop
+// counter: SPIR-V can't index a constant array with a runtime value, so such an
+// array becomes function memory, which mobile GPUs (Adreno) keep in scratch
+// memory (measured ~12 ms of a 73 ms main pass on a Pixel 4a).
+fn pcf_poisson16(t: texture_depth_2d, uv: vec2<f32>, tap_step: vec2<f32>, depth_ref: f32) -> f32 {
+    var sum = 0.0;
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.94201624, -0.39906216) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.94558609, -0.76890725) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.09418410, -0.92938870) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.34495938, 0.29387760) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.91588581, 0.45771432) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.81544232, -0.87912464) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.38277543, 0.27676845) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.97484398, 0.75648379) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.44323325, -0.97511554) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.53742981, -0.47373420) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.26496911, -0.41893023) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.79197514, 0.19090188) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.24188840, 0.99706507) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.81409955, 0.91437590) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.19984126, 0.78641367) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.14383161, -0.14100790) * tap_step, depth_ref);
+    return sum;
+}
+
+// Sample a single cascade's shadow texture with 16-tap Poisson PCF. The cascade
+// is selected once, not per tap.
 fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
     var dims: vec2<u32>;
     if (cascade == 0) {
@@ -454,35 +485,14 @@ fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
     // The sun's real angular size gives a ~1m penumbra at typical
     // scene distances; r=1.0 roughly matches that.
     let radius = 1.0;
-    var sum = 0.0;
-    let poisson = array<vec2<f32>, 16>(
-        vec2<f32>(-0.94201624, -0.39906216),
-        vec2<f32>( 0.94558609, -0.76890725),
-        vec2<f32>(-0.09418410, -0.92938870),
-        vec2<f32>( 0.34495938,  0.29387760),
-        vec2<f32>(-0.91588581,  0.45771432),
-        vec2<f32>(-0.81544232, -0.87912464),
-        vec2<f32>(-0.38277543,  0.27676845),
-        vec2<f32>( 0.97484398,  0.75648379),
-        vec2<f32>( 0.44323325, -0.97511554),
-        vec2<f32>( 0.53742981, -0.47373420),
-        vec2<f32>(-0.26496911, -0.41893023),
-        vec2<f32>( 0.79197514,  0.19090188),
-        vec2<f32>(-0.24188840,  0.99706507),
-        vec2<f32>(-0.81409955,  0.91437590),
-        vec2<f32>( 0.19984126,  0.78641367),
-        vec2<f32>( 0.14383161, -0.14100790),
-    );
-    for (var i: i32 = 0; i < 16; i = i + 1) {
-        let off = poisson[i] * texel * radius;
-        let uv = shadow_uv + off;
-        if (cascade == 0) {
-            sum += textureSampleCompareLevel(shadow_tex_0, shadow_samp, uv, depth_ref);
-        } else if (cascade == 1) {
-            sum += textureSampleCompareLevel(shadow_tex_1, shadow_samp, uv, depth_ref);
-        } else {
-            sum += textureSampleCompareLevel(shadow_tex_2, shadow_samp, uv, depth_ref);
-        }
+    let tap_step = texel * radius;
+    var sum: f32;
+    if (cascade == 0) {
+        sum = pcf_poisson16(shadow_tex_0, shadow_uv, tap_step, depth_ref);
+    } else if (cascade == 1) {
+        sum = pcf_poisson16(shadow_tex_1, shadow_uv, tap_step, depth_ref);
+    } else {
+        sum = pcf_poisson16(shadow_tex_2, shadow_uv, tap_step, depth_ref);
     }
     return sum / 16.0;
 }
