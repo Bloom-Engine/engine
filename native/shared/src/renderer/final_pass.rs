@@ -107,6 +107,10 @@ impl Renderer {
                         binding: 7,
                         resource: wgpu::BindingResource::TextureView(&self.depth_view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&self.tonemap_lut.view),
+                    },
                 ],
             });
             self.composite_bind_group_cache[composite_cache_index] = Some(composite_bg);

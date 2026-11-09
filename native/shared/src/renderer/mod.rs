@@ -115,6 +115,7 @@ mod temporal_diagnostics;
 mod temporal_history;
 mod temporal_reactive;
 mod texture_store;
+mod tonemap_lut;
 mod transmitted_shadows;
 mod transparent_gi;
 #[cfg(feature = "models3d")]
@@ -609,6 +610,8 @@ pub struct Renderer {
     /// the tonemap.
     pub composite_pipeline: LazyRenderPipeline,
     pub composite_layout: wgpu::BindGroupLayout,
+    /// The AgX tonemap as a 3D table (tonemap_lut.rs), read by the composite.
+    tonemap_lut: tonemap_lut::TonemapLut,
     pub composite_sampler: wgpu::Sampler,
     composite_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::CompositeSource::COUNT * 2],
     /// 0 = ACES (default, matches bloom-reference), 1 = AgX.
@@ -4123,6 +4126,7 @@ impl Renderer {
             label: Some("composite_shader"),
             source: wgpu::ShaderSource::Wgsl(COMPOSITE_SHADER_WGSL.into()),
         });
+        let tonemap_lut = tonemap_lut::TonemapLut::new(&device, &queue);
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite_layout"),
             entries: &[
@@ -4190,6 +4194,16 @@ impl Renderer {
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
                         view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
                         multisampled: false,
                     },
                     count: None,
@@ -8128,6 +8142,7 @@ impl Renderer {
             scene_compose_bind_group_cache: std::array::from_fn(|_| None),
             composite_pipeline,
             composite_layout,
+            tonemap_lut,
             composite_sampler,
             composite_bind_group_cache: std::array::from_fn(|_| None),
             // 1 = AgX (Troy Sobotka 2022). Matches Blender 4.0+ and
