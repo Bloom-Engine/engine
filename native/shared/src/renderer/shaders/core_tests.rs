@@ -21,7 +21,18 @@ fn scene_vertex_shader_preserves_the_missing_tangent_sentinel() {
 fn textured_specular_glossiness_keeps_authored_diffuse_and_f0_independent() {
     wgpu::naga::front::wgsl::parse_str(SCENE_SHADER)
         .unwrap_or_else(|error| panic!("ordinary scene WGSL failed: {error:?}"));
-    assert!(SCENE_SHADER.contains("fn shade_specular_glossiness_pbr("));
+    // Both workflows light through one BRDF taking a diffuse colour and an F0.
+    assert!(SCENE_SHADER.contains("fn shade_pbr_f0("));
+    assert!(!SCENE_SHADER.contains("fn shade_specular_glossiness_pbr("));
+    assert!(SCENE_SHADER.contains(
+        "let light_diffuse = select(base_color * (1.0 - metallic), base_color, has_spec_gloss);"
+    ));
+    assert_eq!(
+        SCENE_SHADER
+            .matches("light_diffuse, light_f0, roughness")
+            .count(),
+        3
+    );
     assert!(SCENE_SHADER.contains("let f0 = select(mr_f0, authored_specular, has_spec_gloss);"));
     assert!(
         SCENE_SHADER.contains("let diffuse_weight = select(1.0 - metallic, 1.0, has_spec_gloss);")
