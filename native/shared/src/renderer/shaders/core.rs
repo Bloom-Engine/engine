@@ -693,7 +693,14 @@ fn shade_pbr(
 // failure case.  Keeping the authored F0 here preserves both lobes while
 // sharing the established GGX distribution, visibility, energy bound, and
 // roughness policy with the ordinary material path.
-fn shade_specular_glossiness_pbr(
+// Direct GGX for a surface given as a diffuse colour and an F0: both the
+// specular/glossiness workflow (authored) and metallic/roughness (diffuse =
+// base * (1 - metallic), F0 = mix(0.04, base, metallic), exactly shade_pbr)
+// light through this one function, so the scene shader inlines one BRDF per
+// light instead of one per workflow (the second copy was 8 ms of a 38 ms
+// main pass on a mobile GPU, Pixel 4a). shade_pbr stays the metallic form
+// the layered-material variant is derived from.
+fn shade_pbr_f0(
     n: vec3<f32>,
     v: vec3<f32>,
     l_dir: vec3<f32>,
@@ -1013,6 +1020,14 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     let dielectric_floor = select(0.15, 0.045, has_spec_gloss);
     var roughness = max(roughness_raw,
                         dielectric_floor * (1.0 - metallic));
+    // What the lights see of either workflow: a diffuse colour and an F0
+    // (see shade_pbr_f0).
+    let light_diffuse = select(base_color * (1.0 - metallic), base_color, has_spec_gloss);
+    let light_f0 = select(
+        mix(vec3<f32>(0.04), base_color, metallic),
+        authored_specular,
+        has_spec_gloss,
+    );
 
     // Specular antialiasing. Two sources of variance are folded into
     // GGX α² as additive corrections:
@@ -1101,16 +1116,9 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         lit += base_color / PI * lighting.light_color.rgb * lighting.light_dir.w
              * ndl_wrap * direct_shadow;
     } else {
-        if (has_spec_gloss) {
-            lit += shade_specular_glossiness_pbr(
-                n, v, legacy_dir, lighting.light_color.rgb,
-                lighting.light_dir.w, base_color, authored_specular, roughness,
-            ) * direct_shadow;
-        } else {
-            lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
-                             lighting.light_dir.w, base_color, metallic, roughness)
-                 * direct_shadow;
-        }
+        lit += shade_pbr_f0(n, v, legacy_dir, lighting.light_color.rgb,
+                            lighting.light_dir.w, light_diffuse, light_f0, roughness)
+             * direct_shadow;
     }
 
     // Foliage backlit transmission — sun bleeding THROUGH alpha-cut leaf cards
@@ -1130,15 +1138,8 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     for (var i = 0u; i < dir_count; i++) {
         let dl = lighting.dir_lights[i];
         let l = normalize(dl.direction.xyz);
-        if (has_spec_gloss) {
-            lit += shade_specular_glossiness_pbr(
-                n, v, l, dl.color.rgb, dl.direction.w,
-                base_color, authored_specular, roughness,
-            );
-        } else {
-            lit += shade_pbr(n, v, l, dl.color.rgb, dl.direction.w,
-                             base_color, metallic, roughness);
-        }
+        lit += shade_pbr_f0(n, v, l, dl.color.rgb, dl.direction.w,
+                            light_diffuse, light_f0, roughness);
     }
 
     // BEGIN-POINT-LIGHT-LOOP (replaced by the froxel-clustered variant
@@ -1155,15 +1156,8 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
             let l = to_light / dist;
             let atten = 1.0 - (dist / range);
             let atten2 = atten * atten;
-            if (has_spec_gloss) {
-                lit += shade_specular_glossiness_pbr(
-                    n, v, l, pl.color.rgb, pl.color.w * atten2,
-                    base_color, authored_specular, roughness,
-                );
-            } else {
-                lit += shade_pbr(n, v, l, pl.color.rgb, pl.color.w * atten2,
-                                 base_color, metallic, roughness);
-            }
+            lit += shade_pbr_f0(n, v, l, pl.color.rgb, pl.color.w * atten2,
+                                light_diffuse, light_f0, roughness);
         }
     }
     // END-POINT-LIGHT-LOOP
