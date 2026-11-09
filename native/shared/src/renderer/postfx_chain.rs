@@ -781,7 +781,7 @@ impl Renderer {
         // upscale_rt. Downstream post-FX (DoF/MB/SSS/composite) read
         // upscale_rt so the chain operates at full surface resolution.
         if self.render_scale < 0.999 && !self.taa_enabled {
-            self.record_upscale(encoder, PostFxSource::Composed);
+            self.record_upscale(encoder, profiler, PostFxSource::Composed);
         }
 
         // ============================================================
@@ -1084,7 +1084,7 @@ impl Renderer {
                 } else {
                     PostFxSource::Taa1
                 };
-                self.record_upscale(encoder, source);
+                self.record_upscale(encoder, profiler, source);
             }
         }
 
@@ -1465,7 +1465,12 @@ impl Renderer {
     /// Upscale pass: a render-resolution `source` (the composed scene, or the
     /// TAA output when TAA resolves at the render resolution) → the
     /// full-surface upscale_rt, with the `upscale_mode` filter.
-    fn record_upscale(&mut self, encoder: &mut wgpu::CommandEncoder, source: PostFxSource) {
+    fn record_upscale(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+        source: PostFxSource,
+    ) {
         let up = UpscaleParams {
             params: [self.upscale_mode as f32, 0.0, 0.0, 0.0],
         };
@@ -1501,6 +1506,7 @@ impl Renderer {
             });
             self.upscale_bind_group_cache[slot] = Some(bind_group);
         }
+        let upscale_ts = profiler.pass_timestamp_writes("upscale_pass");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("upscale_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1513,7 +1519,7 @@ impl Renderer {
                 },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: upscale_ts,
             occlusion_query_set: None,
             multiview_mask: None,
         });
