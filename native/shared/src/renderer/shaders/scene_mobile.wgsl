@@ -140,6 +140,8 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // END-POINT-LIGHT-LOOP
 
     // --- Image-based lighting ---
+    //IBL_STRIP_BEGIN — BLOOM_SKIP=ibl replaces this block with a flat ambient
+    // (see mod.rs); only ibl_diffuse/ibl_spec escape it.
     // Karis's analytic fit of the split-sum environment BRDF ("Physically
     // Based Shading on Mobile", the one Unreal's mobile renderer uses) in
     // place of the BRDF LUT.
@@ -172,6 +174,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         0.0, 1.0,
     );
     let ibl_spec = prefiltered_env * (env_brdf + ms) * spec_occ * (1.0 - ssr_own);
+    //IBL_STRIP_END
     let indirect_shadow = mix(0.35, 1.0, shadow_factor);
 
     let hdr_raw = lit + (ibl_diffuse + ibl_spec) * indirect_shadow + emissive;

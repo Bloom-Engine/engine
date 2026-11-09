@@ -110,12 +110,30 @@ mod tests {
         for marker in [
             "//PREPASS_STRIP_BEGIN",
             "//PREPASS_STRIP_END",
+            "//IBL_STRIP_BEGIN",
+            "//IBL_STRIP_END",
             "// BEGIN-POINT-LIGHT-LOOP",
             "// END-POINT-LIGHT-LOOP",
             "pl.color.w * atten2",
         ] {
             assert_eq!(mobile.matches(marker).count(), 1, "{marker}");
         }
+    }
+
+    #[test]
+    fn mobile_scene_shader_takes_the_ibl_strip_diagnostic() {
+        // As BLOOM_SKIP=ibl does in specialized_scene_shader_source_from.
+        let mobile = with_mobile_shading(SCENE_SHADER);
+        let begin = mobile.find("//IBL_STRIP_BEGIN").unwrap();
+        let end = mobile.find("//IBL_STRIP_END").unwrap() + "//IBL_STRIP_END".len();
+        let stripped = format!(
+            "{}\n    let ibl_diffuse = base_color * (1.0 - metallic) * occlusion\n        * lighting.camera_pos.w * 0.35;\n    let ibl_spec = vec3<f32>(0.0);\n    let ibl_clearcoat = vec3<f32>(0.0);\n{}",
+            &mobile[..begin],
+            &mobile[end..]
+        );
+        assert!(!stripped.contains("env_sample_lod(reflect(-v, n)"));
+        wgpu::naga::front::wgsl::parse_str(&stripped)
+            .unwrap_or_else(|error| panic!("IBL-stripped mobile WGSL failed: {error:?}"));
     }
 
     #[test]
