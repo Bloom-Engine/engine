@@ -13,6 +13,7 @@ pub(super) fn create_scene_depth_pipeline(
     shader: &wgpu::ShaderModule,
     label: &'static str,
     visibility_target: bool,
+    cull_mode: Option<wgpu::Face>,
 ) -> super::lazy_pipeline::LazyRenderPipeline {
     let targets = [visibility_target.then_some(wgpu::ColorTargetState {
         format: visibility_buffer::VISIBILITY_FORMAT,
@@ -41,7 +42,7 @@ pub(super) fn create_scene_depth_pipeline(
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
+                cull_mode,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -146,6 +147,13 @@ impl Renderer {
         let inline_visibility_recorded = false;
         #[cfg(feature = "models3d")]
         let mut virtual_visibility_recorded = false;
+        // Whether the opaque retained nodes get their depth here, and so take
+        // the depth-equal pipelines in the main pass. Not on wasm, where the
+        // prepass draws nothing (above).
+        let scene_nodes_prepassed = cfg!(not(target_arch = "wasm32"))
+            && !self.dbg_skip("prepass")
+            && !self.dbg_skip("prepass_draws")
+            && !self.dbg_skip("scene_graph");
         if !self.dbg_skip("prepass") {
             let prepass_ts = profiler.pass_timestamp_writes("depth_prepass");
             let color_attachments = [self.gpu_driven.visibility_raster_attachment()];
@@ -237,6 +245,16 @@ impl Renderer {
                             pass.draw_indexed(draw.index_range(), draw.base_vertex, 0..1);
                         }
                     }
+                }
+                // The opaque retained nodes, so the main pass shades each of
+                // their pixels once (see Scene::render_depth_prepass).
+                if !self.dbg_skip("scene_graph") {
+                    pass.set_pipeline(&self.scene_node_depth_pipeline);
+                    scene.render_depth_prepass(
+                        &mut pass,
+                        self.gpu_driven.submitting(),
+                        self.imported_refraction_enabled,
+                    );
                 }
                 #[cfg(feature = "models3d")]
                 if virtual_visibility_prepared {
@@ -652,8 +670,10 @@ impl Renderer {
                     }
                 }
 
-                // Retained scene-graph nodes are not in the prepass, so they still need
-                // the depth-writing pipeline.
+                // Retained scene-graph nodes went through the depth prepass with
+                // the cached models (`scene_nodes_prepassed`): shade each pixel
+                // once with the depth-equal pipelines. Without the prepass
+                // (wasm, or a diagnostic skip) they keep the depth-writing one.
                 if !self.dbg_skip("scene_graph") {
                     // SH-055 diag
                     pass.set_pipeline(&self.scene_pipeline);
@@ -663,6 +683,7 @@ impl Renderer {
                         self.imported_refraction_enabled,
                         &self.scene_pipeline,
                         self.scene_layered_pbr_resources.as_ref(),
+                        scene_nodes_prepassed.then_some(&*self.scene_node_pipeline_prepassed),
                     );
                 }
             }

@@ -1650,6 +1650,10 @@ pub struct Renderer {
     scene_depth_visibility_pipeline: Option<LazyRenderPipeline>,
     /// EN-044 — cached-model pipeline for the prepassed path (no depth write, Equal).
     pub scene_pipeline_prepassed: LazyRenderPipeline,
+    /// The retained scene nodes' depth prepass and prepassed pipeline: as
+    /// above, with scene_pipeline's back-face culling.
+    scene_node_depth_pipeline: LazyRenderPipeline,
+    scene_node_pipeline_prepassed: LazyRenderPipeline,
     pub scene_material_layout: wgpu::BindGroupLayout,
     scene_sheen_albedo_lut: Option<layered_pbr_scene::SceneSheenAlbedoLut>,
     scene_layered_pbr_resources: Option<layered_pbr_scene::SceneLayeredPbrResources>,
@@ -3978,6 +3982,7 @@ impl Renderer {
             &scene_shader,
             "scene_depth_prepass_pipeline",
             false,
+            None,
         );
 
         // EN-044 — the cached-model pipeline for the PREPASSED path.
@@ -3995,90 +4000,102 @@ impl Renderer {
         // surface's depth is bit-identical to what the prepass wrote — same vertex
         // stage, same uniforms, same wind.
         //
-        // scene_pipeline (Less, write) stays for the retained scene-graph nodes,
-        // which are not in the prepass.
-        let scene_pipeline_prepassed = LazyRenderPipeline::new(
-            &device,
-            &wgpu::RenderPipelineDescriptor {
-                label: Some("scene_pipeline_prepassed"),
-                layout: Some(&scene_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    // Original module for the vertex stage — EN-044's prepass/main
-                    // depth bit-exactness must not depend on the fragment strip.
-                    module: &scene_shader,
-                    entry_point: Some("vs_main_scene"),
-                    buffers: &[Vertex3D::desc()],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    // SH-055 — discard-free variant so Adreno keeps LRZ/early-Z
-                    // (see scene_shader_prepassed above). Depth is Equal-tested
-                    // against the prepass, so cutout shape is preserved exactly.
-                    module: &scene_shader_prepassed,
-                    entry_point: Some("fs_main_scene"),
-                    // SH-055 — `lean_mrt` (Android): see pipeline_3d's comment above.
-                    #[cfg(lean_mrt)]
-                    targets: &[
-                        Some(wgpu::ColorTargetState {
-                            format: HDR_FORMAT,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
+        // scene_pipeline (Less, write) stays for the retained scene-graph nodes
+        // the prepass does not draw (SceneNode::depth_prepassed).
+        //
+        // The retained scene nodes take the back-face-culled variant, like
+        // scene_pipeline: their prepass culls the same faces.
+        let create_scene_pipeline_prepassed =
+            |label: &'static str, cull_mode: Option<wgpu::Face>| {
+                LazyRenderPipeline::new(
+                    &device,
+                    &wgpu::RenderPipelineDescriptor {
+                        label: Some(label),
+                        layout: Some(&scene_pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            // Original module for the vertex stage — EN-044's prepass/main
+                            // depth bit-exactness must not depend on the fragment strip.
+                            module: &scene_shader,
+                            entry_point: Some("vs_main_scene"),
+                            buffers: &[Vertex3D::desc()],
+                            compilation_options: Default::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            // SH-055 — discard-free variant so Adreno keeps LRZ/early-Z
+                            // (see scene_shader_prepassed above). Depth is Equal-tested
+                            // against the prepass, so cutout shape is preserved exactly.
+                            module: &scene_shader_prepassed,
+                            entry_point: Some("fs_main_scene"),
+                            // SH-055 — `lean_mrt` (Android): see pipeline_3d's comment above.
+                            #[cfg(lean_mrt)]
+                            targets: &[
+                                Some(wgpu::ColorTargetState {
+                                    format: HDR_FORMAT,
+                                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                                    write_mask: wgpu::ColorWrites::ALL,
+                                }),
+                                None,
+                                Some(wgpu::ColorTargetState {
+                                    format: VELOCITY_FORMAT,
+                                    blend: None,
+                                    write_mask: wgpu::ColorWrites::ALL,
+                                }),
+                                None,
+                            ],
+                            #[cfg(not(lean_mrt))]
+                            targets: &[
+                                Some(wgpu::ColorTargetState {
+                                    format: HDR_FORMAT,
+                                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                                    write_mask: wgpu::ColorWrites::ALL,
+                                }),
+                                Some(wgpu::ColorTargetState {
+                                    format: MATERIAL_FORMAT,
+                                    // Replace blend so the material slot reflects
+                                    // the topmost-fragment material, not blended.
+                                    blend: None,
+                                    write_mask: wgpu::ColorWrites::ALL,
+                                }),
+                                Some(wgpu::ColorTargetState {
+                                    format: VELOCITY_FORMAT,
+                                    blend: None,
+                                    write_mask: wgpu::ColorWrites::ALL,
+                                }),
+                                Some(wgpu::ColorTargetState {
+                                    format: wgpu::TextureFormat::Rgba8Unorm,
+                                    blend: None,
+                                    write_mask: wgpu::ColorWrites::ALL,
+                                }),
+                            ],
+                            compilation_options: Default::default(),
                         }),
-                        None,
-                        Some(wgpu::ColorTargetState {
-                            format: VELOCITY_FORMAT,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            strip_index_format: None,
+                            front_face: wgpu::FrontFace::Ccw,
+                            cull_mode,
+                            polygon_mode: wgpu::PolygonMode::Fill,
+                            unclipped_depth: false,
+                            conservative: false,
+                        },
+                        depth_stencil: Some(wgpu::DepthStencilState {
+                            format: DEPTH_FORMAT,
+                            depth_write_enabled: Some(false),
+                            depth_compare: Some(wgpu::CompareFunction::Equal),
+                            stencil: wgpu::StencilState::default(),
+                            bias: wgpu::DepthBiasState::default(),
                         }),
-                        None,
-                    ],
-                    #[cfg(not(lean_mrt))]
-                    targets: &[
-                        Some(wgpu::ColorTargetState {
-                            format: HDR_FORMAT,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: MATERIAL_FORMAT,
-                            // Replace blend so the material slot reflects
-                            // the topmost-fragment material, not blended.
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: VELOCITY_FORMAT,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                    ],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Equal),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            },
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview_mask: None,
+                        cache: None,
+                    },
+                )
+            };
+        let scene_pipeline_prepassed =
+            create_scene_pipeline_prepassed("scene_pipeline_prepassed", None);
+        let scene_node_pipeline_prepassed = create_scene_pipeline_prepassed(
+            "scene_node_pipeline_prepassed",
+            Some(wgpu::Face::Back),
         );
 
         // Default flat-normal 1×1 texture for meshes that have tangents
@@ -8021,8 +8038,21 @@ impl Renderer {
                 &scene_shader,
                 "scene_depth_visibility_prepass_pipeline",
                 true,
+                None,
             )
         });
+        // The retained scene nodes' prepass: scene_pipeline culls their back
+        // faces, so their depth must not include them either. Its colour slot
+        // matches the prepass attachments (the packed visibility target when
+        // routing is on, as for scene_depth_visibility_pipeline).
+        let scene_node_depth_pipeline = scene_pass::create_scene_depth_pipeline(
+            &device,
+            &scene_pipeline_layout,
+            &scene_shader,
+            "scene_node_depth_prepass_pipeline",
+            cfg!(not(target_arch = "wasm32")) && gpu_driven.visibility_routing_enabled(),
+            Some(wgpu::Face::Back),
+        );
         let vsm_gpu_casters = vsm_gpu_casters::VsmGpuCasters::new(&device, gpu_driven.enabled());
         let transient_pool = transient::TransientPool::new();
         let frame_plan_cache = graph::PlanCache::new();
@@ -8663,6 +8693,8 @@ impl Renderer {
             #[cfg(not(target_arch = "wasm32"))]
             scene_depth_visibility_pipeline,
             scene_pipeline_prepassed,
+            scene_node_depth_pipeline,
+            scene_node_pipeline_prepassed,
             froxel,
             scene_material_layout,
             scene_sheen_albedo_lut: None,
