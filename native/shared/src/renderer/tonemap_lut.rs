@@ -88,7 +88,10 @@ impl TonemapLut {
             pass.dispatch_workgroups(groups, groups, groups);
         }
         queue.submit([encoder.finish()]);
-        Self { _texture: texture, view }
+        Self {
+            _texture: texture,
+            view,
+        }
     }
 }
 
@@ -99,7 +102,9 @@ mod tests {
     #[test]
     fn wgsl_table_size_matches() {
         let wgsl = include_str!("shaders/tonemap_lut.wgsl");
-        assert!(wgsl.contains(&format!("const TONEMAP_LUT_SIZE: f32 = {TONEMAP_LUT_SIZE}.0;")));
+        assert!(wgsl.contains(&format!(
+            "const TONEMAP_LUT_SIZE: f32 = {TONEMAP_LUT_SIZE}.0;"
+        )));
     }
 
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -194,9 +199,18 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
             label: None,
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&lut.view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: worst.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&lut.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: worst.as_entire_binding(),
+                },
             ],
         });
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -209,10 +223,17 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
         encoder.copy_buffer_to_buffer(&worst, 0, &readback, 0, 8);
         queue.submit([encoder.finish()]);
         readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
         let v: Vec<u32> = bytemuck::cast_slice(&readback.slice(..).get_mapped_range()).to_vec();
         let (all, mid) = (v[0] as f32 / 1e6, v[1] as f32 / 1e6);
-        println!("AgX table: worst {:.2}/255, mid-tones {:.2}/255", all * 255.0, mid * 255.0);
+        println!(
+            "AgX table: worst {:.2}/255, mid-tones {:.2}/255",
+            all * 255.0,
+            mid * 255.0
+        );
         assert!(all < 2.0 / 255.0, "worst {all}");
         assert!(mid < 1.0 / 255.0, "mid-tones {mid}");
     }
