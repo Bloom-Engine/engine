@@ -466,8 +466,21 @@ fn pcf_poisson16(t: texture_depth_2d, uv: vec2<f32>, tap_step: vec2<f32>, depth_
     return sum;
 }
 
-// Sample a single cascade's shadow texture with 16-tap Poisson PCF. The cascade
-// is selected once, not per tap.
+// 4 hardware 2x2 comparisons half a texel off the centre: together a 3x3-texel
+// tent. The mobile filter (Unity URP's Low soft shadows), a quarter of the
+// Poisson disc's taps.
+fn pcf_tent4(t: texture_depth_2d, uv: vec2<f32>, texel: vec2<f32>, depth_ref: f32) -> f32 {
+    let h = 0.5 * texel;
+    var sum = textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-h.x, -h.y), depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(h.x, -h.y), depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-h.x, h.y), depth_ref);
+    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(h.x, h.y), depth_ref);
+    return sum;
+}
+
+// Sample a single cascade's shadow texture with 16-tap Poisson PCF, or the
+// 4-tap tent when dir_light_count.w selects it (set_shadow_filter_4tap). The
+// cascade is selected once, not per tap.
 fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
     var dims: vec2<u32>;
     if (cascade == 0) {
@@ -484,6 +497,17 @@ fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
     // to 2-3m of fuzz, which reads as 'painted' rather than 'cast'.
     // The sun's real angular size gives a ~1m penumbra at typical
     // scene distances; r=1.0 roughly matches that.
+    if (lighting.dir_light_count.w > 0.5) {
+        var tent: f32;
+        if (cascade == 0) {
+            tent = pcf_tent4(shadow_tex_0, shadow_uv, texel, depth_ref);
+        } else if (cascade == 1) {
+            tent = pcf_tent4(shadow_tex_1, shadow_uv, texel, depth_ref);
+        } else {
+            tent = pcf_tent4(shadow_tex_2, shadow_uv, texel, depth_ref);
+        }
+        return tent * 0.25;
+    }
     let radius = 1.0;
     let tap_step = texel * radius;
     var sum: f32;
@@ -499,9 +523,13 @@ fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
 
 // Cascaded shadow map sampling. Determines which cascade the fragment
 // belongs to based on its view-space depth, projects through that
-// cascade's VP, and performs PCF. Blends between cascades at boundaries
-// for smooth transitions.
-fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
+// cascade's VP, and performs PCF. In the band before a cascade's far split,
+// each pixel takes the next cascade with a probability rising toward the
+// split (a 4x4 ordered dither at `frag_xy`, which TAA averages): a smooth
+// transition with one lookup per pixel. Sampling both cascades and blending
+// put a second copy of the filter in the scene shader, whose register cost
+// was 12 ms of a 43 ms main pass on a mobile GPU (Pixel 4a).
+fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>, frag_xy: vec2<f32>) -> f32 {
     // shadows disabled → fully lit. dir_light_count.y carries the enabled
     // flag (splits.w is the TSR mip-LOD bias — do NOT gate on it); without
     // this gate the projection below runs through identity/stale cascade
@@ -568,6 +596,20 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
     }
     var recv_pos = world_pos + geo_n * (2.0 * fit_r / map_dim) * 1.5;
 
+    // The transition band: `recv_pos` was sized for it above, so both
+    // cascades see the same receiver. Keep this cascade where the next one
+    // doesn't cover the receiver.
+    if (cascade < 2 && offset_dist_to_edge < offset_blend_zone) {
+        let keep = offset_dist_to_edge / offset_blend_zone;
+        if (bayer4(u32(frag_xy.x), u32(frag_xy.y)) > keep) {
+            let next_clip = lighting.shadow_cascade_vps[cascade + 1] * vec4<f32>(recv_pos, 1.0);
+            let next_ndc = next_clip.xyz / next_clip.w;
+            if (all(abs(next_ndc.xy) <= vec2<f32>(1.0)) && next_ndc.z >= 0.0 && next_ndc.z <= 1.0) {
+                cascade = cascade + 1;
+            }
+        }
+    }
+
     // Project through the selected cascade's VP. A retained translation-slack
     // fit can put a receiver (especially after its normal offset) just outside
     // the selected cascade even though the next, wider cascade covers it. The
@@ -604,42 +646,7 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
     let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
     let bias = 0.001;
     let depth_ref = light_ndc.z - bias;
-    let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);
-
-    // Blend between cascades at boundary regions for smooth transitions.
-    // The blend zone is 10% of each cascade's range.
-    var split_near = 0.0;
-    var split_far = lighting.shadow_cascade_splits.x;
-    if (cascade == 1) {
-        split_near = lighting.shadow_cascade_splits.x;
-        split_far = lighting.shadow_cascade_splits.y;
-    } else if (cascade == 2) {
-        split_near = lighting.shadow_cascade_splits.y;
-        split_far = lighting.shadow_cascade_splits.z;
-    }
-    let blend_zone = (split_far - split_near) * 0.1;
-    let dist_to_edge = split_far - view_depth;
-
-    if (dist_to_edge < blend_zone && cascade < 2) {
-        // In the blend zone: sample the next cascade too and lerp.
-        // `recv_pos` was smoothly sized for this transition above. Sampling
-        // both maps at that same world-space point prevents a double edge.
-        let next_cascade = cascade + 1;
-        let next_clip = lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(recv_pos, 1.0);
-        let next_ndc = next_clip.xyz / next_clip.w;
-        // The next fitted slice may not cover the inner blend zone. Never
-        // turn its clamped edge texel into a moving, falsely-lit shadow gap.
-        if (any(abs(next_ndc.xy) > vec2<f32>(1.0)) || next_ndc.z < 0.0 || next_ndc.z > 1.0) {
-            return shadow_val;
-        }
-        let next_uv = vec2<f32>(next_ndc.x * 0.5 + 0.5, 1.0 - (next_ndc.y * 0.5 + 0.5));
-        let next_depth_ref = next_ndc.z - bias;
-        let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);
-        let t = dist_to_edge / blend_zone;
-        return mix(next_val, shadow_val, t);
-    }
-
-    return shadow_val;
+    return sample_cascade(cascade, shadow_uv, depth_ref);
 }
 
 // Evaluate a single directional light's PBR contribution. Returns
@@ -1095,7 +1102,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // offset — the mapped normal can point anywhere per-texel and would
     // dither the offset; the flipped foliage normal would push the sample
     // through the card.
-    let shadow_factor = sample_shadow(in.world_pos, normalize(in.normal));
+    let shadow_factor = sample_shadow(in.world_pos, normalize(in.normal), in.clip_position.xy);
     // Never fully zero direct light — a 10% floor simulates
     // ambient bounce from surrounding surfaces and keeps shadows
     // from going pitch-black regardless of IBL intensity.

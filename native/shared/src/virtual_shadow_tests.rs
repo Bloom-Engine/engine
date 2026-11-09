@@ -440,20 +440,19 @@ fn page_crop_preserves_depth() {
 }
 
 #[test]
-fn scene_shader_variant_injects_bindings_and_both_cascade_samples() {
+fn scene_shader_variant_injects_bindings_and_the_cascade_sample() {
     let source = r#"
-let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);
-fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
-let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);
+fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>, frag_xy: vec2<f32>) -> f32 {
+return sample_cascade(cascade, shadow_uv, depth_ref);
 }
 "#;
     let variant = directional_scene_shader(source);
     assert!(variant.contains("@binding(13) var vsm_page_table"));
     assert!(variant.contains("@binding(14) var vsm_physical_pages"));
     assert!(variant.contains("@binding(15) var<uniform> vsm_params"));
-    assert_eq!(variant.matches("sample_virtual_shadow(").count(), 3);
-    assert!(variant.contains("sample_virtual_shadow(cascade, recv_pos,"));
-    assert!(variant.contains("sample_virtual_shadow(next_cascade, recv_pos,"));
+    // the helper's definition and the one lookup
+    assert_eq!(variant.matches("sample_virtual_shadow(").count(), 2);
+    assert!(variant.contains("return sample_virtual_shadow(cascade, recv_pos,"));
     assert!(variant.contains("(vsm_params.words.x & 2u) == 0u"));
     assert!(variant.contains("level_vps: array<mat4x4<f32>, 3>"));
     assert!(!source.contains("vsm_page_table"));

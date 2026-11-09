@@ -333,6 +333,9 @@ pub struct ShadowMap {
     /// where the cache hit rate would be ~zero anyway. When true, every
     /// frame renders shadows; the cache is bypassed.
     pub always_fresh: bool,
+    /// The sun shadow's filter: 4 hardware-PCF taps (a 3x3-texel tent, the
+    /// mobile filter) instead of the 16-tap Poisson disc. Default on Android.
+    pub filter_4tap: bool,
     /// Cascade VPs that correspond to the contents currently stored in
     /// the depth textures. `None` before the first render. When the
     /// freshly-computed VPs match this byte-for-byte AND nothing else
@@ -802,6 +805,7 @@ impl ShadowMap {
             enabled: false,
             dirty: true,
             always_fresh: false,
+            filter_4tap: cfg!(target_os = "android"),
             rendered_light_vps: None,
             rendered_light_dir: None,
             rendered_scene_version: 0,

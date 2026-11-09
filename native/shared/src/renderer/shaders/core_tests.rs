@@ -51,16 +51,25 @@ fn shadow_cascade_selection_matches_the_fitted_view_frustum_depth() {
 }
 
 #[test]
-fn shadow_cascade_blend_never_samples_outside_the_next_fit() {
-    assert!(SCENE_SHADER.contains("if (any(abs(next_ndc.xy) > vec2<f32>(1.0)) || next_ndc.z < 0.0"));
-    assert!(SCENE_SHADER.contains("return shadow_val;"));
+fn shadow_cascade_transition_takes_one_lookup_per_pixel() {
+    // An ordered dither picks one cascade in the band; no second lookup.
+    assert!(SCENE_SHADER.contains("bayer4(u32(frag_xy.x), u32(frag_xy.y)) > keep"));
+    assert!(!SCENE_SHADER.contains("let next_val = sample_cascade("));
+    assert!(SCENE_SHADER.contains("return sample_cascade(cascade, shadow_uv, depth_ref);"));
 }
 
 #[test]
-fn shadow_cascade_blend_uses_one_continuous_receiver_position() {
+fn shadow_cascade_transition_never_samples_outside_the_next_fit() {
+    assert!(SCENE_SHADER.contains(
+        "if (all(abs(next_ndc.xy) <= vec2<f32>(1.0)) && next_ndc.z >= 0.0 && next_ndc.z <= 1.0) {"
+    ));
+}
+
+#[test]
+fn shadow_cascade_transition_uses_one_continuous_receiver_position() {
     assert!(SCENE_SHADER.contains("fit_r = mix(fit_r, next_fit_r, toward_next);"));
     assert!(SCENE_SHADER
-        .contains("lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(recv_pos, 1.0)"));
+        .contains("lighting.shadow_cascade_vps[cascade + 1] * vec4<f32>(recv_pos, 1.0)"));
     assert!(!SCENE_SHADER.contains("let next_pos = world_pos + geo_n"));
 }
 

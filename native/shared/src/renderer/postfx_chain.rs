@@ -777,70 +777,11 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         profiler: &mut crate::profiler::Profiler,
     ) {
-        // ============================================================
-        // Upscale pass: render-res composed_rt → full-surface upscale_rt.
-        // Engages only when render_scale < 1.0 AND TAA is off — when
-        // TAA runs it does its own Catmull-Rom upscale. Downstream
-        // post-FX (DoF/MB/SSS/composite) read upscale_rt instead of
-        // hdr_rt in this case so the chain operates at full surface
-        // resolution.
-        // ============================================================
+        // Upscale pass, TAA off: render-res composed_rt → full-surface
+        // upscale_rt. Downstream post-FX (DoF/MB/SSS/composite) read
+        // upscale_rt so the chain operates at full surface resolution.
         if self.render_scale < 0.999 && !self.taa_enabled {
-            let up = UpscaleParams {
-                params: [self.upscale_mode as f32, 0.0, 0.0, 0.0],
-            };
-            self.queue
-                .write_buffer(&self.upscale_uniform_buffer, 0, bytemuck::bytes_of(&up));
-            if self.upscale_bind_group_cache.is_none() {
-                self.frame_resource_stats
-                    .created_bind_group(frame_resource_stats::BindGroupCreationSite::Upscale);
-                self.upscale_bind_group_cache =
-                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("upscale_bg"),
-                        layout: &self.upscale_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: self.upscale_uniform_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(
-                                    &self.composed_rt_view,
-                                ),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                            },
-                        ],
-                    }));
-            }
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("upscale_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.upscale_rt_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.upscale_pipeline);
-            pass.set_bind_group(
-                0,
-                self.upscale_bind_group_cache
-                    .as_ref()
-                    .expect("upscale bind group was initialized"),
-                &[],
-            );
-            pass.draw(0..3, 0..1);
+            self.record_upscale(encoder, PostFxSource::Composed);
         }
 
         // ============================================================
@@ -865,12 +806,14 @@ impl Renderer {
             // Effective temporal window scales with per-pixel sample
             // density (~render_scale²). At 0.5 → 0.0625 (~16-frame
             // window, close to the prior 0.05/20-frame); at 1.0 →
-            // 0.10 (~10-frame), matching native TAA.
-            let alpha = taa_current_weight(
-                self.taa_history_valid,
-                self.taa_frame_index,
-                self.render_scale,
-            );
+            // 0.10 (~10-frame), matching native TAA. Resolving at the
+            // render resolution, TAA is native to its input: scale 1.
+            let taa_scale = if self.taa_upscales() {
+                self.render_scale
+            } else {
+                1.0
+            };
+            let alpha = taa_current_weight(self.taa_history_valid, self.taa_frame_index, taa_scale);
             // Pack authored camera motion into the otherwise-unused sign of
             // the positive TAA weight. This lets history reconstruction keep
             // its exact settled lookup while selecting a sharper fractional
@@ -893,9 +836,9 @@ impl Renderer {
                     -0.5 * self.current_jitter_ndc[0],
                     0.5 * self.current_jitter_ndc[1],
                     if self.current_proj_matrix[3][3].abs() < 0.5 {
-                        self.render_scale
+                        taa_scale
                     } else {
-                        -self.render_scale
+                        -taa_scale
                     },
                 ],
                 // Match the already-qualified path-tracing inverse upload.
@@ -1135,23 +1078,21 @@ impl Renderer {
             }
             self.taa_history_valid = true;
             self.taa_history_written = true;
+            if self.render_scale < 0.999 && !self.taa_upscales() {
+                let source = if taa_dst_idx == 0 {
+                    PostFxSource::Taa0
+                } else {
+                    PostFxSource::Taa1
+                };
+                self.record_upscale(encoder, source);
+            }
         }
 
         // ============================================================
         // DoF pass: variable-radius Poisson disc blur driven by CoC
         // Reads TAA output / upscale_rt / hdr_rt + depth → dof_rt
         // ============================================================
-        let pre_dof_source = if self.taa_enabled {
-            if taa_dst_idx == 0 {
-                PostFxSource::Taa0
-            } else {
-                PostFxSource::Taa1
-            }
-        } else if self.render_scale < 0.999 {
-            PostFxSource::Upscale
-        } else {
-            PostFxSource::Hdr
-        };
+        let pre_dof_source = self.resolved_postfx_source(taa_dst_idx, PostFxSource::Hdr);
 
         if self.dof_enabled && self.dof_aperture > 0.0 {
             let inv_proj = self.current_inv_proj_matrix;
@@ -1233,16 +1174,8 @@ impl Renderer {
         // ============================================================
         let pre_mblur_source = if self.dof_enabled && self.dof_aperture > 0.0 {
             PostFxSource::DepthOfField
-        } else if self.taa_enabled {
-            if taa_dst_idx == 0 {
-                PostFxSource::Taa0
-            } else {
-                PostFxSource::Taa1
-            }
-        } else if self.render_scale < 0.999 {
-            PostFxSource::Upscale
         } else {
-            PostFxSource::Hdr
+            self.resolved_postfx_source(taa_dst_idx, PostFxSource::Hdr)
         };
 
         if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
@@ -1332,16 +1265,8 @@ impl Renderer {
             PostFxSource::MotionBlur
         } else if self.dof_enabled && self.dof_aperture > 0.0 {
             PostFxSource::DepthOfField
-        } else if self.taa_enabled {
-            if taa_dst_idx == 0 {
-                PostFxSource::Taa0
-            } else {
-                PostFxSource::Taa1
-            }
-        } else if self.render_scale < 0.999 {
-            PostFxSource::Upscale
         } else {
-            PostFxSource::Hdr
+            self.resolved_postfx_source(taa_dst_idx, PostFxSource::Hdr)
         };
 
         if self.sss_enabled && self.sss_strength > 0.0 {
@@ -1424,18 +1349,8 @@ impl Renderer {
             PostFxSource::MotionBlur
         } else if self.dof_enabled && self.dof_aperture > 0.0 {
             PostFxSource::DepthOfField
-        } else if self.taa_enabled {
-            if taa_dst_idx == 0 {
-                PostFxSource::Taa0
-            } else {
-                PostFxSource::Taa1
-            }
-        } else if self.render_scale < 0.999 {
-            PostFxSource::Upscale
         } else {
-            // TAA off, native res: composed_rt is already full-surface
-            // and carries SSR / SSGI / bloom / fog / shafts.
-            PostFxSource::Composed
+            self.resolved_postfx_source(taa_dst_idx, PostFxSource::Composed)
         };
 
         if self.cas_strength > 0.0 {
@@ -1511,17 +1426,106 @@ impl Renderer {
             CompositeSource::MotionBlur
         } else if self.dof_enabled && self.dof_aperture > 0.0 {
             CompositeSource::DepthOfField
-        } else if self.taa_enabled {
-            if self.taa_current_idx == 0 {
-                CompositeSource::Taa0
-            } else {
-                CompositeSource::Taa1
-            }
-        } else if self.render_scale < 0.999 {
-            CompositeSource::Upscale
         } else {
-            CompositeSource::Composed
+            match self.resolved_postfx_source(self.taa_current_idx, PostFxSource::Composed) {
+                PostFxSource::Taa0 => CompositeSource::Taa0,
+                PostFxSource::Taa1 => CompositeSource::Taa1,
+                PostFxSource::Upscale => CompositeSource::Upscale,
+                _ => CompositeSource::Composed,
+            }
         }
+    }
+
+    /// Whether the TAA pass also upscales (`temporal_upscale` with a render
+    /// scale below 1): its history and output then live at the surface's
+    /// size. Otherwise it resolves at the render resolution and the upscale
+    /// pass scales its result.
+    pub(super) fn taa_upscales(&self) -> bool {
+        self.temporal_upscale && self.render_scale < 0.999
+    }
+
+    /// The output of the TAA/upscale stage, which the later post-FX stages
+    /// read: TAA's when it ran at the surface's size, the upscale pass's when
+    /// the render resolution is lower, else `native` (the render-resolution
+    /// scene, which is then the surface's size).
+    fn resolved_postfx_source(&self, taa_idx: usize, native: PostFxSource) -> PostFxSource {
+        if self.render_scale < 0.999 && !(self.taa_enabled && self.taa_upscales()) {
+            PostFxSource::Upscale
+        } else if self.taa_enabled {
+            if taa_idx == 0 {
+                PostFxSource::Taa0
+            } else {
+                PostFxSource::Taa1
+            }
+        } else {
+            native
+        }
+    }
+
+    /// Upscale pass: a render-resolution `source` (the composed scene, or the
+    /// TAA output when TAA resolves at the render resolution) → the
+    /// full-surface upscale_rt, with the `upscale_mode` filter.
+    fn record_upscale(&mut self, encoder: &mut wgpu::CommandEncoder, source: PostFxSource) {
+        let up = UpscaleParams {
+            params: [self.upscale_mode as f32, 0.0, 0.0, 0.0],
+        };
+        self.queue
+            .write_buffer(&self.upscale_uniform_buffer, 0, bytemuck::bytes_of(&up));
+        let slot = match source {
+            PostFxSource::Taa0 => 1,
+            PostFxSource::Taa1 => 2,
+            _ => 0,
+        };
+        if self.upscale_bind_group_cache[slot].is_none() {
+            self.frame_resource_stats
+                .created_bind_group(frame_resource_stats::BindGroupCreationSite::Upscale);
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("upscale_bg"),
+                layout: &self.upscale_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.upscale_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.postfx_source_view_for(source),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    },
+                ],
+            });
+            self.upscale_bind_group_cache[slot] = Some(bind_group);
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("upscale_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.upscale_rt_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.upscale_pipeline);
+        pass.set_bind_group(
+            0,
+            self.upscale_bind_group_cache[slot]
+                .as_ref()
+                .expect("upscale bind group was initialized"),
+            &[],
+        );
+        pass.draw(0..3, 0..1);
     }
 
     pub(super) fn composite_source_view_for(&self, source: CompositeSource) -> &wgpu::TextureView {
