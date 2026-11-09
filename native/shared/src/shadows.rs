@@ -291,8 +291,12 @@ pub struct ShadowUniforms {
 
 /// Shadow map resources for cascaded shadow mapping.
 pub struct ShadowMap {
-    pub depth_textures: [wgpu::Texture; NUM_CASCADES],
+    /// The live cascades, one layer each (see `ShadowMap::new`).
+    pub depth_texture: wgpu::Texture,
+    /// Layer `i` of `depth_texture` as a 2D view.
     pub depth_views: [wgpu::TextureView; NUM_CASCADES],
+    /// All the cascades as a 2D array view, the layer being the cascade.
+    pub depth_array_view: wgpu::TextureView,
     /// Cached static-caster depth per cascade ("cached whole-scene
     /// shadows"): scene nodes / cached models / material draws render in
     /// here only when the cascade's VP or static content changes. Every
@@ -333,6 +337,9 @@ pub struct ShadowMap {
     /// where the cache hit rate would be ~zero anyway. When true, every
     /// frame renders shadows; the cache is bypassed.
     pub always_fresh: bool,
+    /// The sun shadow's filter: 4 hardware-PCF taps (a 3x3-texel tent, the
+    /// mobile filter) instead of the 16-tap Poisson disc. Default on Android.
+    pub filter_4tap: bool,
     /// Cascade VPs that correspond to the contents currently stored in
     /// the depth textures. `None` before the first render. When the
     /// freshly-computed VPs match this byte-for-byte AND nothing else
@@ -421,35 +428,49 @@ impl ShadowMap {
         vertex_layout: wgpu::VertexBufferLayout<'static>,
         joint_layout: &wgpu::BindGroupLayout,
     ) -> Self {
-        // Create NUM_CASCADES depth textures (live + static cache).
-        let mut depth_textures_vec: Vec<wgpu::Texture> = Vec::new();
-        let mut depth_views_vec: Vec<wgpu::TextureView> = Vec::new();
-        let mut static_textures_vec: Vec<wgpu::Texture> = Vec::new();
-        let mut static_views_vec: Vec<wgpu::TextureView> = Vec::new();
-        for i in 0..NUM_CASCADES {
-            let tex = device.create_texture(&wgpu::TextureDescriptor {
+        // The live cascades are the layers of one depth texture: the scene
+        // shader samples them through one array view with the cascade as the
+        // layer, so a pixel's cascade choice is a coordinate, not a branch
+        // between textures. (Pixels of one quad sampling different textures in
+        // divergent branches lose their writes on Adreno; and each branch was
+        // another inlined copy of the filter.) `depth_views` are the layers'
+        // own views, for rendering and for the consumers that bind cascades
+        // one by one. The static caches are separate copy sources.
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow_depth_cascades"),
+            size: wgpu::Extent3d {
+                width: CASCADE_MAP_SIZE,
+                height: CASCADE_MAP_SIZE,
+                depth_or_array_layers: NUM_CASCADES as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                // Refreshed from the static cache before dynamic
+                // casters draw on top.
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let depth_views: [wgpu::TextureView; NUM_CASCADES] = std::array::from_fn(|i| {
+            depth_texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some(&format!("shadow_depth_cascade_{}", i)),
-                size: wgpu::Extent3d {
-                    width: CASCADE_MAP_SIZE,
-                    height: CASCADE_MAP_SIZE,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC
-                    // Refreshed from the static cache before dynamic
-                    // casters draw on top.
-                    | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            depth_textures_vec.push(tex);
-            depth_views_vec.push(view);
-            let stex = device.create_texture(&wgpu::TextureDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: i as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        });
+        let depth_array_view = depth_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("shadow_depth_cascades"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let static_depth_textures: [wgpu::Texture; NUM_CASCADES] = std::array::from_fn(|i| {
+            device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("shadow_static_depth_cascade_{}", i)),
                 size: wgpu::Extent3d {
                     width: CASCADE_MAP_SIZE,
@@ -462,25 +483,11 @@ impl ShadowMap {
                 format: wgpu::TextureFormat::Depth32Float,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
-            });
-            let sview = stex.create_view(&wgpu::TextureViewDescriptor::default());
-            static_textures_vec.push(stex);
-            static_views_vec.push(sview);
-        }
-
-        // Convert Vecs to fixed-size arrays
-        let depth_textures: [wgpu::Texture; NUM_CASCADES] = depth_textures_vec
-            .try_into()
-            .unwrap_or_else(|_| panic!("cascade texture count mismatch"));
-        let depth_views: [wgpu::TextureView; NUM_CASCADES] = depth_views_vec
-            .try_into()
-            .unwrap_or_else(|_| panic!("cascade view count mismatch"));
-        let static_depth_textures: [wgpu::Texture; NUM_CASCADES] = static_textures_vec
-            .try_into()
-            .unwrap_or_else(|_| panic!("static cascade texture count mismatch"));
-        let static_depth_views: [wgpu::TextureView; NUM_CASCADES] = static_views_vec
-            .try_into()
-            .unwrap_or_else(|_| panic!("static cascade view count mismatch"));
+            })
+        });
+        let static_depth_views: [wgpu::TextureView; NUM_CASCADES] = std::array::from_fn(|i| {
+            static_depth_textures[i].create_view(&wgpu::TextureViewDescriptor::default())
+        });
 
         // Comparison sampler for PCF
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -783,8 +790,9 @@ impl ShadowMap {
             crate::virtual_shadows::DirectionalVirtualShadowMap::new(device, &uniform_layout);
 
         Self {
-            depth_textures,
+            depth_texture,
             depth_views,
+            depth_array_view,
             static_depth_textures,
             static_depth_views,
             sampler,
@@ -802,6 +810,7 @@ impl ShadowMap {
             enabled: false,
             dirty: true,
             always_fresh: false,
+            filter_4tap: cfg!(target_os = "android"),
             rendered_light_vps: None,
             rendered_light_dir: None,
             rendered_scene_version: 0,

@@ -25,11 +25,6 @@ pub(super) fn create_lighting_layout(
         view_dimension: wgpu::TextureViewDimension::D2,
         multisampled: false,
     };
-    let tex_depth = wgpu::BindingType::Texture {
-        sample_type: wgpu::TextureSampleType::Depth,
-        view_dimension: wgpu::TextureViewDimension::D2,
-        multisampled: false,
-    };
     let frag = wgpu::ShaderStages::FRAGMENT;
     let mut entries = vec![
         // 0: Lighting UBO. VERTEX_FRAGMENT so the scene vertex shader can read
@@ -70,23 +65,15 @@ pub(super) fn create_lighting_layout(
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         },
-        // 5-7: shadow cascades, 8: comparison sampler
+        // 5: the shadow cascades (one layer each), 8: comparison sampler
         wgpu::BindGroupLayoutEntry {
             binding: 5,
             visibility: frag,
-            ty: tex_depth,
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 6,
-            visibility: frag,
-            ty: tex_depth,
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 7,
-            visibility: frag,
-            ty: tex_depth,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
             count: None,
         },
         wgpu::BindGroupLayoutEntry {
@@ -193,15 +180,7 @@ pub(super) fn create_lighting_bind_group(
         },
         wgpu::BindGroupEntry {
             binding: 5,
-            resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_views[0]),
-        },
-        wgpu::BindGroupEntry {
-            binding: 6,
-            resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_views[1]),
-        },
-        wgpu::BindGroupEntry {
-            binding: 7,
-            resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_views[2]),
+            resource: wgpu::BindingResource::TextureView(&src.shadow_map.depth_array_view),
         },
         wgpu::BindGroupEntry {
             binding: 8,

@@ -1424,7 +1424,8 @@ const DIRECTIONAL_VSM_SCENE_HELPER: &str =
 /// byte-for-byte unchanged when VSM is disabled, avoiding an extra branch or
 /// binding in the default renderer.
 pub(crate) fn directional_scene_shader(source: &str) -> String {
-    let helper_marker = "fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {";
+    let helper_marker =
+        "fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>, frag_xy: vec2<f32>) -> f32 {";
     let helper_offset = source
         .find(helper_marker)
         .expect("scene shader missing sample_shadow marker");
@@ -1435,13 +1436,14 @@ pub(crate) fn directional_scene_shader(source: &str) -> String {
     output.push_str(&source[..helper_offset]);
     output.push_str(DIRECTIONAL_VSM_SCENE_HELPER);
     output.push_str(&source[helper_offset..]);
-    output = output.replace(
-        "let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);",
-        "let shadow_val = sample_virtual_shadow(cascade, recv_pos, shadow_uv, depth_ref);",
+    let cascade_lookup = "return sample_cascade(cascade, shadow_uv, depth_ref);";
+    debug_assert!(
+        output.contains(cascade_lookup),
+        "VSM scene variant must replace the cascade lookup"
     );
     output = output.replace(
-        "let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);",
-        "let next_val = sample_virtual_shadow(next_cascade, recv_pos, next_uv, next_depth_ref);",
+        cascade_lookup,
+        "return sample_virtual_shadow(cascade, recv_pos, shadow_uv, depth_ref);",
     );
     let light_index = if source.contains("let light_index = cluster_indices[") {
         "light_index"

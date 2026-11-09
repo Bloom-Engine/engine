@@ -193,7 +193,13 @@ impl Renderer {
         } else {
             0.0
         };
-        self.lighting_uniforms.dir_light_count = [0.0, shadows_flag, ssr_share, 0.0];
+        // dir_light_count.w selects the sun shadow's 4-tap filter.
+        let filter_4tap = if self.shadow_map.filter_4tap {
+            1.0
+        } else {
+            0.0
+        };
+        self.lighting_uniforms.dir_light_count = [0.0, shadows_flag, ssr_share, filter_4tap];
         self.lighting_uniforms.point_light_count = [0.0; 4];
         self.shadow_map.virtual_map.clear_local_requests();
     }

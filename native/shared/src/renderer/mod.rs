@@ -98,6 +98,7 @@ mod pt_temporal_diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 mod quality_capture;
 mod quality_preset;
+mod quality_readback;
 mod queries;
 mod refractive_reflections;
 mod scene_pass;
@@ -802,6 +803,8 @@ pub struct Renderer {
     /// 1 = TAA on (default). When off the renderer behaves exactly
     /// as the pre-TAA pipeline did.
     pub taa_enabled: bool,
+    /// TAA also upscales below render scale 1; see `set_temporal_upscale`.
+    temporal_upscale: bool,
     /// Perspective/orthographic clip planes for begin_mode_3d. Defaults keep
     /// the historical 0.01..1000; a scene viewed from ~15 units away needs a
     /// larger near plane, or surfaces a millimetre apart z-fight.
@@ -1341,7 +1344,7 @@ pub struct Renderer {
     pub upscale_pipeline: LazyRenderPipeline,
     pub upscale_layout: wgpu::BindGroupLayout,
     pub upscale_uniform_buffer: wgpu::Buffer,
-    upscale_bind_group_cache: Option<wgpu::BindGroup>,
+    upscale_bind_group_cache: [Option<wgpu::BindGroup>; 3],
     /// 0 = bilinear (cheap), 1 = Catmull-Rom 5-tap (sharper edges).
     /// Default 1.
     pub upscale_mode: u32,
@@ -8285,6 +8288,7 @@ impl Renderer {
             taa_reactive_bind_group_cache_keys: [None, None],
             taa_frame_index: 0,
             taa_enabled: true,
+            temporal_upscale: !cfg!(target_os = "android"),
             camera_near: 0.01,
             camera_far: 1000.0,
             taa_history_valid: false,
@@ -8538,7 +8542,7 @@ impl Renderer {
             upscale_pipeline,
             upscale_layout,
             upscale_uniform_buffer,
-            upscale_bind_group_cache: None,
+            upscale_bind_group_cache: [None, None, None],
             upscale_mode: 1, // Catmull-Rom by default
             cas_rt_texture,
             cas_rt_view,
@@ -8947,7 +8951,7 @@ impl Renderer {
             self.taa_bind_group_cache = [None, None];
             self.taa_reactive_bind_group_cache = [None, None];
             self.taa_reactive_bind_group_cache_keys = [None, None];
-            self.upscale_bind_group_cache = None;
+            self.upscale_bind_group_cache = [None, None, None];
             self.dof_bind_group_cache = std::array::from_fn(|_| None);
             self.motion_blur_bind_group_cache = std::array::from_fn(|_| None);
             self.sss_bind_group_cache = std::array::from_fn(|_| None);
@@ -9001,19 +9005,7 @@ impl Renderer {
             self.hiz_views = hiz_v;
             #[cfg(feature = "models3d")]
             self.invalidate_registered_virtual_hiz(true);
-            // TAA history/output live at SURFACE size — the TAA pass is
-            // also the TSR upscaler (render res in, output res out).
-            let (taa_t, taa_v) = create_taa_textures(&self.device, width, height);
-            self.taa_textures = taa_t;
-            self.taa_views = taa_v;
-            let (taa_depth_t, taa_depth_v) =
-                create_taa_depth_history_textures(&self.device, width, height);
-            self.taa_depth_history_textures = taa_depth_t;
-            self.taa_depth_history_views = taa_depth_v;
-            self.taa_current_idx = 0;
-            self.taa_frame_index = 0; // reset jitter sequence on resize
-            self.taa_history_valid = false;
-            self.taa_history_written = false;
+            self.recreate_taa_targets(width, height, rw, rh);
             let (sr_t, sr_v) = create_ssr_rt(&self.device, rw, rh);
             self.ssr_rt_texture = sr_t;
             self.ssr_rt_view = sr_v;
