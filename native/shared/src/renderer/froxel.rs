@@ -167,15 +167,8 @@ const CLUSTERED_LOOP: &str = "
             let l = to_light / dist;
             let atten = 1.0 - (dist / range);
             let atten2 = atten * atten;
-            if (has_spec_gloss) {
-                lit += shade_specular_glossiness_pbr(
-                    n, v, l, pl.color.rgb, pl.color.w * atten2,
-                    base_color, authored_specular, roughness,
-                );
-            } else {
-                lit += shade_pbr(n, v, l, pl.color.rgb, pl.color.w * atten2,
-                                 base_color, metallic, roughness);
-            }
+            lit += shade_pbr_f0(n, v, l, pl.color.rgb, pl.color.w * atten2,
+                                light_diffuse, light_f0, roughness);
         }
     }
 ";
@@ -191,10 +184,15 @@ pub(super) fn clustered_scene_shader(source: &str) -> String {
         .expect("scene shader missing END marker")
         + end_marker.len();
     let clustered_loop = if source.contains("fn shade_layered_base_pbr(") {
-        CLUSTERED_LOOP.replace(
-            "shade_pbr(n, v,",
-            "shade_layered_pbr(layered_surface, n, v,",
-        )
+        CLUSTERED_LOOP
+            .replace(
+                "shade_pbr_f0(n, v,",
+                "shade_layered_pbr(layered_surface, n, v,",
+            )
+            .replace(
+                "light_diffuse, light_f0, roughness",
+                "base_color, metallic, roughness",
+            )
     } else {
         CLUSTERED_LOOP.to_owned()
     };

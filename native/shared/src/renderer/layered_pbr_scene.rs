@@ -377,9 +377,16 @@ fn layered_secondary_uv(in: VertexOutputScene) -> vec2<f32> {
         "direct diffuse complement",
     );
 
+    // The direct lights take the layered BRDF, from the base colour and
+    // metallic (glTF's layered extensions are metallic/roughness only; the
+    // specular/glossiness extension doesn't combine with them).
     source = source.replace(
-        "shade_pbr(n, v,",
+        "shade_pbr_f0(n, v,",
         "shade_layered_pbr(layered_surface, n, v,",
+    );
+    source = source.replace(
+        "light_diffuse, light_f0, roughness",
+        "base_color, metallic, roughness",
     );
     assert_eq!(
         source
