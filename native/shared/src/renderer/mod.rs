@@ -9316,8 +9316,12 @@ impl Renderer {
         if (s - self.render_scale).abs() > 1e-4 {
             self.render_scale = s;
             self.taa_frame_index = 0;
-            let (w, h) = (self.surface_config.width, self.surface_config.height);
-            self.resize(w, h, self.logical_width, self.logical_height);
+            // the native size: resize() applies output_scale itself, so passing the
+            // (already output-scaled) surface size here scaled the output down again
+            let (w, h) = (self.native_width, self.native_height);
+            if w > 0 && h > 0 {
+                self.resize(w, h, self.logical_width, self.logical_height);
+            }
         }
     }
 
