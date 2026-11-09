@@ -119,6 +119,16 @@ struct VsOut {
     @location(1) alpha: f32,
 };
 
+// The 4x4 Bayer threshold (0.5..15.5)/16 at (x, y), from the bits of x ^ y and
+// y. A table indexed by the pixel would be a local array: SPIR-V can't index a
+// constant array with a runtime value, so it becomes function memory, which
+// mobile GPUs (Adreno) keep in scratch memory.
+fn bayer4(x: u32, y: u32) -> f32 {
+    let v = x ^ y;
+    let i = ((v & 1u) << 3u) | ((y & 1u) << 2u) | (v & 2u) | ((y & 2u) >> 1u);
+    return (f32(i) + 0.5) / 16.0;
+}
+
 // Match the scene pass's authored-space coverage phase. A shadow-map pixel
 // phase changes whenever a cascade refits, which made stationary foliage cast
 // a visibly different dappled shadow as the camera moved.
@@ -127,12 +137,6 @@ fn mask_coverage_threshold(
     dimensions: vec2<u32>,
     lod: f32,
 ) -> f32 {
-    let bayer = array<f32, 16>(
-         0.5 / 16.0,  8.5 / 16.0,  2.5 / 16.0, 10.5 / 16.0,
-        12.5 / 16.0,  4.5 / 16.0, 14.5 / 16.0,  6.5 / 16.0,
-         3.5 / 16.0, 11.5 / 16.0,  1.5 / 16.0,  9.5 / 16.0,
-        15.5 / 16.0,  7.5 / 16.0, 13.5 / 16.0,  5.5 / 16.0,
-    );
     let wrapped_uv = uv - floor(uv);
     // Match the scene pass's sampled-mip footprint. A level-zero phase at
     // distance makes one shadow texel cross many binary leaf decisions during
@@ -146,7 +150,7 @@ fn mask_coverage_threshold(
     let texel = vec2<u32>(floor(wrapped_uv * mip_dimensions));
     let x = texel.x & 3u;
     let y = texel.y & 3u;
-    return bayer[y * 4u + x];
+    return bayer4(x, y);
 }
 
 fn mask_texture_lod(uv: vec2<f32>, dimensions: vec2<u32>) -> f32 {
