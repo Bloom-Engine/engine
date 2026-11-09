@@ -108,7 +108,68 @@ fn quality_preset_config(preset: u32) -> QualityPresetConfig {
     }
 }
 
+/// A GPU's performance class, for the device profile the quality presets are
+/// resolved against (Unreal's device profiles match GPU families the same
+/// way). A preset names a tier relative to the device: on a low-class GPU it
+/// leaves out the effects whose cost there is out of proportion to what they
+/// add (see `device_profile`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuClass {
+    /// Mobile GPUs a generation or more below current mid-range: Adreno
+    /// below 640, Mali-T and Mali-G below G76, PowerVR.
+    Low,
+    Standard,
+}
+
+/// The class of the GPU `name` (the adapter's name); `BLOOM_GPU_CLASS=low|
+/// standard` overrides it.
+pub fn gpu_class(name: &str) -> GpuClass {
+    match std::env::var("BLOOM_GPU_CLASS").as_deref() {
+        Ok("low") => return GpuClass::Low,
+        Ok("standard") => return GpuClass::Standard,
+        _ => {}
+    }
+    let model = |prefix: &str| -> Option<u32> {
+        let rest = &name[name.find(prefix)? + prefix.len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    let low = if let Some(n) = model("Adreno (TM) ").or_else(|| model("Adreno ")) {
+        n < 640
+    } else if let Some(n) = model("Mali-G") {
+        n < 76
+    } else {
+        name.contains("Mali-T") || name.contains("Mali-4") || name.contains("PowerVR")
+    };
+    if low {
+        GpuClass::Low
+    } else {
+        GpuClass::Standard
+    }
+}
+
+/// `config` for a GPU of `class`. On a low-class GPU no tier pays for the
+/// full-resolution composite sharpen, SSAO, SSR or SSGI: measured on a Pixel
+/// 4a (Adreno 618) at render scale 0.5, the sharpen alone was 6 ms and SSAO
+/// 7 ms of a ~70 ms frame, more than the rest of the post chain together.
+/// TAA, shadows and bloom stay as the tier sets them.
+fn device_profile(mut config: QualityPresetConfig, class: GpuClass) -> QualityPresetConfig {
+    if class == GpuClass::Low {
+        config.composite_sharpen = 0.0;
+        config.cas_sharpen = 0.0;
+        config.ssao = false;
+        config.ssr = false;
+        config.ssgi = false;
+    }
+    config
+}
+
 impl Renderer {
+    /// This device's GPU class (see `gpu_class`).
+    pub fn gpu_class(&self) -> GpuClass {
+        gpu_class(&self.device.adapter_info().name)
+    }
+
     /// Whether TAA also upscales when the render scale is below 1 (a temporal
     /// upscaler: render-resolution input, history and output at the surface's
     /// size). Off, TAA resolves at the render resolution and the upscale pass
@@ -141,7 +202,7 @@ impl Renderer {
     /// upscale filtering, sharpening, and effects change together. Individual
     /// setters remain overrides and should be called after this method.
     pub fn apply_quality_preset(&mut self, preset: u32) {
-        let config = quality_preset_config(preset);
+        let config = device_profile(quality_preset_config(preset), self.gpu_class());
         self.set_render_scale(config.render_scale);
         self.set_taa_enabled(config.taa);
         self.set_upscale_mode(config.upscale_mode);
@@ -160,7 +221,49 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{quality_preset_config, DEFAULT_RENDER_SCALE};
+    use super::{device_profile, gpu_class, quality_preset_config, GpuClass, DEFAULT_RENDER_SCALE};
+
+    #[test]
+    fn gpu_class_matches_mobile_families() {
+        for low in [
+            "Adreno (TM) 618",
+            "Adreno (TM) 630",
+            "Adreno 505",
+            "Mali-G52 MC2",
+            "Mali-G72",
+            "Mali-T880",
+            "PowerVR Rogue GE8320",
+        ] {
+            assert_eq!(gpu_class(low), GpuClass::Low, "{low}");
+        }
+        for standard in [
+            "Adreno (TM) 640",
+            "Adreno (TM) 740",
+            "Mali-G78 MP20",
+            "Mali-G710",
+            "Apple M1 Max",
+            "NVIDIA GeForce RTX 4080",
+            "Immortalis-G715",
+        ] {
+            assert_eq!(gpu_class(standard), GpuClass::Standard, "{standard}");
+        }
+    }
+
+    #[test]
+    fn low_class_presets_drop_the_costly_post_effects_only() {
+        for preset in 0..=4 {
+            let tier = quality_preset_config(preset);
+            let low = device_profile(tier, GpuClass::Low);
+            assert_eq!(low.composite_sharpen, 0.0);
+            assert!(!low.ssao && !low.ssr && !low.ssgi);
+            assert_eq!(
+                (low.taa, low.shadows, low.bloom),
+                (tier.taa, tier.shadows, tier.bloom)
+            );
+            assert_eq!(low.render_scale, tier.render_scale);
+            assert_eq!(device_profile(tier, GpuClass::Standard), tier);
+        }
+    }
 
     #[test]
     fn tiers_raise_resolution_monotonically_and_ultra_is_native() {
