@@ -309,6 +309,14 @@ pub struct LodLevel {
 }
 
 impl SceneNode {
+    /// Whether the depth prepass draws this opaque node, so that the main
+    /// pass shades it with the depth-equal pipelines. Not with a fractional
+    /// opacity: it blends over what lies behind it, and its prepass depth
+    /// would reject that. (Non-finite opacity draws as 1, as in the uniforms.)
+    pub(crate) fn depth_prepassed(&self) -> bool {
+        !self.material.opacity.is_finite() || self.material.opacity >= 1.0
+    }
+
     fn new() -> Self {
         Self {
             vertices: Vec::new(),
@@ -2260,7 +2268,7 @@ impl SceneGraph {
             None,
             None,
             0,
-            false,
+            None,
         );
     }
 
@@ -2271,7 +2279,7 @@ impl SceneGraph {
         imported_refraction_enabled: bool,
         base_pipeline: &'a wgpu::RenderPipeline,
         layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
-        prepassed: bool,
+        prepassed_pipeline: Option<&'a wgpu::RenderPipeline>,
     ) {
         self.render_with_material_pipeline_selection(
             pass,
@@ -2280,7 +2288,7 @@ impl SceneGraph {
             Some(base_pipeline),
             layered,
             0,
-            prepassed,
+            prepassed_pipeline,
         );
     }
 
@@ -2299,7 +2307,7 @@ impl SceneGraph {
             Some(base_pipeline),
             layered,
             render_layer,
-            false,
+            None,
         );
     }
 
@@ -2312,7 +2320,15 @@ impl SceneGraph {
         gpu_driven_enabled: bool,
         imported_refraction_enabled: bool,
         render_layer: u32,
-    ) -> impl Iterator<Item = (&'a SceneNode, Option<&'a LodLevel>, &'a wgpu::Buffer, &'a wgpu::Buffer, u32)> + 'a {
+    ) -> impl Iterator<
+        Item = (
+            &'a SceneNode,
+            Option<&'a LodLevel>,
+            &'a wgpu::Buffer,
+            &'a wgpu::Buffer,
+            u32,
+        ),
+    > + 'a {
         self.nodes.iter().filter_map(move |(_handle, node)| {
             if !node.visible
                 || node.render_layer != render_layer
@@ -2344,8 +2360,16 @@ impl SceneGraph {
                 .get(node.active_lod.max(0) as usize)
                 .filter(|_| node.active_lod >= 0);
             let (vb, ib, index_count) = match active_lod {
-                Some(lod) => (lod.gpu_vb.as_ref()?, lod.gpu_ib.as_ref()?, lod.gpu_index_count),
-                None => (node.gpu_vb.as_ref()?, node.gpu_ib.as_ref()?, node.gpu_index_count),
+                Some(lod) => (
+                    lod.gpu_vb.as_ref()?,
+                    lod.gpu_ib.as_ref()?,
+                    lod.gpu_index_count,
+                ),
+                None => (
+                    node.gpu_vb.as_ref()?,
+                    node.gpu_ib.as_ref()?,
+                    node.gpu_index_count,
+                ),
             };
             node.gpu_uniform_bg.as_ref()?;
             node.gpu_material_bg.as_ref()?;
@@ -2370,6 +2394,9 @@ impl SceneGraph {
         for (node, _lod, vb, ib, index_count) in
             self.opaque_node_draws(gpu_driven_enabled, imported_refraction_enabled, 0)
         {
+            if !node.depth_prepassed() {
+                continue;
+            }
             let (Some(bg), Some(material)) = (&node.gpu_uniform_bg, &node.gpu_material_bg) else {
                 continue;
             };
@@ -2390,15 +2417,20 @@ impl SceneGraph {
         base_pipeline: Option<&'a wgpu::RenderPipeline>,
         layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
         render_layer: u32,
-        prepassed: bool,
+        prepassed_pipeline: Option<&'a wgpu::RenderPipeline>,
     ) {
         // The renderer enters with the ordinary scene pipeline already bound.
         // Public callers that do not opt into specialization retain the old
-        // contract and incur no per-node pipeline selection.
-        let mut current_pipeline = base_pipeline.map(|_| (false, false));
-        for (node, active_lod, vb, ib, index_count) in
-            self.opaque_node_draws(gpu_driven_enabled, imported_refraction_enabled, render_layer)
-        {
+        // contract and incur no per-node pipeline selection. With
+        // `prepassed_pipeline`, the nodes the depth prepass drew
+        // (`SceneNode::depth_prepassed`) take it, or the layered prepassed one;
+        // the rest keep the depth-writing pipelines.
+        let mut current_pipeline = base_pipeline.map(|_| (false, false, false));
+        for (node, active_lod, vb, ib, index_count) in self.opaque_node_draws(
+            gpu_driven_enabled,
+            imported_refraction_enabled,
+            render_layer,
+        ) {
             let (Some(bg), Some(base_material)) = (&node.gpu_uniform_bg, &node.gpu_material_bg)
             else {
                 continue;
@@ -2416,10 +2448,14 @@ impl SceneGraph {
                 continue;
             }
             if let Some(base_pipeline) = base_pipeline {
-                let key = (layered_material.is_some(), uses_uv1);
+                let prepassed = prepassed_pipeline.is_some() && node.depth_prepassed();
+                let key = (layered_material.is_some(), uses_uv1, prepassed);
                 if current_pipeline != Some(key) {
                     if let (Some(layered), Some(_)) = (layered, layered_material) {
                         pass.set_pipeline(layered.opaque_pipeline(uses_uv1, prepassed));
+                    } else if let (true, Some(prepassed_pipeline)) = (prepassed, prepassed_pipeline)
+                    {
+                        pass.set_pipeline(prepassed_pipeline);
                     } else {
                         pass.set_pipeline(base_pipeline);
                     }

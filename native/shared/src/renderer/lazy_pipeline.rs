@@ -397,6 +397,8 @@ impl super::Renderer {
             wanted.extend([
                 self.scene_depth_pipeline.warm_handle(),
                 self.scene_pipeline_prepassed.warm_handle(),
+                self.scene_node_depth_pipeline.warm_handle(),
+                self.scene_node_pipeline_prepassed.warm_handle(),
                 self.scene_pipeline.warm_handle(),
                 self.scene_compose_pipeline.warm_handle(),
                 self.composite_pipeline.warm_handle(),

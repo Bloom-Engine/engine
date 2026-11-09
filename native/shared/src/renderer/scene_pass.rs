@@ -13,6 +13,7 @@ pub(super) fn create_scene_depth_pipeline(
     shader: &wgpu::ShaderModule,
     label: &'static str,
     visibility_target: bool,
+    cull_mode: Option<wgpu::Face>,
 ) -> super::lazy_pipeline::LazyRenderPipeline {
     let targets = [visibility_target.then_some(wgpu::ColorTargetState {
         format: visibility_buffer::VISIBILITY_FORMAT,
@@ -41,7 +42,7 @@ pub(super) fn create_scene_depth_pipeline(
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
+                cull_mode,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -248,6 +249,7 @@ impl Renderer {
                 // The opaque retained nodes, so the main pass shades each of
                 // their pixels once (see Scene::render_depth_prepass).
                 if !self.dbg_skip("scene_graph") {
+                    pass.set_pipeline(&self.scene_node_depth_pipeline);
                     scene.render_depth_prepass(
                         &mut pass,
                         self.gpu_driven.submitting(),
@@ -674,19 +676,14 @@ impl Renderer {
                 // (wasm, or a diagnostic skip) they keep the depth-writing one.
                 if !self.dbg_skip("scene_graph") {
                     // SH-055 diag
-                    let scene_pipeline = if scene_nodes_prepassed {
-                        &self.scene_pipeline_prepassed
-                    } else {
-                        &self.scene_pipeline
-                    };
-                    pass.set_pipeline(scene_pipeline);
+                    pass.set_pipeline(&self.scene_pipeline);
                     scene.render_with_material_specializations(
                         &mut pass,
                         self.gpu_driven.submitting(),
                         self.imported_refraction_enabled,
-                        scene_pipeline,
+                        &self.scene_pipeline,
                         self.scene_layered_pbr_resources.as_ref(),
-                        scene_nodes_prepassed,
+                        scene_nodes_prepassed.then_some(&*self.scene_node_pipeline_prepassed),
                     );
                 }
             }
