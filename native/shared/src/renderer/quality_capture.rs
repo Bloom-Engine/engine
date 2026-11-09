@@ -293,6 +293,21 @@ impl Renderer {
         aspect: wgpu::TextureAspect,
         bytes_per_pixel: u32,
     ) -> QualityReadback {
+        self.record_quality_texture_layer(encoder, texture, 0, name, kind, aspect, bytes_per_pixel)
+    }
+
+    /// `record_quality_texture` for one layer of an array texture.
+    #[allow(clippy::too_many_arguments)]
+    fn record_quality_texture_layer(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        layer: u32,
+        name: &'static str,
+        kind: ReadbackKind,
+        aspect: wgpu::TextureAspect,
+        bytes_per_pixel: u32,
+    ) -> QualityReadback {
         let size = texture.size();
         let unpadded_bytes_per_row = size.width * bytes_per_pixel;
         let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
@@ -306,7 +321,11 @@ impl Renderer {
             wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
                 aspect,
             },
             wgpu::TexelCopyBufferInfo {
@@ -383,11 +402,12 @@ impl Renderer {
                         .copied()
                         .and_then(|value| value.checked_sub(b'0'))
                         .map(usize::from)
-                        .filter(|&index| index < self.shadow_map.depth_textures.len())
+                        .filter(|&index| index < crate::shadows::NUM_CASCADES)
                         .ok_or_else(|| format!("invalid shadow capture resource '{name}'"))?;
-                    self.record_quality_texture(
+                    self.record_quality_texture_layer(
                         encoder,
-                        &self.shadow_map.depth_textures[cascade],
+                        &self.shadow_map.depth_texture,
+                        cascade as u32,
                         name,
                         ReadbackKind::Depth,
                         wgpu::TextureAspect::DepthOnly,

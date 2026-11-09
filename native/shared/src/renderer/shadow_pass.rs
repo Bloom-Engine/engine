@@ -963,7 +963,16 @@ impl Renderer {
                 // dynamic casters on top.
                 encoder.copy_texture_to_texture(
                     self.shadow_map.static_depth_textures[cascade].as_image_copy(),
-                    self.shadow_map.depth_textures[cascade].as_image_copy(),
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.shadow_map.depth_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: cascade as u32,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
                     wgpu::Extent3d {
                         width: crate::shadows::CASCADE_MAP_SIZE,
                         height: crate::shadows::CASCADE_MAP_SIZE,

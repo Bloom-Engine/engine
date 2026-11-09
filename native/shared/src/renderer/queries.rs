@@ -164,9 +164,13 @@ impl Renderer {
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.shadow_map.depth_textures[cascade],
+                texture: &self.shadow_map.depth_texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: cascade as u32,
+                },
                 aspect: wgpu::TextureAspect::DepthOnly,
             },
             wgpu::TexelCopyBufferInfo {
