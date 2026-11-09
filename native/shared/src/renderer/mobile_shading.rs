@@ -1,7 +1,8 @@
 //! The mobile scene shading: on mobile GPUs the scene shader's
 //! `shade_main_scene` is replaced by `shaders/scene_mobile.wgsl`, a lighter
 //! forward base pass (as Unreal's mobile renderer and Unity URP have). Same
-//! inputs, outputs, lights and shadows; the full shader's normal-variance
+//! inputs, outputs, lights and shadows (the sun's with the 4-tap tent
+//! filter only, chosen when the shader is built); the full shader's normal-variance
 //! roughness, BRDF LUT + multi-scatter IBL, coverage-dithered masks, cloud
 //! shadows and firefly caps are left out. Those cost a mobile GPU most of the
 //! main pass through register pressure, not arithmetic (Pixel 4a, Adreno
@@ -19,6 +20,14 @@ const MOBILE_SHADE_MAIN_SCENE: &str = include_str!("shaders/scene_mobile.wgsl");
 const SHADE_MAIN_SCENE: &str =
     "fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {";
 const AFTER_SHADE_MAIN_SCENE: &str = "@fragment\nfn fs_main_scene(";
+const SAMPLE_CASCADE: &str =
+    "fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {";
+const MOBILE_SAMPLE_CASCADE: &str =
+    "fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
+    let texel = 1.0 / vec2<f32>(textureDimensions(shadow_tex));
+    return pcf_tent4(cascade, shadow_uv, texel, depth_ref) * 0.25;
+}
+";
 
 /// Mobile shading on Android by default; `BLOOM_MOBILE_SHADING=0|1` overrides
 /// it (to compare the two on a device, or to try the mobile shading on a
@@ -48,10 +57,28 @@ fn with_mobile_shading(source: &str) -> String {
         + source[start..]
             .find(AFTER_SHADE_MAIN_SCENE)
             .expect("scene shader missing fs_main_scene after shade_main_scene");
-    format!(
+    let source = format!(
         "{}{}{}",
         &source[..start],
         MOBILE_SHADE_MAIN_SCENE,
+        &source[end..]
+    );
+    // The sun shadow takes the 4-tap tent only. The 16-tap Poisson disc
+    // behind the runtime filter switch costs a mobile GPU even when it never
+    // runs (its code is the pass's register budget): 10 ms of a 36 ms main
+    // pass on a Pixel 4a.
+    let start = source
+        .find(SAMPLE_CASCADE)
+        .expect("scene shader missing sample_cascade");
+    let end = start
+        + source[start..]
+            .find("\n}\n")
+            .expect("sample_cascade without an end")
+        + "\n}\n".len();
+    format!(
+        "{}{}{}",
+        &source[..start],
+        MOBILE_SAMPLE_CASCADE,
         &source[end..]
     )
 }
@@ -76,6 +103,9 @@ mod tests {
         // the full shading's LUT and variance terms are gone
         assert!(!mobile.contains("brdf_lut_tex, brdf_lut_samp, vec2<f32>(n_dot_v_ibl"));
         assert!(!mobile.contains("sigma2_toksvig"));
+        // the shadow filter is the tent alone
+        assert!(!mobile.contains("pcf_poisson16(cascade"));
+        assert_eq!(mobile.matches(SAMPLE_CASCADE).count(), 1);
         // the markers the prepass, froxel and VSM variants rely on
         for marker in [
             "//PREPASS_STRIP_BEGIN",
