@@ -84,9 +84,9 @@ mod lighting_upload;
 mod material_api;
 pub mod material_indirection;
 mod material_instancing;
-#[cfg(feature = "models3d")]
 mod mobile_shading;
 mod model_draw;
+#[cfg(feature = "models3d")]
 mod model_material;
 mod occlusion;
 mod opaque_material_pass;
