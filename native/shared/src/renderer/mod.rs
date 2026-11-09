@@ -784,6 +784,7 @@ pub struct Renderer {
     pub taa_depth_history_views: [wgpu::TextureView; 2],
     pub taa_current_idx: usize,
     pub taa_pipeline: LazyRenderPipeline,
+    taa_pipeline_fast: LazyRenderPipeline,
     pub taa_layout: wgpu::BindGroupLayout,
     pub taa_uniform_buffer: wgpu::Buffer,
     taa_bind_group_cache: [Option<wgpu::BindGroup>; 2],
@@ -805,6 +806,7 @@ pub struct Renderer {
     pub taa_enabled: bool,
     /// TAA also upscales below render scale 1; see `set_temporal_upscale`.
     temporal_upscale: bool,
+    taa_fast: bool, // fs_main_fast; see set_taa_fast
     /// Perspective/orthographic clip planes for begin_mode_3d. Defaults keep
     /// the historical 0.01..1000; a scene viewed from ~15 units away needs a
     /// larger near plane, or surfaces a millimetre apart z-fight.
@@ -4814,49 +4816,53 @@ impl Renderer {
             bind_group_layouts: &[Some(&taa_layout)],
             immediate_size: 0,
         });
-        let taa_pipeline = LazyRenderPipeline::new(
-            &device,
-            &wgpu::RenderPipelineDescriptor {
-                label: Some("taa_pipeline"),
-                layout: Some(&taa_pl_layout),
-                vertex: wgpu::VertexState {
-                    module: &taa_shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
+        let create_taa_pipeline = |label: &'static str, entry: &'static str| {
+            LazyRenderPipeline::new(
+                &device,
+                &wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&taa_pl_layout),
+                    vertex: wgpu::VertexState {
+                        module: &taa_shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &taa_shader,
+                        entry_point: Some(entry),
+                        targets: &[
+                            Some(wgpu::ColorTargetState {
+                                format: HDR_FORMAT,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: TAA_DEPTH_HISTORY_FORMAT,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
+                            }),
+                        ],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
                 },
-                fragment: Some(wgpu::FragmentState {
-                    module: &taa_shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[
-                        Some(wgpu::ColorTargetState {
-                            format: HDR_FORMAT,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: TAA_DEPTH_HISTORY_FORMAT,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
-                        }),
-                    ],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            },
-        );
+            )
+        };
+        let taa_pipeline = create_taa_pipeline("taa_pipeline", "fs_main");
+        let taa_pipeline_fast = create_taa_pipeline("taa_pipeline_fast", "fs_main_fast");
         let taa_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("taa_uniform_buffer"),
             size: std::mem::size_of::<TaaParams>() as u64,
@@ -8277,6 +8283,7 @@ impl Renderer {
             taa_depth_history_views,
             taa_current_idx: 0,
             taa_pipeline,
+            taa_pipeline_fast,
             taa_layout,
             taa_uniform_buffer,
             taa_bind_group_cache: [None, None],
@@ -8289,6 +8296,7 @@ impl Renderer {
             taa_frame_index: 0,
             taa_enabled: true,
             temporal_upscale: !cfg!(target_os = "android"),
+            taa_fast: cfg!(target_os = "android"),
             camera_near: 0.01,
             camera_far: 1000.0,
             taa_history_valid: false,

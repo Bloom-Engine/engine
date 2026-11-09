@@ -1062,6 +1062,8 @@ impl Renderer {
                         .as_ref()
                         .expect("reactive TAA pipeline initialized"),
                 );
+            } else if self.taa_fast {
+                pass.set_pipeline(&self.taa_pipeline_fast);
             } else {
                 pass.set_pipeline(&self.taa_pipeline);
             }

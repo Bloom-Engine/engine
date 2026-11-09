@@ -1383,6 +1383,78 @@ fn fs_main(in: VsOut) -> TaaOut {
         ),
     );
 }
+
+// The fast TAA (set_taa_fast; the mobile default), for TAA resolving at its
+// input's resolution: the current pixel as rendered, history clamped to the
+// variance of the pixel and its 4-neighbour cross in YCoCg, one bilinear
+// history fetch reprojected by the closest-depth velocity (the sky by its
+// direction), and the same blend weight. The low-quality tier of desktop
+// temporal AA (Unreal's lowest r.TemporalAA.Quality): without the
+// reconstruction filters, provenance and lock heuristics above, a fraction of
+// their registers and fetches. Writes the same targets; the provenance keeps
+// the depth key and no confidence.
+@fragment
+fn fs_main_fast(in: VsOut) -> TaaOut {
+    let dims = vec2<i32>(textureDimensions(composed_tex));
+    let max_coord = dims - vec2<i32>(1);
+    let coord = clamp(vec2<i32>(in.uv * vec2<f32>(dims)), vec2<i32>(0), max_coord);
+    let current_sample = textureLoad(composed_tex, coord, 0);
+
+    var closest_coord = coord;
+    var depth = textureLoad(depth_tex, coord, 0);
+    var m1 = rgb_to_ycocg(current_sample.rgb);
+    var m2 = m1 * m1;
+    for (var i = 0; i < 4; i = i + 1) {
+        let c = clamp(coord + cross_offset(i), vec2<i32>(0), max_coord);
+        let d = textureLoad(depth_tex, c, 0);
+        if (d < depth) {
+            depth = d;
+            closest_coord = c;
+        }
+        let s = rgb_to_ycocg(textureLoad(composed_tex, c, 0).rgb);
+        m1 = m1 + s;
+        m2 = m2 + s * s;
+    }
+    let mean = m1 / 5.0;
+    let stddev = sqrt(max(m2 / 5.0 - mean * mean, vec3<f32>(0.0)) * (5.0 / 3.0));
+
+    let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
+    let world_h = u.inv_vp * ndc;
+    let perspective = u.params.w > 0.0;
+    let current_depth_key = select(
+        depth,
+        select(1.0 / max(abs(world_h.w), 0.000001), 10000.0, depth >= 0.9999),
+        perspective,
+    );
+    let vel = textureLoad(velocity_tex, closest_coord, 0).rg;
+    var prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
+    if (depth >= 0.9999) {
+        let prev_clip = u.prev_vp * vec4<f32>(world_h.xyz, 0.0);
+        prev_uv = in.uv;
+        if (prev_clip.w > 0.00001) {
+            let prev_ndc = prev_clip.xyz / prev_clip.w;
+            prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 1.0 - (prev_ndc.y * 0.5 + 0.5));
+        }
+    }
+
+    var alpha = abs(u.params.x);
+    var history_sample = current_sample;
+    if (any(prev_uv < vec2<f32>(0.0)) || any(prev_uv > vec2<f32>(1.0))) {
+        alpha = 1.0;
+    } else {
+        history_sample = textureSampleLevel(history_tex, history_samp, prev_uv, 0.0);
+    }
+    let gamma = mix(1.25, 0.25, smoothstep(0.0005, 0.008, length(vel)));
+    let h = rgb_to_ycocg(history_sample.rgb);
+    let lo = mean - stddev * vec3<f32>(gamma, gamma * 3.0, gamma * 3.0);
+    let hi = mean + stddev * vec3<f32>(gamma, gamma * 3.0, gamma * 3.0);
+    let clamped_history = ycocg_to_rgb(clamp(h, lo, hi));
+    let blended = max(mix(clamped_history, current_sample.rgb, alpha), vec3<f32>(0.0));
+    return TaaOut(
+        vec4<f32>(blended, mix(history_sample.a, current_sample.a, alpha)),
+        vec2<f32>(current_depth_key, pack_temporal_history(0.0, 0.0, 0.0)),
+    );
+}
 ",
 );
 
