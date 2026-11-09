@@ -165,7 +165,8 @@ impl TextRenderer {
     }
 
     pub fn load_font(&mut self, data: &[u8]) -> usize {
-        let font = Font::from_bytes(data, FontSettings::default()).expect("Failed to load font");
+        let data = unicode_cmaps_only(data);
+        let font = Font::from_bytes(&data[..], FontSettings::default()).expect("Failed to load font");
         self.fonts.push(font);
         self.fonts.len() - 1
     }
@@ -644,5 +645,69 @@ impl TextRenderer {
                 cursor_x += glyph.advance * scale;
             }
         }
+    }
+}
+
+/// The font with only its Unicode character maps (of the first face, in a .ttc). fontdue merges
+/// every cmap subtable, later ones overwriting earlier ones, so a legacy Mac Roman table after the
+/// Unicode ones (Menlo, the iOS/tvOS monospace font, has one) draws U+00FC "ü" as Mac Roman byte
+/// 0xFC, the cedilla, and "ä" (0xE4) as "‰". Fonts without a Unicode map are left as they are.
+fn unicode_cmaps_only(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+    let u16_at = |i: usize| -> Option<usize> { Some(u16::from_be_bytes(data.get(i..i + 2)?.try_into().ok()?) as usize) };
+    let u32_at = |i: usize| -> Option<usize> { Some(u32::from_be_bytes(data.get(i..i + 4)?.try_into().ok()?) as usize) };
+    let edit = || -> Option<Vec<u8>> {
+        let face = if data.get(0..4)? == b"ttcf" { u32_at(12)? } else { 0 };
+        let cmap = (0..u16_at(face + 4)?)
+            .map(|t| face + 12 + t * 16)
+            .find(|&r| data.get(r..r + 4) == Some(b"cmap"))
+            .and_then(|r| u32_at(r + 8))?;
+        let count = u16_at(cmap + 2)?;
+        let mut unicode = Vec::new();
+        for k in 0..count {
+            let rec = cmap + 4 + k * 8;
+            let (platform, encoding) = (u16_at(rec)?, u16_at(rec + 2)?);
+            if platform == 0 || (platform == 3 && matches!(encoding, 0 | 1 | 10)) {
+                unicode.push(data.get(rec..rec + 8)?.to_vec());
+            }
+        }
+        if unicode.is_empty() || unicode.len() == count {
+            return None;
+        }
+        // the Unicode encoding records first, and the table count cut to them
+        let mut out = data.to_vec();
+        for (k, rec) in unicode.iter().enumerate() {
+            out[cmap + 4 + k * 8..cmap + 12 + k * 8].copy_from_slice(rec);
+        }
+        out[cmap + 2..cmap + 4].copy_from_slice(&(unicode.len() as u16).to_be_bytes());
+        Some(out)
+    };
+    match edit() {
+        Some(out) => Cow::Owned(out),
+        None => Cow::Borrowed(data),
+    }
+}
+
+#[cfg(test)]
+mod cmap_tests {
+    use super::*;
+
+    /// How many rows of ink a glyph has at 30 px.
+    fn rows(font: &Font, ch: char) -> usize {
+        font.rasterize(ch, 30.0).0.height
+    }
+
+    #[test]
+    fn mac_roman_cmap_does_not_override_unicode() {
+        // macOS's Menlo has the same cmaps as the iOS/tvOS one (Unicode, then Mac Roman)
+        let Ok(data) = std::fs::read("/System/Library/Fonts/Menlo.ttc") else { return };
+        let raw = Font::from_bytes(&data[..], FontSettings::default()).unwrap();
+        let fixed = Font::from_bytes(&unicode_cmaps_only(&data)[..], FontSettings::default()).unwrap();
+        // "ü" is a "u" with dots above it: taller than "u", not a small cedilla
+        assert!(rows(&fixed, 'ü') > rows(&fixed, 'u'));
+        assert!(rows(&fixed, 'ä') > rows(&fixed, 'a'));
+        assert_ne!(fixed.lookup_glyph_index('ü'), fixed.lookup_glyph_index('¸'));
+        // fontdue's own merge is what goes wrong (if this fails, fontdue no longer merges)
+        assert!(rows(&raw, 'ü') < rows(&raw, 'u'));
     }
 }
