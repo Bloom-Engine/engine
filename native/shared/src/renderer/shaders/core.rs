@@ -107,9 +107,8 @@ struct VertexOutputScene {
 @group(1) @binding(2) var env_samp: sampler;
 @group(1) @binding(3) var brdf_lut_tex: texture_2d<f32>;
 @group(1) @binding(4) var brdf_lut_samp: sampler;
-@group(1) @binding(5) var shadow_tex_0: texture_depth_2d;
-@group(1) @binding(6) var shadow_tex_1: texture_depth_2d;
-@group(1) @binding(7) var shadow_tex_2: texture_depth_2d;
+// The shadow cascades, one layer each.
+@group(1) @binding(5) var shadow_tex: texture_depth_2d_array;
 @group(1) @binding(8) var shadow_samp: sampler_comparison;
 @group(1) @binding(9) var env_diffuse_tex: texture_2d<f32>;
 @group(2) @binding(0) var base_color_tex: texture_2d<f32>;
@@ -440,85 +439,60 @@ fn f_schlick(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * fc;
 }
 
-// 16-tap Poisson PCF in one cascade; each tap is a hardware 2x2 comparison.
+// 16-tap Poisson PCF in one cascade (`layer`); each tap is a hardware 2x2
+// comparison.
 // The offsets are literal operands rather than a local array indexed by a loop
 // counter: SPIR-V can't index a constant array with a runtime value, so such an
 // array becomes function memory, which mobile GPUs (Adreno) keep in scratch
 // memory (measured ~12 ms of a 73 ms main pass on a Pixel 4a).
-fn pcf_poisson16(t: texture_depth_2d, uv: vec2<f32>, tap_step: vec2<f32>, depth_ref: f32) -> f32 {
+fn pcf_poisson16(layer: i32, uv: vec2<f32>, tap_step: vec2<f32>, depth_ref: f32) -> f32 {
     var sum = 0.0;
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.94201624, -0.39906216) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.94558609, -0.76890725) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.09418410, -0.92938870) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.34495938, 0.29387760) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.91588581, 0.45771432) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.81544232, -0.87912464) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.38277543, 0.27676845) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.97484398, 0.75648379) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.44323325, -0.97511554) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.53742981, -0.47373420) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.26496911, -0.41893023) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.79197514, 0.19090188) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.24188840, 0.99706507) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-0.81409955, 0.91437590) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.19984126, 0.78641367) * tap_step, depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(0.14383161, -0.14100790) * tap_step, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-0.94201624, -0.39906216) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(0.94558609, -0.76890725) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-0.09418410, -0.92938870) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(0.34495938, 0.29387760) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-0.91588581, 0.45771432) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-0.81544232, -0.87912464) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-0.38277543, 0.27676845) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(0.97484398, 0.75648379) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(0.44323325, -0.97511554) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(0.53742981, -0.47373420) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-0.26496911, -0.41893023) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(0.79197514, 0.19090188) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-0.24188840, 0.99706507) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-0.81409955, 0.91437590) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(0.19984126, 0.78641367) * tap_step, layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(0.14383161, -0.14100790) * tap_step, layer, depth_ref);
     return sum;
 }
 
 // 4 hardware 2x2 comparisons half a texel off the centre: together a 3x3-texel
 // tent. The mobile filter (Unity URP's Low soft shadows), a quarter of the
 // Poisson disc's taps.
-fn pcf_tent4(t: texture_depth_2d, uv: vec2<f32>, texel: vec2<f32>, depth_ref: f32) -> f32 {
+fn pcf_tent4(layer: i32, uv: vec2<f32>, texel: vec2<f32>, depth_ref: f32) -> f32 {
     let h = 0.5 * texel;
-    var sum = textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-h.x, -h.y), depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(h.x, -h.y), depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(-h.x, h.y), depth_ref);
-    sum += textureSampleCompareLevel(t, shadow_samp, uv + vec2<f32>(h.x, h.y), depth_ref);
+    var sum = textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-h.x, -h.y), layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(h.x, -h.y), layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(-h.x, h.y), layer, depth_ref);
+    sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + vec2<f32>(h.x, h.y), layer, depth_ref);
     return sum;
 }
 
-// Sample a single cascade's shadow texture with 16-tap Poisson PCF, or the
-// 4-tap tent when dir_light_count.w selects it (set_shadow_filter_4tap). The
-// cascade is selected once, not per tap.
+// Sample one cascade (the shadow texture's layer) with 16-tap Poisson PCF, or
+// the 4-tap tent when dir_light_count.w selects it (set_shadow_filter_4tap).
 fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
-    var dims: vec2<u32>;
-    if (cascade == 0) {
-        dims = textureDimensions(shadow_tex_0);
-    } else if (cascade == 1) {
-        dims = textureDimensions(shadow_tex_1);
-    } else {
-        dims = textureDimensions(shadow_tex_2);
+    let texel = 1.0 / vec2<f32>(textureDimensions(shadow_tex));
+    if (lighting.dir_light_count.w > 0.5) {
+        return pcf_tent4(cascade, shadow_uv, texel, depth_ref) * 0.25;
     }
-    let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
     // Tighter PCF radius (1.0 vs. prior 2.0). Softer was safer against
     // shadow acne / swim but produced a ~4-texel penumbra on every
     // shadow — for outdoor sun at this map resolution that translates
     // to 2-3m of fuzz, which reads as 'painted' rather than 'cast'.
     // The sun's real angular size gives a ~1m penumbra at typical
     // scene distances; r=1.0 roughly matches that.
-    if (lighting.dir_light_count.w > 0.5) {
-        var tent: f32;
-        if (cascade == 0) {
-            tent = pcf_tent4(shadow_tex_0, shadow_uv, texel, depth_ref);
-        } else if (cascade == 1) {
-            tent = pcf_tent4(shadow_tex_1, shadow_uv, texel, depth_ref);
-        } else {
-            tent = pcf_tent4(shadow_tex_2, shadow_uv, texel, depth_ref);
-        }
-        return tent * 0.25;
-    }
     let radius = 1.0;
-    let tap_step = texel * radius;
-    var sum: f32;
-    if (cascade == 0) {
-        sum = pcf_poisson16(shadow_tex_0, shadow_uv, tap_step, depth_ref);
-    } else if (cascade == 1) {
-        sum = pcf_poisson16(shadow_tex_1, shadow_uv, tap_step, depth_ref);
-    } else {
-        sum = pcf_poisson16(shadow_tex_2, shadow_uv, tap_step, depth_ref);
-    }
-    return sum / 16.0;
+    return pcf_poisson16(cascade, shadow_uv, texel * radius, depth_ref) / 16.0;
 }
 
 // Cascaded shadow map sampling. Determines which cascade the fragment
@@ -559,7 +533,7 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>, frag_xy: vec2<f32>) -> 
     // far below visible peter-panning at each cascade's viewing distance.
     // The cascade fit radius ≈ its split distance (compute_cascade_vps
     // fits a camera-centred sphere), so texel ≈ 2·split / map_dim.
-    let map_dim = f32(textureDimensions(shadow_tex_0).x);
+    let map_dim = f32(textureDimensions(shadow_tex).x);
     var fit_r = lighting.shadow_cascade_splits.z;
     if (cascade == 0) {
         fit_r = lighting.shadow_cascade_splits.x;
