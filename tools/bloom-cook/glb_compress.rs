@@ -21,6 +21,9 @@ const GLB_MAGIC: u32 = 0x4654_6C67;
 const CHUNK_JSON: u32 = 0x4E4F_534A;
 const CHUNK_BIN: u32 = 0x004E_4942;
 
+/// How one image would be encoded: normal map, sRGB colour, block footprint.
+type ImagePlan = (bool, bool, (u8, u8));
+
 #[derive(Clone, Copy)]
 struct Options {
     color: (u8, u8),
@@ -381,7 +384,7 @@ pub(crate) fn compress_glb(data: &[u8], flags: &[String]) -> Result<(Vec<u8>, St
     // Images may share a buffer view. Its bytes can only be replaced when
     // every image on it is compressed the same way; otherwise one of them
     // would keep a PNG MIME type over KTX2 bytes, or get the wrong mips.
-    let mut by_view: BTreeMap<usize, Vec<Option<(bool, bool, (u8, u8))>>> = BTreeMap::new();
+    let mut by_view: BTreeMap<usize, Vec<Option<ImagePlan>>> = BTreeMap::new();
     let images = root.get("images").and_then(Value::as_array).cloned();
     for (index, image) in images.unwrap_or_default().iter().enumerate() {
         if let Some(view) = image.get("bufferView").and_then(Value::as_u64) {
