@@ -91,6 +91,7 @@ mod occlusion;
 mod opaque_material_pass;
 mod planar_pass;
 mod postfx_chain;
+mod pt_dynamic_skin;
 mod pt_geometry;
 mod pt_pass;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1076,7 +1077,10 @@ pub struct Renderer {
     /// Per-slot geometry windows for compute pre-skin and BLAS build.
     pt_dyn_windows: Vec<PtDynWindow>,
     /// Dynamic BLAS pool, recreated when a slot's geometry size changes.
-    pt_dyn_blas: Vec<(wgpu::Blas, u32, u32)>,
+    pt_dyn_blas: Vec<pt_dynamic_skin::PtDynBlas>,
+    /// Counts dynamic-skin frames; staggers the periodic full rebuilds of
+    /// refitted dynamic BLASes.
+    pt_dyn_blas_frame: u32,
     /// Writes posed world-space vertices before dynamic BLAS builds.
     pt_skin_pipeline: Option<wgpu::ComputePipeline>,
     pt_skin_layout: Option<wgpu::BindGroupLayout>,
@@ -8422,6 +8426,7 @@ impl Renderer {
             pt_dyn_uploaded_layout: Vec::new(),
             pt_dyn_windows: Vec::new(),
             pt_dyn_blas: Vec::new(),
+            pt_dyn_blas_frame: 0,
             pt_skin_pipeline: None,
             pt_skin_layout: None,
             pt_skin_params: Vec::new(),
@@ -10207,7 +10212,8 @@ impl Renderer {
         // saves copying every skinned mesh twice per frame (3-4 ms for
         // five characters). Static PT geometry shares the buffers, so the
         // shortcut is limited to frames without it.
-        let mut dyn_layout: Vec<(u64, usize, usize, u32, u32)> = Vec::with_capacity(dyn_draws.len());
+        let mut dyn_layout: Vec<(u64, usize, usize, u32, u32)> =
+            Vec::with_capacity(dyn_draws.len());
         for d in &dyn_draws {
             if let Some(Some(meshes)) = self.model_gpu_cache.get(&d.cache_handle) {
                 if let Some(mesh) = meshes.get(d.mesh_idx) {
@@ -10605,7 +10611,7 @@ impl Renderer {
             // output is already world-space).
             for i in 0..dyn_count {
                 let slot = node_count + i;
-                let blas = &self.pt_dyn_blas[i].0;
+                let blas = &self.pt_dyn_blas[i].blas;
                 tlas[slot] = Some(wgpu::TlasInstance::new(
                     blas,
                     [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -10693,7 +10699,7 @@ impl Renderer {
             let mega_ib = self.pt_geo_index_buffer.as_ref().unwrap();
             for (i, w) in self.pt_dyn_windows.iter().take(dyn_count).enumerate() {
                 build_entries.push(wgpu::BlasBuildEntry {
-                    blas: &self.pt_dyn_blas[i].0,
+                    blas: &self.pt_dyn_blas[i].blas,
                     geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
                         wgpu::BlasTriangleGeometry {
                             size: &dyn_size_descs[i],
@@ -10721,205 +10727,6 @@ impl Renderer {
             self.card_light_coherent = false;
         }
         self.tlas_built_version = scene.tlas_version;
-    }
-
-    /// PT-6 — encode the compute pre-skin dispatches for this frame's
-    /// dynamic windows (posed world-space position/normal written over
-    /// the bind-pose data in the megabuffer) and (re)create each slot's
-    /// BLAS when its geometry size changed. Runs before the combined
-    /// BLAS+TLAS build on the same encoder, so the build reads posed
-    /// vertices.
-    fn encode_dynamic_skin(&mut self, encoder: &mut wgpu::CommandEncoder, dyn_count: usize) {
-        if dyn_count == 0 {
-            return;
-        }
-        if self.pt_skin_pipeline.is_none() {
-            let shader = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("pt_skin_shader"),
-                    source: wgpu::ShaderSource::Wgsl(shaders::PT_SKIN_WGSL.into()),
-                });
-            let layout = self
-                .device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("pt_skin_layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 3,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-            let pl = self
-                .device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("pt_skin_pl"),
-                    bind_group_layouts: &[Some(&layout)],
-                    immediate_size: 0,
-                });
-            self.pt_skin_pipeline = Some(self.device.create_compute_pipeline(
-                &wgpu::ComputePipelineDescriptor {
-                    label: Some("pt_skin_pipeline"),
-                    layout: Some(&pl),
-                    module: &shader,
-                    entry_point: Some("cs_skin"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                },
-            ));
-            self.pt_skin_layout = Some(layout);
-            self.created_pipelines(1);
-        }
-        while self.pt_skin_params.len() < dyn_count {
-            self.pt_skin_params
-                .push(self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("pt_skin_params"),
-                    size: 80,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-        }
-
-        // Per-slot: params upload, BLAS pool upkeep, bind group.
-        let mut bind_groups: Vec<wgpu::BindGroup> = Vec::with_capacity(dyn_count);
-        let mut dispatch_counts: Vec<u32> = Vec::with_capacity(dyn_count);
-        for i in 0..dyn_count {
-            let w = &self.pt_dyn_windows[i];
-            let mut words = [0f32; 20];
-            for c in 0..4 {
-                for r in 0..4 {
-                    words[c * 4 + r] = w.model[c][r];
-                }
-            }
-            words[16] = f32::from_bits(w.v_base);
-            words[17] = f32::from_bits(w.v_count);
-            words[18] = f32::from_bits(w.joint_offset.max(0.0) as u32);
-            words[19] = 0.0;
-            self.queue
-                .write_buffer(&self.pt_skin_params[i], 0, bytemuck::cast_slice(&words));
-
-            let need_new = match self.pt_dyn_blas.get(i) {
-                Some((_, vc, ic)) => *vc != w.v_count || *ic != w.i_count,
-                None => true,
-            };
-            if need_new {
-                let blas = self.device.create_blas(
-                    &wgpu::CreateBlasDescriptor {
-                        label: Some("pt_dyn_blas"),
-                        // Rebuilt from scratch every frame the mesh is drawn
-                        // (wgpu 29 has no refit), so build time dominates:
-                        // on an M1 Max five characters (72k triangles) cost
-                        // 14.5 ms per frame as FAST_TRACE builds and 4.5 ms
-                        // as FAST_BUILD, with no measurable trace penalty.
-                        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD,
-                        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
-                    },
-                    wgpu::BlasGeometrySizeDescriptors::Triangles {
-                        descriptors: vec![wgpu::BlasTriangleGeometrySizeDescriptor {
-                            vertex_format: wgpu::VertexFormat::Float32x3,
-                            vertex_count: w.v_count,
-                            index_format: Some(wgpu::IndexFormat::Uint32),
-                            index_count: Some(w.i_count),
-                            flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
-                        }],
-                    },
-                );
-                if i < self.pt_dyn_blas.len() {
-                    self.pt_dyn_blas[i] = (blas, w.v_count, w.i_count);
-                } else {
-                    self.pt_dyn_blas.push((blas, w.v_count, w.i_count));
-                }
-            }
-
-            let src_vb = match self.model_gpu_cache.get(&w.cache_handle) {
-                Some(Some(meshes)) => match meshes.get(w.mesh_idx) {
-                    Some(m) => match &m.geometry {
-                        gpu_driven::MeshGeometry::Dedicated { vertex, .. } => vertex,
-                        // Dynamic PT windows are registered only for skinned
-                        // cached meshes, which always retain dedicated input.
-                        gpu_driven::MeshGeometry::Shared(_) => continue,
-                    },
-                    None => continue,
-                },
-                _ => continue,
-            };
-            bind_groups.push(
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("pt_skin_bg"),
-                    layout: self.pt_skin_layout.as_ref().unwrap(),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: self.pt_skin_params[i].as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: src_vb.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self
-                                .pt_geo_vertex_buffer
-                                .as_ref()
-                                .unwrap()
-                                .as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: self.joint_buffer.as_entire_binding(),
-                        },
-                    ],
-                }),
-            );
-            dispatch_counts.push(w.v_count);
-        }
-
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("pt_skin"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(self.pt_skin_pipeline.as_ref().unwrap());
-        for (bg, vc) in bind_groups.iter().zip(dispatch_counts.iter()) {
-            pass.set_bind_group(0, bg, &[]);
-            pass.dispatch_workgroups(vc.div_ceil(64), 1, 1);
-        }
     }
 
     /// Toggle depth of field on/off. Off (default) = no DoF pass,

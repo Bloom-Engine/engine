@@ -95,3 +95,8 @@ pollster = "0.4"
 # Live GPU-object counters are enabled only while compiling tests. Production
 # builds keep wgpu's counter atomics disabled.
 wgpu = { version = "29", features = ["counters"] }
+
+# Same patched wgpu-core the Apple platform crates link (third_party/wgpu-core-patched/BLOOM_PATCH.md),
+# so this crate's own tests exercise the BLAS refit path.
+[patch.crates-io]
+wgpu-core = { path = "../third_party/wgpu-core-patched" }

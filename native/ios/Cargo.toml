@@ -30,3 +30,8 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread", "NSObject", "NSLocale", "NSArray"] }
 raw-window-handle = "0.6"
 wgpu = "29"
+
+[patch.crates-io]
+# wgpu-core 29 always rebuilds acceleration structures; the patched copy refits
+# skinned-mesh BLASes (see DYN_BLAS_REFIT in shared/src/renderer/mod.rs).
+wgpu-core = { path = "../third_party/wgpu-core-patched" }
