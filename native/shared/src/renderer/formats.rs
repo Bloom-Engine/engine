@@ -1076,3 +1076,39 @@ pub(super) fn create_bloom_chain(
     let full_view = textures[0].create_view(&wgpu::TextureViewDescriptor::default());
     (textures, views, full_view)
 }
+
+/// Diagnostic (`BLOOM_GPU_TIME=1`): start timing this frame's GPU work.
+///
+/// On tile-based GPUs per-pass timestamps overlap and frame time is quantised
+/// to the display, so the time from submit to completion is the only number
+/// that isolates GPU cost. Measuring it serialises CPU and GPU: never leave it
+/// on when judging frame rate.
+pub(super) fn gpu_frame_clock() -> Option<std::time::Instant> {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    ENABLED
+        .get_or_init(|| std::env::var("BLOOM_GPU_TIME").is_ok_and(|value| value == "1"))
+        .then(std::time::Instant::now)
+}
+
+/// Block until the GPU has finished the submitted frame, accumulate its time
+/// and print the mean every 120 frames.
+pub(super) fn finish_gpu_frame_clock(start: Option<std::time::Instant>, device: &wgpu::Device) {
+    let Some(start) = start else {
+        return;
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    #[cfg(target_arch = "wasm32")]
+    let _ = device;
+    static TOTAL: std::sync::Mutex<(f64, u32)> = std::sync::Mutex::new((0.0, 0));
+    let mut total = TOTAL.lock().unwrap();
+    total.0 += start.elapsed().as_secs_f64() * 1000.0;
+    total.1 += 1;
+    if total.1 == 120 {
+        eprintln!("bloom gpu: {:.2} ms/frame (mean of 120)", total.0 / 120.0);
+        *total = (0.0, 0);
+    }
+}

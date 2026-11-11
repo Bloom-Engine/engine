@@ -13318,8 +13318,10 @@ impl Renderer {
             self.finish_frame_readback(readback);
         } else {
             profiler.begin("queue_submit");
+            let gpu_clock = formats::gpu_frame_clock();
             self.submit_frame_commands(encoder.finish());
             profiler.end("queue_submit");
+            formats::finish_gpu_frame_clock(gpu_clock, &self.device);
         }
         #[cfg(target_arch = "wasm32")]
         {

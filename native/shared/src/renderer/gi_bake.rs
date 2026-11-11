@@ -188,6 +188,8 @@ impl Renderer {
                 transparent_gi,
                 prep.next_node,
                 gather_budget,
+                // An eighth of a voxel: far below what the field resolves.
+                SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_RES as f32 * 0.125,
                 &mut prep.vertices,
                 &mut prep.indices,
             );

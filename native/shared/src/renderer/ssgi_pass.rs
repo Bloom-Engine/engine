@@ -291,7 +291,8 @@ impl Renderer {
                     // Bistro's red awnings onto the façade above them) appear
                     // as a sudden delayed light change ~20 s into a session.
                     self.card_light_coherent_ramp,
-                    0.0,
+                    // Live instance records, for the SDF trace's card lookup.
+                    self.tlas_instance_data_count as f32,
                 ],
             };
             self.queue.write_buffer(
@@ -525,7 +526,7 @@ impl Renderer {
                     self.probe_trace_hw_bg_cache[prev_idx].as_ref().unwrap(),
                     &[],
                 );
-                pass.dispatch_workgroups(gw, gh, 1);
+                pass.dispatch_workgroups(gw.div_ceil(8), gh, 1);
             } else if use_sdf {
                 // Ticket 014 V3 — SW SDF sphere-trace path.
                 // V3 (ticket 016) uses a per-prev_idx slot for the
@@ -631,7 +632,9 @@ impl Renderer {
                     self.probe_trace_sdf_bg_cache[prev_idx].as_ref().unwrap(),
                     &[],
                 );
-                pass.dispatch_workgroups(gw, gh, 1);
+                if !self.dbg_skip("gi_trace") {
+                    pass.dispatch_workgroups(gw.div_ceil(8), gh, 1);
+                }
             } else {
                 let ts = profiler.compute_pass_timestamp_writes("probe_trace_pass");
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -644,7 +647,7 @@ impl Renderer {
                     self.probe_trace_bg_cache[prev_idx].as_ref().unwrap(),
                     &[],
                 );
-                pass.dispatch_workgroups(gw, gh, 1);
+                pass.dispatch_workgroups(gw.div_ceil(8), gh, 1);
             }
 
             // ---- temporal (EMA) ----
@@ -793,7 +796,9 @@ impl Renderer {
                     self.probe_temporal_bg_cache[write_idx].as_ref().unwrap(),
                     &[],
                 );
-                pass.dispatch_workgroups(gw, gh, 1);
+                if !self.dbg_skip("gi_temporal") {
+                    pass.dispatch_workgroups(gw, gh, 1);
+                }
             }
             {
                 let ts = profiler.compute_pass_timestamp_writes("probe_spatial_pass");
@@ -807,7 +812,9 @@ impl Renderer {
                     self.probe_temporal_bg_cache[write_idx].as_ref().unwrap(),
                     &[],
                 );
-                pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
+                if !self.dbg_skip("gi_spatial") {
+                    pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
+                }
             }
             self.probe_history_valid = true;
 
@@ -922,7 +929,9 @@ impl Renderer {
                 self.probe_resolve_bg_cache[write_idx].as_ref().unwrap(),
                 &[],
             );
-            pass.dispatch_workgroups(half_w.div_ceil(8), half_h.div_ceil(8), 1);
+            if !self.dbg_skip("gi_resolve") {
+                pass.dispatch_workgroups(half_w.div_ceil(8), half_h.div_ceil(8), 1);
+            }
         } else {
             // Suppressed frames do not produce probe history. This also
             // catches progressive PT changing ownership without a mode change.

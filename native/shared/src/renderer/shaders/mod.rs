@@ -186,8 +186,10 @@ mod ray_query_variant_tests {
             assert!(!source.contains("u.params.y * ndotd"));
         }
         for source in traces {
-            assert!(source.contains("@compute @workgroup_size(8, 1, 1)"));
-            assert!(source.contains("lid.x >= PROBE_TRACE_RAYS"));
+            // Eight probes by eight rays per workgroup: one-probe groups of
+            // eight threads cost a mobile GPU more in scheduling than in tracing.
+            assert!(source.contains("@compute @workgroup_size(8, 8, 1)"));
+            assert!(source.contains("ray.x >= PROBE_TRACE_RAYS"));
             assert!(!source.contains("lid.y >= PROBE_OCT_SIZE / 2u"));
         }
         assert!(PROBE_HELPERS_WGSL.contains("fn probe_lattice_jitter(phase_in: u32)"));

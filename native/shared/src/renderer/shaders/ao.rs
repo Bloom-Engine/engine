@@ -272,8 +272,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let P = view_pos_from_linear(uv, center_z);
     let uv_r = uv + vec2<f32>(inv_sz.x, 0.0);
     let uv_u = uv + vec2<f32>(0.0, -inv_sz.y);
-    let P_r = view_pos_from_linear(uv_r, hiz_sample(uv_r, 0));
-    let P_u = view_pos_from_linear(uv_u, hiz_sample(uv_u, 0));
+    let z_r = hiz_sample(uv_r, 0);
+    let z_u = hiz_sample(uv_u, 0);
+    let P_r = view_pos_from_linear(uv_r, z_r);
+    let P_u = view_pos_from_linear(uv_u, z_u);
     let N = normalize(cross(P_r - P, P_u - P));
 
     let coord = vec2<f32>(px);
@@ -357,9 +359,22 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // quad neighbours, checkerboard gone by construction. Flat walls,
     // ground and grass-over-ground keep the cheap 2-direction path (their
     // directions agree), so the 4× fan-out cost stays foliage-local.
+    //
+    // Both absorbers only fail at a depth silhouette, so that is part of the
+    // trigger. Direction disagreement alone is also what any crease or
+    // cluttered interior produces (a third of the pixels in a ship's hold),
+    // where the blur and the EMA do their job and the 4x scan bought nothing.
     let anisotropic = (vis_max - vis_min) > 0.3;
+    var silhouette = false;
+    if (anisotropic) {
+        let z_l = hiz_sample(uv - vec2<f32>(inv_sz.x, 0.0), 0);
+        let z_d = hiz_sample(uv + vec2<f32>(0.0, inv_sz.y), 0);
+        let z_near = min(min(z_r, z_u), min(z_l, z_d));
+        let z_far = max(max(z_r, z_u), max(z_l, z_d));
+        silhouette = z_far > center_z * 1.08 || z_near < center_z * 0.92;
+    }
     let near_field = (-P.z) < 1.5;
-    if (anisotropic || near_field) {
+    if ((anisotropic && silhouette) || near_field) {
         for (var d = 0u; d < N_DIRS_TOTAL; d = d + 1u) {
             if ((d % N_PHASES) == phase) { continue; }
             let angle = (f32(d) / f32(N_DIRS_TOTAL)) * PI + jitter_angle;
