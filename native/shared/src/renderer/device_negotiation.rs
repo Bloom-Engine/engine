@@ -209,6 +209,7 @@ fn build_device_request_plans_with_override(
     for optional in [
         wgpu::Features::TIMESTAMP_QUERY,
         wgpu::Features::TEXTURE_COMPRESSION_BC,
+        wgpu::Features::TEXTURE_COMPRESSION_ASTC,
     ] {
         if supported.contains(optional) {
             preferred_features |= optional;

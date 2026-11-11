@@ -863,16 +863,7 @@ macro_rules! __bloom_ffi_models {
                 // visibly flatter than the same GLB through loadModel.
                 let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
                 for tex in &staged.textures {
-                    tex_map.push(
-                        eng.renderer.register_texture_kind_with_color_space(
-                            tex.width,
-                            tex.height,
-                            &tex.data,
-                            tex.is_normal,
-                            tex.is_srgb,
-                            tex.alpha_coverage_reference,
-                        ),
-                    );
+                    tex_map.push(tex.register(&mut eng.renderer));
                 }
                 let mut model = staged.model;
                 // Remap EVERY texture slot, not just the base colour — this

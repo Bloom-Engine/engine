@@ -1,5 +1,42 @@
 //! Texture-byte and URI helpers for the glTF loader.
 
+use crate::compressed_texture::CompressedImage;
+
+/// Upload a KTX2 image (ASTC / BC7 blocks with authored mips) without
+/// decoding it. `None` when the bytes are something else, the adapter lacks
+/// the block format, or the image feeds an alpha-MASK material: coverage
+/// mips are baked per cutoff from the decoded texels, so those images take
+/// the RGBA8 path.
+pub(super) fn register_compressed_image(
+    renderer: &mut crate::renderer::Renderer,
+    bytes: &[u8],
+    is_normal: bool,
+    is_srgb: bool,
+    feeds_alpha_mask: bool,
+) -> Option<u32> {
+    if feeds_alpha_mask {
+        return None;
+    }
+    let image = CompressedImage::from_ktx2(bytes)?;
+    renderer.register_texture_compressed(&image, is_normal, is_srgb)
+}
+
+/// Staged (no renderer yet) counterpart of [`decode_texture_bytes`]: a KTX2
+/// image stays compressed, with no texels, unless it feeds an alpha-MASK
+/// material. Whether it uploads as blocks is decided at commit.
+pub(super) fn stage_texture_bytes(
+    bytes: &[u8],
+    uri: &str,
+    feeds_alpha_mask: bool,
+) -> Option<(Vec<u8>, u32, u32, Option<CompressedImage>)> {
+    if !feeds_alpha_mask {
+        if let Some(image) = CompressedImage::from_ktx2(bytes) {
+            return Some((Vec::new(), image.width, image.height, Some(image)));
+        }
+    }
+    decode_texture_bytes(bytes, uri).map(|(rgba, width, height)| (rgba, width, height, None))
+}
+
 /// Replace the extension on a URI (keeps directories / query strings
 /// untouched). Used to fall back from `foo.png` → `foo.dds` when a
 /// glTF references a PNG URI that isn't on disk but the DDS sibling is.
@@ -20,6 +57,11 @@ pub(super) fn swap_extension(uri: &str, new_ext: &str) -> String {
 /// Lumberyard Bistro that ship BC-compressed textures), falling back
 /// to the `image` crate for PNG/JPEG/etc. Returns None on failure.
 pub(super) fn decode_texture_bytes(bytes: &[u8], uri: &str) -> Option<(Vec<u8>, u32, u32)> {
+    #[cfg(feature = "image-extras")]
+    if crate::compressed_texture::is_ktx2(bytes) {
+        let image = CompressedImage::from_ktx2(bytes)?;
+        return Some((image.decode_rgba8()?, image.width, image.height));
+    }
     let is_dds =
         uri.to_ascii_lowercase().ends_with(".dds") || bytes.len() >= 4 && &bytes[..4] == b"DDS ";
     if is_dds {

@@ -39,6 +39,9 @@ image-extras = [
     "dep:image_dds",
     "dep:serde_json",
     "dep:sha2",
+    # KTX2 images with ASTC blocks in glTF: the software decoder for
+    # adapters without the format.
+    "dep:astc-decode",
 ]
 
 [build-dependencies]
@@ -59,6 +62,7 @@ bytemuck = { version = "1", features = ["derive"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image"], optional = true }
+astc-decode = { version = "0.3", optional = true }
 gltf = { version = "1", features = [
     "extensions",
     "extras",

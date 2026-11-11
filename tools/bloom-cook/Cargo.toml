@@ -16,6 +16,10 @@ gltf = { version = "1.4", default-features = false, features = [
     "utils",
     "KHR_materials_pbrSpecularGlossiness",
 ] }
+# glb-compress: ARM's reference ASTC encoder (vendored, built by cc) and a
+# decoder to report the quality of what was written.
+ctt-astcenc = { version = "0.6", features = ["rayon"] }
+astc-decode = "0.3"
 half = "2"
 meshopt = "0.6.2"
 serde_json = "1"
