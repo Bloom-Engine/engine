@@ -60,6 +60,8 @@ pub fn build_cooked_color_mip_chain(
     (bytes, mip_count)
 }
 mod capability_api;
+mod card_capture_pass;
+use card_capture_pass::CardCaptureDraw;
 mod draw2d;
 mod env_prefilter;
 mod final_pass;
@@ -6737,8 +6739,8 @@ impl Renderer {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
-                    width: CARD_SLOT_SIZE,
-                    height: CARD_SLOT_SIZE,
+                    width: CARD_SLOT_SIZE * CARD_AXES_PER_MESH,
+                    height: CARD_SLOT_SIZE * CARD_CAPTURE_MAX_PER_FRAME as u32,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -6758,8 +6760,8 @@ impl Renderer {
         let card_capture_depth_scratch = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("card_capture_depth_scratch"),
             size: wgpu::Extent3d {
-                width: CARD_SLOT_SIZE,
-                height: CARD_SLOT_SIZE,
+                width: CARD_SLOT_SIZE * CARD_AXES_PER_MESH,
+                height: CARD_SLOT_SIZE * CARD_CAPTURE_MAX_PER_FRAME as u32,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -9428,6 +9430,14 @@ impl Renderer {
                 }],
             });
         let mut capture_index = 0_u32;
+        // Every capture of the frame draws into its own cell of the scratch
+        // grid (one row per mesh, one column per axis) inside a single render
+        // pass, and the cells are copied to their atlas slots afterwards.
+        // One pass and one run of copies per frame replaces a render pass
+        // plus a blit per axis: 120 of each at the per-frame budget, which
+        // on Metal held about 400 MB of encoder memory while a scene loaded.
+        let mut capture_draws: Vec<CardCaptureDraw> =
+            Vec::with_capacity(pending.len() * CARD_AXES_PER_MESH as usize);
 
         for handle in pending {
             let (
@@ -9538,91 +9548,16 @@ impl Renderer {
                     bytemuck::bytes_of(&params),
                 );
 
-                let slot_x = slot % CARD_SLOTS_PER_ROW;
-                let slot_y = slot / CARD_SLOTS_PER_ROW;
-
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("card_capture_pass"),
-                    color_attachments: &[
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: &self.card_capture_albedo_scratch_view,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        }),
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: &self.card_capture_emissive_scratch_view,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        }),
-                    ],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.card_capture_depth_scratch_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Discard,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
+                capture_draws.push(CardCaptureDraw {
+                    uniform_offset: uniform_offset as u32,
+                    texture_bg: texture_bg.clone(),
+                    vertex_buffer: vb_ptr.clone(),
+                    index_buffer: ib_ptr.clone(),
+                    index_count,
+                    cell_x: axis * CARD_SLOT_SIZE,
+                    cell_y: capture_index * CARD_SLOT_SIZE,
+                    slot,
                 });
-                pass.set_pipeline(&self.card_capture_pipeline);
-                pass.set_bind_group(0, &capture_uniform_bg, &[uniform_offset as u32]);
-                pass.set_bind_group(1, &texture_bg, &[]);
-                pass.set_vertex_buffer(0, vb_ptr.slice(..));
-                pass.set_index_buffer(ib_ptr.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..index_count, 0, 0..1);
-                drop(pass);
-
-                let atlas_origin = wgpu::Origin3d {
-                    x: slot_x * CARD_SLOT_SIZE,
-                    y: slot_y * CARD_SLOT_SIZE,
-                    z: 0,
-                };
-                let copy_extent = wgpu::Extent3d {
-                    width: CARD_SLOT_SIZE,
-                    height: CARD_SLOT_SIZE,
-                    depth_or_array_layers: 1,
-                };
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.card_capture_albedo_scratch,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.mesh_card_atlas,
-                        mip_level: 0,
-                        origin: atlas_origin,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    copy_extent,
-                );
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.card_capture_emissive_scratch,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.mesh_card_emissive_tex,
-                        mip_level: 0,
-                        origin: atlas_origin,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    copy_extent,
-                );
 
                 // Stash the world-space normal for the card-lighting
                 // pass. Object-space face normals are axis unit vectors
@@ -9657,6 +9592,7 @@ impl Renderer {
             }
             capture_index += 1;
         }
+        self.record_card_capture_draws(encoder, &capture_uniform_bg, &capture_draws);
 
         // Upload the new slot-meta entries in one contiguous batch.
         // Sorting by slot index lets us coalesce adjacent writes, but
