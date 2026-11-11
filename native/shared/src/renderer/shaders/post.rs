@@ -768,6 +768,35 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
+// Five-tap Catmull-Rom history lookup for native-scale frames under camera
+// motion: no upsample to disturb, and it keeps the detail that per-frame
+// resampling drains. Other motion keeps the corpus-qualified lookup below.
+fn sample_history_catmull_rom(uv: vec2<f32>) -> vec4<f32> {
+    let tex_size = vec2<f32>(textureDimensions(history_tex));
+    let inv_size = 1.0 / tex_size;
+    let sample_pos = uv * tex_size;
+    let tex_pos1 = floor(sample_pos - 0.5) + 0.5;
+    let f = sample_pos - tex_pos1;
+    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    let w3 = f * f * (-0.5 + 0.5 * f);
+    let w12 = w1 + w2;
+    let offset12 = w2 / w12;
+    let tp0 = (tex_pos1 - 1.0) * inv_size;
+    let tp3 = (tex_pos1 + 2.0) * inv_size;
+    let tp12 = (tex_pos1 + offset12) * inv_size;
+    var result = vec4<f32>(0.0);
+    result += textureSampleLevel(history_tex, history_samp, vec2<f32>(tp12.x, tp0.y), 0.0) * w12.x * w0.y;
+    result += textureSampleLevel(history_tex, history_samp, vec2<f32>(tp0.x, tp12.y), 0.0) * w0.x * w12.y;
+    result += textureSampleLevel(history_tex, history_samp, vec2<f32>(tp12.x, tp12.y), 0.0) * w12.x * w12.y;
+    result += textureSampleLevel(history_tex, history_samp, vec2<f32>(tp3.x, tp12.y), 0.0) * w3.x * w12.y;
+    result += textureSampleLevel(history_tex, history_samp, vec2<f32>(tp12.x, tp3.y), 0.0) * w12.x * w3.y;
+    let weight = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    return max(result / weight, vec4<f32>(0.0));
+}
+
+
 // History lives at output resolution. A bilinear lookup is exact while a
 // reprojected coordinate remains on an output texel centre, but under camera
 // or object motion it averages four already-filtered history pixels. Repeating
@@ -781,8 +810,8 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
 // byte-for-byte the original lookup so settled temporal supersampling is not
 // disturbed. Later variance, depth, and reactive guards still decide whether
 // a moving sample belongs to the current surface.
-fn sample_history_reprojected(uv: vec2<f32>, camera_moving: bool) -> vec4<f32> {
-    if (!camera_moving) {
+fn sample_history_reprojected(uv: vec2<f32>, camera_moving: bool, object_moving: bool) -> vec4<f32> {
+    if (!camera_moving && !object_moving) {
         return textureSampleLevel(history_tex, history_samp, uv, 0.0);
     }
     let dims = vec2<f32>(textureDimensions(history_tex));
@@ -891,6 +920,18 @@ fn fs_main(in: VsOut) -> TaaOut {
     }
     let vel_len = length(vel);
     let motion_alpha = smoothstep(0.0005, 0.008, vel_len);
+    // Pixels this surface moved since the last frame, with the camera still.
+    let object_motion_px = select(
+        vel_len * f32(textureDimensions(history_tex).x),
+        0.0,
+        camera_moving,
+    );
+    let object_moving = object_motion_px > 0.05;
+    let native_camera_motion_px = select(
+        0.0,
+        vel_len * f32(textureDimensions(history_tex).x),
+        camera_moving && reconstruction_scale >= 0.95,
+    );
 
     var prev_uv: vec2<f32>;
     if (depth >= 0.9999) {
@@ -1019,7 +1060,10 @@ fn fs_main(in: VsOut) -> TaaOut {
         prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
         prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
     if (history_in_bounds) {
-        let h_sample = sample_history_reprojected(prev_uv, camera_moving);
+        var h_sample = sample_history_reprojected(prev_uv, camera_moving, object_moving);
+        if (native_camera_motion_px > 0.05) {
+            h_sample = sample_history_catmull_rom(prev_uv);
+        }
         history = h_sample.rgb;
         history_w = h_sample.a;
         let history_depth_dims = vec2<i32>(textureDimensions(history_depth_tex));
@@ -1308,9 +1352,15 @@ fn fs_main(in: VsOut) -> TaaOut {
         min(bootstrap_alpha, settled_current_cap),
         settled_lock,
     );
-    let alpha = max(
+    let ramped_alpha = max(
         max(settled_motion_ramped, max(depth_disocclusion, reactive)),
         settled_bootstrap_alpha,
+    );
+    // Slow motion (a pixel or two a frame) sits below the ramp above while
+    // every frame resamples the history: shorten the window once it moves.
+    let alpha = max(
+        ramped_alpha,
+        0.25 * smoothstep(0.1, 1.0, max(object_motion_px, native_camera_motion_px)),
     );
     let accepted_history = select(0.0, 1.0 - temporal_rejection, history_usable);
     let next_history_confidence =
