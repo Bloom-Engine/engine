@@ -834,13 +834,42 @@ impl SceneGraph {
         &self,
         exclude_physical_transmission: bool,
     ) -> (Vec<f32>, Vec<u32>, u32) {
+        let mut vbuf: Vec<f32> = Vec::new();
+        let mut ibuf: Vec<u32> = Vec::new();
+        let (_, tri_count, _) = self.append_world_triangles_for_gi(
+            exclude_physical_transmission,
+            0,
+            usize::MAX,
+            &mut vbuf,
+            &mut ibuf,
+        );
+        (vbuf, ibuf, tri_count)
+    }
+
+    /// Resumable form of `build_world_triangles_for_gi`: appends nodes from
+    /// the `first_node`-th live node onward and stops once `max_vertices`
+    /// vertices have been appended in this call. Returns the node to resume
+    /// from, the triangles appended, and whether every node has been visited.
+    /// A scene SDF rebake uses it to spread the gather over several frames.
+    pub(crate) fn append_world_triangles_for_gi(
+        &self,
+        exclude_physical_transmission: bool,
+        first_node: usize,
+        max_vertices: usize,
+        vbuf: &mut Vec<f32>,
+        ibuf: &mut Vec<u32>,
+    ) -> (usize, u32, bool) {
         // 12 floats per vertex to match `Vertex3D` stride the bake
         // shader indexes with. position + zero-padding.
         const STRIDE: usize = 12;
-        let mut vbuf: Vec<f32> = Vec::new();
-        let mut ibuf: Vec<u32> = Vec::new();
+        let mut next_node = first_node;
+        let mut appended = 0usize;
         let mut tri_count: u32 = 0;
-        for (_, node) in self.nodes.iter() {
+        for (_, node) in self.nodes.iter().skip(first_node) {
+            if appended >= max_vertices {
+                return (next_node, tri_count, false);
+            }
+            next_node += 1;
             if !node.visible
                 || node.vertices().is_empty()
                 || node.indices().is_empty()
@@ -851,6 +880,7 @@ impl SceneGraph {
             let base = (vbuf.len() / STRIDE) as u32;
             let world_transform = node.world_transform();
             let t = &world_transform;
+            vbuf.reserve(node.vertices().len() * STRIDE);
             for v in node.vertices() {
                 let px = v.position[0];
                 let py = v.position[1];
@@ -862,12 +892,11 @@ impl SceneGraph {
                 // read by `SDF_BAKE_WGSL`.
                 vbuf.extend_from_slice(&[wx, wy, wz, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
             }
-            for &idx in node.indices() {
-                ibuf.push(base + idx);
-            }
+            ibuf.extend(node.indices().iter().map(|&idx| base + idx));
             tri_count += (node.indices().len() / 3) as u32;
+            appended += node.vertices().len();
         }
-        (vbuf, ibuf, tri_count)
+        (next_node, tri_count, true)
     }
 
     pub fn set_parent(&mut self, handle: f64, parent: f64) {
