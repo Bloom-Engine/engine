@@ -286,7 +286,13 @@ fn compute_tbn(dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>,
     let b = dp2perp * duv1.y + dp1perp * duv2.y;
     let denom = max(dot(t, t), dot(b, b));
     let invmax = inverseSqrt(max(denom, 1e-20));
-    return mat3x3<f32>(t * invmax, b * invmax, n);
+    // The bitangent is negated. This construction returns the direction of
+    // increasing v, but glTF's v runs down the image while its normal maps
+    // keep +Y up, so the glTF bitangent (cross(normal, tangent) * w, what the
+    // vertex-tangent branch builds) points along decreasing v. Unnegated, the
+    // fallback inverted the normal map's green channel: on a low-poly mesh
+    // whose normal map carries its smoothing, every triangle became a facet.
+    return mat3x3<f32>(t * invmax, -b * invmax, n);
 }
 
 // The 4x4 Bayer threshold (0.5..15.5)/16 at (x, y), from the bits of x ^ y and
