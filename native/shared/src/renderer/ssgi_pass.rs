@@ -120,7 +120,7 @@ impl Renderer {
                 size: [half_w, half_h, gw, gh],
                 params: [
                     (self.probe_frame_index & 4095) as f32,
-                    PROBE_TILE_SIZE as f32,
+                    super::formats::probe_tile_size() as f32,
                     if probe_lattice_jitter_active {
                         1.0
                     } else {
@@ -698,7 +698,12 @@ impl Renderer {
                     gw as f32,
                     gh as f32,
                 ],
-                size: [half_w as f32, half_h as f32, PROBE_TILE_SIZE as f32, p00],
+                size: [
+                    half_w as f32,
+                    half_h as f32,
+                    super::formats::probe_tile_size() as f32,
+                    p00,
+                ],
                 confidence: [
                     if use_hw { 1.0 } else { 0.0 },
                     (self.probe_frame_index & 15) as f32,
@@ -827,7 +832,7 @@ impl Renderer {
                 proj_row01: [p00, p11, p20, p21],
                 size: [half_w, half_h, gw, gh],
                 params: [
-                    PROBE_TILE_SIZE as f32,
+                    super::formats::probe_tile_size() as f32,
                     1.0,
                     resolve_history_current_floor,
                     if camera_moving { 1.0 } else { 0.0 },

@@ -1784,6 +1784,20 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_ssgi_probe_spacing",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_ssao_downscale",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_present_mode",
           "params": [
             "f64"

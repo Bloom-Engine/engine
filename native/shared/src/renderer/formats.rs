@@ -423,14 +423,46 @@ pub(super) fn create_ssgi_rt(
 /// 800×450 half-res Sponza RT = 5700 probes, each holding an 8×8
 /// octahedral atlas = 64 radiance samples (ticket 007a).
 pub(super) const PROBE_TILE_SIZE: u32 = 8;
+
+/// Screen-probe spacing in half-resolution pixels (`Renderer::set_ssgi_probe_spacing`).
+/// Process-wide like the other module-local renderer stores; one renderer per process.
+static PROBE_TILE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(PROBE_TILE_SIZE);
+
+pub(super) fn probe_tile_size() -> u32 {
+    PROBE_TILE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Divisor from the render extent to the ambient-occlusion targets
+/// (`Renderer::set_ssao_downscale`). 2 = half resolution.
+static AO_DIVISOR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+
+pub(super) fn ao_divisor() -> u32 {
+    AO_DIVISOR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(super) fn store_ao_divisor(divisor: u32) {
+    AO_DIVISOR.store(divisor, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Size of the ambient-occlusion targets for a render extent.
+pub(super) fn ao_extent(width: u32, height: u32) -> (u32, u32) {
+    let d = ao_divisor();
+    ((width / d).max(1), (height / d).max(1))
+}
+
+pub(super) fn store_probe_tile_size(tile: u32) {
+    PROBE_TILE.store(tile, std::sync::atomic::Ordering::Relaxed);
+}
 pub(super) const PROBE_OCT_SIZE: u32 = 8;
 pub(super) const PROBE_OCT_TEXELS: u32 = PROBE_OCT_SIZE * PROBE_OCT_SIZE;
 
 pub(super) fn probe_grid_dims(width: u32, height: u32) -> (u32, u32) {
     let half_w = (width / 2).max(1);
     let half_h = (height / 2).max(1);
-    let gw = (half_w + PROBE_TILE_SIZE - 1) / PROBE_TILE_SIZE;
-    let gh = (half_h + PROBE_TILE_SIZE - 1) / PROBE_TILE_SIZE;
+    let tile = probe_tile_size();
+    let gw = (half_w + tile - 1) / tile;
+    let gh = (half_h + tile - 1) / tile;
     (gw.max(1), gh.max(1))
 }
 
@@ -880,8 +912,7 @@ pub(super) fn create_ssao_rt(
     width: u32,
     height: u32,
 ) -> (wgpu::Texture, wgpu::TextureView) {
-    let w = (width / 2).max(1);
-    let h = (height / 2).max(1);
+    let (w, h) = ao_extent(width, height);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssao_rt"),
         size: wgpu::Extent3d {
@@ -911,8 +942,7 @@ pub(super) fn create_ssao_history_textures(
     width: u32,
     height: u32,
 ) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
-    let w = (width / 2).max(1);
-    let h = (height / 2).max(1);
+    let (w, h) = ao_extent(width, height);
     let make = |label: &str| -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -942,8 +972,7 @@ pub(super) fn create_ssao_blur_rt(
     width: u32,
     height: u32,
 ) -> (wgpu::Texture, wgpu::TextureView) {
-    let w = (width / 2).max(1);
-    let h = (height / 2).max(1);
+    let (w, h) = ao_extent(width, height);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssao_blur_rt"),
         size: wgpu::Extent3d {
