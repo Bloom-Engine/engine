@@ -769,11 +769,11 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
 }
 
 // Five-tap Catmull-Rom history lookup (the same kernel the upsample uses),
-// for a pixel that moves under a still camera: a rocking ship, a turning
-// head, a skinned character. Its history is resampled every frame exactly as
-// under camera motion, and bilinear resampling drained a quarter of the
-// detail from a slowly turning model. The camera-motion path keeps its own
-// qualified phase policy below.
+// for a native-resolution frame under real camera motion. There is no
+// upsample for it to disturb there, and the cubic keeps the detail that
+// resampling the history every frame otherwise drains. Fractional scales and
+// object-only motion keep the phase-compressed lookup below, which the
+// temporal corpus qualifies.
 fn sample_history_catmull_rom(uv: vec2<f32>) -> vec4<f32> {
     let tex_size = vec2<f32>(textureDimensions(history_tex));
     let inv_size = 1.0 / tex_size;
@@ -798,6 +798,10 @@ fn sample_history_catmull_rom(uv: vec2<f32>) -> vec4<f32> {
     let weight = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
     return max(result / weight, vec4<f32>(0.0));
 }
+
+// Five-tap Catmull-Rom history lookup, for a native-resolution frame under
+// real camera motion: there is no upsample to protect, and the cubic keeps
+// the detail that repeated resampling otherwise drains.
 
 // History lives at output resolution. A bilinear lookup is exact while a
 // reprojected coordinate remains on an output texel centre, but under camera
@@ -929,6 +933,11 @@ fn fs_main(in: VsOut) -> TaaOut {
         camera_moving,
     );
     let object_moving = object_motion_px > 0.05;
+    let native_camera_motion_px = select(
+        0.0,
+        vel_len * f32(textureDimensions(history_tex).x),
+        camera_moving && reconstruction_scale >= 0.95,
+    );
 
     var prev_uv: vec2<f32>;
     if (depth >= 0.9999) {
@@ -1057,7 +1066,10 @@ fn fs_main(in: VsOut) -> TaaOut {
         prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
         prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
     if (history_in_bounds) {
-        let h_sample = sample_history_reprojected(prev_uv, camera_moving, object_moving);
+        var h_sample = sample_history_reprojected(prev_uv, camera_moving, object_moving);
+        if (native_camera_motion_px > 0.05) {
+            h_sample = sample_history_catmull_rom(prev_uv);
+        }
         history = h_sample.rgb;
         history_w = h_sample.a;
         let history_depth_dims = vec2<i32>(textureDimensions(history_depth_tex));
@@ -1353,7 +1365,10 @@ fn fs_main(in: VsOut) -> TaaOut {
     // Slow object motion (a pixel or two a frame) is below the velocity ramp
     // above, so the window stayed at its settled length while every frame
     // resampled the history. Shorten it as soon as the surface really moves.
-    let alpha = max(ramped_alpha, 0.25 * smoothstep(0.1, 1.0, object_motion_px));
+    let alpha = max(
+        ramped_alpha,
+        0.25 * smoothstep(0.1, 1.0, max(object_motion_px, native_camera_motion_px)),
+    );
     let accepted_history = select(0.0, 1.0 - temporal_rejection, history_usable);
     let next_history_confidence =
         min(history_confidence + 1.0 / 16.0, 1.0) * accepted_history;
