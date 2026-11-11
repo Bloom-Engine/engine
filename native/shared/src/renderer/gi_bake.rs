@@ -104,138 +104,156 @@ impl Renderer {
         {
             self.scene_sdf_clipmap_rebake_needed = true;
         }
-        // Continue an in-flight job first: one slice batch per frame.
+        // Continue an in-flight job first: one slice batch per frame. A job
+        // bakes the triangles it snapshotted, so it stays valid when the scene
+        // moves on and is allowed to publish; the version it carries then
+        // differs from the scene's and the check above starts the next bake.
+        // Dropping it on every scene change meant a scene that animates every
+        // frame never published a clipmap at all.
         if let Some(job) = self.sdf_clipmap_job.take() {
-            if job.scene_version == scene.tlas_version && job.transparent_gi == transparent_gi {
+            if job.transparent_gi == transparent_gi {
                 self.encode_clipmap_bake_slices(job, encoder);
                 return;
             }
-            // The staging volume is not live until its final atomic copy.
-            // Dropping an obsolete job is therefore safe and avoids publishing
-            // geometry/material state that changed while it was amortizing.
+            // The staging volume is not live until its final atomic copy, so
+            // a job for the other transparent-GI specialization can be dropped.
             self.scene_sdf_clipmap_rebake_needed = true;
         }
-        if !self.scene_sdf_clipmap_rebake_needed {
-            return;
-        }
-        // Wait for all per-mesh queues to drain — builds the clipmap
-        // from a fully-loaded scene rather than a partial one, and
-        // keeps first-frame cost spread across the card/BLAS work
-        // already scheduled.
-        if !scene.pending_blas_builds.is_empty()
-            || !scene.pending_card_captures.is_empty()
-            || !scene.pending_sdf_bakes.is_empty()
+        let mut prep_guard = sdf_clipmap_prep::clipmap_prep().lock().unwrap();
+        if prep_guard
+            .as_ref()
+            .is_some_and(|p| p.transparent_gi != transparent_gi)
         {
-            return;
+            *prep_guard = None;
         }
-
-        let mut cache_guard = sdf_tri_cache().lock().unwrap();
-        let stale = match &*cache_guard {
-            Some(c) => c.version != scene.tlas_version || c.excludes_transmission != transparent_gi,
-            None => true,
-        };
-        if stale {
-            let (v, i, n) = scene.build_world_triangles_for_gi(transparent_gi);
-            *cache_guard = Some(SdfTriCache {
-                version: scene.tlas_version,
-                excludes_transmission: transparent_gi,
-                vertices: v,
-                indices: i,
-                tri_count: n,
+        if prep_guard.is_none() {
+            if !self.scene_sdf_clipmap_rebake_needed {
+                return;
+            }
+            // Wait for all per-mesh queues to drain — builds the clipmap
+            // from a fully-loaded scene rather than a partial one, and
+            // keeps first-frame cost spread across the card/BLAS work
+            // already scheduled.
+            if !scene.pending_blas_builds.is_empty()
+                || !scene.pending_card_captures.is_empty()
+                || !scene.pending_sdf_bakes.is_empty()
+            {
+                return;
+            }
+            // A soup gathered for this scene version is reused as is (a
+            // travel-triggered rebake only re-bins); a stale one donates its
+            // allocations to the new gather.
+            let (vertices, indices, tri_count, gathered) =
+                match sdf_tri_cache().lock().unwrap().take() {
+                    Some(c)
+                        if c.version == scene.tlas_version
+                            && c.excludes_transmission == transparent_gi =>
+                    {
+                        (c.vertices, c.indices, c.tri_count, true)
+                    }
+                    Some(mut c) => {
+                        c.vertices.clear();
+                        c.indices.clear();
+                        (c.vertices, c.indices, 0, false)
+                    }
+                    None => (Vec::new(), Vec::new(), 0, false),
+                };
+            *prep_guard = Some(sdf_clipmap_prep::ClipmapPrep {
+                scene_version: scene.tlas_version,
+                transparent_gi,
+                next_node: 0,
+                gathered,
+                vertices,
+                indices,
+                tri_count,
+                origin: [0.0; 3],
+                binner: None,
             });
         }
-        let cached = cache_guard.as_ref().unwrap();
-        let vertices = &cached.vertices;
-        let indices = &cached.indices;
-        let tri_count = cached.tri_count;
+        // The first bake prepares in one go, as it always has. A rebake has a
+        // live clipmap to keep serving traces, so it spends a bounded amount
+        // of CPU per frame.
+        let amortized = self.scene_sdf_clipmap_built;
+        let (gather_budget, bin_budget) = if amortized {
+            (
+                sdf_clipmap_prep::REBAKE_GATHER_VERTICES_PER_FRAME,
+                sdf_clipmap_prep::REBAKE_BIN_REFS_PER_FRAME,
+            )
+        } else {
+            (usize::MAX, usize::MAX)
+        };
+        let prep = prep_guard.as_mut().unwrap();
+        if !prep.gathered {
+            let (next_node, tris, done) = scene.append_world_triangles_for_gi(
+                transparent_gi,
+                prep.next_node,
+                gather_budget,
+                &mut prep.vertices,
+                &mut prep.indices,
+            );
+            prep.next_node = next_node;
+            prep.tri_count += tris;
+            prep.gathered = done;
+            if !done || amortized {
+                return;
+            }
+        }
+        if prep.binner.is_none() {
+            // V5 — centre the clipmap on the current camera position,
+            // voxel-snapped for sampling stability (sub-voxel shifts
+            // would change which voxel each sphere-trace step reads).
+            // The live origin flips only when the job completes.
+            let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
+            let voxel = SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_RES as f32;
+            let cam = self.current_camera_pos;
+            prep.origin = [
+                (cam[0] / voxel).round() * voxel,
+                (cam[1] / voxel).round() * voxel,
+                (cam[2] / voxel).round() * voxel,
+            ];
+            prep.binner = Some(sdf_clipmap_prep::TriangleBinner::new(
+                [
+                    prep.origin[0] - half,
+                    prep.origin[1] - half,
+                    prep.origin[2] - half,
+                ],
+                SCENE_SDF_CLIPMAP_EXTENT,
+                SCENE_SDF_CLIPMAP_BIN_CELLS as usize,
+            ));
+        }
+        let binned = prep.tri_count == 0
+            || prep.binner.as_mut().unwrap().step(
+                &prep.vertices,
+                &prep.indices,
+                prep.tri_count as usize,
+                bin_budget,
+            );
+        if !binned {
+            return;
+        }
+        let prep = prep_guard.take().unwrap();
+        drop(prep_guard);
+        let binner = prep.binner.unwrap();
+        let (origin, tri_count) = (prep.origin, prep.tri_count);
+        let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
+        let aabb_min = [origin[0] - half, origin[1] - half, origin[2] - half, 0.0];
+        let aabb_max = [origin[0] + half, origin[1] + half, origin[2] + half, 0.0];
+        let (offsets, tri_refs) = (binner.offsets, binner.tri_refs);
+        // Keep the soup for the next rebake of this scene version.
+        *sdf_tri_cache().lock().unwrap() = Some(SdfTriCache {
+            version: prep.scene_version,
+            excludes_transmission: transparent_gi,
+            vertices: prep.vertices,
+            indices: prep.indices,
+            tri_count,
+        });
         if tri_count == 0 {
             return;
         }
-
-        // V5 — centre the clipmap on the current camera position,
-        // voxel-snapped for sampling stability (sub-voxel shifts
-        // would change which voxel each sphere-trace step reads).
-        // The live origin flips only when the job completes.
-        let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
-        let voxel = SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_RES as f32;
-        let cam = self.current_camera_world_pos();
-        let origin = [
-            (cam[0] / voxel).round() * voxel,
-            (cam[1] / voxel).round() * voxel,
-            (cam[2] / voxel).round() * voxel,
-        ];
-        let aabb_min = [origin[0] - half, origin[1] - half, origin[2] - half, 0.0];
-        let aabb_max = [origin[0] + half, origin[1] + half, origin[2] + half, 0.0];
-
-        // Bin triangles into BIN_CELLS³ cells, each list expanded by one
-        // cell (the shader's narrow band) so the per-cell clamp stays a
-        // conservative lower bound for sphere tracing. Two-pass counting
-        // sort: count, prefix-sum, fill.
-        let cells = SCENE_SDF_CLIPMAP_BIN_CELLS as usize;
-        let cell_size = SCENE_SDF_CLIPMAP_EXTENT / cells as f32;
-        let grid_min = [aabb_min[0], aabb_min[1], aabb_min[2]];
-        let cell_range = |tri: usize| -> Option<([usize; 3], [usize; 3])> {
-            let i0 = indices[tri * 3] as usize * 12;
-            let i1 = indices[tri * 3 + 1] as usize * 12;
-            let i2 = indices[tri * 3 + 2] as usize * 12;
-            let mut lo = [f32::MAX; 3];
-            let mut hi = [f32::MIN; 3];
-            for base in [i0, i1, i2] {
-                for a in 0..3 {
-                    let v = vertices[base + a];
-                    lo[a] = lo[a].min(v);
-                    hi[a] = hi[a].max(v);
-                }
-            }
-            let mut c_lo = [0usize; 3];
-            let mut c_hi = [0usize; 3];
-            for a in 0..3 {
-                // Expand by one cell width (= the shader's band).
-                let lo_c = ((lo[a] - cell_size - grid_min[a]) / cell_size).floor();
-                let hi_c = ((hi[a] + cell_size - grid_min[a]) / cell_size).floor();
-                if hi_c < 0.0 || lo_c >= cells as f32 {
-                    return None; // entirely outside the clipmap volume
-                }
-                c_lo[a] = lo_c.max(0.0) as usize;
-                c_hi[a] = hi_c.min(cells as f32 - 1.0) as usize;
-            }
-            Some((c_lo, c_hi))
-        };
-        let cell_count = cells * cells * cells;
-        let mut counts = vec![0u32; cell_count];
-        for t in 0..tri_count as usize {
-            if let Some((lo, hi)) = cell_range(t) {
-                for z in lo[2]..=hi[2] {
-                    for y in lo[1]..=hi[1] {
-                        for x in lo[0]..=hi[0] {
-                            counts[(z * cells + y) * cells + x] += 1;
-                        }
-                    }
-                }
-            }
-        }
-        let mut offsets = vec![0u32; cell_count + 1];
-        for i in 0..cell_count {
-            offsets[i + 1] = offsets[i] + counts[i];
-        }
-        let total_refs = offsets[cell_count] as usize;
-        let mut cursor: Vec<u32> = offsets[..cell_count].to_vec();
-        // wgpu rejects zero-sized buffers — keep one dummy entry when no
-        // triangle touches the volume (all cells then read empty ranges).
-        let mut tri_refs = vec![0u32; total_refs.max(1)];
-        for t in 0..tri_count as usize {
-            if let Some((lo, hi)) = cell_range(t) {
-                for z in lo[2]..=hi[2] {
-                    for y in lo[1]..=hi[1] {
-                        for x in lo[0]..=hi[0] {
-                            let ci = (z * cells + y) * cells + x;
-                            tri_refs[cursor[ci] as usize] = t as u32;
-                            cursor[ci] += 1;
-                        }
-                    }
-                }
-            }
-        }
+        let cache_guard = sdf_tri_cache().lock().unwrap();
+        let cached = cache_guard.as_ref().unwrap();
+        let vertices = &cached.vertices;
+        let indices = &cached.indices;
 
         let vbuf = self
             .device
@@ -312,7 +330,7 @@ impl Renderer {
             origin,
             aabb_min,
             aabb_max,
-            scene_version: scene.tlas_version,
+            scene_version: cached.version,
             transparent_gi,
             uniform,
             bind_group,

@@ -105,6 +105,7 @@ mod quality_readback;
 mod queries;
 mod refractive_reflections;
 mod scene_pass;
+mod sdf_clipmap_prep;
 mod shaders;
 mod shadow_pass;
 mod sorted_transparency;
