@@ -1069,6 +1069,10 @@ pub struct Renderer {
     pt_resv_buffers: [Option<wgpu::Buffer>; 2],
     /// Skinned draws awaiting dynamic TLAS instance construction.
     pt_dynamic_draws: Vec<PtDynamicDraw>,
+    /// Dynamic windows last uploaded to the PT megabuffers, in order:
+    /// (model cache handle, mesh index, CPU vertex pointer, vertex count,
+    /// index count). Lets an unchanged frame skip the re-upload.
+    pt_dyn_uploaded_layout: Vec<(u64, usize, usize, u32, u32)>,
     /// Per-slot geometry windows for compute pre-skin and BLAS build.
     pt_dyn_windows: Vec<PtDynWindow>,
     /// Dynamic BLAS pool, recreated when a slot's geometry size changes.
@@ -8415,6 +8419,7 @@ impl Renderer {
             pt_restir,
             pt_resv_buffers: [None, None],
             pt_dynamic_draws: Vec::new(),
+            pt_dyn_uploaded_layout: Vec::new(),
             pt_dyn_windows: Vec::new(),
             pt_dyn_blas: Vec::new(),
             pt_skin_pipeline: None,
@@ -10193,6 +10198,40 @@ impl Renderer {
         // flat albedo is white; no card (geo window always present).
         self.pt_dyn_windows.clear();
         let dyn_draws = std::mem::take(&mut self.pt_dynamic_draws);
+        // The megabuffer's dynamic windows hold bind-pose Vertex3D data whose
+        // position/normal words the pre-skin compute pass overwrites every
+        // frame from each mesh's own vertex buffer. Everything else (UVs,
+        // colours, indices) is constant, so when this frame's windows are
+        // the same meshes in the same order as the last upload, the buffers
+        // already hold exactly what a re-upload would write. Skipping it
+        // saves copying every skinned mesh twice per frame (3-4 ms for
+        // five characters). Static PT geometry shares the buffers, so the
+        // shortcut is limited to frames without it.
+        let mut dyn_layout: Vec<(u64, usize, usize, u32, u32)> = Vec::with_capacity(dyn_draws.len());
+        for d in &dyn_draws {
+            if let Some(Some(meshes)) = self.model_gpu_cache.get(&d.cache_handle) {
+                if let Some(mesh) = meshes.get(d.mesh_idx) {
+                    if let (Some(v), Some(i)) = (&mesh.cpu_vertices, &mesh.cpu_indices) {
+                        if !v.is_empty() && !i.is_empty() {
+                            dyn_layout.push((
+                                d.cache_handle as u64,
+                                d.mesh_idx,
+                                v.as_ptr() as usize,
+                                v.len() as u32,
+                                i.len() as u32,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let reuse_dyn_geometry = !build_static_pt_geometry
+            && !dyn_layout.is_empty()
+            && dyn_layout == self.pt_dyn_uploaded_layout
+            && self.pt_geo_vertex_buffer.is_some()
+            && self.pt_geo_index_buffer.is_some();
+        let mut dyn_vertex_cursor = (geo_vertices.len() / 24) as u32;
+        let mut dyn_index_cursor = geo_indices.len() as u32;
         for d in &dyn_draws {
             let mesh = match self.model_gpu_cache.get(&d.cache_handle) {
                 Some(Some(meshes)) => match meshes.get(d.mesh_idx) {
@@ -10205,10 +10244,14 @@ impl Renderer {
                 (Some(v), Some(i)) if !v.is_empty() && !i.is_empty() => (v, i),
                 _ => continue,
             };
-            let vb = (geo_vertices.len() / 24) as u32;
-            let ib = geo_indices.len() as u32;
-            geo_vertices.extend_from_slice(bytemuck::cast_slice(cv));
-            geo_indices.extend_from_slice(ci);
+            let vb = dyn_vertex_cursor;
+            let ib = dyn_index_cursor;
+            dyn_vertex_cursor += cv.len() as u32;
+            dyn_index_cursor += ci.len() as u32;
+            if !reuse_dyn_geometry {
+                geo_vertices.extend_from_slice(bytemuck::cast_slice(cv));
+                geo_indices.extend_from_slice(ci);
+            }
             let uses_uv1 = layered_pbr_pt::append_record(
                 &mut pt_layered_records,
                 &mut pt_layered_texture_records,
@@ -10222,13 +10265,15 @@ impl Renderer {
                 runtime_texture_count,
                 self.pt_texture_arrays_enabled && mesh.cpu_secondary_uvs.is_some(),
             );
-            pt_geometry::append_pt_secondary_uvs(
-                &mut geo_secondary_uvs,
-                vb as usize,
-                cv.len(),
-                mesh.cpu_secondary_uvs.as_deref(),
-                uses_uv1,
-            );
+            if !reuse_dyn_geometry {
+                pt_geometry::append_pt_secondary_uvs(
+                    &mut geo_secondary_uvs,
+                    vb as usize,
+                    cv.len(),
+                    mesh.cpu_secondary_uvs.as_deref(),
+                    uses_uv1,
+                );
+            }
             instance_data.push(InstanceGiDataCpu {
                 albedo: [1.0, 1.0, 1.0],
                 emissive_luma: 0.0,
@@ -10262,8 +10307,19 @@ impl Renderer {
                 mesh_idx: d.mesh_idx,
             });
         }
-        let geometry_uploaded = if build_static_pt_geometry || !dyn_draws.is_empty() {
-            self.upload_pt_geometry(&geo_vertices, &geo_indices, geo_secondary_uvs.as_deref())
+        let geometry_uploaded = if reuse_dyn_geometry {
+            true
+        } else if build_static_pt_geometry || !dyn_draws.is_empty() {
+            let uploaded =
+                self.upload_pt_geometry(&geo_vertices, &geo_indices, geo_secondary_uvs.as_deref());
+            // Remember the layout only when the buffers hold nothing but
+            // these dynamic windows.
+            self.pt_dyn_uploaded_layout = if uploaded && !build_static_pt_geometry {
+                dyn_layout
+            } else {
+                Vec::new()
+            };
+            uploaded
         } else {
             true
         };
@@ -10787,7 +10843,12 @@ impl Renderer {
                 let blas = self.device.create_blas(
                     &wgpu::CreateBlasDescriptor {
                         label: Some("pt_dyn_blas"),
-                        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                        // Rebuilt from scratch every frame the mesh is drawn
+                        // (wgpu 29 has no refit), so build time dominates:
+                        // on an M1 Max five characters (72k triangles) cost
+                        // 14.5 ms per frame as FAST_TRACE builds and 4.5 ms
+                        // as FAST_BUILD, with no measurable trace penalty.
+                        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD,
                         update_mode: wgpu::AccelerationStructureUpdateMode::Build,
                     },
                     wgpu::BlasGeometrySizeDescriptors::Triangles {
