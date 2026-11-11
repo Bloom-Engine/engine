@@ -68,6 +68,8 @@ const RENDERER_STATUS_FUNCTIONS = new Set([
   'bloom_set_vignette',
   'bloom_set_film_grain',
   'bloom_set_sharpen_strength',
+  'bloom_set_ssgi_probe_spacing',
+  'bloom_set_ssao_downscale',
   'bloom_set_present_mode',
   'bloom_set_transparency_composition_mode',
   'bloom_set_sun_shafts',

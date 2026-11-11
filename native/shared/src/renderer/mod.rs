@@ -189,7 +189,7 @@ use formats::{
     create_taa_depth_history_textures, create_taa_textures, create_velocity_rt, create_wsrc_atlas,
     halton, probe_grid_dims, BLOOM_MIP_COUNT, CARD_RADIANCE_ATLAS_SIZE, CARD_RADIANCE_SLOT_SIZE,
     CARD_SLOTS_PER_ROW, CARD_SLOT_SIZE, HDR_FORMAT, HIZ_FORMAT, HIZ_MIP_COUNT, MATERIAL_FORMAT,
-    MESH_SDF_RES, PROBE_TILE_SIZE, SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT,
+    MESH_SDF_RES, SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT,
     SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME, SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD, SCENE_SDF_CLIPMAP_RES,
     SSAO_FORMAT, TAA_DEPTH_HISTORY_FORMAT, VELOCITY_FORMAT, WSRC_CASCADE_COUNT,
     WSRC_CASCADE_EXTENTS, WSRC_GRID_RES, WSRC_REBAKE_THRESHOLD,
@@ -13212,7 +13212,7 @@ impl Renderer {
                 }
             });
             bind_optional_pass!("gtao", |c: &mut FrameCtx2| {
-                let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
+                let (hw, hh) = formats::ao_extent(c.surf.0, c.surf.1);
                 let p = &c.r.current_proj_matrix;
                 let (p00, p11, p20, p21) = (p[0][0], p[1][1], p[2][0], p[2][1]);
                 c.r.record_gtao(c.encoder, c.profiler, hw, hh, p00, p11, p20, p21);

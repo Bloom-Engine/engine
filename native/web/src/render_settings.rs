@@ -50,6 +50,16 @@ pub fn bloom_set_sharpen_strength(strength: f64) -> f64 {
     1.0
 }
 #[wasm_bindgen]
+pub fn bloom_set_ssgi_probe_spacing(pixels: f64) -> f64 {
+    engine().renderer.set_ssgi_probe_spacing(pixels.max(0.0) as u32);
+    1.0
+}
+#[wasm_bindgen]
+pub fn bloom_set_ssao_downscale(divisor: f64) -> f64 {
+    engine().renderer.set_ssao_downscale(divisor.max(0.0) as u32);
+    1.0
+}
+#[wasm_bindgen]
 pub fn bloom_set_sun_shafts(strength: f64, decay: f64, r: f64, g: f64, b: f64) -> f64 {
     let eng = engine();
     eng.renderer.set_sun_shaft_strength(strength as f32);

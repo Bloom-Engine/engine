@@ -293,6 +293,26 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_ssgi_probe_spacing
+        #[no_mangle]
+        pub extern "C" fn bloom_set_ssgi_probe_spacing(pixels: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssgi_probe_spacing", move || {
+                engine()
+                    .renderer
+                    .set_ssgi_probe_spacing(pixels.max(0.0) as u32);
+            })
+        }
+
+        // bloom_set_ssao_downscale
+        #[no_mangle]
+        pub extern "C" fn bloom_set_ssao_downscale(divisor: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssao_downscale", move || {
+                engine()
+                    .renderer
+                    .set_ssao_downscale(divisor.max(0.0) as u32);
+            })
+        }
+
         // bloom_set_present_mode  [round-2 audit F6]
         #[no_mangle]
         pub extern "C" fn bloom_set_present_mode(mode: f64) -> f64 {

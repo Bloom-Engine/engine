@@ -148,8 +148,8 @@ impl Renderer {
         // below) for those frames.
         if self.ssao_enabled && !self.pt_owns_frame() {
             // texel_size is the size of one SSAO RT texel (half-res).
-            let ao_w = (surf_w / 2).max(1) as f32;
-            let ao_h = (surf_h / 2).max(1) as f32;
+            let (ao_w, ao_h) = super::formats::ao_extent(surf_w, surf_h);
+            let (ao_w, ao_h) = (ao_w as f32, ao_h as f32);
             let bp = SsaoBlurParams {
                 params: [1.0 / ao_w, 1.0 / ao_h, 0.05, 0.0],
             };
