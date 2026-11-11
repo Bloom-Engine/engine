@@ -300,6 +300,7 @@ impl Renderer {
             }
         }
 
+        let mut opaque_materials_drawn = false;
         profiler.begin("main_hdr_pass");
         // SH-055 diag — "hdr_pass" skips the whole main HDR pass (prepass untouched).
         if !self.dbg_skip("hdr_pass") {
@@ -686,6 +687,12 @@ impl Renderer {
                         scene_nodes_prepassed.then_some(&*self.scene_node_pipeline_prepassed),
                     );
                 }
+                // Game-compiled opaque materials share this pass (see
+                // `dispatch_opaque_materials` for why they must).
+                if self.has_opaque_material_draws() {
+                    self.dispatch_opaque_materials(&mut pass);
+                    opaque_materials_drawn = true;
+                }
             }
         }
 
@@ -798,7 +805,9 @@ impl Renderer {
 
         // User-material draws are part of the compiled `hdr_scene` node. The old
         // one-node graph rebuilt and topologically sorted this closure every frame.
-        self.record_opaque_material_pass(encoder, profiler);
+        if !opaque_materials_drawn {
+            self.record_opaque_material_pass(encoder, profiler);
+        }
         // The legacy G-buffer cannot losslessly carry thin-film Fresnel. Replay
         // only visible opaque iridescent meshes into a lazy metadata target for
         // the later SSR pass; base-only frames return before allocating or
