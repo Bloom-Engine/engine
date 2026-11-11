@@ -768,12 +768,9 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
-// Five-tap Catmull-Rom history lookup (the same kernel the upsample uses),
-// for a native-resolution frame under real camera motion. There is no
-// upsample for it to disturb there, and the cubic keeps the detail that
-// resampling the history every frame otherwise drains. Fractional scales and
-// object-only motion keep the phase-compressed lookup below, which the
-// temporal corpus qualifies.
+// Five-tap Catmull-Rom history lookup for native-scale frames under camera
+// motion: no upsample to disturb, and it keeps the detail that per-frame
+// resampling drains. Other motion keeps the corpus-qualified lookup below.
 fn sample_history_catmull_rom(uv: vec2<f32>) -> vec4<f32> {
     let tex_size = vec2<f32>(textureDimensions(history_tex));
     let inv_size = 1.0 / tex_size;
@@ -799,9 +796,6 @@ fn sample_history_catmull_rom(uv: vec2<f32>) -> vec4<f32> {
     return max(result / weight, vec4<f32>(0.0));
 }
 
-// Five-tap Catmull-Rom history lookup, for a native-resolution frame under
-// real camera motion: there is no upsample to protect, and the cubic keeps
-// the detail that repeated resampling otherwise drains.
 
 // History lives at output resolution. A bilinear lookup is exact while a
 // reprojected coordinate remains on an output texel centre, but under camera
@@ -1362,9 +1356,8 @@ fn fs_main(in: VsOut) -> TaaOut {
         max(settled_motion_ramped, max(depth_disocclusion, reactive)),
         settled_bootstrap_alpha,
     );
-    // Slow object motion (a pixel or two a frame) is below the velocity ramp
-    // above, so the window stayed at its settled length while every frame
-    // resampled the history. Shorten it as soon as the surface really moves.
+    // Slow motion (a pixel or two a frame) sits below the ramp above while
+    // every frame resamples the history: shorten the window once it moves.
     let alpha = max(
         ramped_alpha,
         0.25 * smoothstep(0.1, 1.0, max(object_motion_px, native_camera_motion_px)),
