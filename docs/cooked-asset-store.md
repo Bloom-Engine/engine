@@ -459,3 +459,31 @@ renderer path, buffers, shaders, passes, draws, pixels, or frame-time behavior.
 
 The canonical variant, fallback, deduplication, and Bistro qualification is
 recorded in `docs/evidence/issue-136-asset-variants-v2.{md,json}`.
+
+## Compressed textures inside a GLB (`glb-compress`)
+
+`glb-compress` is independent of the store: it rewrites one GLB so every
+embedded image is a KTX2 container of ASTC blocks with a full mip chain, and
+the ordinary `loadModel` / staged model paths load the result.
+
+```shell
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  glb-compress hero.glb hero.astc.glb [--astc 4x4] [--normal-astc 4x4|keep] \
+  [--quality fast|medium|thorough|exhaustive]
+```
+
+- On an adapter with `TEXTURE_COMPRESSION_ASTC` (every Apple GPU, most mobile
+  GPUs) the blocks upload untouched: a 4096² texture occupies 22 MB at 4×4 or
+  10 MB at 6×6 instead of 85 MB of RGBA8 with mips, and load skips PNG inflate
+  and mip filtering. Other adapters decode level zero on the CPU and take the
+  RGBA8 path, so one file loads everywhere. BC7 payloads in KTX2 are read the
+  same way.
+- Mips are the runtime's own: sRGB-aware averaging for colour, plain averaging
+  for data, renormalised direction plus accumulated variance in alpha for
+  normal maps.
+- Base-colour images of alpha-`MASK` materials are left as they are, because
+  their coverage mips depend on the material cutoff.
+- The command prints the PSNR of each encoded top level. The file on disk is
+  larger than with PNG or JPEG images (blocks are not entropy-coded).
+- The images carry `mimeType: "image/ktx2"`. That is not a ratified glTF
+  extension for raw ASTC, so keep the source GLB for other tools.

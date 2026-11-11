@@ -6,6 +6,7 @@
 #[cfg(any(feature = "image-extras", feature = "models3d"))]
 mod adapter_profile;
 pub mod audio;
+pub mod compressed_texture;
 #[cfg(all(feature = "models3d", not(target_arch = "wasm32")))]
 pub mod cooked_scene_store;
 #[cfg(all(feature = "image-extras", not(target_arch = "wasm32")))]
