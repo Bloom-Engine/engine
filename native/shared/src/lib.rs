@@ -43,6 +43,7 @@ pub mod profiler;
 #[cfg(all(feature = "models3d", feature = "jolt"))]
 pub mod ragdoll;
 pub mod scene;
+mod scene_gi_soup;
 pub mod sdf_cache;
 pub mod shadows;
 pub mod staging;
