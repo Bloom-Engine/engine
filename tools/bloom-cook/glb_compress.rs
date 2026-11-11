@@ -306,27 +306,36 @@ fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
-fn split_glb(data: &[u8]) -> Result<(Value, &[u8]), String> {
+/// The JSON document, the binary chunk, and any further chunks verbatim
+/// (header included) so extension data survives the rewrite.
+fn split_glb(data: &[u8]) -> Result<(Value, &[u8], Vec<u8>), String> {
     if read_u32(data, 0) != Some(GLB_MAGIC) || read_u32(data, 4) != Some(2) {
         return Err("not a glTF 2.0 binary (.glb)".to_string());
     }
     let mut json = None;
-    let mut bin: &[u8] = &[];
+    let mut bin: Option<&[u8]> = None;
+    let mut other = Vec::new();
     let mut at = 12usize;
     while let (Some(length), Some(kind)) = (read_u32(data, at), read_u32(data, at + 4)) {
-        let body = data
-            .get(at + 8..at + 8 + length as usize)
-            .ok_or("truncated GLB chunk")?;
+        let end = at + 8 + length as usize;
+        let body = data.get(at + 8..end).ok_or("truncated GLB chunk")?;
         match kind {
-            CHUNK_JSON => {
+            CHUNK_JSON if json.is_none() => {
                 json = Some(serde_json::from_slice::<Value>(body).map_err(|e| e.to_string())?)
             }
-            CHUNK_BIN => bin = body,
-            _ => {}
+            CHUNK_BIN if bin.is_none() => bin = Some(body),
+            _ => {
+                other.extend_from_slice(&data[at..end]);
+                other.resize(other.len().next_multiple_of(4), 0);
+            }
         }
-        at += 8 + (length as usize).next_multiple_of(4);
+        at = end.next_multiple_of(4);
     }
-    Ok((json.ok_or("GLB has no JSON chunk")?, bin))
+    Ok((
+        json.ok_or("GLB has no JSON chunk")?,
+        bin.unwrap_or(&[]),
+        other,
+    ))
 }
 
 fn view_range(root: &Value, view: usize) -> Option<(usize, usize)> {
@@ -341,7 +350,7 @@ fn view_range(root: &Value, view: usize) -> Option<(usize, usize)> {
 /// Compress the images of `data` (a GLB); returns the new file and a report.
 pub(crate) fn compress_glb(data: &[u8], flags: &[String]) -> Result<(Vec<u8>, String), String> {
     let options = parse_options(flags)?;
-    let (mut root, bin) = split_glb(data)?;
+    let (mut root, bin, other_chunks) = split_glb(data)?;
     let roles = classify(&root);
 
     // image index -> (buffer view, block size)
@@ -368,6 +377,35 @@ pub(crate) fn compress_glb(data: &[u8], flags: &[String]) -> Result<(Vec<u8>, St
             notes.push(format!("  image {index}: normal map, left as it is"));
         }
     }
+
+    // Images may share a buffer view. Its bytes can only be replaced when
+    // every image on it is compressed the same way; otherwise one of them
+    // would keep a PNG MIME type over KTX2 bytes, or get the wrong mips.
+    let mut by_view: BTreeMap<usize, Vec<Option<(bool, bool, (u8, u8))>>> = BTreeMap::new();
+    let images = root.get("images").and_then(Value::as_array).cloned();
+    for (index, image) in images.unwrap_or_default().iter().enumerate() {
+        if let Some(view) = image.get("bufferView").and_then(Value::as_u64) {
+            let plan = jobs.get(&index).map(|&(_, block)| {
+                (
+                    roles.normal.contains(&index),
+                    roles.srgb.contains(&index),
+                    block,
+                )
+            });
+            by_view.entry(view as usize).or_default().push(plan);
+        }
+    }
+    jobs.retain(|index, (view, _)| {
+        let plans = &by_view[view];
+        let consistent = plans.iter().all(|plan| plan.is_some() && *plan == plans[0]);
+        if !consistent {
+            notes.push(format!(
+                "  image {index}: shares its data with an image that is used differently, \
+                 left as it is"
+            ));
+        }
+        consistent
+    });
 
     let mut replacements: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     for (&index, &(view, block)) in &jobs {
@@ -428,7 +466,7 @@ pub(crate) fn compress_glb(data: &[u8], flags: &[String]) -> Result<(Vec<u8>, St
 
     let mut json = serde_json::to_vec(&root).map_err(|error| error.to_string())?;
     json.resize(json.len().next_multiple_of(4), b' ');
-    let total = 12 + 8 + json.len() + 8 + new_bin.len();
+    let total = 12 + 8 + json.len() + 8 + new_bin.len() + other_chunks.len();
     let mut out = Vec::with_capacity(total);
     for value in [GLB_MAGIC, 2, total as u32, json.len() as u32, CHUNK_JSON] {
         out.extend_from_slice(&value.to_le_bytes());
@@ -437,6 +475,7 @@ pub(crate) fn compress_glb(data: &[u8], flags: &[String]) -> Result<(Vec<u8>, St
     out.extend_from_slice(&(new_bin.len() as u32).to_le_bytes());
     out.extend_from_slice(&CHUNK_BIN.to_le_bytes());
     out.extend_from_slice(&new_bin);
+    out.extend_from_slice(&other_chunks);
 
     let report = format!(
         "{} image(s) compressed, {} -> {} bytes\n{}",
@@ -548,8 +587,8 @@ mod tests {
         let source = sample_glb("OPAQUE");
         let (out, report) = compress_glb(&source, &["--astc".into(), "6x6".into()]).unwrap();
         assert!(report.starts_with("2 image(s) compressed"), "{report}");
-        let (root, bin) = split_glb(&out).unwrap();
-        let (source_root, source_bin) = split_glb(&source).unwrap();
+        let (root, bin, _) = split_glb(&out).unwrap();
+        let (source_root, source_bin, _) = split_glb(&source).unwrap();
         let (offset, length) = view_range(&root, 0).unwrap();
         let (source_offset, _) = view_range(&source_root, 0).unwrap();
         assert_eq!(
@@ -587,7 +626,7 @@ mod tests {
     #[test]
     fn flat_normal_map_keeps_direction_and_zero_variance() {
         let (out, _) = compress_glb(&sample_glb("OPAQUE"), &[]).unwrap();
-        let (root, bin) = split_glb(&out).unwrap();
+        let (root, bin, _) = split_glb(&out).unwrap();
         let bytes = image_bytes(&root, bin, 1);
         let image = CompressedImage::from_ktx2(bytes).unwrap();
         let mut worst = 0i32;
@@ -611,10 +650,40 @@ mod tests {
         let flags = ["--normal-astc".to_string(), "keep".to_string()];
         let (out, report) = compress_glb(&sample_glb("MASK"), &flags).unwrap();
         assert!(report.starts_with("0 image(s) compressed"), "{report}");
-        let (root, bin) = split_glb(&out).unwrap();
+        let (root, bin, _) = split_glb(&out).unwrap();
         assert_eq!(root["images"][0]["mimeType"], "image/png");
         assert!(image_bytes(&root, bin, 0).starts_with(b"\x89PNG"));
         assert!(image_bytes(&root, bin, 1).starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn shared_image_data_and_extra_chunks_are_preserved() {
+        // Point the normal map at the colour image's bytes: the two images
+        // now share a buffer view but need different mips.
+        let source = sample_glb("OPAQUE");
+        let (mut root, bin, _) = split_glb(&source).unwrap();
+        root["images"][1]["bufferView"] = Value::from(1);
+        let mut json = serde_json::to_vec(&root).unwrap();
+        json.resize(json.len().next_multiple_of(4), b' ');
+        let extra = [4u32.to_le_bytes(), 0x1234_5678u32.to_le_bytes(), *b"DATA"].concat();
+        let total = 28 + json.len() + bin.len() + extra.len();
+        let mut glb = Vec::new();
+        for value in [GLB_MAGIC, 2, total as u32, json.len() as u32, CHUNK_JSON] {
+            glb.extend_from_slice(&value.to_le_bytes());
+        }
+        glb.extend_from_slice(&json);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&CHUNK_BIN.to_le_bytes());
+        glb.extend_from_slice(bin);
+        glb.extend_from_slice(&extra);
+
+        let (out, report) = compress_glb(&glb, &[]).unwrap();
+        assert!(report.starts_with("0 image(s) compressed"), "{report}");
+        let (root, bin, other) = split_glb(&out).unwrap();
+        assert_eq!(other, extra);
+        assert_eq!(root["images"][0]["mimeType"], "image/png");
+        assert!(image_bytes(&root, bin, 0).starts_with(b"\x89PNG"));
+        assert_eq!(read_u32(&out, 8), Some(out.len() as u32));
     }
 
     #[test]
