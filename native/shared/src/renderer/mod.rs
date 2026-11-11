@@ -1076,7 +1076,10 @@ pub struct Renderer {
     /// Per-slot geometry windows for compute pre-skin and BLAS build.
     pt_dyn_windows: Vec<PtDynWindow>,
     /// Dynamic BLAS pool, recreated when a slot's geometry size changes.
-    pt_dyn_blas: Vec<(wgpu::Blas, u32, u32)>,
+    pt_dyn_blas: Vec<PtDynBlas>,
+    /// Counts dynamic-skin frames; staggers the periodic full rebuilds of
+    /// refitted dynamic BLASes.
+    pt_dyn_blas_frame: u32,
     /// Writes posed world-space vertices before dynamic BLAS builds.
     pt_skin_pipeline: Option<wgpu::ComputePipeline>,
     pt_skin_layout: Option<wgpu::BindGroupLayout>,
@@ -1920,6 +1923,26 @@ fn specialized_scene_shader_source_from(
         source
     }
 }
+
+/// One pooled BLAS for a skinned mesh in the ray scene, and the mesh it
+/// was sized (and, with refit, first built) for.
+struct PtDynBlas {
+    blas: wgpu::Blas,
+    v_count: u32,
+    i_count: u32,
+    cache_handle: u64,
+    mesh_idx: usize,
+}
+
+/// Whether a per-frame build of a dynamic BLAS can be an in-place refit.
+/// wgpu-core 29 always rebuilds; the Apple platform crates link the patched
+/// copy in `native/third_party/wgpu-core-patched`, which refits a BLAS
+/// created with `PreferUpdate` + `ALLOW_UPDATE`. A crate that asks for
+/// refit without the patch still renders correctly, with full rebuilds.
+const DYN_BLAS_REFIT: bool = cfg!(target_vendor = "apple");
+
+/// Frames between full rebuilds of a refitted dynamic BLAS.
+const DYN_BLAS_REBUILD_INTERVAL: u32 = 240;
 
 impl Renderer {
     pub fn new(
@@ -8422,6 +8445,7 @@ impl Renderer {
             pt_dyn_uploaded_layout: Vec::new(),
             pt_dyn_windows: Vec::new(),
             pt_dyn_blas: Vec::new(),
+            pt_dyn_blas_frame: 0,
             pt_skin_pipeline: None,
             pt_skin_layout: None,
             pt_skin_params: Vec::new(),
@@ -10605,7 +10629,7 @@ impl Renderer {
             // output is already world-space).
             for i in 0..dyn_count {
                 let slot = node_count + i;
-                let blas = &self.pt_dyn_blas[i].0;
+                let blas = &self.pt_dyn_blas[i].blas;
                 tlas[slot] = Some(wgpu::TlasInstance::new(
                     blas,
                     [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -10693,7 +10717,7 @@ impl Renderer {
             let mega_ib = self.pt_geo_index_buffer.as_ref().unwrap();
             for (i, w) in self.pt_dyn_windows.iter().take(dyn_count).enumerate() {
                 build_entries.push(wgpu::BlasBuildEntry {
-                    blas: &self.pt_dyn_blas[i].0,
+                    blas: &self.pt_dyn_blas[i].blas,
                     geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
                         wgpu::BlasTriangleGeometry {
                             size: &dyn_size_descs[i],
@@ -10817,6 +10841,7 @@ impl Renderer {
                 }));
         }
 
+        self.pt_dyn_blas_frame = self.pt_dyn_blas_frame.wrapping_add(1);
         // Per-slot: params upload, BLAS pool upkeep, bind group.
         let mut bind_groups: Vec<wgpu::BindGroup> = Vec::with_capacity(dyn_count);
         let mut dispatch_counts: Vec<u32> = Vec::with_capacity(dyn_count);
@@ -10835,21 +10860,47 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.pt_skin_params[i], 0, bytemuck::cast_slice(&words));
 
+            // A slot keeps its BLAS while it holds the same mesh. Where the
+            // backend can refit (see `DYN_BLAS_REFIT`), the per-frame build of
+            // a kept BLAS is an in-place refit, which keeps the tree of the
+            // pose it was first built in; a staggered full rebuild every
+            // `DYN_BLAS_REBUILD_INTERVAL` frames stops that tree from
+            // drifting too far from the current pose.
+            let stale = DYN_BLAS_REFIT
+                && (self.pt_dyn_blas_frame.wrapping_add(i as u32 * 37)) % DYN_BLAS_REBUILD_INTERVAL
+                    == 0;
             let need_new = match self.pt_dyn_blas.get(i) {
-                Some((_, vc, ic)) => *vc != w.v_count || *ic != w.i_count,
+                Some(slot) => {
+                    slot.v_count != w.v_count
+                        || slot.i_count != w.i_count
+                        || slot.cache_handle != w.cache_handle
+                        || slot.mesh_idx != w.mesh_idx
+                        || stale
+                }
                 None => true,
             };
             if need_new {
+                // Without refit the BLAS is rebuilt from scratch every frame,
+                // so build time dominates: on an M1 Max five characters (72k
+                // triangles) cost 14.5 ms per frame as FAST_TRACE builds,
+                // 4.5 ms as FAST_BUILD and under 1 ms as refits.
+                let (flags, update_mode) = if DYN_BLAS_REFIT {
+                    (
+                        wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD
+                            | wgpu::AccelerationStructureFlags::ALLOW_UPDATE,
+                        wgpu::AccelerationStructureUpdateMode::PreferUpdate,
+                    )
+                } else {
+                    (
+                        wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD,
+                        wgpu::AccelerationStructureUpdateMode::Build,
+                    )
+                };
                 let blas = self.device.create_blas(
                     &wgpu::CreateBlasDescriptor {
                         label: Some("pt_dyn_blas"),
-                        // Rebuilt from scratch every frame the mesh is drawn
-                        // (wgpu 29 has no refit), so build time dominates:
-                        // on an M1 Max five characters (72k triangles) cost
-                        // 14.5 ms per frame as FAST_TRACE builds and 4.5 ms
-                        // as FAST_BUILD, with no measurable trace penalty.
-                        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD,
-                        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                        flags,
+                        update_mode,
                     },
                     wgpu::BlasGeometrySizeDescriptors::Triangles {
                         descriptors: vec![wgpu::BlasTriangleGeometrySizeDescriptor {
@@ -10861,10 +10912,17 @@ impl Renderer {
                         }],
                     },
                 );
+                let slot = PtDynBlas {
+                    blas,
+                    v_count: w.v_count,
+                    i_count: w.i_count,
+                    cache_handle: w.cache_handle,
+                    mesh_idx: w.mesh_idx,
+                };
                 if i < self.pt_dyn_blas.len() {
-                    self.pt_dyn_blas[i] = (blas, w.v_count, w.i_count);
+                    self.pt_dyn_blas[i] = slot;
                 } else {
-                    self.pt_dyn_blas.push((blas, w.v_count, w.i_count));
+                    self.pt_dyn_blas.push(slot);
                 }
             }
 
