@@ -35,9 +35,6 @@ fn sample_shadow_cascade(
     light_ndc.x * 0.5 + 0.5,
     1.0 - (light_ndc.y * 0.5 + 0.5),
   );
-  // Slight depth bias to avoid surface acne.
-  let ref_depth = light_ndc.z - 0.001;
-
   var dims: vec2<u32>;
   switch (cascade_idx) {
     case 0u: { dims = textureDimensions(shadow_tex_0); }
@@ -45,6 +42,22 @@ fn sample_shadow_cascade(
     default: { dims = textureDimensions(shadow_tex_2); }
   }
   let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
+
+  // Receiver bias against acne: two shadow texels of world distance along the
+  // light axis, turned into NDC depth through the cascade's own projection (the
+  // z row of an ortho VP is 1 / its depth range). The cascade's world radius is
+  // about its split distance, as in core.rs::sample_shadow. A constant NDC bias
+  // (0.001 until now) is a distance that grows with the pancake volume: with a
+  // 600 m ground plane in the scene bounds it reached half a metre, so casters
+  // that close to a receiver stopped counting and shadows leaked through decks
+  // and thin walls. Two texels rather than the deferred path's one, because this
+  // path has no receiver normal offset.
+  var fit_r = view.shadow_splits.z;
+  if (cascade_idx == 0u) { fit_r = view.shadow_splits.x; }
+  else if (cascade_idx == 1u) { fit_r = view.shadow_splits.y; }
+  let vp_c = view.shadow_cascades[cascade_idx];
+  let ndc_per_m = length(vec3<f32>(vp_c[0][2], vp_c[1][2], vp_c[2][2]));
+  let ref_depth = light_ndc.z - (2.0 * fit_r / f32(dims.x)) * 2.0 * ndc_per_m;
 
   var offs = array<vec2<f32>, 4>(
     vec2<f32>(-0.5, -0.5), vec2<f32>( 0.5, -0.5),

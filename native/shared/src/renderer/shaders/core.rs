@@ -618,7 +618,16 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>, frag_xy: vec2<f32>) -> 
         return 1.0;
     }
     let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
-    let bias = 0.001;
+    // Receiver bias: one shadow texel of world distance along the light axis, turned into
+    // NDC depth through the cascade's own projection (the z row of an ortho VP is
+    // 1 / its depth range). It used to be a constant 0.001 in NDC, which is a distance
+    // that grows with the pancake volume: a 600 m ground plane in the scene bounds
+    // stretched it to half a metre, so a caster within that of a receiver stopped
+    // counting. Decks and thin hulls then let the shadows of whatever stood on them
+    // through to their far side, and every contact shadow floated off its base.
+    let vp_c = lighting.shadow_cascade_vps[cascade];
+    let ndc_per_m = length(vec3<f32>(vp_c[0][2], vp_c[1][2], vp_c[2][2]));
+    let bias = (2.0 * fit_r / map_dim) * ndc_per_m;
     let depth_ref = light_ndc.z - bias;
     return sample_cascade(cascade, shadow_uv, depth_ref);
 }
