@@ -10231,7 +10231,8 @@ impl Renderer {
         // saves copying every skinned mesh twice per frame (3-4 ms for
         // five characters). Static PT geometry shares the buffers, so the
         // shortcut is limited to frames without it.
-        let mut dyn_layout: Vec<(u64, usize, usize, u32, u32)> = Vec::with_capacity(dyn_draws.len());
+        let mut dyn_layout: Vec<(u64, usize, usize, u32, u32)> =
+            Vec::with_capacity(dyn_draws.len());
         for d in &dyn_draws {
             if let Some(Some(meshes)) = self.model_gpu_cache.get(&d.cache_handle) {
                 if let Some(mesh) = meshes.get(d.mesh_idx) {
