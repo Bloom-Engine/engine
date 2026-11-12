@@ -8907,7 +8907,6 @@ impl Renderer {
     /// Platform entry point: the window changed size. Records the native size, then
     /// applies `output_scale` on top of it.
     pub fn resize(&mut self, width: u32, height: u32, logical_width: u32, logical_height: u32) {
-        formats::store_ao_render_scale(self.render_scale);
         if width > 0 && height > 0 {
             self.native_width = width;
             self.native_height = height;
