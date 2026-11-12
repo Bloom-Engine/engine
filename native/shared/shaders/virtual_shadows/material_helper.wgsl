@@ -6,8 +6,8 @@ fn sample_shadow_cascade(
     if (vsm_params.words.x == 0u) {
         return sample_shadow_cascade_csm(cascade_idx, world_pos, outside_value);
     }
-    let light_clip = vsm_params.level_vps[cascade_idx]
-                   * vec4<f32>(world_pos, 1.0);
+    let level_vp = vsm_params.level_vps[cascade_idx];
+    let light_clip = level_vp * vec4<f32>(world_pos, 1.0);
     let light_ndc = light_clip.xyz / light_clip.w;
     if (abs(light_ndc.x) > 1.0 || abs(light_ndc.y) > 1.0
         || light_ndc.z < 0.0 || light_ndc.z > 1.0) {
@@ -17,8 +17,15 @@ fn sample_shadow_cascade(
         light_ndc.x * 0.5 + 0.5,
         1.0 - (light_ndc.y * 0.5 + 0.5),
     );
-    let depth_ref = light_ndc.z - 0.001;
     let axis = vsm_params.words.y;
+    // Receiver bias of two virtual texels of world distance, as NDC depth
+    // (the x row of the ortho level VP has length 2 / width in metres, the
+    // z row 1 / depth range). The constant in NDC it replaces scaled with
+    // whatever the scene bounds pancaked that range to.
+    let x_row = length(vec3<f32>(level_vp[0][0], level_vp[1][0], level_vp[2][0]));
+    let z_row = length(vec3<f32>(level_vp[0][2], level_vp[1][2], level_vp[2][2]));
+    let virtual_texel_m = 2.0 / (x_row * f32(axis * vsm_params.words.z));
+    let depth_ref = light_ndc.z - 2.0 * virtual_texel_m * z_row;
     let scaled_uv = shadow_uv * f32(axis);
     let page_xy = min(vec2<u32>(scaled_uv), vec2<u32>(axis - 1u));
     let encoded = textureLoad(
