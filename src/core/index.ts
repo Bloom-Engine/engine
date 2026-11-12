@@ -37,6 +37,9 @@ declare function bloom_set_vignette(strength: number, softness: number): number;
 declare function bloom_set_film_grain(strength: number): number;
 declare function bloom_set_sharpen_strength(strength: number): number;
 declare function bloom_set_ssgi_probe_spacing(pixels: number): number;
+declare function bloom_set_shadow_distance(metres: number): number;
+declare function bloom_set_shadow_filter_4tap(on: number): number;
+declare function bloom_set_shadow_map_size(texels: number): number;
 declare function bloom_set_ssao_downscale(divisor: number): number;
 declare function bloom_set_present_mode(mode: number): number;
 declare function bloom_get_present_mode(): number;
@@ -745,6 +748,36 @@ export function setSsgiIntensity(intensity: number): boolean {
  */
 export function setSsgiProbeSpacing(pixels: number): boolean {
   return bloom_set_ssgi_probe_spacing(pixels) !== 0;
+}
+
+/**
+ * How far from the camera the sun's shadow cascades reach, in metres. Engine
+ * default 80, range 5 to 1000. The three cascades split this range: a scene
+ * that ends or fogs out at 30 m gets much sharper shadows by saying so, and
+ * casters beyond the range are no longer drawn into the maps.
+ */
+export function setShadowDistance(metres: number): boolean {
+  return bloom_set_shadow_distance(metres) !== 0;
+}
+
+/**
+ * Side of each sun-shadow cascade map: 1024, 2048 (engine default) or 4096.
+ * Call it BEFORE initWindow; afterwards it returns false and changes nothing.
+ * Shadow sharpness is texels per metre, so together with a shorter
+ * setShadowDistance a smaller map keeps the look for a quarter of the pixels.
+ */
+export function setShadowMapSize(texels: number): boolean {
+  return bloom_set_shadow_map_size(texels) !== 0;
+}
+
+/**
+ * The sun shadow's filter: true takes 4 hardware-PCF taps (a 3x3-texel tent,
+ * the usual mobile filter), false the 16-tap Poisson disc (the default except
+ * on Android). The filter runs for every lit pixel, so on a mobile GPU at a
+ * high resolution it costs more than drawing the shadow maps.
+ */
+export function setShadowFilter4Tap(on: boolean): boolean {
+  return bloom_set_shadow_filter_4tap(on ? 1 : 0) !== 0;
 }
 
 /** SSGI max view-space march distance in meters. Default 20. Tune to scene scale. */

@@ -143,7 +143,7 @@ impl Renderer {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn dump_shadow_cascade(&self, path: &str, cascade: usize) {
         let cascade = cascade.min(crate::shadows::NUM_CASCADES - 1);
-        let size = crate::shadows::CASCADE_MAP_SIZE;
+        let size = crate::shadows::cascade_map_size();
         let bytes_per_pixel = 4u32; // Depth32Float = 4 bytes
         let unpadded_bpr = size * bytes_per_pixel;
         let padded_bpr = (unpadded_bpr + 255) & !255;

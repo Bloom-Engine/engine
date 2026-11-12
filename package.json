@@ -1791,6 +1791,27 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_shadow_map_size",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_shadow_filter_4tap",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_shadow_distance",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_ssao_downscale",
           "params": [
             "f64"

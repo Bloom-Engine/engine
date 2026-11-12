@@ -19,6 +19,34 @@ pub const NUM_CASCADES: usize = 3;
 /// near-field edges. The normal-offset receiver bias and PCF radius are
 /// texel-proportional, so both adapt to the size automatically.
 pub const CASCADE_MAP_SIZE: u32 = 2048;
+
+static CASCADE_SIZE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(CASCADE_MAP_SIZE);
+static CASCADE_SIZE_LOCKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The side of each cascade map in texels (default `CASCADE_MAP_SIZE`).
+pub fn cascade_map_size() -> u32 {
+    CASCADE_SIZE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Choose the cascade map size (1024, 2048 or 4096). Only before the window
+/// is created: the maps and everything bound to them are built once. Returns
+/// false once that has happened. Sharpness is texels per metre, so a game
+/// that also shortens `set_shadow_distance` can keep it with smaller maps:
+/// 40 m at 1024 equals the default 80 m at 2048 with a quarter of the pixels.
+pub fn store_cascade_map_size(texels: u32) -> bool {
+    if CASCADE_SIZE_LOCKED.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let size = match texels {
+        0..=1535 => 1024,
+        1536..=3071 => 2048,
+        _ => 4096,
+    };
+    CASCADE_SIZE.store(size, std::sync::atomic::Ordering::Relaxed);
+    true
+}
 pub const SHADOW_NEAR: f32 = 0.1;
 pub const SHADOW_FAR: f32 = 100.0;
 /// Dynamic-uniform buffer stride for per-node shadow uniforms. Must
@@ -337,6 +365,9 @@ pub struct ShadowMap {
     /// where the cache hit rate would be ~zero anyway. When true, every
     /// frame renders shadows; the cache is bypassed.
     pub always_fresh: bool,
+    /// How far from the camera the cascades reach, in metres (default 80).
+    /// See `Renderer::set_shadow_distance`.
+    pub distance: f32,
     /// The sun shadow's filter: 4 hardware-PCF taps (a 3x3-texel tent, the
     /// mobile filter) instead of the 16-tap Poisson disc. Default on Android.
     pub filter_4tap: bool,
@@ -436,11 +467,12 @@ impl ShadowMap {
         // another inlined copy of the filter.) `depth_views` are the layers'
         // own views, for rendering and for the consumers that bind cascades
         // one by one. The static caches are separate copy sources.
+        CASCADE_SIZE_LOCKED.store(true, std::sync::atomic::Ordering::Relaxed);
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow_depth_cascades"),
             size: wgpu::Extent3d {
-                width: CASCADE_MAP_SIZE,
-                height: CASCADE_MAP_SIZE,
+                width: cascade_map_size(),
+                height: cascade_map_size(),
                 depth_or_array_layers: NUM_CASCADES as u32,
             },
             mip_level_count: 1,
@@ -473,8 +505,8 @@ impl ShadowMap {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("shadow_static_depth_cascade_{}", i)),
                 size: wgpu::Extent3d {
-                    width: CASCADE_MAP_SIZE,
-                    height: CASCADE_MAP_SIZE,
+                    width: cascade_map_size(),
+                    height: cascade_map_size(),
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -810,6 +842,7 @@ impl ShadowMap {
             enabled: false,
             dirty: true,
             always_fresh: false,
+            distance: 80.0,
             filter_4tap: cfg!(target_os = "android"),
             rendered_light_vps: None,
             rendered_light_dir: None,
@@ -1051,7 +1084,7 @@ impl ShadowMap {
 
             // Texel snap: quantize the ortho center to texel boundaries
             // in light space so camera translation doesn't crawl edges.
-            let texel_world = (2.0 * radius) / CASCADE_MAP_SIZE as f32;
+            let texel_world = (2.0 * radius) / cascade_map_size() as f32;
             let ls_x = dot3(center, right);
             let ls_y = dot3(center, ortho_up);
             let snapped_x = (ls_x / texel_world).floor() * texel_world;
