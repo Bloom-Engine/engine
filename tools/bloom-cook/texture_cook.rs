@@ -343,7 +343,7 @@ fn normal_mip_chain_dds(
     .map_err(|error| format!("create normal-map DDS: {error}"))
 }
 
-fn build_normal_mip_chain(image: &image::RgbaImage) -> (Vec<u8>, u32) {
+pub(crate) fn build_normal_mip_chain(image: &image::RgbaImage) -> (Vec<u8>, u32) {
     let mut mip_data = Vec::with_capacity(image.as_raw().len() * 2);
     for pixel in image.pixels() {
         mip_data.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 0]);

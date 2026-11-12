@@ -27,6 +27,15 @@
 #[no_mangle] pub extern "C" fn bloom_set_env_clear_from_hdr(_p0: i64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_menu_button_exits(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_display_scale() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_safe_area_inset(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_is_key_repeated(_p0: f64) -> f64 {
     0.0
 }
@@ -43,6 +52,9 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_is_mouse_button_released(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_render_emoji(_p0: i64, _p1: f64, _p2: i64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_set_listener_position(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
@@ -330,6 +342,12 @@
 #[no_mangle] pub extern "C" fn bloom_set_sharpen_strength(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_ssgi_probe_spacing(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_ssao_downscale(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_present_mode(_p0: f64) -> f64 {
     0.0
 }
@@ -351,9 +369,6 @@
 #[no_mangle] pub extern "C" fn bloom_set_material_binding_tier_override(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_get_display_scale() -> f64 { 1.0 }
-#[no_mangle] pub extern "C" fn bloom_set_menu_button_exits(_p0: f64) -> f64 { 1.0 }
-#[no_mangle] pub extern "C" fn bloom_get_safe_area_inset(_p0: f64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_set_camera_clip_planes(_p0: f64, _p1: f64) -> f64 {
     0.0
 }

@@ -19,6 +19,40 @@ pub struct StagedTexture {
     /// MASK-only texture-space cutoff used to build lower mips whose alpha
     /// stores surviving texel coverage. None preserves ordinary color mips.
     pub alpha_coverage_reference: Option<f32>,
+    /// A KTX2 image kept as GPU blocks (`data` is then empty). It uploads
+    /// untouched when the adapter has the block format and is decoded at
+    /// commit otherwise.
+    pub compressed: Option<crate::compressed_texture::CompressedImage>,
+}
+
+impl StagedTexture {
+    /// Create the GPU texture; returns the renderer texture index.
+    pub fn register(&self, renderer: &mut crate::renderer::Renderer) -> u32 {
+        #[allow(unused_mut)]
+        let mut decoded: Option<Vec<u8>> = None;
+        if let Some(image) = &self.compressed {
+            if let Some(index) =
+                renderer.register_texture_compressed(image, self.is_normal, self.is_srgb)
+            {
+                return index;
+            }
+            #[cfg(feature = "image-extras")]
+            {
+                decoded = image.decode_rgba8();
+            }
+            if decoded.is_none() {
+                return 0;
+            }
+        }
+        renderer.register_texture_kind_with_color_space(
+            self.width,
+            self.height,
+            decoded.as_deref().unwrap_or(&self.data),
+            self.is_normal,
+            self.is_srgb,
+            self.alpha_coverage_reference,
+        )
+    }
 }
 
 #[cfg(feature = "models3d")]
@@ -90,6 +124,7 @@ pub fn decode_and_stage_texture(file_data: &[u8]) -> f64 {
         is_normal: false,
         is_srgb: true,
         alpha_coverage_reference: None,
+        compressed: None,
     })
 }
 

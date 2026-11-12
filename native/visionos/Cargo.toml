@@ -33,6 +33,9 @@ wgpu = "29"
 image = { version = "0.25", default-features = false, features = ["hdr"] }
 
 [patch.crates-io]
+# wgpu-core 29 always rebuilds acceleration structures; the patched copy refits
+# skinned-mesh BLASes (see DYN_BLAS_REFIT in shared/src/renderer/mod.rs).
+wgpu-core = { path = "../third_party/wgpu-core-patched" }
 # visionOS shares tvOS's vendored Metal crate (it already carries the
 # target_os = "visionos" cfg arms). Referenced as a sibling to avoid
 # duplicating the large vendored crate; the published package ships

@@ -445,6 +445,9 @@ pub struct MeshData {
 mod metadata;
 pub use metadata::*;
 
+#[path = "models_source_cache.rs"]
+mod source_cache;
+
 pub struct ModelData {
     /// Ordered drawable placements. Repeated glTF nodes clone the `Arc`, not
     /// the immutable primitive payload, so CPU geometry scales with unique
@@ -542,6 +545,9 @@ pub struct ModelManager {
     /// physics subsystem's `scratch_*` shape-upload path.
     pub scratch_f32: Vec<f32>,
     pub scratch_u32: Vec<u32>,
+    /// Imports by source path, so a repeated `loadModel` of one file shares
+    /// its meshes and textures (see `models_source_cache.rs`).
+    source_cache: source_cache::SourceModelCache,
 }
 
 impl ModelManager {
@@ -551,6 +557,7 @@ impl ModelManager {
             animations: HandleRegistry::new(),
             scratch_f32: Vec::new(),
             scratch_u32: Vec::new(),
+            source_cache: Default::default(),
         }
     }
 
@@ -662,6 +669,9 @@ impl ModelManager {
         source_path: &std::path::Path,
         renderer: &mut crate::renderer::Renderer,
     ) -> f64 {
+        if let Some(shared) = self.source_cache.share(source_path, file_data) {
+            return self.models.alloc(shared);
+        }
         let base_dir = source_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
@@ -671,7 +681,10 @@ impl ModelManager {
             Some(base_dir),
             Some(&source_path.display().to_string()),
         ) {
-            Some(model) => self.models.alloc(model),
+            Some(model) => {
+                self.source_cache.remember(source_path, file_data, &model);
+                self.models.alloc(model)
+            }
             None => 0.0,
         }
     }

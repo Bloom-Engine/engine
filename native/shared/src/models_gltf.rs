@@ -34,7 +34,10 @@ use bake::{
     complete_geometry_source_hash, model_bounds, share_scene_mesh_instances,
     shared_or_owned_instance,
 };
-use texture_io::{base64_decode, decode_texture_bytes, swap_extension};
+use texture_io::{
+    base64_decode, decode_texture_bytes, register_compressed_image, stage_texture_bytes,
+    swap_extension,
+};
 use texture_semantics::srgb_material_image_indices;
 
 /// Walk the scene graph and collect EVERY world-space transform that
@@ -529,10 +532,18 @@ pub(super) fn load_gltf_with_textures(
                     let length = view.length();
                     if offset + length <= buffer_data[buf_idx].len() {
                         let img_data = &buffer_data[buf_idx][offset..offset + length];
-                        // Decode image (PNG/JPEG)
-                        if let Ok(img) = image::load_from_memory(img_data) {
-                            let rgba = img.to_rgba8();
-                            let (w, h) = (rgba.width(), rgba.height());
+                        // KTX2 blocks upload as they are; PNG/JPEG decode.
+                        if let Some(index) = register_compressed_image(
+                            renderer,
+                            img_data,
+                            is_normal,
+                            is_srgb,
+                            mask_coverage_references.contains_key(&image_idx),
+                        ) {
+                            texture_indices.push(index);
+                        } else if let Some((rgba, w, h)) =
+                            decode_texture_bytes(img_data, "embedded-image")
+                        {
                             texture_indices.push(register_gltf_image_with_mask_variants(
                                 renderer,
                                 image_idx,
@@ -586,7 +597,15 @@ pub(super) fn load_gltf_with_textures(
                     } else {
                         (None, uri.to_string())
                     };
-                match bytes.and_then(|b| decode_texture_bytes(&b, &effective_uri)) {
+                let direct = bytes.as_deref().and_then(|b| {
+                    let masked = mask_coverage_references.contains_key(&image_idx);
+                    register_compressed_image(renderer, b, is_normal, is_srgb, masked)
+                });
+                let decoded = match direct {
+                    Some(_) => None,
+                    None => bytes.and_then(|b| decode_texture_bytes(&b, &effective_uri)),
+                };
+                match decoded {
                     Some((rgba, w, h)) => {
                         texture_indices.push(register_gltf_image_with_mask_variants(
                             renderer,
@@ -601,7 +620,7 @@ pub(super) fn load_gltf_with_textures(
                             &mut mask_texture_indices,
                         ));
                     }
-                    None => texture_indices.push(0),
+                    None => texture_indices.push(direct.unwrap_or(0)),
                 }
             }
         }
@@ -1076,6 +1095,7 @@ fn load_gltf_staged_impl(
     let mut staged_textures: Vec<StagedTexture> = Vec::new();
     let mut texture_indices: Vec<u32> = Vec::new();
     for (image_idx, image) in gltf.images().enumerate() {
+        let masked = mask_coverage_references.contains_key(&image_idx);
         let decoded = match image.source() {
             gltf::image::Source::View { view, .. } => {
                 let buf_idx = view.buffer().index();
@@ -1083,7 +1103,11 @@ fn load_gltf_staged_impl(
                     let offset = view.offset();
                     let length = view.length();
                     if offset + length <= buffer.len() {
-                        decode_texture_bytes(&buffer[offset..offset + length], "embedded-image")
+                        stage_texture_bytes(
+                            &buffer[offset..offset + length],
+                            "embedded-image",
+                            masked,
+                        )
                     } else {
                         None
                     }
@@ -1110,13 +1134,13 @@ fn load_gltf_staged_impl(
                 } else {
                     (None, uri.to_string())
                 };
-                bytes.and_then(|bytes| decode_texture_bytes(&bytes, &effective_uri))
+                bytes.and_then(|bytes| stage_texture_bytes(&bytes, &effective_uri, masked))
             }
         };
-        texture_indices.push(decoded.map_or(0, |(rgba, width, height)| {
+        texture_indices.push(decoded.map_or(0, |(rgba, width, height, compressed)| {
             stage_image_variants(
                 image_idx,
-                rgba,
+                (rgba, compressed),
                 width,
                 height,
                 normal_image_set.contains(&image_idx),
@@ -1432,7 +1456,7 @@ fn load_gltf_staged_impl(
 #[allow(clippy::too_many_arguments)]
 fn stage_image_variants(
     image_index: usize,
-    rgba: Vec<u8>,
+    (rgba, compressed): (Vec<u8>, Option<crate::compressed_texture::CompressedImage>),
     width: u32,
     height: u32,
     is_normal: bool,
@@ -1452,6 +1476,7 @@ fn stage_image_variants(
             is_normal,
             is_srgb: !is_normal && is_srgb,
             alpha_coverage_reference: None,
+            compressed,
         });
         primary = Some(staged.len() as u32);
     }
@@ -1464,6 +1489,7 @@ fn stage_image_variants(
                 is_normal: false,
                 is_srgb: true,
                 alpha_coverage_reference: Some(*reference),
+                compressed: None,
             });
             mask_indices.insert((image_index, reference.to_bits()), staged.len() as u32);
             primary.get_or_insert(staged.len() as u32);

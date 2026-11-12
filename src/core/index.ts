@@ -36,6 +36,8 @@ declare function bloom_set_chromatic_aberration(strength: number): number;
 declare function bloom_set_vignette(strength: number, softness: number): number;
 declare function bloom_set_film_grain(strength: number): number;
 declare function bloom_set_sharpen_strength(strength: number): number;
+declare function bloom_set_ssgi_probe_spacing(pixels: number): number;
+declare function bloom_set_ssao_downscale(divisor: number): number;
 declare function bloom_set_present_mode(mode: number): number;
 declare function bloom_get_present_mode(): number;
 declare function bloom_get_material_binding_capabilities(): string;
@@ -735,6 +737,16 @@ export function setSsgiIntensity(intensity: number): boolean {
   return bloom_set_ssgi_intensity(intensity) !== 0;
 }
 
+/**
+ * Spacing of the screen-space GI probes in half-resolution pixels. Engine
+ * default 8, range 4 to 32. Cost falls with the square of the spacing, and
+ * indirect light is low-frequency, so high-density displays can use 12 or 16
+ * with little visible change.
+ */
+export function setSsgiProbeSpacing(pixels: number): boolean {
+  return bloom_set_ssgi_probe_spacing(pixels) !== 0;
+}
+
 /** SSGI max view-space march distance in meters. Default 20. Tune to scene scale. */
 export function setSsgiRadius(radius: number): boolean {
   return bloom_set_ssgi_radius(radius) !== 0;
@@ -843,6 +855,15 @@ export function setSsaoEnabled(on: boolean): boolean {
 /** SSAO strength. 0 disables corner darkening, 1 is default, 2 is heavy. */
 export function setSsaoIntensity(intensity: number): boolean {
   return bloom_set_ssao_intensity(intensity) !== 0;
+}
+
+/**
+ * Resolution of the ambient-occlusion pass as a divisor of the render
+ * resolution. Engine default 2 (half resolution), range 1 to 4. Higher is
+ * cheaper, and gives softer and somewhat weaker occlusion.
+ */
+export function setSsaoDownscale(divisor: number): boolean {
+  return bloom_set_ssao_downscale(divisor) !== 0;
 }
 
 /** SSAO sampling radius in world units. 0.1..2.0 m is the sane range. */

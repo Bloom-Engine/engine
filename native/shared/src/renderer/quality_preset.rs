@@ -1,6 +1,6 @@
 //! Coherent resolution, reconstruction, and effect policy for quality presets.
 
-use super::Renderer;
+use super::{formats, Renderer};
 
 /// Balanced first-run default: 56% of native pixel shading instead of the
 /// former 25%, while leaving a meaningful performance tier below it.
@@ -170,6 +170,42 @@ impl Renderer {
         gpu_class(&self.device.adapter_info().name)
     }
 
+    /// Spacing of the screen-space GI probes, in half-resolution pixels
+    /// (default 8, range 4..=32). Probe count, and with it the trace,
+    /// temporal and resolve cost, falls with the square of the spacing.
+    /// Indirect light is low-frequency, so a high-density display can take
+    /// 12 or 16 with little visible change: at 3200x1800 on an M1 Max,
+    /// 16 took 3.1 ms off a 19.1 ms frame. Rebuilds the probe targets.
+    pub fn set_ssgi_probe_spacing(&mut self, pixels: u32) {
+        let tile = pixels.clamp(4, 32);
+        if tile != formats::probe_tile_size() {
+            formats::store_probe_tile_size(tile);
+            self.rebuild_render_targets();
+        }
+    }
+
+    /// Divisor from the render resolution to the ambient-occlusion targets
+    /// (default 2 = half resolution, range 1..=4). The Hi-Z pyramid it
+    /// samples stays at half resolution. At 3200x1800 on an M1 Max, 3 took
+    /// 2.1 ms and 4 took 2.3 ms off a 19.2 ms frame. Coarser targets also
+    /// weaken the occlusion: at 3 a dim interior read about 5 of 255 levels
+    /// brighter. Rebuilds the ambient-occlusion targets.
+    pub fn set_ssao_downscale(&mut self, divisor: u32) {
+        let divisor = divisor.clamp(1, 4);
+        if divisor != formats::ao_divisor() {
+            formats::store_ao_divisor(divisor);
+            self.rebuild_render_targets();
+        }
+    }
+
+    fn rebuild_render_targets(&mut self) {
+        let (w, h) = (self.native_width, self.native_height);
+        let (lw, lh) = (self.logical_width, self.logical_height);
+        if w > 0 && h > 0 {
+            self.resize(w, h, lw, lh);
+        }
+    }
+
     /// Whether TAA also upscales when the render scale is below 1 (a temporal
     /// upscaler: render-resolution input, history and output at the surface's
     /// size). Off, TAA resolves at the render resolution and the upscale pass
@@ -194,7 +230,7 @@ impl Renderer {
     /// the full reconstruction with its provenance and detail-lock
     /// heuristics. The low tier of temporal AA, for TAA resolving at the
     /// render resolution (`set_temporal_upscale(false)`). Default on Android
-    /// (Pixel 4a: 16 -> ? ms at 0.5 render scale).
+    /// (Pixel 4a: 16 -> 4 ms at 0.5 render scale).
     pub fn set_taa_fast(&mut self, on: bool) {
         if on != self.taa_fast {
             self.taa_fast = on;

@@ -784,6 +784,116 @@ impl Renderer {
         )
     }
 
+    /// True when a block-compressed image can upload without decoding.
+    pub fn supports_compressed_image(
+        &self,
+        image: &crate::compressed_texture::CompressedImage,
+    ) -> bool {
+        image.format.texture_format().is_some()
+            && self
+                .device
+                .features()
+                .contains(image.format.required_feature())
+    }
+
+    /// Register a block-compressed texture with its authored mip chain
+    /// (a KTX2 image from a glTF). The blocks upload untouched. Returns
+    /// `None` when the adapter lacks the block format; the caller then
+    /// decodes level zero and takes the RGBA8 path.
+    pub fn register_texture_compressed(
+        &mut self,
+        image: &crate::compressed_texture::CompressedImage,
+        is_normal_map: bool,
+        srgb_rgb: bool,
+    ) -> Option<u32> {
+        if !self.supports_compressed_image(image) {
+            return None;
+        }
+        let format = image.format.texture_format()?;
+        let (block_width, block_height) = image.format.block_size();
+        let (width, height) = (image.width, image.height);
+        let mip_count = image.levels.len() as u32;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("compressed_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: mip_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (mip, data) in image.levels.iter().enumerate() {
+            let blocks_w = (width >> mip).max(1).div_ceil(block_width);
+            let blocks_h = (height >> mip).max(1).div_ceil(block_height);
+            // Compressed copies are expressed in whole physical blocks.
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: mip as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(blocks_w * 16),
+                    rows_per_image: Some(blocks_h),
+                },
+                wgpu::Extent3d {
+                    width: blocks_w * block_width,
+                    height: blocks_h * block_height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compressed_texture_bg"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        let idx = self.texture_bind_groups.len() as u32;
+        let srgb = srgb_rgb && !is_normal_map;
+        let global_id = self.register_global_texture(
+            &view,
+            width,
+            height,
+            mip_count,
+            if srgb {
+                TextureColorSpace::Srgb
+            } else {
+                TextureColorSpace::Linear
+            },
+            if is_normal_map {
+                TextureSemantic::Normal
+            } else if srgb {
+                TextureSemantic::BaseColor
+            } else {
+                TextureSemantic::MetallicRoughness
+            },
+            false,
+        );
+        self.texture_bind_groups.push(bind_group);
+        self.textures.push(texture);
+        self.texture_sizes.push((width, height));
+        self.global_texture_ids.push(global_id);
+        Some(idx)
+    }
+
     /// Register a cooked DDS texture (output of bloom-cook).
     /// Gated on `image-extras` (DDS is a beyond-PNG runtime codec).
     ///

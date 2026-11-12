@@ -44,3 +44,8 @@ wgpu = "29"
 libc = "0.2"
 rfd = "0.15"
 arboard = "3"
+
+# wgpu-core 29 always rebuilds acceleration structures. The patched copy refits
+# a BLAS created with PreferUpdate + ALLOW_UPDATE (skinned meshes, every frame).
+[patch.crates-io]
+wgpu-core = { path = "../third_party/wgpu-core-patched" }

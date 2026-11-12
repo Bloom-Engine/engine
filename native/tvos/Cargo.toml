@@ -33,6 +33,9 @@ wgpu = "29"
 image = { version = "0.25", default-features = false, features = ["hdr"] }
 
 [patch.crates-io]
+# wgpu-core 29 always rebuilds acceleration structures; the patched copy refits
+# skinned-mesh BLASes (see DYN_BLAS_REFIT in shared/src/renderer/mod.rs).
+wgpu-core = { path = "../third_party/wgpu-core-patched" }
 metal = { path = "metal-patched" }
 # minimp3's ring buffer: upstream 0.3.4 uses System V shared memory on tvOS,
 # and shmget is a forbidden syscall there (SIGSYS when music starts).

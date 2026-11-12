@@ -16,6 +16,7 @@
 //!   bloom-cook texture-dir <in-dir> <out-dir> [--linear]
 //!   bloom-cook texture-store <logical-id> <in> <store> [profile] [texture flags]
 //!   bloom-cook texture-benchmark <in> [texture flags] [--iterations N]
+//!   bloom-cook glb-compress <in.glb> <out.glb> [--astc WxH] [--normal-astc WxH|keep] [--quality Q]
 //!   bloom-cook geometry <in.(glb|gltf)> <out.bgeo> [geometry limits]
 //!   bloom-cook geometry-inspect <in.bgeo>
 //!   bloom-cook geometry-store <logical-id> <in.(glb|gltf)> <store> [profile] [limits]
@@ -41,6 +42,7 @@ mod geometric_error;
 mod geometry_cook;
 mod geometry_format;
 mod geometry_quantization;
+mod glb_compress;
 mod hierarchy;
 mod meshlet;
 mod scene_cook;
@@ -96,6 +98,22 @@ fn main() -> ExitCode {
         }
         Some("texture-benchmark") if args.len() >= 2 => {
             match asset_benchmark::benchmark_texture_command(Path::new(&args[1]), &args[2..]) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("glb-compress") if args.len() >= 3 => {
+            match glb_compress::compress_glb_command(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                &args[3..],
+            ) {
                 Ok(report) => {
                     println!("{report}");
                     ExitCode::SUCCESS

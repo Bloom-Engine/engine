@@ -404,20 +404,23 @@ fn hiz_sample(uv: vec2<f32>, mip: i32) -> f32 {
     }
 }
 
-@compute @workgroup_size(8, 1, 1)
+@compute @workgroup_size(8, 8, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let grid_w = u.size.z;
     let grid_h = u.size.w;
-    if (wg.x >= grid_w || wg.y >= grid_h) { return; }
-    if (lid.x >= PROBE_TRACE_RAYS) { return; }
+    // One workgroup traces eight neighbouring probes (x) by eight rays (y).
+    let probe = vec2<u32>(wg.x * 8u + lid.x, wg.y);
+    let ray = vec2<u32>(lid.y, 0u);
+    if (probe.x >= grid_w || probe.y >= grid_h) { return; }
+    if (ray.x >= PROBE_TRACE_RAYS) { return; }
 
-    let probe_idx = wg.y * grid_w + wg.x;
+    let probe_idx = probe.y * grid_w + probe.x;
     let header = probes[probe_idx];
 
-    let dst_coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
+    let dst_coord = vec3<i32>(i32(probe.x), i32(probe.y), i32(ray.x));
 
     // Invalid probe (sky tile) → contribute zero.
     if (header.world_pos.w < 0.5) {
@@ -428,7 +431,7 @@ fn cs_main(
     // Cosine-hemisphere sampling keeps every ray above the receiver and folds
     // the Lambertian cosine/pdf term into the distribution itself.
     let dir_ws = probe_trace_direction(
-        lid.xy,
+        ray,
         header.world_pos.xyz,
         n_ws,
         u.params.x,
@@ -997,21 +1000,24 @@ fn hw_gi_trace_sample(
     return HwGiSample(radiance, hit_distance, source_id);
 }
 
-@compute @workgroup_size(8, 1, 1)
+@compute @workgroup_size(8, 8, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let grid_w = u.size.z;
     let grid_h = u.size.w;
-    if (wg.x >= grid_w || wg.y >= grid_h) { return; }
-    if (lid.x >= PROBE_TRACE_RAYS) { return; }
+    // One workgroup traces eight neighbouring probes (x) by eight rays (y).
+    let probe = vec2<u32>(wg.x * 8u + lid.x, wg.y);
+    let ray = vec2<u32>(lid.y, 0u);
+    if (probe.x >= grid_w || probe.y >= grid_h) { return; }
+    if (ray.x >= PROBE_TRACE_RAYS) { return; }
 
-    let probe_idx = wg.y * grid_w + wg.x;
+    let probe_idx = probe.y * grid_w + probe.x;
     let header = probes[probe_idx];
 
-    let lane = lid.y * PROBE_OCT_SIZE + lid.x;
-    let dst_coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lane));
+    let lane = ray.x;
+    let dst_coord = vec3<i32>(i32(probe.x), i32(probe.y), i32(lane));
 
     if (header.world_pos.w < 0.5) {
         textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
@@ -1028,7 +1034,7 @@ fn cs_main(
     var source_id = 0.0;
     if (lane < PROBE_TRACE_RAYS) {
         let dir_ws = probe_trace_direction(
-            lid.xy,
+            ray,
             header.world_pos.xyz,
             n_ws,
             u.params.x,
@@ -1259,19 +1265,22 @@ fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
          + c01 * (ix * fy) + c11 * (fx * fy);
 }
 
-@compute @workgroup_size(8, 1, 1)
+// One workgroup traces eight neighbouring probes (x) by eight rays (y).
+@compute @workgroup_size(8, 8, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let grid_w = u.size.z;
     let grid_h = u.size.w;
-    if (wg.x >= grid_w || wg.y >= grid_h) { return; }
-    if (lid.x >= PROBE_TRACE_RAYS) { return; }
+    let probe = vec2<u32>(wg.x * 8u + lid.x, wg.y);
+    let ray = vec2<u32>(lid.y, 0u);
+    if (probe.x >= grid_w || probe.y >= grid_h) { return; }
+    if (ray.x >= PROBE_TRACE_RAYS) { return; }
 
-    let probe_idx = wg.y * grid_w + wg.x;
+    let probe_idx = probe.y * grid_w + probe.x;
     let header = probes[probe_idx];
-    let dst_coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
+    let dst_coord = vec3<i32>(i32(probe.x), i32(probe.y), i32(ray.x));
 
     if (header.world_pos.w < 0.5) {
         textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
@@ -1280,7 +1289,7 @@ fn cs_main(
     // Temporally stratified 8-ray diffuse estimate. See the HW path.
     let n_ws = header.normal.xyz;
     let dir_ws = probe_trace_direction(
-        lid.xy,
+        ray,
         header.world_pos.xyz,
         n_ws,
         u.params.x,
@@ -1298,7 +1307,7 @@ fn cs_main(
     var transparent_idx: i32 = -1;
     var transparent_t: f32 = max_t + 1.0;
     if (BLOOM_TRANSPARENT_GI) {
-        let instance_count = arrayLength(&instance_data);
+        let instance_count = min(arrayLength(&instance_data), u32(u.shadow_params.w));
         for (var i: u32 = 0u; i < instance_count; i = i + 1u) {
             let candidate = instance_data[i];
             if (candidate.mat_params.z <= 0.0) { continue; }
@@ -1358,13 +1367,16 @@ fn cs_main(
         // back to analytic sun/sky × gray when no instance matches
         // (clipmap sentinel voxels, hits inside unaccounted-for
         // geometry, etc.).
-        let count = arrayLength(&instance_data);
+        // Walk the live records only (the buffer is a zero-padded power of
+        // two), and read just the fields the test needs: this loop runs for
+        // every ray that hits, and copying the whole 176-byte record per
+        // instance cost more than the march itself on mobile GPUs.
+        let count = min(arrayLength(&instance_data), u32(u.shadow_params.w));
         var picked: i32 = -1;
         var picked_vol: f32 = 1e30;
         for (var i: u32 = 0u; i < count; i = i + 1u) {
-            let ad = instance_data[i];
-            if (ad.card_slot.w < 0.5) { continue; }
-            if (BLOOM_TRANSPARENT_GI && ad.mat_params.z > 0.0) { continue; }
+            if (instance_data[i].card_slot.w < 0.5) { continue; }
+            if (BLOOM_TRANSPARENT_GI && instance_data[i].mat_params.z > 0.0) { continue; }
             // EN-023 — compare the WORLD hit against the WORLD AABB.
             // The old object-space comparison only matched assets whose
             // vertices were already in world space; every transformed
@@ -1373,8 +1385,8 @@ fn cs_main(
             // spanning instance (the shooter's ±140 m terrain proxy)
             // otherwise swallows every hit — walls and trees included —
             // and its mostly-empty side cards darken the bounce.
-            let bmin = ad.world_aabb_min.xyz - vec3<f32>(0.05);
-            let bmax = ad.world_aabb_max.xyz + vec3<f32>(0.05);
+            let bmin = instance_data[i].world_aabb_min.xyz - vec3<f32>(0.05);
+            let bmax = instance_data[i].world_aabb_max.xyz + vec3<f32>(0.05);
             if (hit_pos.x >= bmin.x && hit_pos.x <= bmax.x &&
                 hit_pos.y >= bmin.y && hit_pos.y <= bmax.y &&
                 hit_pos.z >= bmin.z && hit_pos.z <= bmax.z) {

@@ -60,6 +60,8 @@ pub fn build_cooked_color_mip_chain(
     (bytes, mip_count)
 }
 mod capability_api;
+mod card_capture_pass;
+use card_capture_pass::CardCaptureDraw;
 mod draw2d;
 mod env_prefilter;
 mod final_pass;
@@ -92,6 +94,7 @@ mod occlusion;
 mod opaque_material_pass;
 mod planar_pass;
 mod postfx_chain;
+mod pt_dynamic_skin;
 mod pt_geometry;
 mod pt_pass;
 #[cfg(not(target_arch = "wasm32"))]
@@ -103,6 +106,7 @@ mod quality_readback;
 mod queries;
 mod refractive_reflections;
 mod scene_pass;
+mod sdf_clipmap_prep;
 mod shaders;
 mod shadow_pass;
 mod sorted_transparency;
@@ -186,7 +190,7 @@ use formats::{
     create_taa_depth_history_textures, create_taa_textures, create_velocity_rt, create_wsrc_atlas,
     halton, probe_grid_dims, BLOOM_MIP_COUNT, CARD_RADIANCE_ATLAS_SIZE, CARD_RADIANCE_SLOT_SIZE,
     CARD_SLOTS_PER_ROW, CARD_SLOT_SIZE, HDR_FORMAT, HIZ_FORMAT, HIZ_MIP_COUNT, MATERIAL_FORMAT,
-    MESH_SDF_RES, PROBE_TILE_SIZE, SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT,
+    MESH_SDF_RES, SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT,
     SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME, SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD, SCENE_SDF_CLIPMAP_RES,
     SSAO_FORMAT, TAA_DEPTH_HISTORY_FORMAT, VELOCITY_FORMAT, WSRC_CASCADE_COUNT,
     WSRC_CASCADE_EXTENTS, WSRC_GRID_RES, WSRC_REBAKE_THRESHOLD,
@@ -1070,10 +1074,17 @@ pub struct Renderer {
     pt_resv_buffers: [Option<wgpu::Buffer>; 2],
     /// Skinned draws awaiting dynamic TLAS instance construction.
     pt_dynamic_draws: Vec<PtDynamicDraw>,
+    /// Dynamic windows last uploaded to the PT megabuffers, in order:
+    /// (model cache handle, mesh index, CPU vertex pointer, vertex count,
+    /// index count). Lets an unchanged frame skip the re-upload.
+    pt_dyn_uploaded_layout: Vec<(u64, usize, usize, u32, u32)>,
     /// Per-slot geometry windows for compute pre-skin and BLAS build.
     pt_dyn_windows: Vec<PtDynWindow>,
     /// Dynamic BLAS pool, recreated when a slot's geometry size changes.
-    pt_dyn_blas: Vec<(wgpu::Blas, u32, u32)>,
+    pt_dyn_blas: Vec<pt_dynamic_skin::PtDynBlas>,
+    /// Counts dynamic-skin frames; staggers the periodic full rebuilds of
+    /// refitted dynamic BLASes.
+    pt_dyn_blas_frame: u32,
     /// Writes posed world-space vertices before dynamic BLAS builds.
     pt_skin_pipeline: Option<wgpu::ComputePipeline>,
     pt_skin_layout: Option<wgpu::BindGroupLayout>,
@@ -6733,8 +6744,8 @@ impl Renderer {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
-                    width: CARD_SLOT_SIZE,
-                    height: CARD_SLOT_SIZE,
+                    width: CARD_SLOT_SIZE * CARD_AXES_PER_MESH,
+                    height: CARD_SLOT_SIZE * CARD_CAPTURE_MAX_PER_FRAME as u32,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -6754,8 +6765,8 @@ impl Renderer {
         let card_capture_depth_scratch = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("card_capture_depth_scratch"),
             size: wgpu::Extent3d {
-                width: CARD_SLOT_SIZE,
-                height: CARD_SLOT_SIZE,
+                width: CARD_SLOT_SIZE * CARD_AXES_PER_MESH,
+                height: CARD_SLOT_SIZE * CARD_CAPTURE_MAX_PER_FRAME as u32,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -8419,8 +8430,10 @@ impl Renderer {
             pt_restir,
             pt_resv_buffers: [None, None],
             pt_dynamic_draws: Vec::new(),
+            pt_dyn_uploaded_layout: Vec::new(),
             pt_dyn_windows: Vec::new(),
             pt_dyn_blas: Vec::new(),
+            pt_dyn_blas_frame: 0,
             pt_skin_pipeline: None,
             pt_skin_layout: None,
             pt_skin_params: Vec::new(),
@@ -9422,6 +9435,14 @@ impl Renderer {
                 }],
             });
         let mut capture_index = 0_u32;
+        // Every capture of the frame draws into its own cell of the scratch
+        // grid (one row per mesh, one column per axis) inside a single render
+        // pass, and the cells are copied to their atlas slots afterwards.
+        // One pass and one run of copies per frame replaces a render pass
+        // plus a blit per axis: 120 of each at the per-frame budget, which
+        // on Metal held about 400 MB of encoder memory while a scene loaded.
+        let mut capture_draws: Vec<CardCaptureDraw> =
+            Vec::with_capacity(pending.len() * CARD_AXES_PER_MESH as usize);
 
         for handle in pending {
             let (
@@ -9532,91 +9553,16 @@ impl Renderer {
                     bytemuck::bytes_of(&params),
                 );
 
-                let slot_x = slot % CARD_SLOTS_PER_ROW;
-                let slot_y = slot / CARD_SLOTS_PER_ROW;
-
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("card_capture_pass"),
-                    color_attachments: &[
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: &self.card_capture_albedo_scratch_view,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        }),
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: &self.card_capture_emissive_scratch_view,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        }),
-                    ],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.card_capture_depth_scratch_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Discard,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
+                capture_draws.push(CardCaptureDraw {
+                    uniform_offset: uniform_offset as u32,
+                    texture_bg: texture_bg.clone(),
+                    vertex_buffer: vb_ptr.clone(),
+                    index_buffer: ib_ptr.clone(),
+                    index_count,
+                    cell_x: axis * CARD_SLOT_SIZE,
+                    cell_y: capture_index * CARD_SLOT_SIZE,
+                    slot,
                 });
-                pass.set_pipeline(&self.card_capture_pipeline);
-                pass.set_bind_group(0, &capture_uniform_bg, &[uniform_offset as u32]);
-                pass.set_bind_group(1, &texture_bg, &[]);
-                pass.set_vertex_buffer(0, vb_ptr.slice(..));
-                pass.set_index_buffer(ib_ptr.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..index_count, 0, 0..1);
-                drop(pass);
-
-                let atlas_origin = wgpu::Origin3d {
-                    x: slot_x * CARD_SLOT_SIZE,
-                    y: slot_y * CARD_SLOT_SIZE,
-                    z: 0,
-                };
-                let copy_extent = wgpu::Extent3d {
-                    width: CARD_SLOT_SIZE,
-                    height: CARD_SLOT_SIZE,
-                    depth_or_array_layers: 1,
-                };
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.card_capture_albedo_scratch,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.mesh_card_atlas,
-                        mip_level: 0,
-                        origin: atlas_origin,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    copy_extent,
-                );
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.card_capture_emissive_scratch,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.mesh_card_emissive_tex,
-                        mip_level: 0,
-                        origin: atlas_origin,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    copy_extent,
-                );
 
                 // Stash the world-space normal for the card-lighting
                 // pass. Object-space face normals are axis unit vectors
@@ -9651,6 +9597,7 @@ impl Renderer {
             }
             capture_index += 1;
         }
+        self.record_card_capture_draws(encoder, &capture_uniform_bg, &capture_draws);
 
         // Upload the new slot-meta entries in one contiguous batch.
         // Sorting by slot index lets us coalesce adjacent writes, but
@@ -10197,6 +10144,41 @@ impl Renderer {
         // flat albedo is white; no card (geo window always present).
         self.pt_dyn_windows.clear();
         let dyn_draws = std::mem::take(&mut self.pt_dynamic_draws);
+        // The megabuffer's dynamic windows hold bind-pose Vertex3D data whose
+        // position/normal words the pre-skin compute pass overwrites every
+        // frame from each mesh's own vertex buffer. Everything else (UVs,
+        // colours, indices) is constant, so when this frame's windows are
+        // the same meshes in the same order as the last upload, the buffers
+        // already hold exactly what a re-upload would write. Skipping it
+        // saves copying every skinned mesh twice per frame (3-4 ms for
+        // five characters). Static PT geometry shares the buffers, so the
+        // shortcut is limited to frames without it.
+        let mut dyn_layout: Vec<(u64, usize, usize, u32, u32)> =
+            Vec::with_capacity(dyn_draws.len());
+        for d in &dyn_draws {
+            if let Some(Some(meshes)) = self.model_gpu_cache.get(&d.cache_handle) {
+                if let Some(mesh) = meshes.get(d.mesh_idx) {
+                    if let (Some(v), Some(i)) = (&mesh.cpu_vertices, &mesh.cpu_indices) {
+                        if !v.is_empty() && !i.is_empty() {
+                            dyn_layout.push((
+                                d.cache_handle as u64,
+                                d.mesh_idx,
+                                v.as_ptr() as usize,
+                                v.len() as u32,
+                                i.len() as u32,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let reuse_dyn_geometry = !build_static_pt_geometry
+            && !dyn_layout.is_empty()
+            && dyn_layout == self.pt_dyn_uploaded_layout
+            && self.pt_geo_vertex_buffer.is_some()
+            && self.pt_geo_index_buffer.is_some();
+        let mut dyn_vertex_cursor = (geo_vertices.len() / 24) as u32;
+        let mut dyn_index_cursor = geo_indices.len() as u32;
         for d in &dyn_draws {
             let mesh = match self.model_gpu_cache.get(&d.cache_handle) {
                 Some(Some(meshes)) => match meshes.get(d.mesh_idx) {
@@ -10209,10 +10191,14 @@ impl Renderer {
                 (Some(v), Some(i)) if !v.is_empty() && !i.is_empty() => (v, i),
                 _ => continue,
             };
-            let vb = (geo_vertices.len() / 24) as u32;
-            let ib = geo_indices.len() as u32;
-            geo_vertices.extend_from_slice(bytemuck::cast_slice(cv));
-            geo_indices.extend_from_slice(ci);
+            let vb = dyn_vertex_cursor;
+            let ib = dyn_index_cursor;
+            dyn_vertex_cursor += cv.len() as u32;
+            dyn_index_cursor += ci.len() as u32;
+            if !reuse_dyn_geometry {
+                geo_vertices.extend_from_slice(bytemuck::cast_slice(cv));
+                geo_indices.extend_from_slice(ci);
+            }
             let uses_uv1 = layered_pbr_pt::append_record(
                 &mut pt_layered_records,
                 &mut pt_layered_texture_records,
@@ -10226,13 +10212,15 @@ impl Renderer {
                 runtime_texture_count,
                 self.pt_texture_arrays_enabled && mesh.cpu_secondary_uvs.is_some(),
             );
-            pt_geometry::append_pt_secondary_uvs(
-                &mut geo_secondary_uvs,
-                vb as usize,
-                cv.len(),
-                mesh.cpu_secondary_uvs.as_deref(),
-                uses_uv1,
-            );
+            if !reuse_dyn_geometry {
+                pt_geometry::append_pt_secondary_uvs(
+                    &mut geo_secondary_uvs,
+                    vb as usize,
+                    cv.len(),
+                    mesh.cpu_secondary_uvs.as_deref(),
+                    uses_uv1,
+                );
+            }
             instance_data.push(InstanceGiDataCpu {
                 albedo: [1.0, 1.0, 1.0],
                 emissive_luma: 0.0,
@@ -10266,8 +10254,19 @@ impl Renderer {
                 mesh_idx: d.mesh_idx,
             });
         }
-        let geometry_uploaded = if build_static_pt_geometry || !dyn_draws.is_empty() {
-            self.upload_pt_geometry(&geo_vertices, &geo_indices, geo_secondary_uvs.as_deref())
+        let geometry_uploaded = if reuse_dyn_geometry {
+            true
+        } else if build_static_pt_geometry || !dyn_draws.is_empty() {
+            let uploaded =
+                self.upload_pt_geometry(&geo_vertices, &geo_indices, geo_secondary_uvs.as_deref());
+            // Remember the layout only when the buffers hold nothing but
+            // these dynamic windows.
+            self.pt_dyn_uploaded_layout = if uploaded && !build_static_pt_geometry {
+                dyn_layout
+            } else {
+                Vec::new()
+            };
+            uploaded
         } else {
             true
         };
@@ -10553,7 +10552,7 @@ impl Renderer {
             // output is already world-space).
             for i in 0..dyn_count {
                 let slot = node_count + i;
-                let blas = &self.pt_dyn_blas[i].0;
+                let blas = &self.pt_dyn_blas[i].blas;
                 tlas[slot] = Some(wgpu::TlasInstance::new(
                     blas,
                     [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -10641,7 +10640,7 @@ impl Renderer {
             let mega_ib = self.pt_geo_index_buffer.as_ref().unwrap();
             for (i, w) in self.pt_dyn_windows.iter().take(dyn_count).enumerate() {
                 build_entries.push(wgpu::BlasBuildEntry {
-                    blas: &self.pt_dyn_blas[i].0,
+                    blas: &self.pt_dyn_blas[i].blas,
                     geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
                         wgpu::BlasTriangleGeometry {
                             size: &dyn_size_descs[i],
@@ -10669,200 +10668,6 @@ impl Renderer {
             self.card_light_coherent = false;
         }
         self.tlas_built_version = scene.tlas_version;
-    }
-
-    /// PT-6 — encode the compute pre-skin dispatches for this frame's
-    /// dynamic windows (posed world-space position/normal written over
-    /// the bind-pose data in the megabuffer) and (re)create each slot's
-    /// BLAS when its geometry size changed. Runs before the combined
-    /// BLAS+TLAS build on the same encoder, so the build reads posed
-    /// vertices.
-    fn encode_dynamic_skin(&mut self, encoder: &mut wgpu::CommandEncoder, dyn_count: usize) {
-        if dyn_count == 0 {
-            return;
-        }
-        if self.pt_skin_pipeline.is_none() {
-            let shader = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("pt_skin_shader"),
-                    source: wgpu::ShaderSource::Wgsl(shaders::PT_SKIN_WGSL.into()),
-                });
-            let layout = self
-                .device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("pt_skin_layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 3,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-            let pl = self
-                .device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("pt_skin_pl"),
-                    bind_group_layouts: &[Some(&layout)],
-                    immediate_size: 0,
-                });
-            self.pt_skin_pipeline = Some(self.device.create_compute_pipeline(
-                &wgpu::ComputePipelineDescriptor {
-                    label: Some("pt_skin_pipeline"),
-                    layout: Some(&pl),
-                    module: &shader,
-                    entry_point: Some("cs_skin"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                },
-            ));
-            self.pt_skin_layout = Some(layout);
-            self.created_pipelines(1);
-        }
-        while self.pt_skin_params.len() < dyn_count {
-            self.pt_skin_params
-                .push(self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("pt_skin_params"),
-                    size: 80,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-        }
-
-        // Per-slot: params upload, BLAS pool upkeep, bind group.
-        let mut bind_groups: Vec<wgpu::BindGroup> = Vec::with_capacity(dyn_count);
-        let mut dispatch_counts: Vec<u32> = Vec::with_capacity(dyn_count);
-        for i in 0..dyn_count {
-            let w = &self.pt_dyn_windows[i];
-            let mut words = [0f32; 20];
-            for c in 0..4 {
-                for r in 0..4 {
-                    words[c * 4 + r] = w.model[c][r];
-                }
-            }
-            words[16] = f32::from_bits(w.v_base);
-            words[17] = f32::from_bits(w.v_count);
-            words[18] = f32::from_bits(w.joint_offset.max(0.0) as u32);
-            words[19] = 0.0;
-            self.queue
-                .write_buffer(&self.pt_skin_params[i], 0, bytemuck::cast_slice(&words));
-
-            let need_new = match self.pt_dyn_blas.get(i) {
-                Some((_, vc, ic)) => *vc != w.v_count || *ic != w.i_count,
-                None => true,
-            };
-            if need_new {
-                let blas = self.device.create_blas(
-                    &wgpu::CreateBlasDescriptor {
-                        label: Some("pt_dyn_blas"),
-                        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
-                        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
-                    },
-                    wgpu::BlasGeometrySizeDescriptors::Triangles {
-                        descriptors: vec![wgpu::BlasTriangleGeometrySizeDescriptor {
-                            vertex_format: wgpu::VertexFormat::Float32x3,
-                            vertex_count: w.v_count,
-                            index_format: Some(wgpu::IndexFormat::Uint32),
-                            index_count: Some(w.i_count),
-                            flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
-                        }],
-                    },
-                );
-                if i < self.pt_dyn_blas.len() {
-                    self.pt_dyn_blas[i] = (blas, w.v_count, w.i_count);
-                } else {
-                    self.pt_dyn_blas.push((blas, w.v_count, w.i_count));
-                }
-            }
-
-            let src_vb = match self.model_gpu_cache.get(&w.cache_handle) {
-                Some(Some(meshes)) => match meshes.get(w.mesh_idx) {
-                    Some(m) => match &m.geometry {
-                        gpu_driven::MeshGeometry::Dedicated { vertex, .. } => vertex,
-                        // Dynamic PT windows are registered only for skinned
-                        // cached meshes, which always retain dedicated input.
-                        gpu_driven::MeshGeometry::Shared(_) => continue,
-                    },
-                    None => continue,
-                },
-                _ => continue,
-            };
-            bind_groups.push(
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("pt_skin_bg"),
-                    layout: self.pt_skin_layout.as_ref().unwrap(),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: self.pt_skin_params[i].as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: src_vb.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self
-                                .pt_geo_vertex_buffer
-                                .as_ref()
-                                .unwrap()
-                                .as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: self.joint_buffer.as_entire_binding(),
-                        },
-                    ],
-                }),
-            );
-            dispatch_counts.push(w.v_count);
-        }
-
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("pt_skin"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(self.pt_skin_pipeline.as_ref().unwrap());
-        for (bg, vc) in bind_groups.iter().zip(dispatch_counts.iter()) {
-            pass.set_bind_group(0, bg, &[]);
-            pass.dispatch_workgroups(vc.div_ceil(64), 1, 1);
-        }
     }
 
     /// Toggle depth of field on/off. Off (default) = no DoF pass,
@@ -13411,7 +13216,7 @@ impl Renderer {
                 }
             });
             bind_optional_pass!("gtao", |c: &mut FrameCtx2| {
-                let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
+                let (hw, hh) = formats::ao_extent(c.surf.0, c.surf.1);
                 let p = &c.r.current_proj_matrix;
                 let (p00, p11, p20, p21) = (p[0][0], p[1][1], p[2][0], p[2][1]);
                 c.r.record_gtao(c.encoder, c.profiler, hw, hh, p00, p11, p20, p21);
@@ -13517,8 +13322,10 @@ impl Renderer {
             self.finish_frame_readback(readback);
         } else {
             profiler.begin("queue_submit");
+            let gpu_clock = formats::gpu_frame_clock();
             self.submit_frame_commands(encoder.finish());
             profiler.end("queue_submit");
+            formats::finish_gpu_frame_clock(gpu_clock, &self.device);
         }
         #[cfg(target_arch = "wasm32")]
         {

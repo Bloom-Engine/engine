@@ -639,14 +639,7 @@ macro_rules! __bloom_ffi_assets {
                     None => return 0.0,
                 };
                 let eng = engine();
-                let bind_group_idx = eng.renderer.register_texture_kind_with_color_space(
-                    staged.width,
-                    staged.height,
-                    &staged.data,
-                    staged.is_normal,
-                    staged.is_srgb,
-                    staged.alpha_coverage_reference,
-                );
+                let bind_group_idx = staged.register(&mut eng.renderer);
                 eng.textures.textures.alloc($crate::textures::TextureData {
                     bind_group_idx,
                     width: staged.width,
