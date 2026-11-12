@@ -205,7 +205,10 @@ impl Renderer {
             });
             pass.set_pipeline(&self.ssao_blur_pipeline);
             pass.set_bind_group(0, bg, &[]);
-            pass.draw(0..3, 0..1);
+            // BLOOM_SKIP=ao_blur leaves the cleared (unoccluded) target.
+            if !self.dbg_skip("ao_blur") {
+                pass.draw(0..3, 0..1);
+            }
         } else {
             // SSAO disabled — clear the blur RT to WHITE so the
             // composite pass samples "no occlusion". Cheaper than a
@@ -361,7 +364,10 @@ impl Renderer {
         });
         pass.set_pipeline(&self.ssao_pipeline);
         pass.set_bind_group(0, bg, &[]);
-        pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
+        // BLOOM_SKIP=ao_compute keeps the previous occlusion target.
+        if !self.dbg_skip("ao_compute") {
+            pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
+        }
 
         // Flip ping-pong indices for the next frame.
         self.ssao_history_idx = read_idx;
