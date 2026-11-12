@@ -55,6 +55,24 @@ pub fn bloom_set_ssgi_probe_spacing(pixels: f64) -> f64 {
     1.0
 }
 #[wasm_bindgen]
+pub fn bloom_set_shadow_map_size(texels: f64) -> f64 {
+    if bloom_shared::shadows::store_cascade_map_size(texels.max(0.0) as u32) {
+        1.0
+    } else {
+        0.0
+    }
+}
+#[wasm_bindgen]
+pub fn bloom_set_shadow_filter_4tap(on: f64) -> f64 {
+    engine().renderer.set_shadow_filter_4tap(on != 0.0);
+    1.0
+}
+#[wasm_bindgen]
+pub fn bloom_set_shadow_distance(metres: f64) -> f64 {
+    engine().renderer.set_shadow_distance(metres as f32);
+    1.0
+}
+#[wasm_bindgen]
 pub fn bloom_set_ssao_downscale(divisor: f64) -> f64 {
     engine().renderer.set_ssao_downscale(divisor.max(0.0) as u32);
     1.0

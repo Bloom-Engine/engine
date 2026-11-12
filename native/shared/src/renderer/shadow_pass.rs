@@ -49,8 +49,8 @@ impl Renderer {
                 // stay byte-stable when the camera is actually
                 // stationary (the shadow cache compares them exactly).
                 self.current_proj_matrix_unjittered,
-                0.5,  // near — start cascades slightly past the camera
-                80.0, // far — shadow coverage range
+                0.5,                      // near — start cascades slightly past the camera
+                self.shadow_map.distance, // far — shadow coverage range
                 scene_bounds,
             );
 
@@ -974,8 +974,8 @@ impl Renderer {
                         aspect: wgpu::TextureAspect::All,
                     },
                     wgpu::Extent3d {
-                        width: crate::shadows::CASCADE_MAP_SIZE,
-                        height: crate::shadows::CASCADE_MAP_SIZE,
+                        width: crate::shadows::cascade_map_size(),
+                        height: crate::shadows::cascade_map_size(),
                         depth_or_array_layers: 1,
                     },
                 );

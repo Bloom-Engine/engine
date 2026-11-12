@@ -303,6 +303,32 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_shadow_map_size — before initWindow only; needs no engine.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_shadow_map_size(texels: f64) -> f64 {
+            if $crate::shadows::store_cascade_map_size(texels.max(0.0) as u32) {
+                1.0
+            } else {
+                0.0
+            }
+        }
+
+        // bloom_set_shadow_filter_4tap
+        #[no_mangle]
+        pub extern "C" fn bloom_set_shadow_filter_4tap(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_shadow_filter_4tap", move || {
+                engine().renderer.set_shadow_filter_4tap(on != 0.0);
+            })
+        }
+
+        // bloom_set_shadow_distance
+        #[no_mangle]
+        pub extern "C" fn bloom_set_shadow_distance(metres: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_shadow_distance", move || {
+                engine().renderer.set_shadow_distance(metres as f32);
+            })
+        }
+
         // bloom_set_ssao_downscale
         #[no_mangle]
         pub extern "C" fn bloom_set_ssao_downscale(divisor: f64) -> f64 {
