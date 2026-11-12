@@ -445,30 +445,12 @@ pub(super) fn store_ao_divisor(divisor: u32) {
     AO_DIVISOR.store(divisor, std::sync::atomic::Ordering::Relaxed);
 }
 
-static AO_RENDER_SCALE: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0x3F80_0000); // 1.0f32
-
-/// Record the render scale the ambient-occlusion targets follow. Called
-/// where the targets are about to be recreated, never between frames.
-pub(super) fn store_ao_render_scale(scale: f32) {
-    AO_RENDER_SCALE.store(
-        scale.clamp(0.15, 1.0).to_bits(),
-        std::sync::atomic::Ordering::Relaxed,
-    );
-}
-
-/// Size of the ambient-occlusion targets for a surface extent: the render
-/// extent (surface x render scale) over the divisor. "Half resolution" is
-/// half of what the scene is rendered at; sized from the surface, a scene
-/// rendered at 75 % had its occlusion computed at two thirds of its own
-/// resolution and paid 78 % more for it than the half it was meant to be.
+/// Size of the ambient-occlusion targets for a render extent. Callers pass
+/// the render extent (`Renderer::render_extent`), so the divisor is already
+/// relative to what the scene is rendered at.
 pub(super) fn ao_extent(width: u32, height: u32) -> (u32, u32) {
-    let d = ao_divisor() as f32;
-    let scale = f32::from_bits(AO_RENDER_SCALE.load(std::sync::atomic::Ordering::Relaxed));
-    (
-        ((width as f32 * scale / d) as u32).max(1),
-        ((height as f32 * scale / d) as u32).max(1),
-    )
+    let d = ao_divisor();
+    ((width / d).max(1), (height / d).max(1))
 }
 
 pub(super) fn store_probe_tile_size(tile: u32) {
