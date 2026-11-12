@@ -656,7 +656,9 @@ impl Renderer {
                 shadow_vps,
                 shadow_splits,
                 flags: [
-                    0.002,
+                    // x = receiver depth bias in shadow texels. Probes sit
+                    // in free space, so there is no normal to offset along.
+                    2.0,
                     if shadows_enabled { 1.0 } else { 0.0 },
                     c as f32,
                     0.0,

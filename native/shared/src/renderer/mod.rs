@@ -9776,7 +9776,9 @@ impl Renderer {
             shadow_splits,
             view_matrix: self.current_view_matrix,
             flags: [
-                0.002,
+                // x = receiver depth bias in shadow texels; the shader adds
+                // a 1.5-texel normal offset of its own.
+                1.0,
                 if shadows_enabled { 1.0 } else { 0.0 },
                 if use_hw {
                     self.tlas_instance_data_count as f32

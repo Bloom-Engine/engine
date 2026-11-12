@@ -1054,7 +1054,8 @@ pub(super) struct WsrcBakeParams {
     /// xyz = view-space split distances (unused by V6 because it
     /// always samples cascade 2), w = 0.
     pub(super) shadow_splits: [f32; 4],
-    /// x = shadow bias, y = shadows_enabled (0/1), zw unused.
+    /// x = receiver depth bias in shadow texels (world-sized in the
+    /// shader), y = shadows_enabled (0/1), zw unused.
     pub(super) flags: [f32; 4],
     /// EN-023 — xyz = scene-average albedo (mean of card-instance flat
     /// albedos) for the SW bake's ground-bounce term; w unused. The HW
@@ -1079,7 +1080,8 @@ pub(super) struct CardLightParams {
     /// Camera view matrix — needed to convert card-texel world pos
     /// into view-space Z for cascade selection.
     pub(super) view_matrix: [[f32; 4]; 4],
-    /// x = shadow bias, y = shadows_enabled (0/1), zw unused.
+    /// x = receiver depth bias in shadow texels (world-sized in the
+    /// shader), y = shadows_enabled (0/1), zw unused.
     pub(super) flags: [f32; 4],
 }
 
