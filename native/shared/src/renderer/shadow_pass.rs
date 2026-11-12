@@ -49,10 +49,33 @@ impl Renderer {
                 // stay byte-stable when the camera is actually
                 // stationary (the shadow cache compares them exactly).
                 self.current_proj_matrix_unjittered,
-                0.5,  // near — start cascades slightly past the camera
-                80.0, // far — shadow coverage range
+                0.5,                      // near — start cascades slightly past the camera
+                self.shadow_map.distance, // far — shadow coverage range
                 scene_bounds,
             );
+
+            // Staggered cascades (`set_shadow_cascade_stagger`): on its off
+            // frames a cascade beyond the first keeps the projection it was
+            // last drawn with, so receivers sample the depth it still holds,
+            // and its casters are not redrawn. A light change, a reset or a
+            // cascade that has never been drawn redraws at once.
+            let stagger_frame = self.shadow_map.stagger_frame;
+            self.shadow_map.stagger_frame = stagger_frame.wrapping_add(1);
+            let mut stagger_skip = [false; crate::shadows::NUM_CASCADES];
+            if self.shadow_map.stagger
+                && !self.shadow_map.always_fresh
+                && !self.shadow_map.dirty
+                && self.shadow_map.rendered_light_dir == Some(light_dir)
+            {
+                if let Some(rendered) = self.shadow_map.rendered_light_vps {
+                    for cascade in 1..crate::shadows::NUM_CASCADES {
+                        if (stagger_frame + cascade as u32) % 2 == 1 {
+                            self.shadow_map.light_vps[cascade] = rendered[cascade];
+                            stagger_skip[cascade] = true;
+                        }
+                    }
+                }
+            }
 
             // Re-upload lighting uniforms with cascade VPs and splits.
             // Always write these — even on a cache hit the cascade
@@ -849,6 +872,9 @@ impl Renderer {
                     // Live texture already holds exactly this content.
                     continue;
                 }
+                if stagger_skip[cascade] {
+                    continue;
+                }
 
                 if static_stale {
                     let static_entries: Vec<usize> = entries
@@ -974,8 +1000,8 @@ impl Renderer {
                         aspect: wgpu::TextureAspect::All,
                     },
                     wgpu::Extent3d {
-                        width: crate::shadows::CASCADE_MAP_SIZE,
-                        height: crate::shadows::CASCADE_MAP_SIZE,
+                        width: crate::shadows::cascade_map_size(),
+                        height: crate::shadows::cascade_map_size(),
                         depth_or_array_layers: 1,
                     },
                 );

@@ -367,7 +367,33 @@ struct CardLightParams {
 @group(0) @binding(8) var shadow_atlas_2: texture_depth_2d;
 @group(0) @binding(9) var shadow_samp: sampler_comparison;
 
-fn sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
+fn shadow_vp(cascade: i32) -> mat4x4<f32> {
+    if (cascade == 0) { return u.shadow_vps[0]; }
+    if (cascade == 1) { return u.shadow_vps[1]; }
+    return u.shadow_vps[2];
+}
+
+// One shadow-map texel of world distance, read off the cascade's own
+// orthographic view-projection (its x row has length 2 / width in metres).
+fn shadow_texel_m(cascade: i32) -> f32 {
+    let vp = shadow_vp(cascade);
+    let x_row = length(vec3<f32>(vp[0][0], vp[1][0], vp[2][0]));
+    return 2.0 / (x_row * f32(textureDimensions(shadow_atlas_0).x));
+}
+
+// The same texel as NDC depth (the z row has length 1 / depth range).
+// Receiver biases are measured in texels so that they keep their size in
+// the world whatever the scene bounds pancake the depth range to. The
+// constant 0.002 in NDC this replaces grew to a metre over a 600 m ground
+// plane, at which point a deck no longer shadowed the hull beneath it in
+// the GI feed.
+fn shadow_texel_ndc(cascade: i32) -> f32 {
+    let vp = shadow_vp(cascade);
+    let z_row = length(vec3<f32>(vp[0][2], vp[1][2], vp[2][2]));
+    return shadow_texel_m(cascade) * z_row;
+}
+
+fn sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias_texels: f32) -> f32 {
     var clip: vec4<f32>;
     if (cascade == 0) {
         clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
@@ -383,7 +409,7 @@ fn sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
         return 0.0;
     }
     let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    let ref_depth = ndc.z - bias;
+    let ref_depth = ndc.z - bias_texels * shadow_texel_ndc(cascade);
     if (cascade == 0) {
         return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, shadow_uv, ref_depth);
     } else if (cascade == 1) {
@@ -459,21 +485,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (u.flags.y > 0.5) {
         shadow = 0.0;
         for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1) {
-            var clip: vec4<f32>;
-            if (cascade == 0) {
-                clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
-            } else if (cascade == 1) {
-                clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0);
-            } else {
-                clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0);
-            }
+            // Receiver normal offset of 1.5 texels, as in the main pass.
+            let p = pos_ws + n_ws * shadow_texel_m(cascade) * 1.5;
+            let clip = shadow_vp(cascade) * vec4<f32>(p, 1.0);
             if (clip.w <= 0.0) { continue; }
             let ndc = clip.xyz / clip.w;
             if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
                 ndc.z < 0.0 || ndc.z > 1.0) {
                 continue;
             }
-            shadow = sample_cascade(cascade, pos_ws, u.flags.x);
+            shadow = sample_cascade(cascade, p, u.flags.x);
             break;
         }
     }
@@ -727,7 +748,7 @@ struct WsrcBakeParams {
     grid: vec4<f32>,
     shadow_vps: array<mat4x4<f32>, 3>,
     shadow_splits: vec4<f32>,
-    // x = shadow bias, y = shadows-enabled flag, z = cascade index
+    // x = receiver depth bias in shadow texels, y = shadows-enabled flag, z = cascade index
     // (0..WSRC_CASCADE_COUNT), w unused. Cascade index offsets the
     // output z-slice so this pipeline can be dispatched once per
     // cascade with the same layout.
@@ -743,7 +764,33 @@ struct WsrcBakeParams {
 @group(0) @binding(4) var shadow_samp: sampler_comparison;
 @group(0) @binding(5) var wsrc_out: texture_storage_3d<rgba16float, write>;
 
-fn wsrc_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
+fn shadow_vp(cascade: i32) -> mat4x4<f32> {
+    if (cascade == 0) { return u.shadow_vps[0]; }
+    if (cascade == 1) { return u.shadow_vps[1]; }
+    return u.shadow_vps[2];
+}
+
+// One shadow-map texel of world distance, read off the cascade's own
+// orthographic view-projection (its x row has length 2 / width in metres).
+fn shadow_texel_m(cascade: i32) -> f32 {
+    let vp = shadow_vp(cascade);
+    let x_row = length(vec3<f32>(vp[0][0], vp[1][0], vp[2][0]));
+    return 2.0 / (x_row * f32(textureDimensions(shadow_atlas_0).x));
+}
+
+// The same texel as NDC depth (the z row has length 1 / depth range).
+// Receiver biases are measured in texels so that they keep their size in
+// the world whatever the scene bounds pancake the depth range to. The
+// constant 0.002 in NDC this replaces grew to a metre over a 600 m ground
+// plane, at which point a deck no longer shadowed the hull beneath it in
+// the GI feed.
+fn shadow_texel_ndc(cascade: i32) -> f32 {
+    let vp = shadow_vp(cascade);
+    let z_row = length(vec3<f32>(vp[0][2], vp[1][2], vp[2][2]));
+    return shadow_texel_m(cascade) * z_row;
+}
+
+fn wsrc_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias_texels: f32) -> f32 {
     var clip: vec4<f32>;
     if (cascade == 0) {
         clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
@@ -757,7 +804,7 @@ fn wsrc_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
         return 0.0;
     }
     let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    let ref_depth = ndc.z - bias;
+    let ref_depth = ndc.z - bias_texels * shadow_texel_ndc(cascade);
     if (cascade == 0) {
         return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, shadow_uv, ref_depth);
     } else if (cascade == 1) {

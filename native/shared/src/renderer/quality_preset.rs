@@ -184,6 +184,32 @@ impl Renderer {
         }
     }
 
+    /// Redraw the second and third shadow cascades on alternate frames
+    /// (default off). Their moving casters then cast a shadow that is one
+    /// frame old every other frame, which at those distances is hard to see,
+    /// and a scene whose casters all move every frame draws a third fewer
+    /// cascade passes. The nearest cascade is always current.
+    pub fn set_shadow_cascade_stagger(&mut self, on: bool) {
+        self.shadow_map.stagger = on;
+    }
+
+    /// How far from the camera the sun's shadow cascades reach, in metres
+    /// (default 80, range 5..=1000). The three cascades split this range, so
+    /// a scene that is fogged out or simply ends at 30 m gets three times
+    /// the shadow texel density of the default by saying so, and casters
+    /// beyond the range are no longer drawn into the maps.
+    pub fn set_shadow_distance(&mut self, metres: f32) {
+        let distance = if metres.is_finite() {
+            metres.clamp(5.0, 1000.0)
+        } else {
+            80.0
+        };
+        if distance != self.shadow_map.distance {
+            self.shadow_map.distance = distance;
+            self.shadow_map.invalidate();
+        }
+    }
+
     /// Divisor from the render resolution to the ambient-occlusion targets
     /// (default 2 = half resolution, range 1..=4). The Hi-Z pyramid it
     /// samples stays at half resolution. At 3200x1800 on an M1 Max, 3 took

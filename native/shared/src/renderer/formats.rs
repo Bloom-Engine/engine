@@ -445,7 +445,9 @@ pub(super) fn store_ao_divisor(divisor: u32) {
     AO_DIVISOR.store(divisor, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Size of the ambient-occlusion targets for a render extent.
+/// Size of the ambient-occlusion targets for a render extent. Callers pass
+/// the render extent (`Renderer::render_extent`), so the divisor is already
+/// relative to what the scene is rendered at.
 pub(super) fn ao_extent(width: u32, height: u32) -> (u32, u32) {
     let d = ao_divisor();
     ((width / d).max(1), (height / d).max(1))

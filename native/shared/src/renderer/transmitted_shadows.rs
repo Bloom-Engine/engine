@@ -182,7 +182,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         vec2<i32>(blocker_dims) - vec2<i32>(1),
     );
     let blocker = textureLoad(opaque_depth, blocker_pixel, 0);
-    if (blocker + 0.00075 < in.position.z) {
+    // Tolerance of two opaque-map texels of world distance, as NDC depth
+    // (x row of the ortho light VP = 2 / width in metres, z row = 1 / depth
+    // range). A constant in NDC scaled with the scene bounds.
+    let x_row = length(vec3<f32>(u.light_vp[0][0], u.light_vp[1][0], u.light_vp[2][0]));
+    let z_row = length(vec3<f32>(u.light_vp[0][2], u.light_vp[1][2], u.light_vp[2][2]));
+    let tolerance = 2.0 * (2.0 / (x_row * f32(blocker_dims.x))) * z_row;
+    if (blocker + tolerance < in.position.z) {
         discard;
     }
 
@@ -380,12 +386,9 @@ fn load_trans_color(cascade: i32, pixel: vec2<i32>) -> vec3<f32> {
     return textureLoad(trans_color_2, pixel, 0).rgb;
 }
 
-fn transmitted_visibility(
-    cascade: i32,
-    world_pos: vec3<f32>,
-    receiver_bias: f32,
-) -> vec3<f32> {
-    let clip = u.cascade_vps[cascade] * vec4<f32>(world_pos, 1.0);
+fn transmitted_visibility(cascade: i32, world_pos: vec3<f32>) -> vec3<f32> {
+    let vp = u.cascade_vps[cascade];
+    let clip = vp * vec4<f32>(world_pos, 1.0);
     let ndc = clip.xyz / max(abs(clip.w), 0.000001);
     if (
         ndc.x < -1.0 || ndc.x > 1.0
@@ -397,6 +400,12 @@ fn transmitted_visibility(
 
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     let dims = vec2<i32>(textureDimensions(trans_depth_0));
+    // Receiver bias of two transmitted-map texels of world distance, as NDC
+    // depth (x row of the ortho VP = 2 / width in metres, z row = 1 / depth
+    // range). The constant in NDC it replaces scaled with the scene bounds.
+    let x_row = length(vec3<f32>(vp[0][0], vp[1][0], vp[2][0]));
+    let z_row = length(vec3<f32>(vp[0][2], vp[1][2], vp[2][2]));
+    let receiver_bias = 2.0 * (2.0 / (x_row * f32(dims.x))) * z_row;
     let texel = uv * vec2<f32>(dims) - vec2<f32>(0.5);
     let base = vec2<i32>(floor(texel));
     let fraction = fract(texel);
@@ -429,8 +438,7 @@ fn sample_transmitted_shadow(world_pos: vec3<f32>) -> vec3<f32> {
     } else if (distance_to_camera <= u.cascade_splits.y) {
         cascade = 1;
     }
-    let receiver_bias = 0.0015;
-    let value = transmitted_visibility(cascade, world_pos, receiver_bias);
+    let value = transmitted_visibility(cascade, world_pos);
 
     var split_near = 0.0;
     var split_far = u.cascade_splits.x;
@@ -444,11 +452,7 @@ fn sample_transmitted_shadow(world_pos: vec3<f32>) -> vec3<f32> {
     let blend_zone = max((split_far - split_near) * 0.1, 0.0001);
     let distance_to_edge = split_far - distance_to_camera;
     if (distance_to_edge < blend_zone && cascade < 2) {
-        let next_value = transmitted_visibility(
-            cascade + 1,
-            world_pos,
-            receiver_bias,
-        );
+        let next_value = transmitted_visibility(cascade + 1, world_pos);
         return mix(next_value, value, clamp(distance_to_edge / blend_zone, 0.0, 1.0));
     }
     return value;
@@ -718,7 +722,9 @@ impl TransmittedShadowResources {
             label: Some("transmitted_shadow_draw_layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // The fragment stage reads `light_vp` for its hidden-glass
+                // tolerance.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: true,

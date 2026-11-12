@@ -917,15 +917,20 @@ fn refl_sun_shadow(wp: vec3<f32>, n: vec3<f32>) -> f32 {
     if (c == 0) { fit = light.shadow_splits.x; }
     else if (c == 1) { fit = light.shadow_splits.y; }
     let dim = f32(textureDimensions(refl_shadow_0).x);
+    let vp_c = light.shadow_cascades[c];
     let p = wp + n * (2.0 * fit / dim) * 1.5;
-    let clip = light.shadow_cascades[c] * vec4<f32>(p, 1.0);
+    let clip = vp_c * vec4<f32>(p, 1.0);
     let ndc = clip.xyz / clip.w;
     if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
         ndc.z < 0.0 || ndc.z > 1.0) {
         return 1.0;
     }
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
-    let ref_d = ndc.z - 0.001;
+    // One texel of world distance as NDC depth (the z row of the ortho VP
+    // is 1 / its depth range), the main pass's receiver bias. A constant
+    // in NDC scaled with whatever the scene bounds pancake that range to.
+    let ndc_per_m = length(vec3<f32>(vp_c[0][2], vp_c[1][2], vp_c[2][2]));
+    let ref_d = ndc.z - (2.0 * fit / dim) * ndc_per_m;
     if (c == 0) { return textureSampleCompareLevel(refl_shadow_0, refl_shadow_samp, uv, ref_d); }
     if (c == 1) { return textureSampleCompareLevel(refl_shadow_1, refl_shadow_samp, uv, ref_d); }
     return textureSampleCompareLevel(refl_shadow_2, refl_shadow_samp, uv, ref_d);

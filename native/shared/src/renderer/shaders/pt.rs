@@ -195,30 +195,36 @@ fn lin_depth(d: f32) -> f32 {
 // Sun visibility from the shadow cascades (near -> far fallthrough by
 // coverage, same scheme as the WSRC bake). Deterministic and smooth —
 // the whole reason RT mode's direct light doesn't shimmer or dither.
-fn sun_vis_cascade(pos_ws: vec3<f32>) -> f32 {
+fn sun_vis_cascade(pos_ws: vec3<f32>, n: vec3<f32>) -> f32 {
     for (var c = 0; c < 3; c = c + 1) {
-        var clip: vec4<f32>;
-        if (c == 0) { clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0); }
-        else if (c == 1) { clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0); }
-        else { clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0); }
+        var vp: mat4x4<f32>;
+        var dims: vec2<u32>;
+        if (c == 0) { vp = u.shadow_vps[0]; dims = textureDimensions(shadow_atlas_0); }
+        else if (c == 1) { vp = u.shadow_vps[1]; dims = textureDimensions(shadow_atlas_1); }
+        else { vp = u.shadow_vps[2]; dims = textureDimensions(shadow_atlas_2); }
+        let fdims = vec2<f32>(dims);
+        // Receiver bias in shadow texels, the raster main pass's scheme:
+        // 1.5 texels of normal offset and one texel of depth, sized from
+        // the cascade's own ortho projection (x row = 2 / width in metres,
+        // z row = 1 / depth range). The constant in NDC it replaces grew
+        // with the pancaked depth range, to a metre over a 600 m ground.
+        let x_row = length(vec3<f32>(vp[0][0], vp[1][0], vp[2][0]));
+        let z_row = length(vec3<f32>(vp[0][2], vp[1][2], vp[2][2]));
+        let texel_m = 2.0 / (x_row * fdims.x);
+        let clip = vp * vec4<f32>(pos_ws + n * texel_m * 1.5, 1.0);
         if (abs(clip.w) < 1e-6) { continue; }
         let ndc = clip.xyz / clip.w;
         if (ndc.x < -0.99 || ndc.x > 0.99 || ndc.y < -0.99 || ndc.y > 0.99 || ndc.z < 0.0 || ndc.z > 1.0) {
             continue;
         }
         let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-        let ref_depth = ndc.z - 0.002;
+        let ref_depth = ndc.z - texel_m * z_row;
         // Manual load-and-compare with a 2x2 average instead of the
         // comparison sampler: SampleCmp from a COMPUTE stage proved
         // unreliable on this DXC path (constant 0, independent of the
         // matrices — same failure shape as the ray-query saga), and the
         // only other compute-stage user (WSRC bake) was never validated
         // on DX12. textureLoad is proven (the PT depth reads use it).
-        var dims: vec2<u32>;
-        if (c == 0) { dims = textureDimensions(shadow_atlas_0); }
-        else if (c == 1) { dims = textureDimensions(shadow_atlas_1); }
-        else { dims = textureDimensions(shadow_atlas_2); }
-        let fdims = vec2<f32>(dims);
         var vis = 0.0;
         for (var ty = 0; ty <= 1; ty = ty + 1) {
             for (var tx = 0; tx <= 1; tx = tx + 1) {
@@ -630,7 +636,7 @@ fn albedo_at_hit(
 // ray otherwise (reference quality, soft penumbra).
 fn sun_visibility(p: vec3<f32>, n: vec3<f32>, r2: vec2<f32>) -> f32 {
     if (u.ext.z == 1u) {
-        return sun_vis_cascade(p);
+        return sun_vis_cascade(p, n);
     }
     let sd = sun_cone_sample(r2);
     if (dot(n, sd) <= 0.0) {
@@ -1137,7 +1143,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // primary surface. Must match the raster shadow shapes exactly
         // (crisp tree/building shadows). Gray everywhere = the VPs are
         // wrong (transposition or stale).
-        let vis18 = sun_vis_cascade(p0 + n0 * 0.02);
+        let vis18 = sun_vis_cascade(p0, n0);
         textureStore(out_hdr, px_full, vec4<f32>(vec3<f32>(vis18 * 50.0), 1.0));
         return;
     }
