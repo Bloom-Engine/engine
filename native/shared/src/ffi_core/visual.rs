@@ -321,6 +321,14 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_shadow_cascade_stagger
+        #[no_mangle]
+        pub extern "C" fn bloom_set_shadow_cascade_stagger(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_shadow_cascade_stagger", move || {
+                engine().renderer.set_shadow_cascade_stagger(on != 0.0);
+            })
+        }
+
         // bloom_set_shadow_distance
         #[no_mangle]
         pub extern "C" fn bloom_set_shadow_distance(metres: f64) -> f64 {

@@ -123,6 +123,15 @@ impl Renderer {
         }
     }
 
+    /// Redraw the second and third shadow cascades on alternate frames
+    /// (default off). Their moving casters then cast a shadow that is one
+    /// frame old every other frame, which at those distances is hard to see,
+    /// and a scene whose casters all move every frame draws a third fewer
+    /// cascade passes. The nearest cascade is always current.
+    pub fn set_shadow_cascade_stagger(&mut self, on: bool) {
+        self.shadow_map.stagger = on;
+    }
+
     /// How far from the camera the sun's shadow cascades reach, in metres
     /// (default 80, range 5..=1000). The three cascades split this range, so
     /// a scene that is fogged out or simply ends at 30 m gets three times

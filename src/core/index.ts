@@ -38,6 +38,7 @@ declare function bloom_set_film_grain(strength: number): number;
 declare function bloom_set_sharpen_strength(strength: number): number;
 declare function bloom_set_ssgi_probe_spacing(pixels: number): number;
 declare function bloom_set_shadow_distance(metres: number): number;
+declare function bloom_set_shadow_cascade_stagger(on: number): number;
 declare function bloom_set_shadow_filter_4tap(on: number): number;
 declare function bloom_set_shadow_map_size(texels: number): number;
 declare function bloom_set_ssao_downscale(divisor: number): number;
@@ -778,6 +779,17 @@ export function setShadowMapSize(texels: number): boolean {
  */
 export function setShadowFilter4Tap(on: boolean): boolean {
   return bloom_set_shadow_filter_4tap(on ? 1 : 0) !== 0;
+}
+
+/**
+ * Redraw the second and third sun-shadow cascades on alternate frames
+ * (default off). Moving casters in those cascades then cast a shadow that is
+ * one frame old every other frame; the nearest cascade is always current.
+ * Worth it when every caster moves every frame (a ship at sea, a vehicle
+ * interior) and the shadow cache therefore never hits.
+ */
+export function setShadowCascadeStagger(on: boolean): boolean {
+  return bloom_set_shadow_cascade_stagger(on ? 1 : 0) !== 0;
 }
 
 /** SSGI max view-space march distance in meters. Default 20. Tune to scene scale. */
