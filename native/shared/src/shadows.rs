@@ -365,6 +365,11 @@ pub struct ShadowMap {
     /// where the cache hit rate would be ~zero anyway. When true, every
     /// frame renders shadows; the cache is bypassed.
     pub always_fresh: bool,
+    /// Redraw the cascades beyond the first on alternate frames (default
+    /// off). See `Renderer::set_shadow_cascade_stagger`.
+    pub stagger: bool,
+    /// Frame counter for `stagger`.
+    pub stagger_frame: u32,
     /// How far from the camera the cascades reach, in metres (default 80).
     /// See `Renderer::set_shadow_distance`.
     pub distance: f32,
@@ -843,6 +848,8 @@ impl ShadowMap {
             dirty: true,
             always_fresh: false,
             distance: 80.0,
+            stagger: false,
+            stagger_frame: 0,
             filter_4tap: cfg!(target_os = "android"),
             rendered_light_vps: None,
             rendered_light_dir: None,

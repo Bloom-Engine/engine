@@ -71,6 +71,7 @@ const RENDERER_STATUS_FUNCTIONS = new Set([
   'bloom_set_ssgi_probe_spacing',
   'bloom_set_ssao_downscale',
   'bloom_set_shadow_distance',
+  'bloom_set_shadow_cascade_stagger',
   'bloom_set_shadow_filter_4tap',
   'bloom_set_shadow_map_size',
   'bloom_set_present_mode',
