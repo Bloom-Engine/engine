@@ -41,6 +41,11 @@ struct SdfTriCache {
 /// How far the camera can travel from where a soup was gathered before it is
 /// gathered again, in multiples of the field's extent.
 const SDF_GATHER_MARGIN_EXTENTS: f32 = 1.0;
+/// The width a gathered region has to cover for the field to be baked from
+/// it: the field's box and, on every side, the one bin cell beyond it that
+/// the binner and the bake shader also read triangles from.
+const SDF_COVERED_EXTENT: f32 =
+    SCENE_SDF_CLIPMAP_EXTENT + 2.0 * SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_BIN_CELLS as f32;
 fn sdf_tri_cache() -> &'static std::sync::Mutex<Option<SdfTriCache>> {
     static INSTANCE: std::sync::OnceLock<std::sync::Mutex<Option<SdfTriCache>>> =
         std::sync::OnceLock::new();
@@ -167,7 +172,7 @@ impl Renderer {
                             && crate::scene_gi_soup::region_covers(
                                 c.region,
                                 cam,
-                                SCENE_SDF_CLIPMAP_EXTENT,
+                                SDF_COVERED_EXTENT,
                             ) =>
                     {
                         (c.vertices, c.indices, c.tri_count, true, c.region)
@@ -231,7 +236,7 @@ impl Renderer {
             let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
             let voxel = SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_RES as f32;
             let cam = self.current_camera_pos;
-            if !crate::scene_gi_soup::region_covers(prep.region, cam, SCENE_SDF_CLIPMAP_EXTENT) {
+            if !crate::scene_gi_soup::region_covers(prep.region, cam, SDF_COVERED_EXTENT) {
                 // The camera left the gathered region while an amortized
                 // gather ran: gather again round where it is now.
                 prep.region = crate::scene_gi_soup::gather_region(
