@@ -1765,6 +1765,14 @@ pub extern "C" fn bloom_save_file_dialog(_default_name_ptr: *const u8, _title_pt
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 9.0 }
 
+/// Relaunch the running program with the arguments it was started with.
+/// Returns 0 when this platform cannot (the caller should tell the player to
+/// reopen the app); where it can, it does not return. See `restartApp()`.
+#[no_mangle]
+pub extern "C" fn bloom_restart_app() -> f64 {
+    0.0 // an app cannot relaunch itself on this OS
+}
+
 /// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag). See macos lib for format.
 #[no_mangle]
 pub extern "C" fn bloom_get_language() -> f64 {

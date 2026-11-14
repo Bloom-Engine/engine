@@ -1491,6 +1491,22 @@ pub extern "C" fn bloom_get_platform() -> f64 {
     3.0
 }
 
+/// Relaunch the running program with the arguments it was started with.
+/// Returns 0 when this platform cannot (the caller should tell the player to
+/// reopen the app); where it can, it does not return. See `restartApp()`.
+#[no_mangle]
+pub extern "C" fn bloom_restart_app() -> f64 {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return 0.0,
+    };
+    // Windows has no exec(): start the successor, then leave.
+    match std::process::Command::new(exe).args(std::env::args_os().skip(1)).spawn() {
+        Ok(_) => std::process::exit(0),
+        Err(_) => 0.0,
+    }
+}
+
 /// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag), from
 /// `GetUserDefaultLocaleName` (e.g. "en-US" -> "en"). Falls back to "en".
 #[no_mangle]

@@ -178,6 +178,7 @@ declare function bloom_inject_gamepad_axis(axis: number, value: number): void;
 declare function bloom_inject_gamepad_button_down(button: number): void;
 declare function bloom_inject_gamepad_button_up(button: number): void;
 declare function bloom_get_platform(): number;
+declare function bloom_restart_app(): number;
 declare function bloom_get_language(): number;
 declare function bloom_is_any_input_pressed(): number;
 declare function bloom_get_crown_rotation(): number;
@@ -1506,6 +1507,20 @@ export function injectGamepadButtonUp(button: number): void { bloom_inject_gamep
 export const Platform = { UNKNOWN: 0, MACOS: 1, IOS: 2, WINDOWS: 3, LINUX: 4, ANDROID: 5, TVOS: 6, WEB: 7, WATCHOS: 8, VISIONOS: 9 } as const;
 
 export function getPlatform(): number { return bloom_get_platform(); }
+
+/// Relaunch the program with the arguments it was started with: the way to
+/// apply a choice that is only read at startup (a different level, a renderer
+/// backend) without asking the player to quit and reopen.
+///
+/// macOS and Linux replace the process in place, Windows starts a successor
+/// and exits, the web reloads the page. On those platforms a successful call
+/// does not return (on the web it returns true and the page reloads after the
+/// current frame). iOS, tvOS, visionOS, watchOS and Android cannot relaunch an
+/// app from inside it: there this returns false and nothing happens, so the
+/// caller must fall back to telling the player.
+///
+/// Save anything that must survive BEFORE calling: no shutdown code runs.
+export function restartApp(): boolean { return bloom_restart_app() !== 0; }
 
 /// User's preferred OS language as a packed 2-letter code (`c0 * 256 + c1`,
 /// ASCII of the lowercased ISO-639 primary subtag, e.g. "en" = 101*256+110).
