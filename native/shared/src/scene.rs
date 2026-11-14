@@ -191,6 +191,10 @@ pub struct SceneNode {
     /// reflections, GI, LODs and ray tracing remain byte-for-byte unchanged.
     pub(crate) gpu_geometry: Option<GeometrySlice>,
     gpu_geometry_key: Option<SceneGeometryKey>,
+    /// The arena had no room for this geometry (device buffer limit). The
+    /// node stays on the compatibility path and is not offered again until
+    /// its geometry changes, so a full arena costs no hashing per frame.
+    gpu_geometry_refused: bool,
     /// Shared compatibility resources (VB/IB, BLAS, local SDF). Separate from
     /// the GPU-driven arena key because fallback passes need these on every
     /// backend, including adapters where GPU-driven submission is disabled.
@@ -343,6 +347,7 @@ impl SceneNode {
             gpu_ib: None,
             gpu_geometry: None,
             gpu_geometry_key: None,
+            gpu_geometry_refused: false,
             gpu_resource_key: None,
             gpu_material_id: MaterialId::FALLBACK,
             gpu_material_key: None,
@@ -1946,9 +1951,12 @@ impl SceneGraph {
                 }
                 node.gpu_geometry = None;
             }
+            if geometry_changed {
+                node.gpu_geometry_refused = false;
+            }
             if gpu_driven.enabled()
                 && gpu_driven_scene_active
-                && (geometry_changed || node.gpu_geometry.is_none())
+                && (geometry_changed || (node.gpu_geometry.is_none() && !node.gpu_geometry_refused))
                 && !node.vertices().is_empty()
                 && !node.indices().is_empty()
             {
@@ -1957,9 +1965,10 @@ impl SceneGraph {
                     if let Some(old_key) = node.gpu_geometry_key.take() {
                         release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
                     }
+                    node.gpu_geometry = None;
                     let slice = if let Some(cached) = shared_gpu_geometry.get_mut(&key) {
                         cached.references = cached.references.saturating_add(1);
-                        cached.slice
+                        Some(cached.slice)
                     } else {
                         let slice = gpu_driven.upload_static(
                             device,
@@ -1967,17 +1976,25 @@ impl SceneGraph {
                             node.vertices(),
                             node.indices(),
                         );
-                        shared_gpu_geometry.insert(
-                            key,
-                            SharedSceneGeometry {
-                                slice,
-                                references: 1,
-                            },
-                        );
+                        if let Some(slice) = slice {
+                            shared_gpu_geometry.insert(
+                                key,
+                                SharedSceneGeometry {
+                                    slice,
+                                    references: 1,
+                                },
+                            );
+                        }
                         slice
                     };
-                    node.gpu_geometry = Some(slice);
-                    node.gpu_geometry_key = Some(key);
+                    match slice {
+                        Some(slice) => {
+                            node.gpu_geometry = Some(slice);
+                            node.gpu_geometry_key = Some(key);
+                        }
+                        // Arena full: the node keeps its own buffers.
+                        None => node.gpu_geometry_refused = true,
+                    }
                 }
             }
             if node.uniform_slot.is_none() {
