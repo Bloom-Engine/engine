@@ -61,8 +61,15 @@ pub struct AnimRig {
 impl Default for AnimRig {
     fn default() -> Self {
         Self {
-            blends: [BlendSlot { clip: -1, weight: 0.0 }; BLEND_SLOTS],
-            rots: [RotSlot { joint: -1, axis: [0.0, 1.0, 0.0], angle: 0.0 }; ROT_SLOTS],
+            blends: [BlendSlot {
+                clip: -1,
+                weight: 0.0,
+            }; BLEND_SLOTS],
+            rots: [RotSlot {
+                joint: -1,
+                axis: [0.0, 1.0, 0.0],
+                angle: 0.0,
+            }; ROT_SLOTS],
             iks: [IkSlot {
                 end: -1,
                 target: [0.0; 3],
@@ -194,10 +201,18 @@ fn fk(topo: &Topology, t: &[V3], r: &[Q], s: &[V3], pos: &mut [V3], rot: &mut [Q
             rot[j] = qnorm(r[j]);
             scl[j] = s[j];
         } else {
-            let lt = [t[j][0] * scl[p][0], t[j][1] * scl[p][1], t[j][2] * scl[p][2]];
+            let lt = [
+                t[j][0] * scl[p][0],
+                t[j][1] * scl[p][1],
+                t[j][2] * scl[p][2],
+            ];
             pos[j] = add(pos[p], qrot(rot[p], lt));
             rot[j] = qnorm(qmul(rot[p], r[j]));
-            scl[j] = [scl[p][0] * s[j][0], scl[p][1] * s[j][1], scl[p][2] * s[j][2]];
+            scl[j] = [
+                scl[p][0] * s[j][0],
+                scl[p][1] * s[j][1],
+                scl[p][2] * s[j][2],
+            ];
         }
     }
 }
@@ -274,7 +289,11 @@ pub fn apply_post(rig: &AnimRig, topo: &Topology, t: &[V3], r: &mut [Q], s: &[V3
         }
         if axis0 == [0.0; 3] {
             let d = norm(sub(c, a));
-            let helper = if d[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+            let helper = if d[1].abs() < 0.9 {
+                [0.0, 1.0, 0.0]
+            } else {
+                [1.0, 0.0, 0.0]
+            };
             axis0 = norm(cross(d, helper));
         }
         let axis1 = norm(cross(sub(c, a), sub(target, a)));
@@ -285,7 +304,13 @@ pub fn apply_post(rig: &AnimRig, topo: &Topology, t: &[V3], r: &mut [Q], s: &[V3
         let bend_mid = axis_angle(axis0, ba_bc_1 - ba_bc_0);
         rotate_model_space(topo, r, &rot, a_j, bend_root);
         fk(topo, t, r, s, &mut pos, &mut rot, &mut scl);
-        rotate_model_space(topo, r, &rot, b_j, qmul(bend_root, qmul(bend_mid, qconj(bend_root))));
+        rotate_model_space(
+            topo,
+            r,
+            &rot,
+            b_j,
+            qmul(bend_root, qmul(bend_mid, qconj(bend_root))),
+        );
         fk(topo, t, r, s, &mut pos, &mut rot, &mut scl);
         if axis1 != [0.0; 3] {
             rotate_model_space(topo, r, &rot, a_j, axis_angle(axis1, ac_at_0));
@@ -380,13 +405,23 @@ impl crate::models::ModelManager {
     /// Mixer clocks, in seconds: 0 base clip time, 1 layer clip time,
     /// 2 base clip time as a 0..1 phase.
     pub fn anim_time(&self, handle: f64, which: u32) -> f32 {
-        let Some(ma) = self.animations.get(handle) else { return 0.0 };
+        let Some(ma) = self.animations.get(handle) else {
+            return 0.0;
+        };
         match which {
             0 => ma.mixer.cur_time,
             1 => ma.mixer.layer_time,
             2 => {
-                let d = ma.animations.get(ma.mixer.cur_clip).map(|a| a.duration).unwrap_or(0.0);
-                if d > 0.0 { ma.mixer.cur_time / d } else { 0.0 }
+                let d = ma
+                    .animations
+                    .get(ma.mixer.cur_clip)
+                    .map(|a| a.duration)
+                    .unwrap_or(0.0);
+                if d > 0.0 {
+                    ma.mixer.cur_time / d
+                } else {
+                    0.0
+                }
             }
             _ => 0.0,
         }
@@ -405,7 +440,12 @@ mod tests {
         let ch: Vec<Vec<usize>> = vec![vec![1], vec![2], vec![3], vec![]];
         let refs: Vec<&[usize]> = ch.iter().map(|c| c.as_slice()).collect();
         let topo = topology(&refs, &[0]);
-        let t = vec![[0.0, 1.4, 0.0], [0.2, 0.0, 0.0], [0.3, 0.0, 0.0], [0.25, 0.0, 0.0]];
+        let t = vec![
+            [0.0, 1.4, 0.0],
+            [0.2, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
+            [0.25, 0.0, 0.0],
+        ];
         let r = vec![ID, ID, axis_angle([0.0, 1.0, 0.0], 0.3), ID];
         let s = vec![[1.0; 3]; 4];
         (topo, t, r, s)
@@ -429,16 +469,30 @@ mod tests {
 
     #[test]
     fn ik_reaches_targets_in_range() {
-        for target in [[0.5, 1.5, 0.2], [0.3, 1.0, -0.25], [0.45, 1.75, 0.1], [0.2, 1.4, 0.4]] {
+        for target in [
+            [0.5, 1.5, 0.2],
+            [0.3, 1.0, -0.25],
+            [0.45, 1.75, 0.1],
+            [0.2, 1.4, 0.4],
+        ] {
             let (topo, t, mut r, s) = arm();
             let mut rig = AnimRig::default();
             rig.iks[0] = IkSlot {
-                end: 3, target, weight: 1.0, keep_end_rotation: false,
-                pole: [0.0; 3], pole_on: false,
+                end: 3,
+                target,
+                weight: 1.0,
+                keep_end_rotation: false,
+                pole: [0.0; 3],
+                pole_on: false,
             };
             apply_post(&rig, &topo, &t, &mut r, &s);
             let (p, _) = end_of(&topo, &t, &r, &s, 3);
-            assert!(len(sub(p, target)) < 2e-3, "target {:?} got {:?}", target, p);
+            assert!(
+                len(sub(p, target)) < 2e-3,
+                "target {:?} got {:?}",
+                target,
+                p
+            );
             // bone lengths are untouched: the solve only rotates
             let (e, _) = end_of(&topo, &t, &r, &s, 2);
             let (sh, _) = end_of(&topo, &t, &r, &s, 1);
@@ -452,8 +506,12 @@ mod tests {
         let target = [3.0, 1.4, 0.0];
         let mut rig = AnimRig::default();
         rig.iks[0] = IkSlot {
-            end: 3, target, weight: 1.0, keep_end_rotation: false,
-            pole: [0.0; 3], pole_on: false,
+            end: 3,
+            target,
+            weight: 1.0,
+            keep_end_rotation: false,
+            pole: [0.0; 3],
+            pole_on: false,
         };
         apply_post(&rig, &topo, &t, &mut r, &s);
         let (p, _) = end_of(&topo, &t, &r, &s, 3);
@@ -469,14 +527,23 @@ mod tests {
             let (topo, t, mut r, s) = arm();
             let mut rig = AnimRig::default();
             rig.iks[0] = IkSlot {
-                end: 3, target, weight: 1.0, keep_end_rotation: false,
-                pole: [0.3, 1.4 + pole_y, 0.0], pole_on: true,
+                end: 3,
+                target,
+                weight: 1.0,
+                keep_end_rotation: false,
+                pole: [0.3, 1.4 + pole_y, 0.0],
+                pole_on: true,
             };
             apply_post(&rig, &topo, &t, &mut r, &s);
             let (p, _) = end_of(&topo, &t, &r, &s, 3);
             assert!(len(sub(p, target)) < 2e-3);
             let (e, _) = end_of(&topo, &t, &r, &s, 2);
-            assert!((e[1] - 1.4) * pole_y > 0.0, "elbow {:?} for pole_y {}", e, pole_y);
+            assert!(
+                (e[1] - 1.4) * pole_y > 0.0,
+                "elbow {:?} for pole_y {}",
+                e,
+                pole_y
+            );
         }
     }
 
@@ -486,13 +553,20 @@ mod tests {
         let (_, before) = end_of(&topo, &t, &r, &s, 3);
         let mut rig = AnimRig::default();
         rig.iks[0] = IkSlot {
-            end: 3, target: [0.3, 1.1, 0.3], weight: 1.0, keep_end_rotation: true,
-            pole: [0.0; 3], pole_on: false,
+            end: 3,
+            target: [0.3, 1.1, 0.3],
+            weight: 1.0,
+            keep_end_rotation: true,
+            pole: [0.0; 3],
+            pole_on: false,
         };
         apply_post(&rig, &topo, &t, &mut r, &s);
         let (_, after) = end_of(&topo, &t, &r, &s, 3);
-        let d = (before[0] * after[0] + before[1] * after[1] + before[2] * after[2]
-            + before[3] * after[3]).abs();
+        let d = (before[0] * after[0]
+            + before[1] * after[1]
+            + before[2] * after[2]
+            + before[3] * after[3])
+            .abs();
         assert!(d > 0.9999);
     }
 
@@ -501,13 +575,21 @@ mod tests {
         let (topo, t, mut r, s) = arm();
         let mut rig = AnimRig::default();
         // quarter turn about model +Y at the shoulder joint (index 1)
-        rig.rots[0] = RotSlot { joint: 1, axis: [0.0, 1.0, 0.0], angle: std::f32::consts::FRAC_PI_2 };
+        rig.rots[0] = RotSlot {
+            joint: 1,
+            axis: [0.0, 1.0, 0.0],
+            angle: std::f32::consts::FRAC_PI_2,
+        };
         let (before, _) = end_of(&topo, &t, &r, &s, 2);
         apply_post(&rig, &topo, &t, &mut r, &s);
         let (after, _) = end_of(&topo, &t, &r, &s, 2);
         // elbow was 0.3 along +X from the shoulder; +90 deg about Y sends +X to -Z
         assert!((before[0] - 0.5).abs() < 1e-5);
-        assert!((after[0] - 0.2).abs() < 1e-4 && (after[2] + 0.3).abs() < 1e-4, "{:?}", after);
+        assert!(
+            (after[0] - 0.2).abs() < 1e-4 && (after[2] + 0.3).abs() < 1e-4,
+            "{:?}",
+            after
+        );
     }
 
     #[test]

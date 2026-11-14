@@ -1434,7 +1434,11 @@ impl ModelManager {
             // weight, each sampled at the base clip's PHASE so strides stay in
             // step whatever the clips' lengths.
             {
-                let phase = if cur_dur > 0.0 { ma.mixer.cur_time / cur_dur } else { 0.0 };
+                let phase = if cur_dur > 0.0 {
+                    ma.mixer.cur_time / cur_dur
+                } else {
+                    0.0
+                };
                 let mut total = 1.0f32;
                 for b in ma.mixer.rig.blends.iter() {
                     total -= b.weight.max(0.0) * ((b.clip >= 0) as i32 as f32);
