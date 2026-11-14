@@ -301,16 +301,11 @@ macro_rules! __bloom_ffi_scene {
                 if mi >= model_data.meshes.len() {
                     return 0.0;
                 }
-                let mesh = &model_data.meshes[mi];
-                let vertices = mesh.vertices.clone();
-                let secondary_tex_coords = mesh.secondary_tex_coords.clone();
-                let indices = mesh.indices.clone();
-                eng.scene.set_lod_geometry_with_secondary_uv(
+                let mesh = std::sync::Arc::clone(&model_data.meshes[mi]);
+                eng.scene.set_lod_model_mesh(
                     node_handle,
                     lod_index as usize,
-                    vertices,
-                    secondary_tex_coords,
-                    indices,
+                    mesh,
                     max_coverage as f32,
                 );
                 1.0
