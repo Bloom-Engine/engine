@@ -280,6 +280,14 @@ pub extern "C" fn perry_scene_will_connect(_scene: *const c_void) {}
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 8.0 }
 
+/// Relaunch the running program with the arguments it was started with.
+/// Returns 0 when this platform cannot (the caller should tell the player to
+/// reopen the app); where it can, it does not return. See `restartApp()`.
+#[no_mangle]
+pub extern "C" fn bloom_restart_app() -> f64 {
+    0.0 // an app cannot relaunch itself on this OS
+}
+
 /// Preferred OS language packed as `c0*256+c1`. TODO: real per-OS detection; returns "en" for now.
 #[no_mangle]
 pub extern "C" fn bloom_get_language() -> f64 {

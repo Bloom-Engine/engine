@@ -908,6 +908,14 @@ pub extern "C" fn bloom_get_platform() -> f64 {
     5.0
 }
 
+/// Relaunch the running program with the arguments it was started with.
+/// Returns 0 when this platform cannot (the caller should tell the player to
+/// reopen the app); where it can, it does not return. See `restartApp()`.
+#[no_mangle]
+pub extern "C" fn bloom_restart_app() -> f64 {
+    0.0 // an app cannot relaunch itself on this OS
+}
+
 /// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag), read
 /// from the device locale system property via the NDK (no JNI). Tries the
 /// user-set locale first, then the factory defaults. Falls back to "en".

@@ -1946,6 +1946,19 @@ pub fn bloom_get_platform() -> f64 {
     7.0 // Web platform ID
 }
 
+/// Relaunch the running program with the arguments it was started with.
+/// Returns 0 when this platform cannot (the caller should tell the player to
+/// reopen the app); where it can, it does not return. See `restartApp()`.
+#[wasm_bindgen]
+pub fn bloom_restart_app() -> f64 {
+    // A page reload is the web's relaunch. The reload is queued; this frame
+    // still finishes, so report success and let the caller stop drawing.
+    match web_sys::window() {
+        Some(w) => if w.location().reload().is_ok() { 1.0 } else { 0.0 },
+        None => 0.0,
+    }
+}
+
 #[wasm_bindgen]
 pub fn bloom_get_language() -> f64 {
     // navigator.language (e.g. "en-US" / "zh-Hans") -> packed 2-letter code.
