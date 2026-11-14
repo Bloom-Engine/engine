@@ -32,6 +32,33 @@ fn push_position(vbuf: &mut Vec<f32>, t: &[[f32; 4]; 4], p: [f32; 3]) {
     ]);
 }
 
+/// True when a node's world box (`bmin`..`bmax`) lies wholly outside the
+/// region `lo`..`hi`. An invalid box (`bmin[0] > bmax[0]`: the node has not
+/// been through `prepare()` yet) is never outside, so the node is kept.
+pub(crate) fn bounds_outside(bmin: [f32; 3], bmax: [f32; 3], lo: [f32; 3], hi: [f32; 3]) -> bool {
+    if bmin[0] > bmax[0] {
+        return false;
+    }
+    (0..3).any(|a| bmax[a] < lo[a] || bmin[a] > hi[a])
+}
+
+/// The region a gather for a field centred on `centre` should cover: the
+/// field's own box (`extent` wide) grown by `margin` on every side, so the
+/// camera can travel `margin` before the soup has to be gathered again.
+pub(crate) fn gather_region(centre: [f32; 3], extent: f32, margin: f32) -> ([f32; 3], [f32; 3]) {
+    let h = extent * 0.5 + margin;
+    (
+        [centre[0] - h, centre[1] - h, centre[2] - h],
+        [centre[0] + h, centre[1] + h, centre[2] + h],
+    )
+}
+
+/// True when the field box (`extent` wide, centred on `centre`) fits inside `region`.
+pub(crate) fn region_covers(region: ([f32; 3], [f32; 3]), centre: [f32; 3], extent: f32) -> bool {
+    let h = extent * 0.5;
+    (0..3).all(|a| centre[a] - h >= region.0[a] && centre[a] + h <= region.1[a])
+}
+
 /// Append one mesh in world space; returns the triangles appended.
 pub(crate) fn append_node_triangles(
     vertices: &[Vertex3D],
@@ -140,6 +167,44 @@ mod tests {
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ];
+
+    #[test]
+    fn a_node_is_left_out_only_when_wholly_outside_the_region() {
+        let (lo, hi) = gather_region([100.0, 0.0, 100.0], 40.0, 40.0);
+        assert_eq!(lo, [40.0, -60.0, 40.0]);
+        assert_eq!(hi, [160.0, 60.0, 160.0]);
+        // far away
+        assert!(bounds_outside(
+            [900.0, 0.0, 0.0],
+            [910.0, 5.0, 10.0],
+            lo,
+            hi
+        ));
+        // reaching into the region
+        assert!(!bounds_outside(
+            [20.0, 0.0, 90.0],
+            [45.0, 5.0, 110.0],
+            lo,
+            hi
+        ));
+        // a great ground plane that contains it
+        assert!(!bounds_outside(
+            [-5000.0, -1.0, -5000.0],
+            [5000.0, 0.0, 5000.0],
+            lo,
+            hi
+        ));
+        // not yet through prepare(): kept
+        assert!(!bounds_outside([f32::MAX; 3], [f32::MIN; 3], lo, hi));
+    }
+
+    #[test]
+    fn a_region_covers_the_field_until_the_camera_leaves_the_margin() {
+        let region = gather_region([0.0, 0.0, 0.0], 40.0, 40.0);
+        assert!(region_covers(region, [0.0, 0.0, 0.0], 40.0));
+        assert!(region_covers(region, [39.0, 0.0, -39.0], 40.0));
+        assert!(!region_covers(region, [41.0, 0.0, 0.0], 40.0));
+    }
 
     /// A flat `cells`×`cells` grid of side `size`, two triangles per cell.
     fn grid(cells: u32, size: f32) -> (Vec<Vertex3D>, Vec<u32>) {
