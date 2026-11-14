@@ -1430,6 +1430,32 @@ impl ModelManager {
                 blend_pose(&mut pose, &prev, 1.0 - w, None);
             }
 
+            // --- EN-064 blend partners: extra clips mixed into the base by
+            // weight, each sampled at the base clip's PHASE so strides stay in
+            // step whatever the clips' lengths.
+            {
+                let phase = if cur_dur > 0.0 {
+                    ma.mixer.cur_time / cur_dur
+                } else {
+                    0.0
+                };
+                let mut total = 1.0f32;
+                for b in ma.mixer.rig.blends.iter() {
+                    total -= b.weight.max(0.0) * ((b.clip >= 0) as i32 as f32);
+                }
+                let mut total = total.max(0.0);
+                for b in ma.mixer.rig.blends.iter() {
+                    if b.clip < 0 || b.weight <= 0.0 {
+                        continue;
+                    }
+                    if let Some(clip) = ma.animations.get(b.clip as usize) {
+                        let p = sample_local_pose(skel, clip, phase * clip.duration, strip_root);
+                        total += b.weight;
+                        blend_pose(&mut pose, &p, b.weight / total, None);
+                    }
+                }
+            }
+
             // --- root motion: delta of the root joint's authored translation
             if ma.mixer.root_motion && !skel.joints.is_empty() {
                 let cd = cur_dur;
@@ -1471,6 +1497,14 @@ impl ModelManager {
                 let w = ma.mixer.layer_weight;
                 let mask = ma.mask_weights.clone();
                 blend_pose(&mut pose, &lpose, w, Some(&mask));
+            }
+
+            // --- EN-064 joint rotations + two-bone IK, over everything else
+            if ma.mixer.rig.has_post() {
+                let children: Vec<&[usize]> =
+                    skel.joints.iter().map(|j| j.children.as_slice()).collect();
+                let topo = crate::anim_rig::topology(&children, &skel.root_joints);
+                crate::anim_rig::apply_post(&ma.mixer.rig, &topo, &pose.0, &mut pose.1, &pose.2);
             }
 
             ma.apply_pose(&pose);

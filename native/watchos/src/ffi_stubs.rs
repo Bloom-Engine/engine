@@ -251,6 +251,17 @@
 #[no_mangle] pub extern "C" fn bloom_anim_root_delta(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_anim_set_blend(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_joint_rotation(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_ik(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_ik_pole(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_time(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_model_find_joint(_p0: f64, _p1: i64) -> f64 {
     0.0
 }
@@ -530,6 +541,9 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_get_model_material_count(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_restart_app() -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_set_sound_bus(_p0: f64, _p1: f64) {

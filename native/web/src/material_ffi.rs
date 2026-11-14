@@ -662,6 +662,70 @@ pub fn bloom_anim_clip_duration(handle: f64, clip: f64) -> f64 {
     engine().models.anim_clip_duration(handle, clip as usize) as f64
 }
 
+// ---- EN-064: blend partners, joint rotations, two-bone IK, mixer clocks ----
+
+#[wasm_bindgen]
+pub fn bloom_anim_set_blend(handle: f64, slot: f64, clip: f64, weight: f64) {
+    engine()
+        .models
+        .anim_set_blend(handle, slot as usize, clip as i32, weight as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_set_joint_rotation(
+    handle: f64,
+    slot: f64,
+    joint: f64,
+    ax: f64,
+    ay: f64,
+    az: f64,
+    angle: f64,
+) {
+    engine().models.anim_set_joint_rotation(
+        handle,
+        slot as usize,
+        joint as i32,
+        [ax as f32, ay as f32, az as f32],
+        angle as f32,
+    );
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_set_ik(
+    handle: f64,
+    slot: f64,
+    end_joint: f64,
+    tx: f64,
+    ty: f64,
+    tz: f64,
+    weight: f64,
+    keep_rot: f64,
+) {
+    engine().models.anim_set_ik(
+        handle,
+        slot as usize,
+        end_joint as i32,
+        [tx as f32, ty as f32, tz as f32],
+        weight as f32,
+        keep_rot != 0.0,
+    );
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_set_ik_pole(handle: f64, slot: f64, px: f64, py: f64, pz: f64, on: f64) {
+    engine().models.anim_set_ik_pole(
+        handle,
+        slot as usize,
+        [px as f32, py as f32, pz as f32],
+        on != 0.0,
+    );
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_time(handle: f64, which: f64) -> f64 {
+    engine().models.anim_time(handle, which as u32) as f64
+}
+
 #[wasm_bindgen]
 pub fn bloom_anim_root_delta(handle: f64, axis: f64) -> f64 {
     let d = engine().models.anim_root_delta(handle);

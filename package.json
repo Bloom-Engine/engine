@@ -1466,6 +1466,63 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_anim_set_blend",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_set_joint_rotation",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_set_ik",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_set_ik_pole",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_time",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_model_find_joint",
           "params": [
             "f64",

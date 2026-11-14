@@ -890,6 +890,11 @@ declare function bloom_anim_update(handle: number, dt: number, scale: number, px
 declare function bloom_anim_finished(handle: number): number;
 declare function bloom_anim_clip_duration(handle: number, clip: number): number;
 declare function bloom_anim_root_delta(handle: number, axis: number): number;
+declare function bloom_anim_set_blend(handle: number, slot: number, clip: number, weight: number): void;
+declare function bloom_anim_set_joint_rotation(handle: number, slot: number, joint: number, ax: number, ay: number, az: number, angle: number): void;
+declare function bloom_anim_set_ik(handle: number, slot: number, endJoint: number, tx: number, ty: number, tz: number, weight: number, keepRot: number): void;
+declare function bloom_anim_set_ik_pole(handle: number, slot: number, px: number, py: number, pz: number, on: number): void;
+declare function bloom_anim_time(handle: number, which: number): number;
 declare function bloom_model_find_joint(handle: number, name: number): number;
 declare function bloom_model_joint_world(handle: number, joint: number, comp: number): number;
 
@@ -934,6 +939,51 @@ export function animClipDuration(handle: number, clip: number): number {
 export function animRootDelta(handle: number, axis: number): number {
   return bloom_anim_root_delta(handle, axis);
 }
+
+// ---- EN-064: the procedural rig over the mixer -----------------------------------
+// Everything below is per-instance state: set it when it changes (or every
+// frame, it is five numbers) and `animUpdate` applies it after the masked
+// layer. All positions and axes are MODEL space, the space `jointWorld`
+// reports: undo the scale / position / yaw you hand to `animUpdate` first.
+
+/// Mix a second, third or fourth clip into the base clip. `slot` is 0..2;
+/// `weight` is that clip's share (the base keeps 1 minus the sum). Partners
+/// are sampled at the base clip's PHASE, so a strafe and a forward walk of
+/// different lengths stay in step. `clip = -1` or `weight = 0` frees the slot.
+export function animSetBlend(handle: number, slot: number, clip: number, weight: number): void {
+  bloom_anim_set_blend(handle, slot, clip, weight);
+}
+
+/// Turn one joint, and with it everything below it, by `angle` radians about
+/// a model-space axis, after the clips are sampled. `slot` is 0..7 and slots
+/// apply in order, so list a chain root first (spine, spine1, spine2 for an
+/// aim offset). `joint = -1` frees the slot.
+export function animSetJointRotation(handle: number, slot: number, joint: number, ax: number, ay: number, az: number, angle: number): void {
+  bloom_anim_set_joint_rotation(handle, slot, joint, ax, ay, az, angle);
+}
+
+/// Two-bone IK. `endJoint` is the hand or foot; its parent and grandparent
+/// bend so it lands on the model-space target. `slot` is 0..1. `weight`
+/// blends from the animated position to the target. With `keepEndRotation`
+/// the end joint keeps the model-space rotation the clip gave it instead of
+/// turning with the arm. `endJoint = -1` or `weight = 0` switches it off.
+export function animSetIK(handle: number, slot: number, endJoint: number, tx: number, ty: number, tz: number, weight: number, keepEndRotation: boolean = false): void {
+  bloom_anim_set_ik(handle, slot, endJoint, tx, ty, tz, weight, keepEndRotation ? 1 : 0);
+}
+
+/// Which side the middle joint (elbow, knee) of an IK chain bends toward: a
+/// model-space point it should lean at. Without one the chain keeps the bend
+/// plane the clip had.
+export function animSetIKPole(handle: number, slot: number, px: number, py: number, pz: number, on: boolean = true): void {
+  bloom_anim_set_ik_pole(handle, slot, px, py, pz, on ? 1 : 0);
+}
+
+/// Seconds into the base clip (the mixer owns the clock; this reads it).
+export function animTime(handle: number): number { return bloom_anim_time(handle, 0); }
+/// Seconds into the masked layer's clip.
+export function animLayerTime(handle: number): number { return bloom_anim_time(handle, 1); }
+/// Base clip position as a 0..1 phase: footsteps, the end of a roll.
+export function animPhase(handle: number): number { return bloom_anim_time(handle, 2); }
 
 // ---- EN-033: bone sockets ---------------------------------------------------
 
