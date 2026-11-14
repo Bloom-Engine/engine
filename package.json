@@ -2297,6 +2297,11 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_restart_app",
+          "params": [],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_get_language",
           "params": [],
           "returns": "f64"
