@@ -754,7 +754,8 @@ export function setSsgiProbeSpacing(pixels: number): boolean {
 
 /**
  * How far from the camera the sun's shadow cascades reach, in metres. Engine
- * default 80, range 5 to 1000. The three cascades split this range: a scene
+ * default 80, range 5 to 20000 (kilometres are for views from the air: one
+ * cascade texel is then metres wide). The three cascades split this range: a scene
  * that ends or fogs out at 30 m gets much sharper shadows by saying so, and
  * casters beyond the range are no longer drawn into the maps.
  */

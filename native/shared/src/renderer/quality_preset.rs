@@ -133,13 +133,13 @@ impl Renderer {
     }
 
     /// How far from the camera the sun's shadow cascades reach, in metres
-    /// (default 80, range 5..=1000). The three cascades split this range, so
+    /// (default 80, range 5..=20000). The three cascades split this range, so
     /// a scene that is fogged out or simply ends at 30 m gets three times
     /// the shadow texel density of the default by saying so, and casters
     /// beyond the range are no longer drawn into the maps.
     pub fn set_shadow_distance(&mut self, metres: f32) {
         let distance = if metres.is_finite() {
-            metres.clamp(5.0, 1000.0)
+            metres.clamp(5.0, 20000.0)
         } else {
             80.0
         };
