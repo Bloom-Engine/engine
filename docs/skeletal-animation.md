@@ -178,6 +178,16 @@ const dx = animRootDelta(anim, 0);                    // root-motion delta, axis
 
 See `src/models/index.ts` for the full surface (`animPlay`, `animSetLayer`, `animSetRootMotion`, `animUpdate`, `animFinished`, `animClipDuration`, `animRootDelta`).
 
+On top of the mixer sits a small procedural rig (EN-064), set per instance and applied by `animUpdate` after the masked layer. Positions and axes are model space, like `jointWorld`:
+
+```typescript
+animSetBlend(anim, 0, CLIP_STRAFE_R, 0.4);                 // 40% strafe mixed into the base clip, phase-locked
+animSetJointRotation(anim, 0, spine, 0, 0, 1, pitch / 3);  // aim offset, one slot per spine joint
+animSetIK(anim, 0, leftHand, gx, gy, gz, 1.0, true);       // off hand onto the foregrip
+animSetIKPole(anim, 0, ex, ey, ez);                        // elbow leans toward this point
+const phase = animPhase(anim);                             // 0..1 through the base clip
+```
+
 ### Updating — raw-time API (legacy, still supported)
 
 ```typescript
