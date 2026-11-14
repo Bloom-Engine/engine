@@ -14073,20 +14073,20 @@ impl Renderer {
                     }
                 } else {
                     let geometry_identity = (*mesh as *const crate::models::MeshData) as usize;
-                    let slice = if let Some(slice) = shared_static_geometry.get(&geometry_identity)
-                    {
-                        *slice
+                    if let Some(slice) = shared_static_geometry.get(&geometry_identity) {
+                        gpu_driven::MeshGeometry::Shared(*slice)
                     } else {
-                        let slice = self.gpu_driven.upload_static(
+                        let geometry = self.gpu_driven.upload_static_or_dedicated(
                             &self.device,
                             &self.queue,
                             &mesh.vertices,
                             &mesh.indices,
                         );
-                        shared_static_geometry.insert(geometry_identity, slice);
-                        slice
-                    };
-                    gpu_driven::MeshGeometry::Shared(slice)
+                        if let gpu_driven::MeshGeometry::Shared(slice) = &geometry {
+                            shared_static_geometry.insert(geometry_identity, *slice);
+                        }
+                        geometry
+                    }
                 };
                 let base_color_idx = mesh.texture_idx.unwrap_or(0);
                 let normal_idx = mesh.normal_texture_idx.unwrap_or(0);

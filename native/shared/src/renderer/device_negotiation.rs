@@ -283,6 +283,9 @@ fn build_device_request_plans_with_override(
     }
 }
 
+/// Largest geometry arena buffer the engine asks a device for.
+const GEOMETRY_ARENA_BUFFER_CEILING: u64 = 1 << 30;
+
 fn core_required_limits(
     adapter_limits: &wgpu::Limits,
     profile: DeviceRequestProfile,
@@ -302,6 +305,19 @@ fn core_required_limits(
         DeviceRequestProfile::FoldedMobile => FOLDED_MOBILE_STORAGE_BUFFERS,
     };
     limits.max_uniform_buffer_binding_size = CORE_UNIFORM_BUFFER_BINDING_SIZE;
+    // The static geometry arena is one vertex and one index buffer for the
+    // whole scene. The 256 MB downlevel default holds about 2.8 million
+    // vertices; take what the adapter offers, up to 1 GiB.
+    limits.max_buffer_size = limits.max_buffer_size.max(
+        adapter_limits
+            .max_buffer_size
+            .min(GEOMETRY_ARENA_BUFFER_CEILING),
+    );
+    limits.max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size.max(
+        adapter_limits
+            .max_storage_buffer_binding_size
+            .min(GEOMETRY_ARENA_BUFFER_CEILING as _),
+    );
     limits
 }
 
