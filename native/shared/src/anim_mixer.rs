@@ -44,6 +44,9 @@ pub struct AnimMixer {
     /// True once a non-looping `cur_clip` has played past its duration.
     pub finished: bool,
     pub started: bool,
+    /// EN-064 — blend partners, joint rotations and IK applied over the
+    /// sampled pose. Empty by default, which costs nothing.
+    pub rig: crate::anim_rig::AnimRig,
 }
 
 impl Default for AnimMixer {
@@ -69,6 +72,7 @@ impl Default for AnimMixer {
             root_delta: [0.0; 3],
             finished: false,
             started: false,
+            rig: crate::anim_rig::AnimRig::default(),
         }
     }
 }

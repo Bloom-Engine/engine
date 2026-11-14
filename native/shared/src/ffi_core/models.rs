@@ -1135,6 +1135,79 @@ macro_rules! __bloom_ffi_models {
         #[no_mangle]
         pub extern "C" fn bloom_anim_root_delta(_h: f64, _a: f64) -> f64 { 0.0 }
 
+        // bloom_anim_set_blend  [gated: models3d]  EN-064
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_blend(handle: f64, slot: f64, clip: f64, weight: f64) {
+            $crate::ffi::guard("bloom_anim_set_blend", move || {
+                engine().models.anim_set_blend(handle, slot as usize, clip as i32, weight as f32);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_blend(_handle: f64, _slot: f64, _clip: f64, _weight: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_set_blend", "models3d");
+        }
+
+        // bloom_anim_set_joint_rotation  [gated: models3d]  EN-064
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_joint_rotation(handle: f64, slot: f64, joint: f64, ax: f64, ay: f64, az: f64, angle: f64) {
+            $crate::ffi::guard("bloom_anim_set_joint_rotation", move || {
+                engine().models.anim_set_joint_rotation(
+                    handle, slot as usize, joint as i32,
+                    [ax as f32, ay as f32, az as f32], angle as f32);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_joint_rotation(_handle: f64, _slot: f64, _joint: f64, _ax: f64, _ay: f64, _az: f64, _angle: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_set_joint_rotation", "models3d");
+        }
+
+        // bloom_anim_set_ik  [gated: models3d]  EN-064
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_ik(handle: f64, slot: f64, end_joint: f64, tx: f64, ty: f64, tz: f64, weight: f64, keep_rot: f64) {
+            $crate::ffi::guard("bloom_anim_set_ik", move || {
+                engine().models.anim_set_ik(
+                    handle, slot as usize, end_joint as i32,
+                    [tx as f32, ty as f32, tz as f32], weight as f32, keep_rot != 0.0);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_ik(_handle: f64, _slot: f64, _end_joint: f64, _tx: f64, _ty: f64, _tz: f64, _weight: f64, _keep_rot: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_set_ik", "models3d");
+        }
+
+        // bloom_anim_set_ik_pole  [gated: models3d]  EN-064
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_ik_pole(handle: f64, slot: f64, px: f64, py: f64, pz: f64, on: f64) {
+            $crate::ffi::guard("bloom_anim_set_ik_pole", move || {
+                engine().models.anim_set_ik_pole(
+                    handle, slot as usize, [px as f32, py as f32, pz as f32], on != 0.0);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_ik_pole(_handle: f64, _slot: f64, _px: f64, _py: f64, _pz: f64, _on: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_set_ik_pole", "models3d");
+        }
+
+        // bloom_anim_time  [gated: models3d]  EN-064
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_time(handle: f64, which: f64) -> f64 {
+            $crate::ffi::guard("bloom_anim_time", move || {
+                engine().models.anim_time(handle, which as u32) as f64
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_time(_handle: f64, _which: f64) -> f64 { 0.0 }
+
         // bloom_model_find_joint  [gated: models3d]
         // Load-time only (it parses a string) — cache the index, per
         // perry-quirks #5.

@@ -2163,3 +2163,31 @@ default all compile. Still open from this ticket: make the red gate
 LOUD — build-web was failing
 for ~10 hours and five merged PRs without anyone noticing, which is the
 EN-058(a) lesson again — a gate nobody reads is not a gate.
+
+## EN-064 — Procedural rig over the mixer: blend partners, joint rotations, two-bone IK ✅ *(shipped 2026-11-14)*
+
+The shooter's player (plan Phase 1) needs three things the EN-028 mixer could
+not do, and a survey found no way to reach them from TypeScript: mix more than
+two clips (a strafe blend space), turn a joint after sampling (an aim offset
+on the spine), and pull a hand onto a point (the off hand on a foregrip).
+
+Shipped, all per-instance state in `AnimMixer::rig`, applied inside
+`advance_and_update` (`native/shared/src/anim_rig.rs`):
+
+- `animSetBlend(h, slot 0..2, clip, weight)`: partner clips mixed into the
+  base clip by weight, sampled at the base clip's phase. This is also the
+  two-clip locomotion blend EN-028 promised and never built.
+- `animSetJointRotation(h, slot 0..7, joint, ax, ay, az, angle)`: a
+  model-space axis-angle turn of one joint and its subtree, applied in slot
+  order after the masked layer.
+- `animSetIK(h, slot 0..1, endJoint, tx, ty, tz, weight, keepEndRotation)`
+  and `animSetIKPole(h, slot, px, py, pz, on)`: analytic two-bone solve on
+  the end joint's parent and grandparent; rotations only, bone lengths kept.
+- `animTime` / `animLayerTime` / `animPhase`: read the mixer clocks.
+
+Everything is model space (what `jointWorld` reports). Instances with an
+empty rig skip the extra forward-kinematics passes. 7 unit tests cover reach,
+out-of-reach, pole side, kept hand rotation and the joint turn. Web mirrors
+and watchOS stubs included. Not done: additive clips, more than one masked
+layer, foot IK against the ground, look-at.
+

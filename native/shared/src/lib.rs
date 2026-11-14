@@ -31,6 +31,7 @@ pub mod virtual_geometry;
 // ModelAnimation (always compiled); only the gltf/image_dds LOADERS are
 // behind the feature, in models_gltf.rs (EN-063).
 pub mod anim_mixer;
+pub mod anim_rig;
 pub mod custom_shaders;
 pub mod decals;
 pub mod frame_callbacks;
