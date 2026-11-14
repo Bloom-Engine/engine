@@ -851,6 +851,7 @@ impl SceneGraph {
             0,
             usize::MAX,
             0.0,
+            None,
             &mut vbuf,
             &mut ibuf,
         );
@@ -863,12 +864,17 @@ impl SceneGraph {
     /// from, the triangles appended, and whether every node has been visited.
     /// A scene SDF rebake uses it to spread the gather over several frames.
     /// `min_feature` thins sub-voxel triangles (see `scene_gi_soup`); 0 keeps all.
+    /// `region` (world-space min and max) leaves out every node whose bounds
+    /// lie wholly outside it: the field covers a few tens of metres round the
+    /// camera, and a large world gathered whole is hundreds of megabytes that
+    /// the bake then discards. A node without valid world bounds is kept.
     pub(crate) fn append_world_triangles_for_gi(
         &self,
         exclude_physical_transmission: bool,
         first_node: usize,
         max_vertices: usize,
         min_feature: f32,
+        region: Option<([f32; 3], [f32; 3])>,
         vbuf: &mut Vec<f32>,
         ibuf: &mut Vec<u32>,
     ) -> (usize, u32, bool) {
@@ -886,6 +892,16 @@ impl SceneGraph {
                 || (exclude_physical_transmission && node.material.has_gi_transmission())
             {
                 continue;
+            }
+            if let Some((lo, hi)) = region {
+                if crate::scene_gi_soup::bounds_outside(
+                    node.world_bounds_min,
+                    node.world_bounds_max,
+                    lo,
+                    hi,
+                ) {
+                    continue;
+                }
             }
             appended += node.vertices().len();
             tri_count += crate::scene_gi_soup::append_node_triangles(

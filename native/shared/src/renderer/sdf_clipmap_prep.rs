@@ -22,6 +22,8 @@ pub(super) struct ClipmapPrep {
     pub(super) scene_version: u64,
     pub(super) transparent_gi: bool,
     pub(super) next_node: usize,
+    /// The part of the world this gather covers (see `scene_gi_soup::gather_region`).
+    pub(super) region: ([f32; 3], [f32; 3]),
     pub(super) gathered: bool,
     pub(super) vertices: Vec<f32>,
     pub(super) indices: Vec<u32>,
