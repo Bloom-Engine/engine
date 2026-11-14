@@ -978,22 +978,8 @@ impl ShadowMap {
             // from the projection (no inversion, no convention hazard):
             //   tan(fovy/2)          = 1 / proj[1][1]
             //   tan(fovy/2) * aspect = 1 / proj[0][0]
-            let inv_view = crate::renderer::mat4_invert(camera_view);
-            let half_w_per_d = 1.0 / camera_proj[0][0];
-            let half_h_per_d = 1.0 / camera_proj[1][1];
-            let mut world_corners = [[0.0f32; 3]; 8];
-            let mut ci = 0usize;
-            for &d in [c_near, c_far].iter() {
-                let hw = d * half_w_per_d;
-                let hh = d * half_h_per_d;
-                for &(sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].iter() {
-                    // View space looks down -Z, so this slice sits at z = -d.
-                    let vp = [sx * hw, sy * hh, -d, 1.0];
-                    let wc = crate::renderer::mat4_mul_vec4(&inv_view, &vp);
-                    world_corners[ci] = [wc[0], wc[1], wc[2]];
-                    ci += 1;
-                }
-            }
+            let world_corners =
+                frustum_slice_world_corners(camera_view, camera_proj, c_near, c_far);
 
             // Bounding sphere of this cascade's frustum slice. Sphere
             // (not AABB) gives rotation-invariant extent so the ortho
@@ -1258,4 +1244,79 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
 
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// World-space corners of the camera-frustum slice between view depths
+/// `near` and `far`: four at `near`, then four at `far`.
+///
+/// `mat4_invert` returns its result transposed relative to `mat4_mul_vec4`
+/// (see `mat4_transpose`). Used as it comes, the view inverse turns the
+/// corners by the view rotation instead of its inverse and drops the camera
+/// position, so the cascades were fitted round the world origin, mirrored.
+/// Shadows then lined up only for a camera near the origin that looked along
+/// a world axis, and vanished everywhere else.
+pub(crate) fn frustum_slice_world_corners(
+    camera_view: [[f32; 4]; 4],
+    camera_proj: [[f32; 4]; 4],
+    near: f32,
+    far: f32,
+) -> [[f32; 3]; 8] {
+    let inv_view = crate::renderer::mat4_transpose(crate::renderer::mat4_invert(camera_view));
+    let half_w_per_d = 1.0 / camera_proj[0][0];
+    let half_h_per_d = 1.0 / camera_proj[1][1];
+    let mut world_corners = [[0.0f32; 3]; 8];
+    let mut ci = 0usize;
+    for &d in [near, far].iter() {
+        let hw = d * half_w_per_d;
+        let hh = d * half_h_per_d;
+        for &(sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].iter() {
+            // View space looks down -Z, so this slice sits at z = -d.
+            let vp = [sx * hw, sy * hh, -d, 1.0];
+            let wc = crate::renderer::mat4_mul_vec4(&inv_view, &vp);
+            world_corners[ci] = [wc[0], wc[1], wc[2]];
+            ci += 1;
+        }
+    }
+    world_corners
+}
+
+#[cfg(test)]
+mod frustum_slice_tests {
+    use super::frustum_slice_world_corners;
+
+    #[test]
+    fn slice_corners_follow_the_camera_position_and_heading() {
+        // A camera far from the origin, looking along +X and a little down.
+        let eye = [1000.0f32, 2.0, 2000.0];
+        let target = [1010.0f32, 1.0, 2003.0];
+        let view = crate::renderer::mat4_look_at(eye, target, [0.0, 1.0, 0.0]);
+        let proj = crate::renderer::mat4_perspective(50f32.to_radians(), 16.0 / 9.0, 0.5, 4000.0);
+        let (near, far) = (0.5f32, 30.0f32);
+        let corners = frustum_slice_world_corners(view, proj, near, far);
+
+        let mut fwd = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]];
+        let len = (fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]).sqrt();
+        for axis in fwd.iter_mut() {
+            *axis /= len;
+        }
+        // Every corner lies at its slice depth along the view direction.
+        for (i, corner) in corners.iter().enumerate() {
+            let rel = [corner[0] - eye[0], corner[1] - eye[1], corner[2] - eye[2]];
+            let depth = rel[0] * fwd[0] + rel[1] * fwd[1] + rel[2] * fwd[2];
+            let expected = if i < 4 { near } else { far };
+            assert!(
+                (depth - expected).abs() < 0.02,
+                "corner {i} is at depth {depth}, expected {expected}"
+            );
+        }
+        // The far face is centred on the view axis, 30 m ahead of the camera.
+        for axis in 0..3 {
+            let centre = corners[4..].iter().map(|c| c[axis]).sum::<f32>() / 4.0;
+            let expected = eye[axis] + fwd[axis] * far;
+            assert!(
+                (centre - expected).abs() < 0.05,
+                "far face centre axis {axis} is {centre}, expected {expected}"
+            );
+        }
+    }
 }
