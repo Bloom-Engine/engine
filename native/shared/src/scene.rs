@@ -299,6 +299,9 @@ pub struct SceneNode {
 
 /// One reduced-detail variant for a SceneNode.
 pub struct LodLevel {
+    /// A model primitive shared with other nodes. When set, the Vec fields
+    /// stay empty and the GPU buffers come from the scene's shared-mesh cache.
+    shared: Option<Arc<MeshData>>,
     pub vertices: Vec<Vertex3D>,
     secondary_tex_coords: Option<Vec<[f32; 2]>>,
     pub indices: Vec<u32>,
@@ -541,6 +544,7 @@ pub struct SceneGraph {
     pub pending_sdf_bakes: Vec<f64>,
     shared_gpu_resources: HashMap<SceneGeometryKey, SharedSceneGpuResources>,
     shared_gpu_geometry: HashMap<SceneGeometryKey, SharedSceneGeometry>,
+    shared_mesh_cache: SharedMeshCache,
     retired_gpu_geometry: Vec<GeometrySlice>,
     shared_gpu_materials: HashMap<SceneMaterialKey, SharedSceneMaterial>,
     retired_gpu_materials: Vec<MaterialId>,
@@ -580,6 +584,7 @@ impl SceneGraph {
             pending_sdf_bakes: Vec::new(),
             shared_gpu_resources: HashMap::new(),
             shared_gpu_geometry: HashMap::new(),
+            shared_mesh_cache: SharedMeshCache::default(),
             retired_gpu_geometry: Vec::new(),
             shared_gpu_materials: HashMap::new(),
             retired_gpu_materials: Vec::new(),
@@ -944,6 +949,7 @@ impl SceneGraph {
         }
         while node.lods.len() <= lod_index {
             node.lods.push(LodLevel {
+                shared: None,
                 vertices: Vec::new(),
                 secondary_tex_coords: None,
                 indices: Vec::new(),
@@ -958,11 +964,44 @@ impl SceneGraph {
         let lod = &mut node.lods[lod_index];
         let secondary_tex_coords =
             secondary_tex_coords.filter(|coords| coords.len() == vertices.len());
+        lod.shared = None;
         lod.vertices = vertices;
         lod.secondary_tex_coords = secondary_tex_coords;
         lod.indices = indices;
         lod.max_coverage = max_coverage;
         lod.dirty = true;
+    }
+
+    /// Set (or replace) a reduced-detail variant with a model primitive. The
+    /// primitive is not copied: every node that uses it shares one pair of
+    /// GPU buffers.
+    pub fn set_lod_model_mesh(
+        &mut self,
+        handle: f64,
+        lod_index: usize,
+        mesh: Arc<MeshData>,
+        max_coverage: f32,
+    ) {
+        if mesh.vertices.is_empty() {
+            self.set_lod_geometry(handle, lod_index, Vec::new(), Vec::new(), max_coverage);
+            return;
+        }
+        // An empty placeholder creates the level; the shared mesh replaces it.
+        self.set_lod_geometry(
+            handle,
+            lod_index,
+            vec![Vertex3D::default()],
+            Vec::new(),
+            max_coverage,
+        );
+        if let Some(lod) = self
+            .nodes
+            .get_mut(handle)
+            .and_then(|node| node.lods.get_mut(lod_index))
+        {
+            lod.vertices = Vec::new();
+            lod.shared = Some(mesh);
+        }
     }
 
     pub fn update_geometry(&mut self, handle: f64, vertices: Vec<Vertex3D>, indices: Vec<u32>) {
@@ -1512,6 +1551,7 @@ impl SceneGraph {
         let shared_gpu_resources = &mut self.shared_gpu_resources;
         let shared_gpu_geometry = &mut self.shared_gpu_geometry;
         let retired_gpu_geometry = &mut self.retired_gpu_geometry;
+        let shared_mesh_cache = &mut self.shared_mesh_cache;
         let gpu_driven_scene_active = self.gpu_driven_scene_active;
         let mut visible_count: u32 = 0;
         self.has_transparent_nodes = false;
@@ -1642,25 +1682,36 @@ impl SceneGraph {
                 || node.material.layered_pbr.has_resolved_tex_coord(1);
             for lod in &mut node.lods {
                 if lod.dirty {
-                    lod.gpu_vb = Some(device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("scene_node_lod_vb"),
-                            contents: bytemuck::cast_slice(&lod.vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
-                    ));
-                    lod.gpu_ib = Some(device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("scene_node_lod_ib"),
-                            contents: bytemuck::cast_slice(&lod.indices),
-                            usage: wgpu::BufferUsages::INDEX,
-                        },
-                    ));
-                    lod.gpu_index_count = lod.indices.len() as u32;
+                    if let Some(mesh) = lod.shared.as_ref() {
+                        let (vertex, index) = shared_mesh_cache.lod_buffers(device, mesh);
+                        lod.gpu_vb = Some(vertex);
+                        lod.gpu_ib = Some(index);
+                        lod.gpu_index_count = mesh.indices.len() as u32;
+                    } else {
+                        lod.gpu_vb = Some(device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("scene_node_lod_vb"),
+                                contents: bytemuck::cast_slice(&lod.vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            },
+                        ));
+                        lod.gpu_ib = Some(device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("scene_node_lod_ib"),
+                                contents: bytemuck::cast_slice(&lod.indices),
+                                usage: wgpu::BufferUsages::INDEX,
+                            },
+                        ));
+                        lod.gpu_index_count = lod.indices.len() as u32;
+                    }
                     lod.dirty = false;
                 }
+                let lod_uv1 = match lod.shared.as_ref() {
+                    Some(mesh) => mesh.secondary_tex_coords.as_ref(),
+                    None => lod.secondary_tex_coords.as_ref(),
+                };
                 if needs_secondary_uv && lod.gpu_secondary_uv_vb.is_none() {
-                    lod.gpu_secondary_uv_vb = lod.secondary_tex_coords.as_ref().map(|coords| {
+                    lod.gpu_secondary_uv_vb = lod_uv1.map(|coords| {
                         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("scene_node_lod_refractive_uv1_vb"),
                             contents: bytemuck::cast_slice(coords),
@@ -1675,7 +1726,7 @@ impl SceneGraph {
             let geometry_changed = node.geo_dirty;
             if geometry_changed || node.gpu_vb.is_none() {
                 let resource_key = (!node.vertices().is_empty() && !node.indices().is_empty())
-                    .then(|| scene_geometry_key(node.vertices(), node.indices()));
+                    .then(|| node_geometry_key(node, shared_mesh_cache));
                 if node.gpu_resource_key != resource_key {
                     if let Some(old_key) = node.gpu_resource_key.take() {
                         release_scene_gpu_resources(shared_gpu_resources, old_key);
@@ -1960,7 +2011,7 @@ impl SceneGraph {
                 && !node.vertices().is_empty()
                 && !node.indices().is_empty()
             {
-                let key = scene_geometry_key(node.vertices(), node.indices());
+                let key = node_geometry_key(node, shared_mesh_cache);
                 if node.gpu_geometry_key != Some(key) {
                     if let Some(old_key) = node.gpu_geometry_key.take() {
                         release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
@@ -2513,5 +2564,7 @@ impl SceneGraph {
 
 mod draw_lists;
 mod helpers;
+mod shared_mesh;
 use helpers::*;
 pub(crate) use helpers::{aabb_outside_frustum, extract_frustum_planes};
+use shared_mesh::{node_geometry_key, SharedMeshCache};
