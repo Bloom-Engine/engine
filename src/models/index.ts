@@ -16,6 +16,7 @@ declare function bloom_draw_model_transform16(
 ): void;
 declare function bloom_set_model_foliage_wind(handle: number, amount: number): number;
 declare function bloom_set_foliage_shadow_motion(on: number): number;
+declare function bloom_set_cutout_edge_fade(full: number, none: number): number;
 declare function bloom_unload_model(handle: number): void;
 declare function bloom_draw_cube(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_cube_wires(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
@@ -1386,4 +1387,16 @@ export function setModelFoliageWind(model: Model, amount: number): boolean {
 /// frame. Measure before leaving it on.
 export function setFoliageShadowMotion(on: boolean): boolean {
   return bloom_set_foliage_shadow_motion(on ? 1 : 0) !== 0;
+}
+
+/// Thin out leaf cards (glTF alpha MASK materials drawn by the engine's own shader) as they
+/// turn edge on to the camera. A card seen edge on squeezes its whole picture into a few pixel
+/// rows, and a crown built of cards shows a streak wherever one stands along the view.
+///
+/// `full` and `none` are |cos| of the angle between the card's plane normal and the view
+/// direction: below `full` the card is gone, above `none` it is untouched, between them it is
+/// dithered. `setCutoutEdgeFade(0.12, 0.30)` is a good start. `0, 0` (the default) is off.
+/// A tree needs cards in more than one orientation for this to leave something to look at.
+export function setCutoutEdgeFade(full: number, none: number): boolean {
+  return bloom_set_cutout_edge_fade(full, none) !== 0;
 }

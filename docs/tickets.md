@@ -2666,3 +2666,28 @@ for the budget and the window arithmetic. Not run: any backend but Metal.
 global illumination off it is 24 ms. So some 35 ms goes to the ray scene (posing, one
 acceleration-structure refit per character, the larger trace), not to shadows (3 ms) or the
 main pass.
+
+## EN-071 — Leaf cards: no full sky reflection, and an opt-in fade for cards seen edge on ✅ *(2026-11-15, branch feat/foliage-cards)*
+
+Found while making the shooter's trees photoreal. Both are about alpha cut-out (glTF MASK)
+materials drawn by the engine's own scene shader.
+
+- **Image-based specular on cut-out foliage is cut to a fifth.** A leaf card inside a crown
+  mirrors mostly other leaves, and its shading normal is made up (a crown normal, or flipped
+  toward the viewer), yet it took the full prefiltered sky reflection. On the shooter's trees
+  that reflection was as strong as the leaves' own diffuse colour: every crown was a flat pale
+  mint whatever its texture said. Seen by skipping image-based lighting (`BLOOM_SKIP=ibl`):
+  the crowns turned their real green with a lit and a shaded side. Direct specular was already
+  skipped for these materials for the same reason. This changes the look of every cut-out
+  material; nothing opts in.
+- **`setCutoutEdgeFade(full, none)`** (`bloom_set_cutout_edge_fade`, every platform; off by
+  default). A card seen edge on squeezes its picture into a few pixel rows, and a crown of
+  cards shows a streak wherever one stands along the view. With the fade on, a card is
+  thinned out by a dithered discard as |cos| between its plane normal and the view falls from
+  `none` to `full`. The plane normal comes from screen derivatives, because authored foliage
+  normals are bent on purpose. The depth prepass and the main pass use the same function. The
+  two numbers ride in the spare components of the lighting block's `frame_misc`.
+
+**Checked** on Metal with the shooter's Plaza captures (before and after, same views). Not
+checked: the shadow pass still draws edge-on cards (their shadow is thin and correct); the
+visibility-buffer and GPU-driven variants were compiled, not looked at; no other backend ran.
