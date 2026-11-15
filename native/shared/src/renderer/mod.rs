@@ -12655,16 +12655,13 @@ impl Renderer {
         // set_env_intensity, not per-frame, so the default-reset
         // would clobber it. camera_pos.xyz gets rewritten below by
         // begin_mode_3d with the actual camera position.
+        // So are the cut-out card settings in frame_misc.yzw (x is rewritten every frame).
         let preserved_env_intensity = self.lighting_uniforms.camera_pos[3];
+        let preserved_frame_misc = self.lighting_uniforms.frame_misc;
         self.lighting_uniforms = LightingUniforms::defaults();
         self.lighting_uniforms.camera_pos[3] = preserved_env_intensity;
+        self.lighting_uniforms.frame_misc = preserved_frame_misc;
         self.clear_additional_lights();
-
-        // DEBUG: joint animation disabled for iOS port
-        // self.debug_frame += 1;
-        // let angle = (self.debug_frame as f32) * 0.03;
-        // self.set_joint_test(0, angle.sin() * 0.8);
-        // self.set_joint_test(5, (angle * 1.5).sin() * 0.5);
     }
 
     /// Submit a rendered frame while preserving the swapchain's normal
