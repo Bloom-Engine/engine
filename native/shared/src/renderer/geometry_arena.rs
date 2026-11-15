@@ -242,16 +242,25 @@ fn create_index_arena(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
     })
 }
 
-/// Capacity doubles to the next power of two, but never past `max`: the
-/// caller has already checked that `required` fits under it.
+/// Past this size the arena stops doubling and grows by this much at a time.
+/// While it grows, the old and the new buffer exist together: doubling from
+/// 256 MB asks the device for 768 MB at once and leaves 512 MB allocated for
+/// what may be 260 MB of geometry, which a tablet cannot give.
+const LINEAR_GROWTH_STEP: u64 = 64 * 1024 * 1024;
+
+/// Capacity doubles to the next power of two up to `LINEAR_GROWTH_STEP`, then
+/// rounds up to the next multiple of it, but never past `max`: the caller has
+/// already checked that `required` fits under it.
 fn grown_capacity(current: u64, required: u64, max: u64) -> u64 {
     if required <= current {
         current
-    } else {
+    } else if required <= LINEAR_GROWTH_STEP {
         required
             .next_power_of_two()
             .max(GeometryArena::INITIAL_CAPACITY)
             .min(max.max(required))
+    } else {
+        (required.div_ceil(LINEAR_GROWTH_STEP) * LINEAR_GROWTH_STEP).min(max.max(required))
     }
 }
 
@@ -345,8 +354,12 @@ mod tests {
         let mb = 1024 * 1024;
         assert_eq!(grown_capacity(64 * mb, 60 * mb, 256 * mb), 64 * mb);
         assert_eq!(grown_capacity(64 * mb, 100 * mb, 256 * mb), 128 * mb);
-        // 300 MB would double to 512 MB; a 400 MB device gets 400 MB.
-        assert_eq!(grown_capacity(256 * mb, 300 * mb, 400 * mb), 400 * mb);
+        // past the step it no longer doubles
+        assert_eq!(grown_capacity(256 * mb, 257 * mb, 1024 * mb), 320 * mb);
+        assert_eq!(grown_capacity(320 * mb, 500 * mb, 1024 * mb), 512 * mb);
+        assert_eq!(grown_capacity(32 * mb, 40 * mb, 1024 * mb), 64 * mb);
+        // 390 MB would round up to 448 MB; a 400 MB device gets 400 MB.
+        assert_eq!(grown_capacity(256 * mb, 390 * mb, 400 * mb), 400 * mb);
         let unit = std::mem::size_of::<Vertex3D>() as u64 * 4;
         assert_eq!(arena_max_capacity(1000 * mb, 300 * mb) % unit, 0);
         assert!(arena_max_capacity(1000 * mb, 300 * mb) <= 300 * mb);
