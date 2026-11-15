@@ -214,6 +214,7 @@ impl Renderer {
                 // the solid ones cost rasterisation only, and a leaf card
                 // behind a trunk is rejected before its alpha test runs.
                 let one_pipeline = self.dbg_skip("prepass_split"); // A/B diag
+                let mut joint_page = 0;
                 for cutout_round in [false, true] {
                     pass.set_pipeline(match &self.scene_depth_visibility_pipeline {
                         Some(visibility) => visibility,
@@ -251,6 +252,12 @@ impl Renderer {
                                 }
                                 let draw =
                                     self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
+                                self.bind_joint_page(
+                                    &mut pass,
+                                    3,
+                                    cmd.joint_offset,
+                                    &mut joint_page,
+                                );
                                 pass.set_bind_group(
                                     0,
                                     &self.model_uniform_bind_groups[cmd.uniform_slot],
@@ -267,6 +274,7 @@ impl Renderer {
                         }
                     }
                 }
+                self.bind_joint_page(&mut pass, 3, 0.0, &mut joint_page);
                 // The opaque retained nodes, so the main pass shades each of
                 // their pixels once (see Scene::render_depth_prepass).
                 if !self.dbg_skip("scene_graph") {
@@ -606,6 +614,7 @@ impl Renderer {
                     } else {
                         max_models
                     };
+                    let mut joint_page = 0;
                     for cmd in self.model_draw_commands.iter().take(cached_take) {
                         if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
                             if cmd.mesh_idx < meshes.len() {
@@ -671,6 +680,12 @@ impl Renderer {
                                         0,
                                     )
                                 };
+                                self.bind_joint_page(
+                                    &mut pass,
+                                    3,
+                                    cmd.joint_offset,
+                                    &mut joint_page,
+                                );
                                 pass.set_bind_group(
                                     0,
                                     &self.model_uniform_bind_groups[cmd.uniform_slot],
@@ -690,6 +705,7 @@ impl Renderer {
                             }
                         }
                     }
+                    self.bind_joint_page(&mut pass, 3, 0.0, &mut joint_page);
                 }
 
                 // Retained scene-graph nodes went through the depth prepass with
@@ -947,7 +963,14 @@ impl Renderer {
             &[],
         );
         let mut current_pipeline_key = None;
+        let mut joint_page = 0;
         for draw in draws {
+            self.bind_joint_page(
+                pass,
+                3,
+                self.cached_draw_joint_offset(draw.stable_id),
+                &mut joint_page,
+            );
             let uses_uv1 = draw.secondary_uv.is_some();
             let pipeline_key = (draw.layered, draw.double_sided, uses_uv1);
             if current_pipeline_key != Some(pipeline_key) {
@@ -992,6 +1015,7 @@ impl Renderer {
             );
             pass.draw_indexed(draw.mesh.index_range(), draw.mesh.base_vertex, 0..1);
         }
+        self.bind_joint_page(pass, 3, 0.0, &mut joint_page);
     }
 }
 

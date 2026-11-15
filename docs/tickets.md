@@ -2293,3 +2293,50 @@ Compile-checked for macOS, iOS and tvOS; the Android, Linux and Windows crates c
 checked from a Mac (C dependencies) and carry only small edits. Tests: 532 unit tests and the golden-image suite pass. `visibility_shading_matches_forward_
 reference` fails with max delta 2 against a 1-LSB bound, identically on the commit before
 this work. The wasm check does not build on this branch (`mobile_shading`, unrelated).
+
+## EN-066 — More than 1024 skinning joints a frame: the palette in pages ✅ *(2026-11-15, branch feat/joint-palette-storage)*
+
+A frame could pose 1024 joints over all its skinned models together, because the palette is
+one 64 KiB uniform block (`array<mat4x4<f32>, 1024>`, the largest uniform binding every
+backend guarantees). The model that did not fit was drawn with the first model's matrices.
+The shooter lived under it by arithmetic: 67 + 41 creatures x 23.
+
+**Now 16384 a frame, and a model that does not fit is not drawn.** The palette is a list of
+1024-matrix pages (`renderer/joint_pages.rs`). Page 0 is the buffer pair the renderer always
+had. A frame that stages more gets further pages, each its own 64 KiB buffer pair (this
+frame's and the previous frame's matrices, for motion vectors) with its own bind group of
+the unchanged `joint_layout`. A model's joints never straddle two pages (the tail of a page
+is left as padding), so a skinned draw binds the page its joints are in and hands the shader
+the offset inside that page.
+
+**Why pages and not a storage buffer.** No shader, bind group layout or pipeline changes:
+the five shader sources that declare the palette are spliced by text into about a hundred
+variants, and a storage buffer is not there on every device tier (the baseline tier in
+`capabilities.rs` starts from wgpu's WebGL2-level limits, which allow none per stage). With pages there is one
+code path on all nine backends, and a frame within 1024 joints records exactly the commands
+it did before: the page is only rebound when a draw's page differs from the bound one.
+The price: one MODEL is limited to 1024 joints (it was, too), and up to one model's worth
+of joints per page is padding.
+
+- CPU side a draw keeps one absolute offset (`page * 1024 + offset in page`).
+  `joint_page_of` / `joint_offset_in_page` take it apart where the bind group is chosen and
+  where `misc.x` is written. Touched: the depth prepass, the main scene pass, the legacy
+  non-HDR pass, cascaded and virtual shadow passes, transmitted shadows, sorted and weighted
+  transparency, imported refraction, the iridescence metadata pass, and the compute skinning
+  of the ray-traced path (which binds the page's buffer).
+- Pages are created on first use and kept: 128 KiB each, 2 MiB if all sixteen exist. Only
+  the used part of an extra page is uploaded.
+- Past the cap, or for a model with more than 1024 joints, `draw_model_cached_skinned`
+  returns without drawing and a line is printed once.
+- Not paged: the immediate-mode skinned mesh path (`draw_model_mesh*` with weighted
+  vertices; joint indices are baked into the vertices and its pipeline binds page 0). A
+  mesh whose pose lands past the first page is skipped with a warning. `drawModel` on a
+  loaded model takes the cached path and has no such limit. Custom material draws never
+  skinned (`skin_info` is always zero) and still bind page 0. The visibility-buffer,
+  GPU-driven and planar-reflection paths exclude skinned draws, as before.
+
+Tests: `joint_pages::tests` (placement arithmetic) and two rendering tests in
+`tests/golden_render/joint_pages.rs` that check themselves: 100 models of 23 joints (three
+pages), each moved to its own grid cell by the last joint of its palette and tinted by its
+index, every cell showing its own colour; and 36 models of 512 joints against the cap, 32
+drawn right and 4 absent. Run on Metal only.

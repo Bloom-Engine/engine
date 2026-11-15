@@ -453,6 +453,7 @@ impl Renderer {
                 secondary_uv,
                 vertex_byte_offset,
                 index_byte_offset,
+                joint_offset: command.joint_offset,
             });
         }
     }
@@ -522,8 +523,10 @@ impl Renderer {
         });
         pass.set_bind_group(1, &self.lighting_bind_group, &[]);
         pass.set_bind_group(3, &self.joint_bind_group, &[]);
+        let mut joint_page = 0;
         let mut current_uv1 = None;
         for draw in draws {
+            self.bind_joint_page(&mut pass, 3, draw.joint_offset, &mut joint_page);
             let uses_uv1 = draw.secondary_uv.is_some();
             if current_uv1 != Some(uses_uv1) {
                 pass.set_pipeline(resources.metadata_pipeline(uses_uv1));

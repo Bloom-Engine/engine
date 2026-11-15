@@ -5,10 +5,16 @@
 
 use super::*;
 
-/// Joint matrices one frame can hold for all skinned draws together: the
-/// palette is one 64 KiB uniform buffer, the largest binding every backend
-/// guarantees (the shaders declare `array<mat4x4<f32>, 1024>` to match).
-const MAX_FRAME_JOINTS: usize = 1024;
+/// What popping the staged-pose queue gave a draw.
+pub(super) enum StagedSkin {
+    /// No pose was staged for this draw.
+    Nothing,
+    /// The pose is in the frame's palette at this absolute offset.
+    At(f32),
+    /// A pose was staged but the palette has no room for it. The draw must
+    /// be skipped: no slot holds its matrices.
+    Dropped,
+}
 
 /// Previous transform for one ordinary cached-model instance. Calls are paired
 /// by stable submission slot, with the handle preventing a newly spawned
@@ -699,7 +705,14 @@ impl Renderer {
             return;
         }
 
-        let joint_offset = self.take_staged_skin_offset().unwrap_or(0.0);
+        let joint_offset = match self.take_staged_skin_offset() {
+            StagedSkin::At(offset) => offset,
+            // Nothing staged: the first pose of the frame, as always.
+            StagedSkin::Nothing => 0.0,
+            // No room in the palette (warned): not drawn, rather than drawn
+            // with another model's pose.
+            StagedSkin::Dropped => return,
+        };
 
         // Model matrix places the rare rigid (weightless) verts; weighted
         // verts get their world placement from the joint matrices.
@@ -758,7 +771,12 @@ impl Renderer {
                     model: model_matrix,
                     prev_mvp: self.velocity_ref_vp,
                     model_tint: tint,
-                    misc: [joint_offset, 1.0, 0.0, 0.0],
+                    misc: [
+                        joint_pages::joint_offset_in_page(joint_offset),
+                        1.0,
+                        0.0,
+                        0.0,
+                    ],
                 },
             );
 
@@ -891,7 +909,7 @@ impl Renderer {
 
     /// Pop the next staged skin pose (FIFO) and pack it into the frame
     /// joint accumulator, returning the base slot offset its matrices
-    /// were packed at. `None` when nothing is staged.
+    /// were packed at (absolute: see `joint_pages.rs`).
     ///
     /// drawModel-level callers must call this ONCE per model and share
     /// the offset across every primitive: when each primitive popped its
@@ -900,9 +918,9 @@ impl Renderer {
     /// got skinned by whatever pose lives at the start of the joint
     /// buffer — the player's — rendering as a giant mangled blob glued to
     /// the player's position.
-    pub fn take_staged_skin_offset(&mut self) -> Option<f32> {
+    pub(super) fn take_staged_skin_offset(&mut self) -> StagedSkin {
         if self.pending_skin_groups.is_empty() {
-            return None;
+            return StagedSkin::Nothing;
         }
         let group = self.pending_skin_groups.remove(0);
         // PT-7 — the prev-palette queue moves in lockstep so both
@@ -919,28 +937,33 @@ impl Renderer {
         } else {
             group.clone()
         };
-        let start = self.frame_joint_data.len();
-        // Cap at the joint buffer (MAX_FRAME_JOINTS). Overflowing poses land at offset 0,
-        // which at least avoids an out-of-range read — the model will look
-        // mis-posed but not corrupt memory.
-        if start + group.len() <= MAX_FRAME_JOINTS {
-            self.frame_joint_data.extend_from_slice(&group);
-            self.frame_joint_data_prev.extend_from_slice(&prev_group);
-            Some(start as f32)
-        } else {
-            // Say so, once: a model posed with another model's matrices looks
-            // like an animation bug and nothing else points here.
-            static WARNED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!(
-                    "bloom: joint palette full: {} joints already staged this frame, a model with {} more does not fit in {}. It is drawn with the first model's pose. Draw fewer skinned models or strip joints from their rigs.",
-                    start,
-                    group.len(),
-                    MAX_FRAME_JOINTS
-                );
+        match self.place_staged_joint_group(&group, &prev_group) {
+            Some(offset) => StagedSkin::At(offset),
+            None => StagedSkin::Dropped,
+        }
+    }
+
+    /// A staged pose for the immediate-mode mesh path, whose vertices carry
+    /// their joint indices pre-offset and whose pipeline binds the palette's
+    /// first page only. `Err(())` = do not draw this mesh: its pose was
+    /// dropped, or lies past the first page (cached models, the `drawModel`
+    /// path, have no such limit).
+    fn take_staged_skin_offset_immediate(&mut self) -> Result<Option<f32>, ()> {
+        match self.take_staged_skin_offset() {
+            StagedSkin::Nothing => Ok(None),
+            StagedSkin::At(offset) if joint_pages::joint_page_of(offset) == 0 => Ok(Some(offset)),
+            StagedSkin::At(_) => {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "bloom: an immediate-mode skinned mesh was staged past the first {} joints of the frame and is not drawn. Draw it as a cached model.",
+                        joint_pages::JOINTS_PER_PAGE
+                    );
+                }
+                Err(())
             }
-            Some(0.0)
+            StagedSkin::Dropped => Err(()),
         }
     }
 
@@ -963,7 +986,10 @@ impl Renderer {
         // Mirror the joint-pose plumbing in the non-rotated path so a
         // skinned mesh drawn here still consumes its pending pose.
         let joint_offset = if Self::mesh_has_skin(vertices) {
-            self.take_staged_skin_offset()
+            let Ok(offset) = self.take_staged_skin_offset_immediate() else {
+                return;
+            };
+            offset
         } else {
             None
         };
@@ -1092,7 +1118,10 @@ impl Renderer {
         // slice of the shared joint buffer. With a 1024-slot buffer,
         // multiple skinned models can coexist in one frame.
         let joint_offset = if Self::mesh_has_skin(vertices) {
-            self.take_staged_skin_offset()
+            let Ok(offset) = self.take_staged_skin_offset_immediate() else {
+                return;
+            };
+            offset
         } else {
             None
         };
