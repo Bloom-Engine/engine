@@ -853,7 +853,8 @@ fn fs_depth_prepass(in: VertexOutputScene) {
                 in.color.a;
             survives = raw_alpha >= alpha_cutoff;
         }
-        if (!survives || cutout_edge_on(in.world_pos, in.clip_position.xy)) { discard; }
+        if (cutout_edge_on(in.world_pos, in.clip_position.xy)) { survives = false; }
+        if (!survives) { discard; }
     }
 }
 
@@ -997,7 +998,8 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
                 );
             }
         }
-        if (!survives || cutout_edge_on(in.world_pos, in.clip_position.xy)) { discard; }
+        if (cutout_edge_on(in.world_pos, in.clip_position.xy)) { survives = false; }
+        if (!survives) { discard; }
     }
     //PREPASS_STRIP_END
 
