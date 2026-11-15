@@ -2,6 +2,41 @@
 
 const MAX_KEYS: usize = 512;
 const MAX_MOUSE_BUTTONS: usize = 8;
+pub const GAMEPAD_KIND_UNKNOWN: u8 = 0;
+/// A B X Y, as on an Xbox pad.
+pub const GAMEPAD_KIND_XBOX: u8 = 1;
+/// Cross, circle, square, triangle.
+pub const GAMEPAD_KIND_PLAYSTATION: u8 = 2;
+/// B A Y X: the Xbox letters with each pair swapped.
+pub const GAMEPAD_KIND_NINTENDO: u8 = 3;
+/// A pad the platform names but that is none of the above.
+pub const GAMEPAD_KIND_OTHER: u8 = 4;
+
+/// The family of a pad from the name its platform reports (GameController's
+/// `productCategory` or `vendorName`, a HID product string).
+pub fn classify_gamepad(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if n.trim().is_empty() {
+        GAMEPAD_KIND_UNKNOWN
+    } else if has(&[
+        "dualsense",
+        "dualshock",
+        "playstation",
+        "sony",
+        "ps4",
+        "ps5",
+    ]) {
+        GAMEPAD_KIND_PLAYSTATION
+    } else if has(&["xbox", "xinput", "microsoft"]) {
+        GAMEPAD_KIND_XBOX
+    } else if has(&["switch", "joy-con", "joycon", "nintendo"]) {
+        GAMEPAD_KIND_NINTENDO
+    } else {
+        GAMEPAD_KIND_OTHER
+    }
+}
+
 const MAX_GAMEPAD_AXES: usize = 8;
 const MAX_GAMEPAD_BUTTONS: usize = 16;
 const MAX_TOUCH_POINTS: usize = 10;
@@ -79,6 +114,10 @@ pub struct InputState {
     gamepad_buttons_released: [bool; MAX_GAMEPAD_BUTTONS],
     prev_gamepad_buttons: [bool; MAX_GAMEPAD_BUTTONS],
     pub gamepad_axis_count: usize,
+    /// What family the connected pad is, for drawing the right button
+    /// glyphs: one of the `GAMEPAD_KIND_*` values. 0 where the platform
+    /// cannot say (Linux, Android, web).
+    pub gamepad_kind: u8,
     /// EN-031 rumble: (low-frequency motor, high-frequency motor, seconds
     /// left), all 0 = motors off. The FFI writes this; each platform's input
     /// poll drives its own vibration API from it and decrements the timer.
@@ -146,6 +185,7 @@ impl InputState {
             gamepad_buttons_released: [false; MAX_GAMEPAD_BUTTONS],
             prev_gamepad_buttons: [false; MAX_GAMEPAD_BUTTONS],
             gamepad_axis_count: 0,
+            gamepad_kind: GAMEPAD_KIND_UNKNOWN,
             rumble: [0.0; 3],
             touch_points: [EMPTY_TOUCH; MAX_TOUCH_POINTS],
             touch_count: 0,
@@ -471,5 +511,31 @@ impl InputState {
             || self.mouse_pressed.iter().any(|&m| m)
             || self.gamepad_buttons_pressed.iter().any(|&g| g)
             || self.touch_count > 0
+    }
+}
+
+#[cfg(test)]
+mod gamepad_kind_tests {
+    use super::*;
+
+    #[test]
+    fn pads_are_classified_by_the_name_the_platform_gives() {
+        assert_eq!(classify_gamepad("DualSense"), GAMEPAD_KIND_PLAYSTATION);
+        assert_eq!(classify_gamepad("DualShock 4"), GAMEPAD_KIND_PLAYSTATION);
+        assert_eq!(classify_gamepad("Xbox One"), GAMEPAD_KIND_XBOX);
+        assert_eq!(
+            classify_gamepad("Xbox Wireless Controller"),
+            GAMEPAD_KIND_XBOX
+        );
+        assert_eq!(
+            classify_gamepad("Switch Pro Controller"),
+            GAMEPAD_KIND_NINTENDO
+        );
+        assert_eq!(
+            classify_gamepad("Nintendo Switch Joy-Con (L/R)"),
+            GAMEPAD_KIND_NINTENDO
+        );
+        assert_eq!(classify_gamepad("MFi"), GAMEPAD_KIND_OTHER);
+        assert_eq!(classify_gamepad("  "), GAMEPAD_KIND_UNKNOWN);
     }
 }

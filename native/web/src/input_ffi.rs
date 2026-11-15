@@ -147,6 +147,16 @@ pub fn bloom_get_model_bounds_max_z(model_handle: f64) -> f64 {
 // the argument-shift class ffi_core/mod.rs says the shared macro exists to
 // prevent; the web crate hand-mirrors it and drifted.
 #[wasm_bindgen]
+pub fn bloom_get_gamepad_kind() -> f64 {
+    let input = &engine().input;
+    if input.is_gamepad_available() {
+        input.gamepad_kind as f64
+    } else {
+        0.0
+    }
+}
+
+#[wasm_bindgen]
 pub fn bloom_is_gamepad_available() -> f64 {
     if engine().input.is_gamepad_available() {
         1.0

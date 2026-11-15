@@ -617,6 +617,45 @@ pub fn bloom_set_present_mode(mode: f64) -> f64 {
     }
 }
 
+// Monitors: the browser shows one canvas; report it as the one display.
+#[wasm_bindgen]
+pub fn bloom_get_monitor_count() -> f64 {
+    1.0
+}
+#[wasm_bindgen]
+pub fn bloom_get_monitor_metric(index: f64, what: f64) -> f64 {
+    let (w, h) = engine().renderer.native_size();
+    if index != 0.0 {
+        0.0
+    } else if what < 0.5 {
+        w as f64
+    } else if what < 1.5 {
+        h as f64
+    } else {
+        0.0
+    }
+}
+#[wasm_bindgen]
+pub fn bloom_get_monitor_name(index: f64) -> String {
+    if index == 0.0 {
+        String::from("Display")
+    } else {
+        String::new()
+    }
+}
+#[wasm_bindgen]
+pub fn bloom_get_current_monitor() -> f64 {
+    0.0
+}
+#[wasm_bindgen]
+pub fn bloom_set_monitor(index: f64) -> f64 {
+    if index == 0.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 #[wasm_bindgen]
 pub fn bloom_get_present_mode() -> f64 {
     0.0

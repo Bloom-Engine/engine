@@ -990,6 +990,8 @@ fn poll_xinput_gamepad() {
     if result == 0 {
         // ERROR_SUCCESS
         eng.input.gamepad_available = true;
+        // XInput only speaks to Xbox-layout pads.
+        eng.input.gamepad_kind = bloom_shared::input::GAMEPAD_KIND_XBOX;
         let gp = &state.Gamepad;
 
         // Axes: left stick X/Y, right stick X/Y, triggers
