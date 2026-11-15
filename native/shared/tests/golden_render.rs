@@ -36,6 +36,8 @@ mod layered_pbr_motion;
 mod layered_pbr_parity;
 #[path = "golden_render/lighting_upload.rs"]
 mod lighting_upload;
+#[path = "golden_render/local_light_shadows.rs"]
+mod local_light_shadows;
 #[path = "golden_render/motion_producer_audit.rs"]
 mod motion_producer_audit;
 #[path = "golden_render/quality_presets.rs"]

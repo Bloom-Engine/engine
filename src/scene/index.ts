@@ -1012,12 +1012,14 @@ export function addShadowedPointLight(
 }
 
 /**
- * Turn on shadows from local lights for surfaces drawn by custom material
- * shaders (terrain, buildings), or turn them off with `maxLights` 0.
+ * Turn on shadows from local lights, or turn them off with `maxLights` 0.
+ * They fall on the engine's own lit models (characters, props; EN-069) and on
+ * surfaces drawn by custom material shaders that ask for them (see below).
  *
  * Up to `maxLights` (1 to 4) of the lights submitted with
  * `addPointLightWithShadow` get a cube of six depth maps, `resolution` texels
- * a side (0 = 512; 128 to 1024); the nearest to the camera win. A material
+ * a side (0 = 512; 128 to 1024); the nearest to the camera win. Models drawn
+ * by the engine's own shader need nothing more. A material
  * shader receives them by including `common/local_shadows.wgsl` and
  * multiplying a light's contribution by
  * `local_light_shadow(lightIndex, worldPos, normal)`. Needs `enableShadows()`.
