@@ -94,7 +94,7 @@ export {
   loadShader, compileMaterial, drawMeshWithMaterial,
   compileRefractiveMaterial, compileTransparentMaterial, compileAdditiveMaterial,
   compileMaterialCutout,
-  compileMaterialInstanced, createInstanceBuffer,
+  compileMaterialInstanced, createInstanceBuffer, createInstanceBufferLod,
   drawMeshWithMaterialInstanced, destroyInstanceBuffer,
   createPlanarReflection, setMaterialReflectionProbe, setMaterialProbeVisible,
   compileMaterialFromFile, loadMaterial,

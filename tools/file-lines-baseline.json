@@ -1,6 +1,6 @@
 {
   "native/shared/src/physics_jolt.rs": 3858,
-  "native/shared/src/renderer/material_system.rs": 2335,
+  "native/shared/src/renderer/material_system.rs": 2298,
   "native/shared/src/renderer/mod.rs": 14649,
   "native/shared/src/renderer/shaders/post.rs": 2026,
   "native/shared/src/renderer/shaders/ssgi.rs": 2014,
