@@ -107,48 +107,70 @@ impl MaterialSystem {
             );
         }
 
-        // Keep the established point-copy mip behavior. The indirection
-        // record still exposes the real mip count to every capability tier.
+        // Box-filtered mips, built on the CPU and uploaded per level.
+        //
+        // This used to be a chain of `copy_texture_to_texture` calls from the top-left
+        // quarter of each level into the next ("point-copy"). That is not a downsample, it is
+        // a CROP: level n held the top-left 1/2^n of the image at full texel size, so a
+        // surface seen from a distance showed its texture MAGNIFIED 2^n times instead of
+        // minified (a brick wall across a plaza turned into metre-long bricks, a grass scan
+        // into smeared streaks). Colour is averaged in the stored encoding, which for sRGB
+        // layers darkens fine high-contrast detail very slightly; correct enough for scans.
         if auto_generate && mip_level_count > 1 {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("material_texture_array_mipgen"),
-            });
-            for mip in 1..mip_level_count {
-                let src_width = (width >> (mip - 1)).max(1);
-                let src_height = (height >> (mip - 1)).max(1);
-                let copy_width = (width >> mip).max(1).min(src_width);
-                let copy_height = (height >> mip).max(1).min(src_height);
-                for layer in 0..layer_count {
-                    encoder.copy_texture_to_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &texture,
-                            mip_level: mip - 1,
-                            origin: wgpu::Origin3d {
-                                x: 0,
-                                y: 0,
-                                z: layer,
-                            },
-                            aspect: wgpu::TextureAspect::All,
-                        },
+            for (index, (bytes, _, _)) in layers.iter().enumerate().take(layer_count as usize) {
+                if bytes.len() < bytes_per_layer {
+                    continue;
+                }
+                let mut prev: Vec<u8> = bytes[..bytes_per_layer].to_vec();
+                let (mut pw, mut ph) = (width as usize, height as usize);
+                for mip in 1..mip_level_count {
+                    let nw = (pw / 2).max(1);
+                    let nh = (ph / 2).max(1);
+                    let mut next = vec![0u8; nw * nh * 4];
+                    for y in 0..nh {
+                        let y0 = (y * 2).min(ph - 1);
+                        let y1 = (y * 2 + 1).min(ph - 1);
+                        for x in 0..nw {
+                            let x0 = (x * 2).min(pw - 1);
+                            let x1 = (x * 2 + 1).min(pw - 1);
+                            let o = (y * nw + x) * 4;
+                            for c in 0..4 {
+                                let sum = prev[(y0 * pw + x0) * 4 + c] as u32
+                                    + prev[(y0 * pw + x1) * 4 + c] as u32
+                                    + prev[(y1 * pw + x0) * 4 + c] as u32
+                                    + prev[(y1 * pw + x1) * 4 + c] as u32;
+                                next[o + c] = ((sum + 2) / 4) as u8;
+                            }
+                        }
+                    }
+                    queue.write_texture(
                         wgpu::TexelCopyTextureInfo {
                             texture: &texture,
                             mip_level: mip,
                             origin: wgpu::Origin3d {
                                 x: 0,
                                 y: 0,
-                                z: layer,
+                                z: index as u32,
                             },
                             aspect: wgpu::TextureAspect::All,
                         },
+                        &next,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(nw as u32 * 4),
+                            rows_per_image: Some(nh as u32),
+                        },
                         wgpu::Extent3d {
-                            width: copy_width,
-                            height: copy_height,
+                            width: nw as u32,
+                            height: nh as u32,
                             depth_or_array_layers: 1,
                         },
                     );
+                    prev = next;
+                    pw = nw;
+                    ph = nh;
                 }
             }
-            queue.submit(std::iter::once(encoder.finish()));
         }
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
