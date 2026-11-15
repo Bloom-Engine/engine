@@ -14,13 +14,20 @@
 //! slot index and the global texture id do not change, so nothing that
 //! refers to the texture has to be told.
 //!
-//! Who decides the level is the next stage. This one has only a test driver:
-//! `BLOOM_TEXTURE_STREAM_RAISE=1` raises a few textures to their full size
-//! every frame until all are whole, which exercises the swap on real content.
+//! Stage 2 decides the level. Everything drawn says how sharp its textures
+//! have to be: a mesh's texture coordinates per metre and its distance from
+//! the camera give the texels one screen pixel covers, and so the level
+//! (`needed_level`). A texture takes the sharpest level asked of it. Once a
+//! frame the scheduler raises the texture furthest below what it was asked
+//! for and, when the budget is full, first lowers the ones that have held
+//! more than anyone asked for the longest. A texture nothing asked for goes
+//! back to its floor only under that pressure, so looking away costs nothing.
 //!
-//! Streaming is off unless `BLOOM_TEXTURE_STREAM=1`: with nothing yet to
-//! raise a texture when it comes near, turning it on leaves near surfaces
-//! soft. The next stage makes it the default on phones, tablets and TV.
+//! Streaming is on by default on iOS, tvOS and Android, and off elsewhere.
+//! `BLOOM_TEXTURE_STREAM=1` or `=0` overrides that; `BLOOM_TEXTURE_STREAM_MB`
+//! sets the budget for the streamed textures (default 384).
+//! `BLOOM_TEXTURE_STREAM_RAISE=1` is a test driver: it ignores demand and
+//! raises every streamed texture to full size, a few a frame.
 //!
 //! Bind groups hold texture views, so a swap also rebuilds the material bind
 //! groups that show the slot: those of cached models here, those of scene
@@ -40,6 +47,148 @@ use crate::compressed_texture::CompressedImage;
 pub(crate) const FLOOR_DIM: u32 = 256;
 /// How many textures the test driver raises in one frame.
 const RAISES_PER_FRAME: usize = 2;
+/// The scheduler raises one texture a frame: the read is on the frame.
+const SCHEDULED_RAISES_PER_FRAME: usize = 1;
+/// Ticks a texture has to hold more than it is asked for before the
+/// scheduler may take it back (two seconds at 60 Hz).
+const SURPLUS_TICKS_BEFORE_LOWERING: u32 = 120;
+/// Default budget for streamed textures, in megabytes.
+const DEFAULT_BUDGET_MB: u64 = 384;
+/// Levels of margin: ask for one level sharper than the estimate, which
+/// covers surfaces seen at a slant and the estimate's own roughness.
+const LEVEL_BIAS: f32 = 1.0;
+
+fn budget_bytes() -> u64 {
+    static BUDGET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("BLOOM_TEXTURE_STREAM_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_BUDGET_MB)
+            * 1024
+            * 1024
+    })
+}
+
+/// Texture coordinates per metre of a mesh: the square root of its area in
+/// texture space over its area in model space. 0 when either is empty (no
+/// texture coordinates, or a degenerate mesh): unknown.
+pub(crate) fn uv_density(vertices: &[super::Vertex3D], indices: &[u32]) -> f32 {
+    let (mut uv_area, mut area) = (0.0f64, 0.0f64);
+    for tri in indices.chunks_exact(3) {
+        let (Some(a), Some(b), Some(c)) = (
+            vertices.get(tri[0] as usize),
+            vertices.get(tri[1] as usize),
+            vertices.get(tri[2] as usize),
+        ) else {
+            continue;
+        };
+        let e1 = [
+            b.position[0] - a.position[0],
+            b.position[1] - a.position[1],
+            b.position[2] - a.position[2],
+        ];
+        let e2 = [
+            c.position[0] - a.position[0],
+            c.position[1] - a.position[1],
+            c.position[2] - a.position[2],
+        ];
+        let cross = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        area += f64::from((cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt());
+        let (u1, v1) = (b.uv[0] - a.uv[0], b.uv[1] - a.uv[1]);
+        let (u2, v2) = (c.uv[0] - a.uv[0], c.uv[1] - a.uv[1]);
+        uv_area += f64::from((u1 * v2 - u2 * v1).abs());
+    }
+    if area <= 0.0 || uv_area <= 0.0 {
+        return 0.0;
+    }
+    (uv_area / area).sqrt() as f32
+}
+
+/// The level a texture `full_dim` texels across has to hold for a surface
+/// with `density` texture coordinates per metre, `distance` metres away, when
+/// one screen pixel covers `pixel_metres` metres at one metre. 0 (everything)
+/// when the density is unknown.
+pub(crate) fn needed_level(full_dim: u32, density: f32, distance: f32, pixel_metres: f32) -> u32 {
+    if !(density > 0.0) || !(pixel_metres > 0.0) {
+        return 0;
+    }
+    let texels_per_pixel = distance.max(0.05) * pixel_metres * density * full_dim as f32;
+    (texels_per_pixel.log2() - LEVEL_BIAS).floor().max(0.0) as u32
+}
+
+/// Distance from `point` to the box `lo`..`hi` (0 inside it).
+fn distance_to_box(point: [f32; 3], lo: [f32; 3], hi: [f32; 3]) -> f32 {
+    let mut sum = 0.0;
+    for a in 0..3 {
+        let d = (lo[a] - point[a]).max(point[a] - hi[a]).max(0.0);
+        sum += d * d;
+    }
+    sum.sqrt()
+}
+
+/// What the scheduler does this tick: `(slot, level)` to set, lowerings first.
+/// `entries`: slot, resident level, wanted level, ticks in surplus, and the
+/// chain's bytes from each level down.
+pub(crate) fn plan_tick(
+    entries: &[(u32, u32, u32, u32, &[u64])],
+    budget: u64,
+    raises: usize,
+) -> Vec<(u32, u32)> {
+    let bytes = |chain: &[u64], level: u32| chain.get(level as usize).copied().unwrap_or(0);
+    let mut resident: u64 = entries.iter().map(|e| bytes(e.4, e.1)).sum();
+    // Those holding more than asked, longest first: what pressure takes back.
+    let mut spare: Vec<&(u32, u32, u32, u32, &[u64])> = entries
+        .iter()
+        .filter(|e| e.2 > e.1 && e.3 >= SURPLUS_TICKS_BEFORE_LOWERING)
+        .collect();
+    spare.sort_by(|a, b| b.3.cmp(&a.3).then(a.0.cmp(&b.0)));
+    let mut spare = spare.into_iter();
+    // Those holding less than asked, the largest shortfall first.
+    let mut short: Vec<&(u32, u32, u32, u32, &[u64])> =
+        entries.iter().filter(|e| e.2 < e.1).collect();
+    short.sort_by(|a, b| (b.1 - b.2).cmp(&(a.1 - a.2)).then(a.0.cmp(&b.0)));
+    let mut plan = Vec::new();
+    let mut lower_one = |resident: &mut u64, plan: &mut Vec<(u32, u32)>| -> bool {
+        let Some(e) = spare.next() else {
+            return false;
+        };
+        *resident -= bytes(e.4, e.1) - bytes(e.4, e.2);
+        plan.push((e.0, e.2));
+        true
+    };
+    while resident > budget {
+        if !lower_one(&mut resident, &mut plan) {
+            break;
+        }
+    }
+    for e in short.into_iter().take(raises) {
+        // The sharpest level the budget has room for, making room if it can.
+        let mut level = e.2;
+        loop {
+            let cost = bytes(e.4, level) - bytes(e.4, e.1);
+            if resident + cost <= budget {
+                break;
+            }
+            if lower_one(&mut resident, &mut plan) {
+                continue;
+            }
+            level += 1;
+            if level >= e.1 {
+                break;
+            }
+        }
+        if level < e.1 {
+            resident += bytes(e.4, level) - bytes(e.4, e.1);
+            plan.push((e.0, level));
+        }
+    }
+    plan
+}
 
 /// Where a streamed texture's KTX2 bytes are: a byte range of a file.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,6 +206,26 @@ struct StreamedTexture {
     floor_level: u32,
     is_normal: bool,
     srgb: bool,
+    /// Bytes of the chain from each level down (`chain_bytes[0]` = all of it).
+    chain_bytes: Vec<u64>,
+    /// The larger side of level 0, in texels.
+    full_dim: u32,
+    /// The sharpest level anything on screen asked for since the last tick;
+    /// `u32::MAX` when nothing did.
+    wanted: u32,
+    /// What the last tick settled on for it.
+    planned: u32,
+    /// Ticks in a row the texture has held more than was asked for.
+    surplus_ticks: u32,
+}
+
+/// The bytes of `image`'s chain from each level down.
+fn chain_bytes(image: &CompressedImage) -> Vec<u64> {
+    let mut sizes: Vec<u64> = image.levels.iter().map(|l| l.len() as u64).collect();
+    for at in (0..sizes.len().saturating_sub(1)).rev() {
+        sizes[at] += sizes[at + 1];
+    }
+    sizes
 }
 
 /// One renderer's streamed textures. Slot indices mean nothing outside the
@@ -69,6 +238,9 @@ pub(crate) struct TextureStreaming {
     /// Slots given another texture since the scene last rebuilt its material
     /// bind groups (`take_replaced_textures`).
     replaced: Vec<u32>,
+    /// Texture coordinates per metre of each mesh seen, by the address of its
+    /// vertices (shared model primitives are measured once).
+    uv_density: HashMap<usize, f32>,
 }
 
 fn env_flag(name: &str) -> Option<bool> {
@@ -83,7 +255,13 @@ fn env_flag(name: &str) -> Option<bool> {
 /// Whether textures are streamed in this process.
 pub(crate) fn enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag("BLOOM_TEXTURE_STREAM").unwrap_or(false))
+    *ENABLED.get_or_init(|| {
+        env_flag("BLOOM_TEXTURE_STREAM").unwrap_or(cfg!(any(
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "android"
+        )))
+    })
 }
 
 /// The file range of an image that is `view_length` bytes at `view_offset` in
@@ -205,6 +383,11 @@ impl Renderer {
                 floor_level: level,
                 is_normal,
                 srgb,
+                chain_bytes: chain_bytes(image),
+                full_dim: image.width.max(image.height),
+                wanted: u32::MAX,
+                planned: level,
+                surplus_ticks: 0,
             },
         );
         Some(index)
@@ -393,10 +576,152 @@ impl Renderer {
         }
     }
 
-    /// Once a frame. Stage 1 has only the test driver here.
+    /// Something drawn asks for its textures: `slots` are the texture slots
+    /// of its material, `density` its texture coordinates per metre in world
+    /// space, `distance` how far it is from the camera.
+    fn want_textures(&mut self, slots: [u32; 5], density: f32, distance: f32, pixel_metres: f32) {
+        for slot in slots {
+            if slot == 0 {
+                continue;
+            }
+            if let Some(entry) = self.texture_streaming.entries.get_mut(&slot) {
+                let level = needed_level(entry.full_dim, density, distance, pixel_metres);
+                entry.wanted = entry.wanted.min(level);
+            }
+        }
+    }
+
+    /// Metres one output pixel covers at one metre from the camera.
+    fn streaming_pixel_metres(&self) -> f32 {
+        let focal = self.current_proj_matrix[1][1].abs().max(1e-3);
+        2.0 / focal / self.surface_config.height.max(1) as f32
+    }
+
+    /// Every scene node on screen asks for its textures.
+    pub(crate) fn texture_streaming_observe_scene(&mut self, scene: &crate::scene::SceneGraph) {
+        if self.texture_streaming.entries.is_empty() {
+            return;
+        }
+        let camera = self.current_camera_pos;
+        let pixel_metres = self.streaming_pixel_metres();
+        for (_, node) in scene.nodes.iter() {
+            if !node.shown_on_screen() || node.indices().is_empty() {
+                continue;
+            }
+            let material = &node.material;
+            let slots = [
+                material.texture_idx,
+                material.normal_texture_idx,
+                material.metallic_roughness_texture_idx,
+                material.emissive_texture_idx,
+                material.occlusion_texture_idx,
+            ];
+            if !slots
+                .iter()
+                .any(|slot| self.texture_streaming.entries.contains_key(slot))
+            {
+                continue;
+            }
+            let key = node.vertices().as_ptr() as usize;
+            let local = *self
+                .texture_streaming
+                .uv_density
+                .entry(key)
+                .or_insert_with(|| uv_density(node.vertices(), node.indices()));
+            let world = node.world_transform();
+            let scale = (0..3)
+                .map(|c| (world[c][0].powi(2) + world[c][1].powi(2) + world[c][2].powi(2)).sqrt())
+                .fold(0.0f32, f32::max)
+                .max(1e-4);
+            let distance = if node.world_bounds_min[0] <= node.world_bounds_max[0] {
+                distance_to_box(camera, node.world_bounds_min, node.world_bounds_max)
+            } else {
+                0.0
+            };
+            self.want_textures(slots, local / scale, distance, pixel_metres);
+        }
+    }
+
+    /// A cached model drawn at `position` and `scale` asks for its textures.
+    pub(crate) fn texture_streaming_observe_model(
+        &mut self,
+        handle_bits: u64,
+        position: [f32; 3],
+        scale: f32,
+    ) {
+        if self.texture_streaming.entries.is_empty() {
+            return;
+        }
+        let camera = self.current_camera_pos;
+        let pixel_metres = self.streaming_pixel_metres();
+        let asks: Vec<([u32; 5], f32, f32)> = match self.model_gpu_cache.get(&handle_bits) {
+            Some(Some(meshes)) => meshes
+                .iter()
+                .map(|mesh| {
+                    let s = scale.abs().max(1e-4);
+                    let lo = [0, 1, 2].map(|a| position[a] + mesh.local_min[a] * s);
+                    let hi = [0, 1, 2].map(|a| position[a] + mesh.local_max[a] * s);
+                    let distance = if mesh.local_min[0] <= mesh.local_max[0] {
+                        distance_to_box(camera, lo, hi)
+                    } else {
+                        0.0
+                    };
+                    (mesh.material_textures, mesh.uv_density / s, distance)
+                })
+                .collect(),
+            _ => return,
+        };
+        for (slots, density, distance) in asks {
+            self.want_textures(slots, density, distance, pixel_metres);
+        }
+    }
+
+    /// Once a frame: turn what was asked for into at most a few swaps.
+    fn texture_streaming_schedule(&mut self) {
+        if self.texture_streaming.entries.is_empty() {
+            return;
+        }
+        for entry in self.texture_streaming.entries.values_mut() {
+            // Nothing on screen showed it: it could go back to its floor.
+            let wanted = entry.wanted.min(entry.floor_level);
+            entry.wanted = u32::MAX;
+            if wanted > entry.resident_level {
+                entry.surplus_ticks = entry.surplus_ticks.saturating_add(1);
+            } else {
+                entry.surplus_ticks = 0;
+            }
+            // `wanted` is read back by the plan below through this field.
+            entry.planned = wanted;
+        }
+        let plan = {
+            let view: Vec<(u32, u32, u32, u32, &[u64])> = self
+                .texture_streaming
+                .entries
+                .iter()
+                .map(|(&slot, e)| {
+                    (
+                        slot,
+                        e.resident_level,
+                        e.planned,
+                        e.surplus_ticks,
+                        e.chain_bytes.as_slice(),
+                    )
+                })
+                .collect();
+            plan_tick(&view, budget_bytes(), SCHEDULED_RAISES_PER_FRAME)
+        };
+        for (slot, level) in plan {
+            if !self.set_texture_resident_level(slot, level) {
+                self.forget_streamed_texture(slot); // unreadable: leave it as it is
+            }
+        }
+    }
+
+    /// Once a frame.
     pub(crate) fn texture_streaming_tick(&mut self) {
         static RAISE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if !*RAISE.get_or_init(|| env_flag("BLOOM_TEXTURE_STREAM_RAISE").unwrap_or(false)) {
+            self.texture_streaming_schedule();
             return;
         }
         let pending: Vec<u32> = self
@@ -458,6 +783,71 @@ mod tests {
         assert_eq!(floor_level(64, 64, 7, 256), 0);
         // a chain that stops early cannot go below its last level
         assert_eq!(floor_level(2048, 2048, 2, 256), 1);
+    }
+
+    #[test]
+    fn the_needed_level_follows_distance_and_density() {
+        // 2048 texels over one metre, a 1080-line screen with a 90 degree view:
+        // one pixel covers 2/1080 m at 1 m. At 4 m that is 15 texels a pixel:
+        // level 3 would do, and the margin of one level makes it 2.
+        let pixel = 2.0 / 1080.0;
+        assert_eq!(needed_level(2048, 1.0, 0.5, pixel), 0, "close: everything");
+        assert_eq!(needed_level(2048, 1.0, 4.0, pixel), 2);
+        assert_eq!(needed_level(2048, 1.0, 64.0, pixel), 6);
+        // the same texture tiled four times a metre needs it four times as far
+        assert_eq!(needed_level(2048, 4.0, 16.0, pixel), 6);
+        assert_eq!(
+            needed_level(2048, 0.0, 500.0, pixel),
+            0,
+            "unknown density: everything"
+        );
+    }
+
+    #[test]
+    fn uv_density_is_texture_coordinates_per_metre() {
+        let v = |x: f32, y: f32, u: f32, w: f32| super::super::Vertex3D {
+            position: [x, y, 0.0],
+            uv: [u, w],
+            ..Default::default()
+        };
+        // a 2 m square showing the texture once: half a coordinate per metre
+        let quad = [
+            v(0., 0., 0., 0.),
+            v(2., 0., 1., 0.),
+            v(2., 2., 1., 1.),
+            v(0., 2., 0., 1.),
+        ];
+        let indices = [0, 1, 2, 0, 2, 3];
+        assert!((uv_density(&quad, &indices) - 0.5).abs() < 1e-5);
+        let flat = [
+            v(0., 0., 0., 0.),
+            v(2., 0., 0., 0.),
+            v(2., 2., 0., 0.),
+            v(0., 2., 0., 0.),
+        ];
+        assert_eq!(uv_density(&flat, &indices), 0.0);
+    }
+
+    #[test]
+    fn the_scheduler_raises_the_worst_shortfall_and_lowers_only_under_pressure() {
+        let chain: Vec<u64> = vec![1000, 250, 60, 15];
+        let c = chain.as_slice();
+        // slot, resident, wanted, surplus ticks, chain
+        let plenty = 10_000;
+        // room for everything: the larger shortfall goes first, nothing is lowered
+        let entries = [(1, 3, 2, 0, c), (2, 3, 0, 0, c), (3, 0, 3, 500, c)];
+        assert_eq!(plan_tick(&entries, plenty, 1), vec![(2, 0)]);
+        // no room: the texture that has held too much for long is taken back first
+        let entries = [(2, 3, 0, 0, c), (3, 0, 3, 500, c)];
+        assert_eq!(plan_tick(&entries, 1015, 1), vec![(3, 3), (2, 0)]);
+        // a surplus too recent to touch: the raise settles for what fits
+        let entries = [(2, 3, 0, 0, c), (3, 0, 3, 5, c)];
+        assert_eq!(plan_tick(&entries, 1300, 1), vec![(2, 1)]);
+        // nothing fits at all: nothing happens
+        assert_eq!(plan_tick(&entries, 1015, 1), vec![]);
+        // over budget with nothing asked for: the long-held surplus goes
+        let entries = [(3, 0, 3, 500, c), (4, 0, 0, 0, c)];
+        assert_eq!(plan_tick(&entries, 1500, 1), vec![(3, 3)]);
     }
 
     #[test]
