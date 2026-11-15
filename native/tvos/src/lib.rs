@@ -145,11 +145,36 @@ fn resolve_path(path: &str) -> String {
         return path.to_string();
     }
     unsafe {
+        // A program may read files before bloom_init_window (module-level code runs first), so
+        // the bundle path is looked up on first use, not only when the window opens.
+        if BUNDLE_PATH.is_none() {
+            BUNDLE_PATH = main_bundle_resource_path();
+        }
         if let Some(ref base) = BUNDLE_PATH {
             format!("{}/{}", base, path)
         } else {
             path.to_string()
         }
+    }
+}
+
+/// `NSBundle.mainBundle.resourcePath`, or None if it is unavailable.
+fn main_bundle_resource_path() -> Option<String> {
+    unsafe {
+        let bundle_cls = AnyClass::get(c"NSBundle")?;
+        let main_bundle: Retained<AnyObject> = msg_send![bundle_cls, mainBundle];
+        let resource_path: *const AnyObject = msg_send![&*main_bundle, resourcePath];
+        if resource_path.is_null() {
+            return None;
+        }
+        let utf8: *const u8 = msg_send![&*resource_path, UTF8String];
+        if utf8.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(utf8 as *const i8)
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
     }
 }
 
@@ -1519,18 +1544,7 @@ pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const
 
     // Get app bundle path for resolving relative asset paths
     unsafe {
-        let bundle_cls = AnyClass::get(c"NSBundle").unwrap();
-        let main_bundle: Retained<AnyObject> = msg_send![bundle_cls, mainBundle];
-        let resource_path: *const AnyObject = msg_send![&*main_bundle, resourcePath];
-        if !resource_path.is_null() {
-            let utf8: *const u8 = msg_send![&*resource_path, UTF8String];
-            if !utf8.is_null() {
-                let cstr = std::ffi::CStr::from_ptr(utf8 as *const i8);
-                if let Ok(s) = cstr.to_str() {
-                    BUNDLE_PATH = Some(s.to_string());
-                }
-            }
-        }
+        BUNDLE_PATH = main_bundle_resource_path();
     }
 
     // With --features ios-game-loop, this function runs on the game thread.
