@@ -2029,6 +2029,38 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_get_monitor_count",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_monitor_metric",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_monitor_name",
+          "params": [
+            "f64"
+          ],
+          "returns": "string"
+        },
+        {
+          "name": "bloom_get_current_monitor",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_monitor",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_get_physical_width",
           "params": [],
           "returns": "f64"
@@ -2508,6 +2540,11 @@
         },
         {
           "name": "bloom_is_gamepad_available",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_gamepad_kind",
           "params": [],
           "returns": "f64"
         },

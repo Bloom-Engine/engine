@@ -71,3 +71,68 @@ pub fn safe_area_inset(edge: usize) -> f64 {
         .get(edge)
         .map_or(0.0, |v| f64::from_bits(v.load(Ordering::Relaxed)))
 }
+
+// ---- monitors ---------------------------------------------------------------
+//
+// Which displays there are, which one the game is on, and moving it. Only a
+// platform's windowing code can answer, so a platform crate that can registers
+// a provider once at start-up; everywhere else the engine reports the one
+// display it is drawing to. One shared FFI surface either way, so a game's
+// "monitor" settings row needs no per-platform code.
+
+/// One display, in physical pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MonitorInfo {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// Refresh rate in Hz; 0 when the platform does not say.
+    pub refresh_hz: f32,
+}
+
+/// A platform's answers. Plain function pointers: the providers read window
+/// state that lives in the platform crate's own statics.
+#[derive(Clone, Copy)]
+pub struct MonitorProvider {
+    pub list: fn() -> Vec<MonitorInfo>,
+    /// Index into `list()` of the display the window is on.
+    pub current: fn() -> usize,
+    /// Ask for the window to move to that display. May complete over several
+    /// frames (leaving and re-entering fullscreen). False if out of range.
+    pub set: fn(usize) -> bool,
+}
+
+static MONITORS: std::sync::OnceLock<MonitorProvider> = std::sync::OnceLock::new();
+
+/// Called once by a platform crate that can enumerate displays.
+pub fn set_monitor_provider(provider: MonitorProvider) {
+    let _ = MONITORS.set(provider);
+}
+
+/// The displays; `fallback` is the size the engine is drawing at, reported as
+/// the single display when the platform registered nothing.
+pub fn monitors(fallback: (u32, u32)) -> Vec<MonitorInfo> {
+    let listed = MONITORS.get().map(|p| (p.list)()).unwrap_or_default();
+    if listed.is_empty() {
+        vec![MonitorInfo {
+            name: String::from("Display"),
+            width: fallback.0,
+            height: fallback.1,
+            refresh_hz: 0.0,
+        }]
+    } else {
+        listed
+    }
+}
+
+pub fn current_monitor() -> usize {
+    MONITORS.get().map_or(0, |p| (p.current)())
+}
+
+pub fn set_monitor(index: usize) -> bool {
+    match MONITORS.get() {
+        Some(p) => (p.set)(index),
+        // One display: asking for it is a success, anything else is not.
+        None => index == 0,
+    }
+}

@@ -69,6 +69,11 @@ declare function bloom_get_render_scale(): number;
 declare function bloom_set_upscale_mode(mode: number): number;
 declare function bloom_set_cas_strength(strength: number): number;
 declare function bloom_get_physical_width(): number;
+declare function bloom_get_monitor_count(): number;
+declare function bloom_get_monitor_metric(index: number, what: number): number;
+declare function bloom_get_monitor_name(index: number): string;
+declare function bloom_get_current_monitor(): number;
+declare function bloom_set_monitor(index: number): number;
 declare function bloom_get_physical_height(): number;
 declare function bloom_set_auto_resolution(targetHz: number, enabled: number): number;
 declare function bloom_set_manual_exposure(value: number): number;
@@ -163,6 +168,7 @@ declare function bloom_end_mode_3d(): void;
 
 // Gamepad FFI
 declare function bloom_is_gamepad_available(): number;
+declare function bloom_get_gamepad_kind(): number;
 declare function bloom_get_gamepad_axis(axis: number): number;
 declare function bloom_is_gamepad_button_pressed(btn: number): number;
 declare function bloom_is_gamepad_button_down(btn: number): number;
@@ -682,6 +688,27 @@ export function setUpscaleMode(mode: UpscaleMode): boolean {
 export function setCasStrength(strength: number): boolean {
   return bloom_set_cas_strength(strength) !== 0;
 }
+
+/**
+ * Displays attached to the machine. Enumerated on macOS; every other platform
+ * reports the one display the game is drawing to (count 1, and `setMonitor(0)`
+ * is the only move that succeeds). Sizes are physical pixels; a refresh rate
+ * of 0 means the platform did not say. Call these from a settings screen, not
+ * per frame.
+ */
+export function getMonitorCount(): number { return bloom_get_monitor_count(); }
+export function getMonitorWidth(index: number): number { return bloom_get_monitor_metric(index, 0); }
+export function getMonitorHeight(index: number): number { return bloom_get_monitor_metric(index, 1); }
+export function getMonitorRefreshRate(index: number): number { return bloom_get_monitor_metric(index, 2); }
+export function getMonitorName(index: number): string { return bloom_get_monitor_name(index); }
+/** Index of the display the window is on. */
+export function getCurrentMonitor(): number { return bloom_get_current_monitor(); }
+/**
+ * Move the window to another display, keeping it fullscreen if it was. On
+ * macOS this takes a second or so: the window leaves its fullscreen space,
+ * moves and enters one on the new display. Returns false for a bad index.
+ */
+export function setMonitor(index: number): boolean { return bloom_set_monitor(index) !== 0; }
 
 /** Physical-pixel size of the GPU surface (HiDPI-aware on macOS today). */
 export function getPhysicalWidth(): number { return bloom_get_physical_width(); }
@@ -1365,6 +1392,21 @@ export function endMode3D(): void {
 
 export function isGamepadAvailable(id?: number): boolean {
   return bloom_is_gamepad_available() !== 0;
+}
+
+export const GAMEPAD_KIND_UNKNOWN = 0;
+export const GAMEPAD_KIND_XBOX = 1;
+export const GAMEPAD_KIND_PLAYSTATION = 2;
+export const GAMEPAD_KIND_NINTENDO = 3;
+export const GAMEPAD_KIND_OTHER = 4;
+
+/**
+ * The connected pad's family, for drawing the right button glyphs: one of the
+ * GAMEPAD_KIND_* values. Known on macOS (from GameController) and Windows
+ * (XInput pads are Xbox pads); 0 elsewhere and when no pad is connected.
+ */
+export function getGamepadKind(): number {
+  return bloom_get_gamepad_kind();
 }
 
 export function getGamepadAxisValue(id: number, axis: number): number {

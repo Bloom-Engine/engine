@@ -127,6 +127,20 @@ macro_rules! __bloom_ffi_input {
             })
         }
 
+        // bloom_get_gamepad_kind — the connected pad's family, for button
+        // glyphs: 0 unknown, 1 Xbox, 2 PlayStation, 3 Nintendo, 4 other.
+        #[no_mangle]
+        pub extern "C" fn bloom_get_gamepad_kind() -> f64 {
+            $crate::ffi::guard("bloom_get_gamepad_kind", move || {
+                let input = &engine().input;
+                if input.is_gamepad_available() {
+                    input.gamepad_kind as f64
+                } else {
+                    0.0
+                }
+            })
+        }
+
         // bloom_get_gamepad_axis  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_get_gamepad_axis(axis: f64) -> f64 {

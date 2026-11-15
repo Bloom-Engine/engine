@@ -2273,9 +2273,23 @@ of silently posing the model with another's matrices. Raising it means a storage
 five shader sources that about a hundred `create_shader_module` sites derive variants from
 by text splicing, on nine backends; not attempted.
 
-**Not started:** shadows from local lights on material-path geometry, volumetric fog, a
-display-mode list and monitor choice, the connected pad's type, grass LOD (EN-060).
+**Monitors** (`display.rs`, second commit). `getMonitorCount / Width / Height / RefreshRate /
+Name`, `getCurrentMonitor`, `setMonitor`. A platform registers a provider; macOS does
+(NSScreen), everything else reports the one display it draws to. A fullscreen window cannot
+be moved between displays, so the macOS move is a small per-frame state machine: leave the
+fullscreen space, move, enter one on the new display. Tried on a three-display Mac, windowed
+and fullscreen, there and back. There is no list of display MODES: the engine draws
+borderless at the display's own resolution and the output scale is the resolution control.
 
-Tests: 531 unit tests and the golden-image suite pass. `visibility_shading_matches_forward_
+**Pad family** (`getGamepadKind`: Xbox, PlayStation, Nintendo, other), for button glyphs.
+From GameController's `productCategory` on macOS, constant on Windows (XInput), unknown on
+Linux, Android, web and, for now, iOS and tvOS. **No pad was connected: only the name
+classifier is tested.**
+
+**Not started:** shadows from local lights on material-path geometry, volumetric fog,
+grass LOD (EN-060).
+
+Compile-checked for macOS, iOS and tvOS; the Android, Linux and Windows crates cannot be
+checked from a Mac (C dependencies) and carry only small edits. Tests: 532 unit tests and the golden-image suite pass. `visibility_shading_matches_forward_
 reference` fails with max delta 2 against a 1-LSB bound, identically on the commit before
 this work. The wasm check does not build on this branch (`mobile_shading`, unrelated).

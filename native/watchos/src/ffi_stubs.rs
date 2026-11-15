@@ -420,6 +420,21 @@
 #[no_mangle] pub extern "C" fn bloom_set_cas_strength(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_get_monitor_count() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_monitor_metric(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_monitor_name(_p0: f64) -> i64 {
+    0
+}
+#[no_mangle] pub extern "C" fn bloom_get_current_monitor() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_monitor(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_get_physical_width() -> f64 {
     0.0
 }
@@ -567,6 +582,9 @@
 #[no_mangle] pub extern "C" fn bloom_duck_bus(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_reverb(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_get_gamepad_kind() -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_gamepad_rumble(_p0: f64, _p1: f64, _p2: f64) {
 }
