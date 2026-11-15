@@ -468,13 +468,27 @@ mod monitors {
     use objc2::runtime::AnyObject;
     use objc2_foundation::NSRect;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     /// Target display + 1 while a move is under way; 0 = none.
     static PENDING: AtomicUsize = AtomicUsize::new(0);
     static WAS_FULLSCREEN: AtomicBool = AtomicBool::new(false);
     static ASKED_LEAVE: AtomicBool = AtomicBool::new(false);
     static ASKED_ENTER: AtomicBool = AtomicBool::new(false);
-    static FRAMES: AtomicUsize = AtomicUsize::new(0);
+    /// When the move was asked for, and when fullscreen was last toggled (by
+    /// anyone: the game at boot, the player, a phase of a move).
+    static STARTED: Mutex<Option<Instant>> = Mutex::new(None);
+    static LAST_TOGGLE: Mutex<Option<Instant>> = Mutex::new(None);
+    /// AppKit's fullscreen animation. While it runs the style mask does not
+    /// say "fullscreen" yet (or still does), and a window moved in the middle
+    /// of it ends up on no display's space at all: the surface then reports
+    /// occluded for ever. A game that restores a saved display at boot asks
+    /// for the move a few milliseconds after the window asked for fullscreen,
+    /// so every phase waits this long after the last toggle.
+    const SETTLE: Duration = Duration::from_millis(2000);
+    /// Give up rather than fight the window server for ever.
+    const GIVE_UP: Duration = Duration::from_secs(20);
     /// NSWindowStyleMaskFullScreen.
     const STYLE_FULLSCREEN: usize = 1 << 14;
 
@@ -544,9 +558,22 @@ mod monitors {
         WAS_FULLSCREEN.store(false, Ordering::Relaxed);
         ASKED_LEAVE.store(false, Ordering::Relaxed);
         ASKED_ENTER.store(false, Ordering::Relaxed);
-        FRAMES.store(0, Ordering::Relaxed);
+        if let Ok(mut t) = STARTED.lock() {
+            *t = Some(Instant::now());
+        }
         PENDING.store(index + 1, Ordering::Relaxed);
         true
+    }
+
+    /// Fullscreen was just toggled: a pending move waits for the animation.
+    pub fn note_fullscreen_toggle() {
+        if let Ok(mut t) = LAST_TOGGLE.lock() {
+            *t = Some(Instant::now());
+        }
+    }
+
+    fn since(clock: &Mutex<Option<Instant>>) -> Option<Duration> {
+        clock.lock().ok().and_then(|t| t.map(|t| t.elapsed()))
     }
 
     fn done() {
@@ -563,9 +590,12 @@ mod monitors {
             return;
         }
         let target = pending - 1;
-        // Give up rather than fight the window server for ever.
-        if FRAMES.fetch_add(1, Ordering::Relaxed) > 900 {
+        if since(&STARTED).is_some_and(|t| t > GIVE_UP) {
+            eprintln!("bloom: display move to {} given up", target);
             done();
+            return;
+        }
+        if since(&LAST_TOGGLE).is_some_and(|t| t < SETTLE) {
             return;
         }
         unsafe {
@@ -578,6 +608,7 @@ mod monitors {
             if current() != target {
                 if fullscreen {
                     if !ASKED_LEAVE.swap(true, Ordering::Relaxed) {
+                        eprintln!("bloom: display move to {}: leaving fullscreen", target);
                         WAS_FULLSCREEN.store(true, Ordering::Relaxed);
                         super::bloom_toggle_fullscreen();
                     }
@@ -595,16 +626,19 @@ mod monitors {
                 frame.size.height = frame.size.height.min(area.size.height);
                 frame.origin.x = area.origin.x + (area.size.width - frame.size.width) * 0.5;
                 frame.origin.y = area.origin.y + (area.size.height - frame.size.height) * 0.5;
+                eprintln!("bloom: display move to {}: moving the window", target);
                 let _: () = msg_send![&**window, setFrame: frame, display: true];
                 return;
             }
             // On the target display.
             if WAS_FULLSCREEN.load(Ordering::Relaxed) && !fullscreen {
                 if !ASKED_ENTER.swap(true, Ordering::Relaxed) {
+                    eprintln!("bloom: display move to {}: entering fullscreen", target);
                     super::bloom_toggle_fullscreen();
                 }
                 return;
             }
+            eprintln!("bloom: display move to {} done", target);
             done();
         }
     }
@@ -1173,6 +1207,7 @@ pub extern "C" fn bloom_toggle_fullscreen() {
     unsafe {
         if let Some(window) = &WINDOW {
             let _: () = msg_send![window, toggleFullScreen: std::ptr::null::<std::ffi::c_void>()];
+            monitors::note_fullscreen_toggle();
         }
     }
 }
