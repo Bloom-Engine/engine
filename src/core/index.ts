@@ -69,6 +69,11 @@ declare function bloom_get_render_scale(): number;
 declare function bloom_set_upscale_mode(mode: number): number;
 declare function bloom_set_cas_strength(strength: number): number;
 declare function bloom_get_physical_width(): number;
+declare function bloom_get_monitor_count(): number;
+declare function bloom_get_monitor_metric(index: number, what: number): number;
+declare function bloom_get_monitor_name(index: number): string;
+declare function bloom_get_current_monitor(): number;
+declare function bloom_set_monitor(index: number): number;
 declare function bloom_get_physical_height(): number;
 declare function bloom_set_auto_resolution(targetHz: number, enabled: number): number;
 declare function bloom_set_manual_exposure(value: number): number;
@@ -80,6 +85,7 @@ declare function bloom_path_tracing_supported(): number;
 declare function bloom_set_ssgi_intensity(intensity: number): number;
 declare function bloom_set_ssgi_radius(radius: number): number;
 declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): number;
+declare function bloom_set_dof_range(nearSharp: number, farSharp: number, maxBlur: number): number;
 declare function bloom_set_quality_preset(preset: number): number;
 declare function bloom_set_shadows_enabled(on: number): number;
 declare function bloom_set_shadows_always_fresh(on: number): number;
@@ -87,6 +93,9 @@ declare function bloom_set_bloom_enabled(on: number): number;
 declare function bloom_set_bloom_intensity(value: number): number;
 declare function bloom_set_tonemap(kind: number): number;
 declare function bloom_set_color_saturation(value: number): number;
+declare function bloom_set_color_grade(path: number, strength: number): number;
+declare function bloom_set_color_grade_strength(strength: number): number;
+declare function bloom_write_color_grade_neutral(path: number, size: number): number;
 declare function bloom_set_auto_exposure_key(key: number): number;
 declare function bloom_set_auto_exposure_rate(rate: number): number;
 declare function bloom_set_ssao_enabled(on: number): number;
@@ -159,6 +168,7 @@ declare function bloom_end_mode_3d(): void;
 
 // Gamepad FFI
 declare function bloom_is_gamepad_available(): number;
+declare function bloom_get_gamepad_kind(): number;
 declare function bloom_get_gamepad_axis(axis: number): number;
 declare function bloom_is_gamepad_button_pressed(btn: number): number;
 declare function bloom_is_gamepad_button_down(btn: number): number;
@@ -201,6 +211,7 @@ declare function bloom_get_clipboard_text(): number;
 declare function bloom_open_file_dialog(filter: number, title: number): number;
 declare function bloom_save_file_dialog(defaultName: number, title: number): number;
 declare function bloom_write_file(path: number, data: number): number;
+declare function bloom_set_crash_report_path(path: number): void;
 declare function bloom_file_exists(path: number): number;
 declare function bloom_read_file(path: number): number;
 declare function bloom_run_game(callback: number): void;
@@ -678,6 +689,27 @@ export function setCasStrength(strength: number): boolean {
   return bloom_set_cas_strength(strength) !== 0;
 }
 
+/**
+ * Displays attached to the machine. Enumerated on macOS; every other platform
+ * reports the one display the game is drawing to (count 1, and `setMonitor(0)`
+ * is the only move that succeeds). Sizes are physical pixels; a refresh rate
+ * of 0 means the platform did not say. Call these from a settings screen, not
+ * per frame.
+ */
+export function getMonitorCount(): number { return bloom_get_monitor_count(); }
+export function getMonitorWidth(index: number): number { return bloom_get_monitor_metric(index, 0); }
+export function getMonitorHeight(index: number): number { return bloom_get_monitor_metric(index, 1); }
+export function getMonitorRefreshRate(index: number): number { return bloom_get_monitor_metric(index, 2); }
+export function getMonitorName(index: number): string { return bloom_get_monitor_name(index); }
+/** Index of the display the window is on. */
+export function getCurrentMonitor(): number { return bloom_get_current_monitor(); }
+/**
+ * Move the window to another display, keeping it fullscreen if it was. On
+ * macOS this takes a second or so: the window leaves its fullscreen space,
+ * moves and enters one on the new display. Returns false for a bad index.
+ */
+export function setMonitor(index: number): boolean { return bloom_set_monitor(index) !== 0; }
+
 /** Physical-pixel size of the GPU surface (HiDPI-aware on macOS today). */
 export function getPhysicalWidth(): number { return bloom_get_physical_width(); }
 export function getPhysicalHeight(): number { return bloom_get_physical_height(); }
@@ -822,6 +854,18 @@ export function setDepthOfField(focusDistance: number, aperture: number): boolea
   return bloom_set_dof(aperture > 0 ? 1 : 0, focusDistance, aperture) !== 0;
 }
 
+/**
+ * The band around the focus distance that stays sharp: `nearSharp` metres in
+ * front of it and `farSharp` behind it. Blur starts at the band's edges and
+ * grows with `aperture`. Without a band (the default, 0 / 0) only the exact
+ * focus distance is sharp, which softens whatever you focused on.
+ * `maxBlur` caps the blur radius as a fraction of the frame's height
+ * (default 0.006; 0 leaves it as it is).
+ */
+export function setDepthOfFieldRange(nearSharp: number, farSharp: number, maxBlur: number = 0): boolean {
+  return bloom_set_dof_range(nearSharp, farSharp, maxBlur) !== 0;
+}
+
 // ============================================================
 // Render quality — let games pick a preset for the target device
 // or toggle individual effects. Presets apply a known-good set of
@@ -896,6 +940,32 @@ export function setTonemap(kind: Tonemap): boolean {
 /** Post-tonemap output saturation. 1 is neutral; 0 is grayscale. */
 export function setColorSaturation(saturation: number): boolean {
   return bloom_set_color_saturation(saturation) !== 0;
+}
+
+/**
+ * Colour-grade the final image through a lookup table. `path` is a strip PNG:
+ * N*N pixels wide and N high (N = 16, 32 or 64), N tiles side by side with red
+ * along each tile, green down it and blue from tile to tile, the layout most
+ * grading tools export. The table is display-referred (sRGB in, sRGB out) and
+ * applied after the tonemap. `strength` blends it: 0 off, 1 as authored.
+ * An empty path removes the grade. Returns false if the file is missing or is
+ * not a strip. Not available in the web build yet.
+ *
+ * To author one: `writeNeutralColorGradeLut('neutral.png')`, apply to that
+ * image the same adjustments you would make to a screenshot, save, load.
+ */
+export function setColorGrade(path: string, strength: number = 1): boolean {
+  return bloom_set_color_grade(path as any, strength) !== 0;
+}
+
+/** Blend of the loaded colour grade: 0 = off, 1 = as authored. */
+export function setColorGradeStrength(strength: number): boolean {
+  return bloom_set_color_grade_strength(strength) !== 0;
+}
+
+/** Write the neutral (identity) grade strip of edge `size` as a PNG. */
+export function writeNeutralColorGradeLut(path: string, size: number = 32): boolean {
+  return bloom_write_color_grade_neutral(path as any, size) !== 0;
 }
 
 /**
@@ -1324,6 +1394,21 @@ export function isGamepadAvailable(id?: number): boolean {
   return bloom_is_gamepad_available() !== 0;
 }
 
+export const GAMEPAD_KIND_UNKNOWN = 0;
+export const GAMEPAD_KIND_XBOX = 1;
+export const GAMEPAD_KIND_PLAYSTATION = 2;
+export const GAMEPAD_KIND_NINTENDO = 3;
+export const GAMEPAD_KIND_OTHER = 4;
+
+/**
+ * The connected pad's family, for drawing the right button glyphs: one of the
+ * GAMEPAD_KIND_* values. Known on macOS (from GameController) and Windows
+ * (XInput pads are Xbox pads); 0 elsewhere and when no pad is connected.
+ */
+export function getGamepadKind(): number {
+  return bloom_get_gamepad_kind();
+}
+
 export function getGamepadAxisValue(id: number, axis: number): number {
   return bloom_get_gamepad_axis(axis);
 }
@@ -1503,6 +1588,19 @@ export function saveFileDialog(defaultName: string, title: string): string {
 
 export function writeFile(path: string, data: string): boolean {
   return bloom_write_file(path as any, data as any) !== 0.0;
+}
+
+/**
+ * Name the file a crash writes its report to: the panic message or the fatal
+ * signal, with a backtrace where the platform can produce one. The path
+ * resolves like `writeFile`'s. Call it once at start-up, then on the NEXT
+ * launch `readFile` it: text there means the last run crashed. Show it or
+ * send it, then clear it with `writeFile(path, '')`. Nothing is sent anywhere
+ * by the engine. Windows writes a minidump besides (see
+ * docs/crash-triage-windows.md); the web build has no file and ignores this.
+ */
+export function setCrashReportPath(path: string): void {
+  bloom_set_crash_report_path(path as any);
 }
 
 export function fileExists(path: string): boolean {

@@ -1254,6 +1254,8 @@ declare function bloom_ragdoll_activate(rag: number, anim: number, world: number
 declare function bloom_ragdoll_push(rag: number, dx: number, dy: number, dz: number, impulse: number): void;
 declare function bloom_ragdoll_update(rag: number, anim: number, dt: number): number;
 declare function bloom_ragdoll_release(rag: number): void;
+declare function bloom_ragdoll_configure(rag: number, maxBodies: number, radiusScale: number, swing: number, twist: number): void;
+declare function bloom_ragdoll_set_joint(rag: number, joint: number, simulate: number, swing: number, twist: number): void;
 
 /// Allocate a ragdoll slot. Pool these — one per corpse you intend to have on
 /// screen at once — and reuse them; a slot is cheap, but the bodies it holds
@@ -1297,6 +1299,36 @@ export function updateRagdoll(rag: number, anim: number, dt: number): number {
 /// invisible death.
 export function releaseRagdoll(rag: number): void {
   bloom_ragdoll_release(rag);
+}
+
+/// How this slot builds its ragdoll; kept across `releaseRagdoll`, so set a
+/// pooled slot up once for its rig. Pass 0 to leave a value as it is.
+/// Defaults: 24 bodies, limb radius 0.22 of the bone's length, a 0.7 rad swing
+/// cone and 0.3 rad of twist either way at every joint.
+///
+/// Every joint that has a parent gets one capsule, running to its main child
+/// (a head or a hand gets a short stub); when there are more than `maxBodies`
+/// the shortest bones go without and ride their parent.
+export function configureRagdoll(
+  rag: number, maxBodies: number, radiusScale: number = 0, swing: number = 0, twist: number = 0,
+): void {
+  bloom_ragdoll_configure(rag, maxBodies, radiusScale, swing, twist);
+}
+
+/// One joint's part in the ragdoll. `simulate = false` keeps it out: it then
+/// rides its parent in the pose it died in (a tail tip, a weapon bone, a jaw).
+/// `swing` / `twist` (radians) override the slot's limits for the joint that
+/// ties this bone to its parent, e.g. a knee that barely twists; leave them
+/// negative for the defaults.
+export function setRagdollJoint(
+  rag: number, joint: number, simulate: boolean, swing: number = -1, twist: number = -1,
+): void {
+  bloom_ragdoll_set_joint(rag, joint, simulate ? 1 : 0, swing, twist);
+}
+
+/// Forget every `setRagdollJoint` on this slot.
+export function clearRagdollJoints(rag: number): void {
+  bloom_ragdoll_set_joint(rag, -1, 0, -1, -1);
 }
 
 /// Mark a model as foliage, so the wind actually bends it.

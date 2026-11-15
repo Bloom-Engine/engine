@@ -379,6 +379,55 @@ macro_rules! __bloom_ffi_game_loop {
             })
         }
 
+        // Monitors (display.rs): how many, each one's pixel size, refresh
+        // rate and name, which the window is on, and moving it.
+        #[no_mangle]
+        pub extern "C" fn bloom_get_monitor_count() -> f64 {
+            $crate::ffi::guard("bloom_get_monitor_count", move || {
+                let r = &engine().renderer;
+                $crate::display::monitors(r.native_size()).len() as f64
+            })
+        }
+        // what: 0 = width, 1 = height (pixels), 2 = refresh rate in Hz (0 = unknown)
+        #[no_mangle]
+        pub extern "C" fn bloom_get_monitor_metric(index: f64, what: f64) -> f64 {
+            $crate::ffi::guard("bloom_get_monitor_metric", move || {
+                let r = &engine().renderer;
+                let all = $crate::display::monitors(r.native_size());
+                match all.get(index as usize) {
+                    Some(m) if what < 0.5 => m.width as f64,
+                    Some(m) if what < 1.5 => m.height as f64,
+                    Some(m) => m.refresh_hz as f64,
+                    None => 0.0,
+                }
+            })
+        }
+        #[no_mangle]
+        pub extern "C" fn bloom_get_monitor_name(index: f64) -> *const u8 {
+            $crate::ffi::guard("bloom_get_monitor_name", move || {
+                let r = &engine().renderer;
+                let all = $crate::display::monitors(r.native_size());
+                let name = all.get(index as usize).map_or("", |m| m.name.as_str());
+                $crate::string_header::alloc_perry_string(name)
+            })
+        }
+        #[no_mangle]
+        pub extern "C" fn bloom_get_current_monitor() -> f64 {
+            $crate::ffi::guard("bloom_get_current_monitor", move || {
+                $crate::display::current_monitor() as f64
+            })
+        }
+        #[no_mangle]
+        pub extern "C" fn bloom_set_monitor(index: f64) -> f64 {
+            $crate::ffi::guard("bloom_set_monitor", move || {
+                if index >= 0.0 && $crate::display::set_monitor(index as usize) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+        }
+
         // bloom_get_physical_width  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_get_physical_width() -> f64 {

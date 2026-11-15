@@ -62,6 +62,7 @@ pub fn build_cooked_color_mip_chain(
 mod capability_api;
 mod card_capture_pass;
 use card_capture_pass::CardCaptureDraw;
+mod color_grade;
 mod draw2d;
 mod env_prefilter;
 mod final_pass;
@@ -122,6 +123,7 @@ mod temporal_reactive;
 mod texture_store;
 pub(crate) mod texture_streaming;
 mod tonemap_lut;
+pub use color_grade::write_neutral as write_color_grade_neutral;
 mod transmitted_shadows;
 mod transparent_gi;
 #[cfg(feature = "models3d")]
@@ -622,6 +624,8 @@ pub struct Renderer {
     pub composite_layout: wgpu::BindGroupLayout,
     /// The AgX tonemap as a 3D table (tonemap_lut.rs), read by the composite.
     tonemap_lut: tonemap_lut::TonemapLut,
+    /// The game's colour grade (color_grade.rs), read by the composite.
+    color_grade: color_grade::ColorGrade,
     pub composite_sampler: wgpu::Sampler,
     composite_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::CompositeSource::COUNT * 2],
     /// 0 = ACES (default, matches bloom-reference), 1 = AgX.
@@ -1307,6 +1311,8 @@ pub struct Renderer {
     /// Maximum blur disc radius in UV units. Clamps the CoC so the
     /// blur never exceeds this radius. Default 0.02.
     pub dof_max_blur: f32,
+    /// Metres in front of / behind the focus distance that stay sharp.
+    pub dof_sharp_range: [f32; 2],
 
     /// Per-pixel velocity render target (Rg16Float, surface size).
     /// Third color attachment in the HDR pass; written by the 3D and
@@ -1669,6 +1675,8 @@ pub struct Renderer {
     refractive_reflections_active: bool,
     /// EN-044 — depth-only prepass over the same cached-model draws.
     pub scene_depth_pipeline: LazyRenderPipeline,
+    /// The same with a fragment stage that cannot discard, for solid meshes.
+    scene_depth_opaque_pipeline: LazyRenderPipeline,
     /// Shade-mode depth-only variant whose inert color slot makes it
     /// compatible with the inline packed visibility attachment.
     #[cfg(not(target_arch = "wasm32"))]
@@ -4008,6 +4016,17 @@ impl Renderer {
             "scene_depth_prepass_pipeline",
             false,
             None,
+            true,
+        );
+        // The same for meshes with no cutout: see fs_depth_prepass_opaque.
+        let scene_depth_opaque_pipeline = scene_pass::create_scene_depth_pipeline(
+            &device,
+            &scene_pipeline_layout,
+            &scene_shader,
+            "scene_depth_prepass_opaque_pipeline",
+            false,
+            None,
+            false,
         );
 
         // EN-044 — the cached-model pipeline for the PREPASSED path.
@@ -4166,6 +4185,7 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(COMPOSITE_SHADER_WGSL.into()),
         });
         let tonemap_lut = tonemap_lut::TonemapLut::new(&device, &queue);
+        let color_grade = color_grade::ColorGrade::identity(&device, &queue);
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite_layout"),
             entries: &[
@@ -4239,6 +4259,17 @@ impl Renderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // The colour grade table (color_grade.rs).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -8079,6 +8110,7 @@ impl Renderer {
                 "scene_depth_visibility_prepass_pipeline",
                 true,
                 None,
+                true,
             )
         });
         // The retained scene nodes' prepass: scene_pipeline culls their back
@@ -8092,6 +8124,7 @@ impl Renderer {
             "scene_node_depth_prepass_pipeline",
             cfg!(not(target_arch = "wasm32")) && gpu_driven.visibility_routing_enabled(),
             Some(wgpu::Face::Back),
+            true,
         );
         let vsm_gpu_casters = vsm_gpu_casters::VsmGpuCasters::new(&device, gpu_driven.enabled());
         let transient_pool = transient::TransientPool::new();
@@ -8199,6 +8232,7 @@ impl Renderer {
             composite_pipeline,
             composite_layout,
             tonemap_lut,
+            color_grade,
             composite_sampler,
             composite_bind_group_cache: std::array::from_fn(|_| None),
             // 1 = AgX (Troy Sobotka 2022). Matches Blender 4.0+ and
@@ -8544,6 +8578,7 @@ impl Renderer {
             dof_focus_distance: 10.0,
             dof_aperture: 0.0,
             dof_max_blur: 0.006,
+            dof_sharp_range: [0.0, 0.0],
             velocity_rt_texture,
             velocity_rt_view,
             motion_blur_rt_texture,
@@ -8737,6 +8772,7 @@ impl Renderer {
             scene_refractive_reflection_params_buffer: None,
             refractive_reflections_active: false,
             scene_depth_pipeline,
+            scene_depth_opaque_pipeline,
             #[cfg(not(target_arch = "wasm32"))]
             scene_depth_visibility_pipeline,
             scene_pipeline_prepassed,
@@ -8885,6 +8921,11 @@ impl Renderer {
         if (s - self.output_scale).abs() < 1e-4 {
             return;
         }
+        // Before the platform's first resize the surface IS the native size.
+        if self.native_width == 0 || self.native_height == 0 {
+            self.native_width = self.surface_config.width;
+            self.native_height = self.surface_config.height;
+        }
         self.output_scale = s;
         let (w, h) = (self.native_width, self.native_height);
         let (lw, lh) = (self.logical_width, self.logical_height);
@@ -8911,8 +8952,42 @@ impl Renderer {
         )
     }
 
-    /// Platform entry point: the window changed size. Records the native size, then
-    /// applies `output_scale` on top of it.
+    /// What a platform calls every frame with the window's current size: resizes
+    /// only if that differs from the size last recorded.
+    ///
+    /// Platforms used to make that decision themselves by comparing the window
+    /// with the SURFACE (`physical_width`). Below an output scale of 1 those
+    /// never agree, so every platform resized on every frame: all render
+    /// targets rebuilt per frame and the temporal history cut each time, which
+    /// is why a lower output resolution measured SLOWER than native (30 ms
+    /// against 25 in the shooter). The window is compared with the window here.
+    pub fn window_resized(
+        &mut self,
+        width: u32,
+        height: u32,
+        logical_width: u32,
+        logical_height: u32,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        // Before the first call the surface is the window, unscaled.
+        let (native_w, native_h) = if self.native_width == 0 {
+            (self.surface_config.width, self.surface_config.height)
+        } else {
+            (self.native_width, self.native_height)
+        };
+        if width != native_w
+            || height != native_h
+            || logical_width.max(1) != self.logical_width
+            || logical_height.max(1) != self.logical_height
+        {
+            self.resize(width, height, logical_width, logical_height);
+        }
+    }
+
+    /// Rebuild for a window of this size, unconditionally. Records the native
+    /// size, then applies `output_scale` on top of it.
     pub fn resize(&mut self, width: u32, height: u32, logical_width: u32, logical_height: u32) {
         if width > 0 && height > 0 {
             self.native_width = width;
@@ -10694,6 +10769,16 @@ impl Renderer {
     /// produce stronger blur for the same distance from focus.
     pub fn set_dof_aperture(&mut self, aperture: f32) {
         self.dof_aperture = aperture.max(0.0);
+    }
+
+    /// Metres in front of and behind the focus distance that stay sharp; the
+    /// blur grows from the edges of that band. `max_blur` is the largest blur
+    /// radius as a fraction of the frame's height (<= 0 keeps the current one).
+    pub fn set_dof_range(&mut self, near_sharp: f32, far_sharp: f32, max_blur: f32) {
+        self.dof_sharp_range = [near_sharp.max(0.0), far_sharp.max(0.0)];
+        if max_blur > 0.0 {
+            self.dof_max_blur = max_blur.min(0.05);
+        }
     }
 
     /// Toggle motion blur on/off. Off (default) = no motion blur
@@ -13235,7 +13320,7 @@ impl Renderer {
                 c.r.record_ssr_march(c.encoder, c.profiler);
             });
             bind_optional_pass!("ssr_temporal", |c: &mut FrameCtx2| {
-                c.r.record_ssr_temporal(c.encoder);
+                c.r.record_ssr_temporal(c.encoder, c.profiler);
             });
             bind_optional_pass!("ssgi", |c: &mut FrameCtx2| {
                 c.r.record_ssgi_passes(c.encoder, c.profiler, c.surf.0, c.surf.1);
@@ -13250,7 +13335,7 @@ impl Renderer {
                 if c.r.dbg_skip("compose") {
                     return;
                 }
-                c.r.record_scene_compose(c.encoder);
+                c.r.record_scene_compose(c.encoder, c.profiler);
             });
             bind_pass!("postfx_tail", |c: &mut FrameCtx2| {
                 if c.r.dbg_skip("postfx_tail") {
@@ -13263,7 +13348,7 @@ impl Renderer {
                     return;
                 }
                 let (src, dst) = c.exposure_idx;
-                c.r.record_auto_exposure(c.encoder, src, dst);
+                c.r.record_auto_exposure(c.encoder, c.profiler, src, dst);
             });
             bind_pass!("final_composite", |c: &mut FrameCtx2| {
                 let (exposure_src, exposure_dst) = c.exposure_idx;

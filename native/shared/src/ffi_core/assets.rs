@@ -360,6 +360,70 @@ macro_rules! __bloom_ffi_assets {
             })
         }
 
+        // bloom_set_color_grade — load a colour-grade table (a strip PNG:
+        // N*N wide, N high) and set its strength. An empty path removes the
+        // grade. Returns 0 if the file is missing or not a strip.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_color_grade(path_ptr: *const u8, strength: f64) -> f64 {
+            $crate::ffi::guard("bloom_set_color_grade", move || {
+                let path = $crate::string_header::str_from_header(path_ptr);
+                if path.is_empty() {
+                    engine().renderer.clear_color_grade();
+                    return 1.0;
+                }
+                let path: &str = &bloom_resolve_asset_path(path);
+                match std::fs::read(path) {
+                    Ok(data)
+                        if engine()
+                            .renderer
+                            .set_color_grade_lut(&data, strength as f32) =>
+                    {
+                        1.0
+                    }
+                    _ => 0.0,
+                }
+            })
+        }
+
+        // bloom_set_color_grade_strength — 0 = off, 1 = the grade as authored.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_color_grade_strength(strength: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_color_grade_strength", move || {
+                engine().renderer.set_color_grade_strength(strength as f32);
+            })
+        }
+
+        // bloom_write_color_grade_neutral — write the neutral strip of edge
+        // `size` as a PNG, the image to grade in an editor and load back.
+        #[no_mangle]
+        pub extern "C" fn bloom_write_color_grade_neutral(path_ptr: *const u8, size: f64) -> f64 {
+            $crate::ffi::guard("bloom_write_color_grade_neutral", move || {
+                let path = $crate::string_header::str_from_header(path_ptr);
+                let path: &str = &bloom_resolve_asset_path(path);
+                if $crate::renderer::write_color_grade_neutral(path, size as u32) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+        }
+
+        // bloom_set_crash_report_path — where a panic or a fatal signal
+        // writes its report (appended). The game reads the file on its next
+        // launch and clears it. Empty = no file; stderr always gets it.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_crash_report_path(path_ptr: *const u8) {
+            $crate::ffi::guard("bloom_set_crash_report_path", move || {
+                let path = $crate::string_header::str_from_header(path_ptr);
+                if path.is_empty() {
+                    $crate::crash::set_report_path("");
+                } else {
+                    let resolved: &str = &bloom_resolve_asset_path(path);
+                    $crate::crash::set_report_path(resolved);
+                }
+            })
+        }
+
         // bloom_launch_process  [EN-048]
         //
         // Perry's `child_process.spawn` COMPILES and then does nothing — it returns a

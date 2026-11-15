@@ -950,7 +950,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("ssgi_apply_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

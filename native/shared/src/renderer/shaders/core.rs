@@ -763,6 +763,17 @@ struct SceneOut {
     @location(3) albedo: vec4<f32>,
 };
 
+// The prepass for a mesh with no alpha cutout. It has no work to do, and it
+// must be a SEPARATE entry point from the one below: a fragment stage that can
+// `discard` switches off hidden-surface removal on tile-based GPUs and early
+// depth writes on the rest, for every draw using it, cutout or not. Solid
+// geometry drawn with this one costs rasterisation only. (It sits above
+// fs_depth_prepass because the visibility-buffer variant splices that
+// function by the text that follows it.)
+@fragment
+fn fs_depth_prepass_opaque(in: VertexOutputScene) {
+}
+
 // EN-044 — depth prepass. Same vertex stage as the main pass (so the foliage wind
 // displaces identically and the depths match), and a fragment stage that does
 // nothing but honour the alpha cutout.

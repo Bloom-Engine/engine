@@ -57,26 +57,23 @@ macro_rules! __bloom_ffi_ragdoll {
             $crate::ffi::guard("bloom_ragdoll_activate", move || {
                 let eng = engine();
 
-                let (builds, layer) = {
+                let cfg = match eng.ragdolls.get(rag as u32) {
+                    Some(r) => r.config.clone(),
+                    None => return 0.0,
+                };
+                let builds = {
                     let Some(a) = eng.models.get_animation(anim) else {
                         return 0.0;
                     };
-                    // 12 bodies is the sweet spot for these skeletons: spine +
-                    // limbs. Past that you start buying fingers, which cost
-                    // solver time and buy jitter.
-                    let builds = $crate::ragdoll::plan(
+                    $crate::ragdoll::plan(
                         a,
                         scale as f32,
                         [px as f32, py as f32, pz as f32],
                         rot_y as f32,
-                        12, // max bodies
-                        // Chunkier capsules. Thin ones interpenetrate and let
-                        // the corpse fold flat through itself; a limb should
-                        // have some volume to rest ON.
-                        0.38, // capsule radius as a fraction of bone length
-                    );
-                    (builds, 1u32) // MOVING layer
+                        &cfg,
+                    )
                 };
+                let layer = 1u32; // MOVING
                 if builds.is_empty() {
                     return 0.0;
                 }
@@ -130,18 +127,30 @@ macro_rules! __bloom_ffi_ragdoll {
                     bodies.push(body);
                 }
 
+                // --- collisions inside the ragdoll
+                //
+                // A bone's capsule overlaps its parent's and its siblings' at
+                // the joint they share. Left colliding, the solver spends every
+                // step pushing them apart against the joints and the corpse
+                // locks rigid. Everything else in the ragdoll still collides.
+                let parents: Vec<i32> = builds
+                    .iter()
+                    .map(|b| {
+                        if b.parent_bone == usize::MAX {
+                            -1
+                        } else {
+                            b.parent_bone as i32
+                        }
+                    })
+                    .collect();
+                eng.jolt.bodies_set_linked_group(&bodies, &parents);
+
                 // --- joints
                 //
-                // Tight-ish, and deliberately so. Generous limits let the limbs
-                // splay and the corpse settles into a puddle rather than a body;
-                // the first pass used ±1.2 rad and looked exactly like that.
-                // Twist (y) is held hardest, because an over-twisted limb is the
-                // single most obviously WRONG thing a ragdoll can do.
-                let rot_limits: [f32; 6] = [
-                    -0.8, 0.8, // x — bend
-                    -0.25, 0.25, // y — twist
-                    -0.8, 0.8, // z — bend
-                ];
+                // Swing-twist about the bone itself: a cone the bone may lean
+                // in and a small twist about its own length. An over-twisted
+                // limb is the single most obviously WRONG thing a ragdoll can
+                // do, so twist is the tighter of the two.
                 let mut constraints: Vec<f64> = Vec::new();
                 for (i, b) in builds.iter().enumerate() {
                     if b.parent_bone == usize::MAX {
@@ -152,17 +161,10 @@ macro_rules! __bloom_ffi_ragdoll {
                     if pa == 0.0 || pb == 0.0 {
                         continue;
                     }
-                    let c = eng.jolt.constraint_six_dof_locked_translation(
-                        pa,
-                        pb,
-                        b.anchor[0],
-                        b.anchor[1],
-                        b.anchor[2],
-                        b.anchor[0],
-                        b.anchor[1],
-                        b.anchor[2],
-                        rot_limits,
-                        true, // anchors given in world space
+                    // Any axis perpendicular to the bone: the cone is round.
+                    let plane = [b.world[0][0], b.world[0][1], b.world[0][2]];
+                    let c = eng.jolt.constraint_swing_twist_world(
+                        pa, pb, b.anchor, b.dir, plane, b.swing, b.swing, -b.twist, b.twist,
                     );
                     if c != 0.0 {
                         constraints.push(c);
@@ -330,12 +332,78 @@ macro_rules! __bloom_ffi_ragdoll {
                     eng.jolt.destroy_body(b);
                 }
                 if let Some(r) = eng.ragdolls.get_mut(rag as u32) {
-                    *r = $crate::ragdoll::Ragdoll::new();
+                    r.reset();
                 }
             })
         }
         #[cfg(not(all(feature = "models3d", feature = "jolt", not(target_arch = "wasm32"))))]
         #[no_mangle]
         pub extern "C" fn bloom_ragdoll_release(_r: f64) {}
+
+        // bloom_ragdoll_configure — how this slot builds its ragdoll. Kept
+        // across release, so a pooled slot is set up once for its rig. A
+        // value <= 0 leaves that setting alone.
+        #[cfg(all(feature = "models3d", feature = "jolt", not(target_arch = "wasm32")))]
+        #[no_mangle]
+        pub extern "C" fn bloom_ragdoll_configure(
+            rag: f64,
+            max_bodies: f64,
+            radius_scale: f64,
+            swing: f64,
+            twist: f64,
+        ) {
+            $crate::ffi::guard("bloom_ragdoll_configure", move || {
+                let Some(r) = engine().ragdolls.get_mut(rag as u32) else {
+                    return;
+                };
+                if max_bodies >= 1.0 {
+                    r.config.max_bodies = (max_bodies as usize).min(64);
+                }
+                if radius_scale > 0.0 {
+                    r.config.radius_scale = (radius_scale as f32).clamp(0.02, 0.5);
+                }
+                if swing > 0.0 {
+                    r.config.swing = (swing as f32).min(3.0);
+                }
+                if twist > 0.0 {
+                    r.config.twist = (twist as f32).min(3.0);
+                }
+            })
+        }
+        #[cfg(not(all(feature = "models3d", feature = "jolt", not(target_arch = "wasm32"))))]
+        #[no_mangle]
+        pub extern "C" fn bloom_ragdoll_configure(_r: f64, _m: f64, _s: f64, _w: f64, _t: f64) {}
+
+        // bloom_ragdoll_set_joint — one joint's part in the ragdoll.
+        // simulate = 0 keeps it out (it rides its parent as it died);
+        // swing / twist < 0 mean "the slot's defaults". joint < 0 clears every
+        // per-joint setting.
+        #[cfg(all(feature = "models3d", feature = "jolt", not(target_arch = "wasm32")))]
+        #[no_mangle]
+        pub extern "C" fn bloom_ragdoll_set_joint(
+            rag: f64,
+            joint: f64,
+            simulate: f64,
+            swing: f64,
+            twist: f64,
+        ) {
+            $crate::ffi::guard("bloom_ragdoll_set_joint", move || {
+                let Some(r) = engine().ragdolls.get_mut(rag as u32) else {
+                    return;
+                };
+                if joint < 0.0 {
+                    r.config.joints.clear();
+                    return;
+                }
+                let j = joint as usize;
+                r.config.joints.retain(|o| o.0 != j);
+                r.config
+                    .joints
+                    .push((j, simulate != 0.0, swing as f32, twist as f32));
+            })
+        }
+        #[cfg(not(all(feature = "models3d", feature = "jolt", not(target_arch = "wasm32"))))]
+        #[no_mangle]
+        pub extern "C" fn bloom_ragdoll_set_joint(_r: f64, _j: f64, _s: f64, _w: f64, _t: f64) {}
     };
 }

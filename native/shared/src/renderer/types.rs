@@ -693,10 +693,14 @@ pub(super) struct SsaoBlurParams {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct DofParams {
-    /// x = focus_distance, y = aperture, z = max_blur_radius (UV), w = unused
+    /// x = focus_distance, y = aperture, z = max blur radius (fraction of the
+    /// frame's height), w = unused
     pub(super) params: [f32; 4],
-    /// Inverse projection matrix — used to linearize depth.
-    pub(super) inv_proj: [[f32; 4]; 4],
+    /// x = sharp metres in front of the focus distance, y = sharp metres
+    /// behind it, z = height / width, w = unused
+    pub(super) range: [f32; 4],
+    /// x = proj[2][2], y = proj[3][2]: the two constants depth linearises from.
+    pub(super) proj: [f32; 4],
 }
 
 // ============================================================

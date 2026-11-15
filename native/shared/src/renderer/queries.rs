@@ -22,6 +22,16 @@ impl Renderer {
     /// Physical pixel dimensions of the swapchain and post-process
     /// render targets. Always equal to `width`/`height` on non-HiDPI
     /// platforms; `logical * scale_factor` on Retina/Web.
+    /// The window's own pixel size, before the output scale (the surface's
+    /// size until a platform has reported one).
+    pub fn native_size(&self) -> (u32, u32) {
+        if self.native_width > 0 && self.native_height > 0 {
+            (self.native_width, self.native_height)
+        } else {
+            (self.surface_config.width, self.surface_config.height)
+        }
+    }
+
     pub fn physical_width(&self) -> u32 {
         self.surface_config.width
     }

@@ -546,6 +546,23 @@ extern "C" {
         translation_limits_xyz_minmax: *const f32,
         rotation_limits_xyz_minmax: *const f32,
     ) -> bj_constraint;
+    pub fn bj_constraint_swing_twist(
+        world: bj_world,
+        a: *const BjConstraintAnchors,
+        twist_axis: BjVec3,
+        plane_axis: BjVec3,
+        normal_half_cone: f32,
+        plane_half_cone: f32,
+        twist_min: f32,
+        twist_max: f32,
+    ) -> bj_constraint;
+    pub fn bj_bodies_set_linked_group(
+        world: bj_world,
+        bodies: *const bj_body,
+        parents: *const i32,
+        count: u32,
+        group_id: u32,
+    );
     pub fn bj_constraint_destroy(world: bj_world, c: bj_constraint);
     pub fn bj_constraint_set_enabled(world: bj_world, c: bj_constraint, enabled: u8);
 

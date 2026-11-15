@@ -449,8 +449,164 @@ pub extern "C" fn bloom_init_window(
     // Register Bloom's GPU screenshot capture with perry-geisterhand (if linked)
     bloom_register_geisterhand_screenshot();
 
+    bloom_shared::display::set_monitor_provider(bloom_shared::display::MonitorProvider {
+        list: monitors::list,
+        current: monitors::current,
+        set: monitors::set,
+    });
+
     if fullscreen != 0.0 {
         bloom_toggle_fullscreen();
+    }
+}
+
+/// The displays (NSScreen), which one the window is on, and moving it there.
+/// See `bloom_shared::display` for the surface this backs.
+mod monitors {
+    use super::WINDOW;
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSRect;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Target display + 1 while a move is under way; 0 = none.
+    static PENDING: AtomicUsize = AtomicUsize::new(0);
+    static WAS_FULLSCREEN: AtomicBool = AtomicBool::new(false);
+    static ASKED_LEAVE: AtomicBool = AtomicBool::new(false);
+    static ASKED_ENTER: AtomicBool = AtomicBool::new(false);
+    static FRAMES: AtomicUsize = AtomicUsize::new(0);
+    /// NSWindowStyleMaskFullScreen.
+    const STYLE_FULLSCREEN: usize = 1 << 14;
+
+    unsafe fn screens() -> (*mut AnyObject, usize) {
+        let all: *mut AnyObject = msg_send![objc2::class!(NSScreen), screens];
+        if all.is_null() {
+            return (all, 0);
+        }
+        let count: usize = msg_send![all, count];
+        (all, count)
+    }
+
+    pub fn list() -> Vec<bloom_shared::display::MonitorInfo> {
+        let mut out = Vec::new();
+        unsafe {
+            let (all, count) = screens();
+            for i in 0..count {
+                let screen: *mut AnyObject = msg_send![all, objectAtIndex: i];
+                if screen.is_null() {
+                    continue;
+                }
+                let frame: NSRect = msg_send![screen, frame];
+                let scale: f64 = msg_send![screen, backingScaleFactor];
+                let scale = if scale > 0.0 { scale } else { 1.0 };
+                let fps: isize = msg_send![screen, maximumFramesPerSecond];
+                let mut name = format!("Display {}", i + 1);
+                let label: *mut AnyObject = msg_send![screen, localizedName];
+                if !label.is_null() {
+                    let utf8: *const std::ffi::c_char = msg_send![label, UTF8String];
+                    if !utf8.is_null() {
+                        name = std::ffi::CStr::from_ptr(utf8)
+                            .to_string_lossy()
+                            .into_owned();
+                    }
+                }
+                out.push(bloom_shared::display::MonitorInfo {
+                    name,
+                    width: (frame.size.width * scale).round() as u32,
+                    height: (frame.size.height * scale).round() as u32,
+                    refresh_hz: fps.max(0) as f32,
+                });
+            }
+        }
+        out
+    }
+
+    pub fn current() -> usize {
+        unsafe {
+            let Some(window) = &WINDOW else { return 0 };
+            let mine: *mut AnyObject = msg_send![&**window, screen];
+            let (all, count) = screens();
+            for i in 0..count {
+                let screen: *mut AnyObject = msg_send![all, objectAtIndex: i];
+                if screen == mine {
+                    return i;
+                }
+            }
+        }
+        0
+    }
+
+    pub fn set(index: usize) -> bool {
+        let count = unsafe { screens().1 };
+        if index >= count {
+            return false;
+        }
+        WAS_FULLSCREEN.store(false, Ordering::Relaxed);
+        ASKED_LEAVE.store(false, Ordering::Relaxed);
+        ASKED_ENTER.store(false, Ordering::Relaxed);
+        FRAMES.store(0, Ordering::Relaxed);
+        PENDING.store(index + 1, Ordering::Relaxed);
+        true
+    }
+
+    fn done() {
+        PENDING.store(0, Ordering::Relaxed);
+    }
+
+    /// One step of a pending move; called every frame. A fullscreen window
+    /// cannot be moved between displays: it has to leave its space, move, and
+    /// enter a space on the new display, and each of those is an animation
+    /// AppKit runs over many frames. So this asks once per phase and waits.
+    pub fn poll() {
+        let pending = PENDING.load(Ordering::Relaxed);
+        if pending == 0 {
+            return;
+        }
+        let target = pending - 1;
+        // Give up rather than fight the window server for ever.
+        if FRAMES.fetch_add(1, Ordering::Relaxed) > 900 {
+            done();
+            return;
+        }
+        unsafe {
+            let Some(window) = &WINDOW else {
+                done();
+                return;
+            };
+            let style: usize = msg_send![&**window, styleMask];
+            let fullscreen = style & STYLE_FULLSCREEN != 0;
+            if current() != target {
+                if fullscreen {
+                    if !ASKED_LEAVE.swap(true, Ordering::Relaxed) {
+                        WAS_FULLSCREEN.store(true, Ordering::Relaxed);
+                        super::bloom_toggle_fullscreen();
+                    }
+                    return;
+                }
+                let (all, count) = screens();
+                if target >= count {
+                    done();
+                    return;
+                }
+                let screen: *mut AnyObject = msg_send![all, objectAtIndex: target];
+                let area: NSRect = msg_send![screen, visibleFrame];
+                let mut frame: NSRect = msg_send![&**window, frame];
+                frame.size.width = frame.size.width.min(area.size.width);
+                frame.size.height = frame.size.height.min(area.size.height);
+                frame.origin.x = area.origin.x + (area.size.width - frame.size.width) * 0.5;
+                frame.origin.y = area.origin.y + (area.size.height - frame.size.height) * 0.5;
+                let _: () = msg_send![&**window, setFrame: frame, display: true];
+                return;
+            }
+            // On the target display.
+            if WAS_FULLSCREEN.load(Ordering::Relaxed) && !fullscreen {
+                if !ASKED_ENTER.swap(true, Ordering::Relaxed) {
+                    super::bloom_toggle_fullscreen();
+                }
+                return;
+            }
+            done();
+        }
     }
 }
 
@@ -624,6 +780,24 @@ fn poll_game_controllers() {
         // currently-pressed buttons/axes, so without this a released button
         // stays down (begin_frame does not reset gamepad state).
         eng.input.reset_gamepad();
+        // Which family, for glyphs. `productCategory` ("DualSense", "Xbox One",
+        // "Switch Pro Controller", ...) is the one string GameController keeps
+        // stable; asked when the first controller changes, not per frame.
+        static LAST_PAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let pad_id = &*controller as *const AnyObject as usize;
+        if LAST_PAD.swap(pad_id, std::sync::atomic::Ordering::Relaxed) != pad_id {
+            let category: *mut AnyObject = msg_send![&*controller, productCategory];
+            let mut name = String::new();
+            if !category.is_null() {
+                let utf8: *const std::ffi::c_char = msg_send![category, UTF8String];
+                if !utf8.is_null() {
+                    name = std::ffi::CStr::from_ptr(utf8)
+                        .to_string_lossy()
+                        .into_owned();
+                }
+            }
+            eng.input.gamepad_kind = bloom_shared::input::classify_gamepad(&name);
+        }
         eng.input.gamepad_available = true;
 
         // Thumbsticks -> axes 0..3 (Y inverted so screen-up is +1).
@@ -766,6 +940,8 @@ pub extern "C" fn bloom_begin_drawing() {
         engine().should_close = true;
     }
 
+    monitors::poll();
+
     // Handle window resize — track physical (backing) size for the
     // swapchain while keeping the logical (points) size for user code.
     if !unsafe { HEADLESS_PIXEL_EXACT } {
@@ -779,15 +955,11 @@ pub extern "C" fn bloom_begin_drawing() {
                 let physical_w = ((frame.size.width * scale) as u32).max(1);
                 let physical_h = ((frame.size.height * scale) as u32).max(1);
                 let eng = engine();
-                if logical_w > 0
-                    && logical_h > 0
-                    && (physical_w != eng.renderer.physical_width()
-                        || physical_h != eng.renderer.physical_height()
-                        || logical_w != eng.renderer.width()
-                        || logical_h != eng.renderer.height())
-                {
+                // The renderer compares with the window size it last saw (not
+                // with its surface, which is smaller under an output scale).
+                if logical_w > 0 && logical_h > 0 {
                     eng.renderer
-                        .resize(physical_w, physical_h, logical_w, logical_h);
+                        .window_resized(physical_w, physical_h, logical_w, logical_h);
                 }
             }
         }
@@ -1133,7 +1305,9 @@ pub extern "C" fn bloom_restart_app() -> f64 {
     };
     // exec() replaces this process image in place (same pid, same terminal),
     // and only returns if it failed.
-    let _err = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    let _err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .exec();
     0.0
 }
 

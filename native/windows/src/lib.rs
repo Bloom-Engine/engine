@@ -442,13 +442,11 @@ mod win32 {
                 let phys_h = ((lparam.0 >> 16) & 0xFFFF) as u32;
                 if phys_w > 0 && phys_h > 0 {
                     if let Some(eng) = ENGINE.get_mut() {
-                        if phys_w != eng.renderer.physical_width()
-                            || phys_h != eng.renderer.physical_height()
                         {
                             let scale = dpi_scale(hwnd);
                             let log_w = ((phys_w as f64) / scale).round() as u32;
                             let log_h = ((phys_h as f64) / scale).round() as u32;
-                            eng.renderer.resize(phys_w, phys_h, log_w, log_h);
+                            eng.renderer.window_resized(phys_w, phys_h, log_w, log_h);
                         }
                     }
                 }
@@ -589,13 +587,11 @@ mod win32 {
                 let phys_h = ((lparam.0 >> 16) & 0xFFFF) as u32;
                 if phys_w > 0 && phys_h > 0 {
                     if let Some(eng) = ENGINE.get_mut() {
-                        if phys_w != eng.renderer.physical_width()
-                            || phys_h != eng.renderer.physical_height()
                         {
                             let scale = dpi_scale(hwnd);
                             let log_w = ((phys_w as f64) / scale).round() as u32;
                             let log_h = ((phys_h as f64) / scale).round() as u32;
-                            eng.renderer.resize(phys_w, phys_h, log_w, log_h);
+                            eng.renderer.window_resized(phys_w, phys_h, log_w, log_h);
                         }
                     }
                 }
@@ -994,6 +990,8 @@ fn poll_xinput_gamepad() {
     if result == 0 {
         // ERROR_SUCCESS
         eng.input.gamepad_available = true;
+        // XInput only speaks to Xbox-layout pads.
+        eng.input.gamepad_kind = bloom_shared::input::GAMEPAD_KIND_XBOX;
         let gp = &state.Gamepad;
 
         // Axes: left stick X/Y, right stick X/Y, triggers
