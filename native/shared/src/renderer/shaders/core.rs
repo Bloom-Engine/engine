@@ -49,7 +49,7 @@ struct Lighting {
     shadow_view_matrix: mat4x4<f32>,
     wind: vec4<f32>,   // xy=dir, z=amplitude, w=time (foliage sway)
     cloud: vec4<f32>,  // x=shadow strength, y=deck height, z=scale, w=drift m/s
-    frame_misc: vec4<f32>, // x=delta_time (prev-frame wind, for motion vectors)
+    frame_misc: vec4<f32>, // x=delta_time (prev-frame wind, for motion vectors); y,z=cut-out edge fade; w=cut-out env specular removed
 };
 
 struct MaterialFactors {
@@ -763,6 +763,26 @@ struct SceneOut {
     @location(3) albedo: vec4<f32>,
 };
 
+// A cut-out card seen nearly edge on squeezes its whole picture into a few pixel rows: a crown
+// built of leaf cards then shows streaks wherever a card happens to stand along the view. Such a
+// card contributes nothing but the streak, so it is thinned out (a dithered discard that the
+// temporal filter resolves) as it turns edge on, between the two facings in frame_misc.y / .z
+// (|cos| of the angle between the card's true plane normal and the view; 0 / 0 = off, the
+// default). The plane normal comes from screen derivatives: authored foliage normals are bent
+// on purpose and say nothing about the card's plane. Used identically by the depth prepass and
+// the main pass, which must agree on every pixel.
+fn cutout_edge_on(world_pos: vec3<f32>, frag: vec2<f32>) -> bool {
+    let hi = lighting.frame_misc.z;
+    if (hi <= 0.0) { return false; }
+    let g = cross(dpdx(world_pos), dpdy(world_pos));
+    let gl = length(g);
+    if (gl <= 0.0) { return false; }
+    let v = normalize(lighting.camera_pos.xyz - world_pos);
+    let facing = abs(dot(g / gl, v));
+    let n = fract(52.9829189 * fract(dot(floor(frag), vec2<f32>(0.06711056, 0.00583715))));
+    return facing < mix(lighting.frame_misc.y, hi, n);
+}
+
 // The prepass for a mesh with no alpha cutout. It has no work to do, and it
 // must be a SEPARATE entry point from the one below: a fragment stage that can
 // `discard` switches off hidden-surface removal on tile-based GPUs and early
@@ -833,6 +853,7 @@ fn fs_depth_prepass(in: VertexOutputScene) {
                 in.color.a;
             survives = raw_alpha >= alpha_cutoff;
         }
+        if (cutout_edge_on(in.world_pos, in.clip_position.xy)) { survives = false; }
         if (!survives) { discard; }
     }
 }
@@ -977,6 +998,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
                 );
             }
         }
+        if (cutout_edge_on(in.world_pos, in.clip_position.xy)) { survives = false; }
         if (!survives) { discard; }
     }
     //PREPASS_STRIP_END
@@ -1297,7 +1319,15 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         // is reserved for lobes narrow enough to converge without shimmer.
         lighting.dir_light_count.z * (1.0 - smoothstep(0.45, 0.70, roughness)),
         0.0, 1.0);
-    let ibl_spec = ibl_spec_raw * spec_occ * cap2 * (1.0 - ssr_own);
+    // Cut-out foliage: a leaf card inside a crown mirrors mostly other leaves, not the open
+    // sky, and its shading normal is a made-up crown normal (or one flipped toward the viewer),
+    // so the full sky reflection laid an even pale-blue sheen over every canopy that was as
+    // strong as the leaf's own diffuse colour: trees rendered mint and flat. A game says how
+    // much of it to keep (set_cutout_env_specular; frame_misc.w holds what is taken AWAY, so
+    // the default 0 leaves every existing scene as it was).
+    // (Direct specular is already skipped for these materials above, for the same reason.)
+    let foliage_spec_occ = select(1.0, 1.0 - lighting.frame_misc.w, alpha_cutoff > 0.0);
+    let ibl_spec = ibl_spec_raw * spec_occ * cap2 * (1.0 - ssr_own) * foliage_spec_occ;
     //IBL_STRIP_END
 
     // Indirect-shadow attenuation. 0.15 — deep enough that windows

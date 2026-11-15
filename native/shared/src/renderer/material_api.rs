@@ -571,11 +571,29 @@ impl Renderer {
         self.material_system.set_probe_visible(material, visible);
     }
 
+    /// Thin out alpha cut-out cards (leaf cards) as they turn edge on to the view. A card whose
+    /// plane makes less than `full` (|cos| of the angle between its plane normal and the view
+    /// direction) is fully gone, one above `none` is untouched, and in between it is dithered.
+    /// 0 / 0 switches it off, which is the default: a scene that never calls this is unchanged.
+    /// Only the scene shader's cut-out materials (glTF alpha MASK) are affected.
+    pub fn set_cutout_edge_fade(&mut self, full: f32, none: f32) {
+        let none = none.clamp(0.0, 1.0);
+        self.lighting_uniforms.frame_misc[1] = full.clamp(0.0, none);
+        self.lighting_uniforms.frame_misc[2] = none;
+    }
+
+    /// How much of the environment's specular reflection alpha cut-out materials keep (1 = all
+    /// of it, the default; 0 = none). Leaf cards carry made-up shading normals and sit among
+    /// other leaves: at 1 the sky's reflection can be as strong as their diffuse colour.
+    pub fn set_cutout_env_specular(&mut self, keep: f32) {
+        self.lighting_uniforms.frame_misc[3] = 1.0 - keep.clamp(0.0, 1.0);
+    }
+
     /// Synchronize material PerFrame and PerView uniforms.
     pub fn material_system_begin_frame(&mut self, time_seconds: f32, delta_time: f32) {
         self.lighting_uniforms.wind = [self.wind[0], self.wind[1], self.wind[2], time_seconds];
         self.lighting_uniforms.cloud = self.cloud_params;
-        self.lighting_uniforms.frame_misc = [delta_time, 0.0, 0.0, 0.0];
+        self.lighting_uniforms.frame_misc[0] = delta_time;
         let screen_w = self.surface_config.width as f32;
         let screen_h = self.surface_config.height as f32;
         let (render_w, render_h) = self.render_extent();

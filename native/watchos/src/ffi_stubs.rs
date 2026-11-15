@@ -546,6 +546,12 @@
 #[no_mangle] pub extern "C" fn bloom_set_foliage_shadow_motion(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_cutout_edge_fade(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_cutout_env_specular(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_cloud_shadows(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
     0.0
 }
