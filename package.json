@@ -2880,6 +2880,28 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_local_light_shadows",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_add_point_light_with_shadow",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_scene_create_node",
           "params": [],
           "returns": "f64"

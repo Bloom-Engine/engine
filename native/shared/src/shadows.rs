@@ -435,6 +435,9 @@ pub struct ShadowMap {
     /// Issue #132 — bounded virtual-page residency and invalidation.
     /// Sampling remains on CSM until the physical page renderer is qualified.
     pub(crate) virtual_map: crate::virtual_shadows::DirectionalVirtualShadowMap,
+    /// Shadow cubes of a few local lights for material-path receivers
+    /// (`renderer/local_light_shadows.rs`). Inert unless a game turns it on.
+    pub(crate) local_lights: crate::renderer::local_light_shadows::LocalLightShadows,
 }
 
 /// Accepted (slack-inflated) ortho fit for one cascade. `ls_x`/`ls_y`
@@ -825,6 +828,8 @@ impl ShadowMap {
         );
         let virtual_map =
             crate::virtual_shadows::DirectionalVirtualShadowMap::new(device, &uniform_layout);
+        let local_lights =
+            crate::renderer::local_light_shadows::LocalLightShadows::new(device, &uniform_layout);
 
         Self {
             depth_texture,
@@ -862,6 +867,7 @@ impl ShadowMap {
             accepted_fit: [None; NUM_CASCADES],
             accepted_light_dir: None,
             virtual_map,
+            local_lights,
         }
     }
 

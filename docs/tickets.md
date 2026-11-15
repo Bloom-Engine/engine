@@ -2455,3 +2455,89 @@ iOS, the web crate and the shared crate for wasm, and watchOS; Windows and Linux
 built from a Mac and run the same code as macOS, unseen. Four unit tests (uniform layout
 against the WGSL, the three shaders through naga's validator, the view inverse, light
 selection).
+
+## EN-068 — Shadows from local lights on material-path receivers ✅ *(2026-11-15, branch feat/local-light-shadows)*
+
+A game's own material shaders (the shooter's `terrain.wgsl` and `building.wgsl`) light
+themselves by looping over `view.point_lights`, and nothing in that loop could be shadowed:
+a lamp lit the floor of the next room through the wall, and a creature in front of a lamp
+threw no shadow.
+
+**What existed and why it was not used.** The virtual shadow maps already hold cube and
+spot maps for local lights (`addShadowedPointLight`, `virtual_shadows.rs`). They need
+`BLOOM_VSM=1` (an environment variable read once), which also replaces the sun's shadow path;
+only the built-in PBR shader samples them; and they are fail-closed by design: a light is
+switched off while any of its pages is dirty, and a page fades in over eight frames after
+every redraw, so a face with an animated character in it (redrawn every frame) stays at one
+eighth of its brightness. That is right for a conformance fixture and unusable for a lamp in
+a fight. Left as it is.
+
+**What this adds** (`renderer/local_light_shadows.rs`). Up to four point lights, chosen among
+those submitted with `addPointLightWithShadow`, each get a cube of six perspective depth maps
+(layers of one array texture, 512 texels a side by default).
+`setLocalLightShadows(maxLights, resolution)` turns it on; it is off by default and a light
+without a cube is an ordinary unshadowed light (it fails OPEN). The material ABI gains two
+bindings in group 1 (13: the array, 14: a uniform block) and one include,
+`common/local_shadows.wgsl`, whose `local_light_shadow(light_index, world_pos, normal)`
+returns 1 for lit. Where the feature is absent the include is a stub that returns 1 and adds
+no binding, so a material is written once.
+
+**Which lights.** Nearest reach to the camera first, but a light whose reach is out of view
+counts as ten metres further and a light that already holds a cube as four metres nearer.
+Without the second rule a turning camera handed one cube back and forth between two lamps,
+six faces to draw each time (measured in the shooter's Checkpoint arena: five lamps, four
+cubes, 6 to 18 faces rebuilt every two seconds while turning; none with the rule).
+
+**Why it is cheap.** A lamp does not move, so the static casters round it are drawn into a
+second, cached array and kept (two faces a frame, so a new light is ready after three
+frames, then fades in over twelve). The cache is sticky: a game submits what its camera sees,
+so the caster list changes whenever the camera turns, and redrawing a face for that would
+cost more than everything else here. A caster that appears is ADDED to the cached face (a
+depth map only gets nearer, so no clear is needed); one that disappears stays unless its
+place is on screen (then it is gone, not culled), and such faces are rebuilt one at a time,
+thirty frames apart. Per frame, a face is touched only while something that moves is inside
+it: the cached layer is copied over the live one and the movers are drawn on top, the way
+the sun's cascades work. A face with a skinned character is redrawn every frame; a face with
+only rigid movers (a spinning pickup) every other frame; and a mover further from the light
+than three quarters of its range is not drawn at all (the light has fallen to a few percent
+there). That last rule came from measurement: the shooter's weapon pickups are 30,000 to
+40,000 triangles each and spin for ever, and before it the title screen paid 0.9 ms for
+their shadows.
+
+**Cost in the shooter** (M1 Max, 3456 x 2168, four cubes of 512, interleaved off/on runs;
+two runs of the same build differ by about 0.4 ms). Title screen of the Checkpoint arena,
+render scale 0.5: 17.29 ms off, 17.54 ms on. A fight there with the camera still (`perftest`,
+first 24 windows without the screenshot ones): 27.56 / 28.31 and 23.09 / 23.42 ms. The same
+fight with the camera turning: 22.17 / 22.16, 21.42 / 21.61 and 21.63 / 21.57 ms. So about
+0.3 ms in a fight, inside the noise of one run. It is more where the player stands in the
+reach of several lamps at once: the shooter's capture tour of the Checkpoint arena, which
+puts the Trooper beside a lamp in a lit room and jumps to a new place every 50 frames,
+averaged 20.78 ms off and 21.27 ms on; the tour of the night arena 20.10 and 20.15. `BLOOM_LOCAL_LIGHT_SHADOW_LOG=1` prints what was drawn every 120 frames
+(`=2` also lists the movers and whatever sits within a metre of a light).
+
+**Receiver bias.** The receiver is moved along its normal and toward the light by about one
+map texel of world size at its distance before the lookup (more at grazing angles), and the
+comparison is then exact. A constant bias in perspective depth, as the virtual-shadow local
+path uses (`max(0.0005, ...)`), is 0.75 m of world distance six metres from a light with its
+near plane at 2 cm, which detaches every shadow from its caster's feet.
+
+**Where it is absent.** `local_light_shadows::supported()`: desktop targets (macOS, Windows,
+Linux) on the high capability tier, and not with `BLOOM_LOCAL_LIGHT_SHADOWS=0`. Everywhere
+else (iOS, tvOS, Android, web, watchOS, lower tiers) the bind group layouts, the bind groups
+and the expanded shader sources are what they were; `setLocalLightShadows` returns false and
+`addPointLightWithShadow` is `addPointLight`. It also needs the sun's shadow pass
+(`enableShadows`), whose caster lists it reuses; with that off, nothing is shadowed.
+
+**Not done.** The built-in PBR shader does not sample these maps: characters and props are
+still lit by a lamp through a wall. Spot lights have no single-face variant here. Only point
+lights submitted through the new call are considered; nothing picks lights automatically.
+
+**Checked.** macOS on an M1 Max only. `cargo fmt --check`, 552 unit tests (seven new: the
+choice of lights, the face matrices against the shader's face choice, the cache rule, the
+uniform block's size), the golden-image suite (86 passed, none regenerated),
+`validate-ffi` (two new functions: manifest, web mirror, watchOS stubs), the file-line
+ceiling, and the `lint` and `contracts` lanes. Compile-checked for iOS, tvOS and both wasm
+crates, where the feature is compiled out of the layouts and shaders; Android, Linux and
+Windows were not compiled. Linux and Windows are the two targets where the new path is ON and
+has never run. In the shooter: looked at in three arenas (see its SH-064), boot, AI and menu
+checks pass, and a run with the sun's shadows switched off draws the lamps unshadowed.

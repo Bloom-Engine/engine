@@ -558,34 +558,8 @@ impl MaterialSystem {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
-        let vsm_stub = crate::virtual_shadows::virtual_shadows_requested().then(|| {
-            let page_table = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("material_stub_vsm_page_table"),
-                size: wgpu::Extent3d {
-                    width: crate::virtual_shadows::VSM_VIRTUAL_PAGES_PER_AXIS as u32,
-                    height: crate::virtual_shadows::VSM_VIRTUAL_PAGES_PER_AXIS as u32,
-                    depth_or_array_layers: crate::virtual_shadows::VSM_CLIP_LEVELS as u32,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R32Uint,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let page_table_view = page_table.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("material_stub_vsm_page_table_view"),
-                dimension: Some(wgpu::TextureViewDimension::D2Array),
-                ..Default::default()
-            });
-            let params = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("material_stub_vsm_params"),
-                size: crate::virtual_shadows::VSM_SAMPLING_PARAMS_BYTES,
-                usage: wgpu::BufferUsages::UNIFORM,
-                mapped_at_creation: false,
-            });
-            (page_table, page_table_view, params)
-        });
+        let vsm_stub = crate::virtual_shadows::material_stub_resources(device);
+        let local_shadow_stub = super::local_light_shadows::stub_params_buffer(device);
         let mut per_view_entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -644,6 +618,11 @@ impl MaterialSystem {
                 },
             ]);
         }
+        super::local_light_shadows::push_material_bind_entries(
+            &mut per_view_entries,
+            &stub_depth_array_view,
+            &local_shadow_stub,
+        );
         let per_view_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material_per_view_bg"),
             layout: &layouts.per_view,

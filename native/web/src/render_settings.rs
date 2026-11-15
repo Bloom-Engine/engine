@@ -429,3 +429,39 @@ pub fn bloom_scene_attach_model_lod(
         .set_lod_geometry(node, lod_index as usize, v, i, max_coverage as f32);
     1.0
 }
+
+// Shadows from local lights on material-path receivers
+// (shared renderer/local_light_shadows.rs). The browser build does not carry
+// the two extra material bindings, so the shared renderer reports 0 here and
+// submits the light unshadowed: the same calls are safe on every platform.
+#[wasm_bindgen]
+pub fn bloom_set_local_light_shadows(max_lights: f64, resolution: f64) -> f64 {
+    f64::from(engine().renderer.set_local_light_shadows(
+        max_lights.clamp(0.0, 16.0) as u32,
+        resolution.clamp(0.0, 4096.0) as u32,
+    ))
+}
+
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_add_point_light_with_shadow(
+    x: f64,
+    y: f64,
+    z: f64,
+    range: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    intensity: f64,
+) -> f64 {
+    f64::from(engine().renderer.add_point_light_with_shadow(
+        x as f32,
+        y as f32,
+        z as f32,
+        range as f32,
+        r as f32,
+        g as f32,
+        b as f32,
+        intensity as f32,
+    ))
+}
