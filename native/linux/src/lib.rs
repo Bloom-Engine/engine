@@ -559,14 +559,12 @@ mod x11_impl {
                         let phys_h = configure.height as u32;
                         if phys_w > 0 && phys_h > 0 {
                             let eng = engine();
-                            if phys_w != eng.renderer.physical_width()
-                                || phys_h != eng.renderer.physical_height()
                             {
                                 let screen = x11::xlib::XDefaultScreen(DISPLAY);
                                 let scale = display_scale(DISPLAY, screen);
                                 let log_w = ((phys_w as f64) / scale).round() as u32;
                                 let log_h = ((phys_h as f64) / scale).round() as u32;
-                                eng.renderer.resize(phys_w, phys_h, log_w, log_h);
+                                eng.renderer.window_resized(phys_w, phys_h, log_w, log_h);
                             }
                         }
                     }

@@ -427,8 +427,19 @@ impl Renderer {
             }
 
             // V12 hysteresis — angular sun + 5% relative luma.
+            // The COSINE of the angle between the two, so divide the lengths
+            // out. `light_dir` is whatever the game passed and is not unit
+            // length: at 0.998 long its dot with itself is 0.996, under the
+            // threshold, and the nearest cascade was rebaked on every frame
+            // (2.3 ms a frame in the shooter) while the two wider ones, which
+            // bake one per frame after it, never were. A longer one could
+            // turn 20 degrees and still pass.
             let last = self.wsrc_last_sun_dir[c];
-            let sun_dot = ld[0] * last[0] + ld[1] * last[1] + ld[2] * last[2];
+            let lengths = ((ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2])
+                * (last[0] * last[0] + last[1] * last[1] + last[2] * last[2]))
+                .sqrt()
+                .max(1e-8);
+            let sun_dot = (ld[0] * last[0] + ld[1] * last[1] + ld[2] * last[2]) / lengths;
             if sun_dot < 0.99985 {
                 self.wsrc_built[c] = false;
                 continue;

@@ -5,6 +5,11 @@
 
 use super::*;
 
+/// Joint matrices one frame can hold for all skinned draws together: the
+/// palette is one 64 KiB uniform buffer, the largest binding every backend
+/// guarantees (the shaders declare `array<mat4x4<f32>, 1024>` to match).
+const MAX_FRAME_JOINTS: usize = 1024;
+
 /// Previous transform for one ordinary cached-model instance. Calls are paired
 /// by stable submission slot, with the handle preventing a newly spawned
 /// different model from inheriting the departed instance's velocity.
@@ -915,14 +920,26 @@ impl Renderer {
             group.clone()
         };
         let start = self.frame_joint_data.len();
-        // Cap at the 1024-slot buffer. Overflowing poses land at offset 0,
+        // Cap at the joint buffer (MAX_FRAME_JOINTS). Overflowing poses land at offset 0,
         // which at least avoids an out-of-range read — the model will look
         // mis-posed but not corrupt memory.
-        if start + group.len() <= 1024 {
+        if start + group.len() <= MAX_FRAME_JOINTS {
             self.frame_joint_data.extend_from_slice(&group);
             self.frame_joint_data_prev.extend_from_slice(&prev_group);
             Some(start as f32)
         } else {
+            // Say so, once: a model posed with another model's matrices looks
+            // like an animation bug and nothing else points here.
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "bloom: joint palette full: {} joints already staged this frame, a model with {} more does not fit in {}. It is drawn with the first model's pose. Draw fewer skinned models or strip joints from their rigs.",
+                    start,
+                    group.len(),
+                    MAX_FRAME_JOINTS
+                );
+            }
             Some(0.0)
         }
     }

@@ -287,6 +287,10 @@
 }
 #[no_mangle] pub extern "C" fn bloom_ragdoll_release(_p0: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_ragdoll_configure(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_ragdoll_set_joint(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_particles_create(_p0: f64) -> f64 {
     0.0
 }
@@ -446,6 +450,9 @@
 #[no_mangle] pub extern "C" fn bloom_set_dof(_p0: f64, _p1: f64, _p2: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_dof_range(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_quality_preset(_p0: f64) -> f64 {
     0.0
 }
@@ -599,6 +606,17 @@
 }
 #[no_mangle] pub extern "C" fn bloom_get_model_bounds_max_z(_p0: f64) -> f64 {
     0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_color_grade(_p0: i64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_color_grade_strength(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_write_color_grade_neutral(_p0: i64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_crash_report_path(_p0: i64) {
 }
 #[no_mangle] pub extern "C" fn bloom_is_touch_active(_p0: f64) -> f64 {
     0.0

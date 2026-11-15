@@ -613,6 +613,23 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_dof_range — the band around the focus distance that
+        // stays sharp, and the largest blur radius.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_dof_range(
+            near_sharp: f64,
+            far_sharp: f64,
+            max_blur: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_dof_range", move || {
+                engine().renderer.set_dof_range(
+                    near_sharp as f32,
+                    far_sharp as f32,
+                    max_blur as f32,
+                );
+            })
+        }
+
         // bloom_set_quality_preset  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_quality_preset(preset: f64) -> f64 {

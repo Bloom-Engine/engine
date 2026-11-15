@@ -88,6 +88,7 @@ pub struct EngineState {
 
 impl EngineState {
     pub fn new(renderer: Renderer) -> Self {
+        crate::crash::install();
         crate::audio::report_memory();
         let now = Instant::now();
         let quality_fixed_timestep_value = std::env::var("BLOOM_QUALITY_FIXED_TIMESTEP").ok();

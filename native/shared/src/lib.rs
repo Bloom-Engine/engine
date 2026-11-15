@@ -52,12 +52,15 @@ pub(crate) mod virtual_shadows;
 // Jolt C ABI + Rust wrapper live on native only. On wasm32 the web crate
 // routes bloom_physics_* calls through wasm_bindgen to JoltPhysics.js;
 // no Rust-side Jolt integration is needed.
+pub mod crash;
 pub mod drs;
 pub mod engine;
 #[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
 pub mod jolt_sys;
 #[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
 pub mod physics_jolt;
+#[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
+mod physics_jolt_links;
 // Host-surface attach path (PerryTS/perry#5519). Pulls in wgpu's
 // raw-surface API; web builds its surface from a canvas id instead, so
 // this is native-only.

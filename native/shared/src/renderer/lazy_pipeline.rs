@@ -396,6 +396,7 @@ impl super::Renderer {
         if scene_3d {
             wanted.extend([
                 self.scene_depth_pipeline.warm_handle(),
+                self.scene_depth_opaque_pipeline.warm_handle(),
                 self.scene_pipeline_prepassed.warm_handle(),
                 self.scene_node_depth_pipeline.warm_handle(),
                 self.scene_node_pipeline_prepassed.warm_handle(),

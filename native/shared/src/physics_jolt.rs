@@ -60,7 +60,7 @@ pub struct JoltPhysics {
     /// Bodies are world-scoped. We remember which world they belong to.
     bodies: HandleRegistry<(bj_world, bj_body)>,
     /// Constraints similarly scoped.
-    constraints: HandleRegistry<(bj_world, bj_constraint)>,
+    pub(crate) constraints: HandleRegistry<(bj_world, bj_constraint)>,
     /// Character controllers — world-scoped like bodies/constraints.
     characters: HandleRegistry<(bj_world, bj_character)>,
     /// Wheeled vehicles — world-scoped; stores bj_vehicle + the chassis body
@@ -859,7 +859,7 @@ impl JoltPhysics {
         }
     }
 
-    fn resolve_body(&self, h: f64) -> Option<(bj_world, bj_body)> {
+    pub(crate) fn resolve_body(&self, h: f64) -> Option<(bj_world, bj_body)> {
         self.bodies.get(h).copied()
     }
 
@@ -1648,7 +1648,7 @@ impl JoltPhysics {
 
     // -------------------------------------------------------- Constraints
 
-    fn make_anchors(
+    pub(crate) fn make_anchors(
         &self,
         body_a_h: f64,
         body_b_h: f64,

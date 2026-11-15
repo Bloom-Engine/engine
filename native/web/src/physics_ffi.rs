@@ -347,6 +347,24 @@ extern "C" {
     // EN-063: the ragdoll joint — six-DOF with translation locked and
     // per-axis rotation limits. Args: bodyA, bodyB, anchorA(x,y,z),
     // anchorB(x,y,z), rotLimits(xMin,xMax,yMin,yMax,zMin,zMax), worldSpace.
+    #[wasm_bindgen(js_name = constraintSwingTwist)]
+    pub(crate) fn jb_constraint_swing_twist(
+        a0: f64,
+        a1: f64,
+        a2: f64,
+        a3: f64,
+        a4: f64,
+        a5: f64,
+        a6: f64,
+        a7: f64,
+        a8: f64,
+        a9: f64,
+        a10: f64,
+        a11: f64,
+        a12: f64,
+    ) -> f64;
+    #[wasm_bindgen(js_name = bodiesSetLinkedGroup)]
+    pub(crate) fn jb_bodies_set_linked_group(bodies: &[f64], parents: &[i32]);
     #[wasm_bindgen(js_name = constraintSixDofLockedTranslation)]
     pub(crate) fn jb_constraint_six_dof(
         a0: f64,

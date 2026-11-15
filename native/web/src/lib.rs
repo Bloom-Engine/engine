@@ -225,9 +225,7 @@ pub fn bloom_resize(physical_w: f64, physical_h: f64, logical_w: f64, logical_h:
     let lh = (logical_h as u32).max(1);
     unsafe {
         if let Some(eng) = ENGINE.get_mut() {
-            if pw != eng.renderer.physical_width() || ph != eng.renderer.physical_height() {
-                eng.renderer.resize(pw, ph, lw, lh);
-            }
+            eng.renderer.window_resized(pw, ph, lw, lh);
         }
     }
 }
@@ -1766,6 +1764,11 @@ pub fn bloom_project_screen_y() -> f64 {
 pub fn bloom_write_file(_path: f64, _data: f64) -> f64 {
     // Handled by JS glue — uses localStorage
     0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_crash_report_path(_path: f64) {
+    // No file on the web; a panic is already in the browser console.
 }
 
 #[wasm_bindgen]

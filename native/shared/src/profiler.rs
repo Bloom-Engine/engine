@@ -28,7 +28,10 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 const ROLLING_FRAMES: usize = 120;
-const MAX_GPU_PAIRS: u32 = 32;
+/// A full frame of the shooter records about 45 passes (the bloom chain, the
+/// Hi-Z chain and the GI passes are several each); at 32 the tail of the frame
+/// went unmeasured.
+const MAX_GPU_PAIRS: u32 = 96;
 
 #[derive(Clone, Copy)]
 struct CpuSample {
@@ -102,6 +105,45 @@ fn union_length(mut spans: Vec<(u64, u64)>) -> u64 {
         total += ce - cb;
     }
     total
+}
+
+/// Split GPU busy time between the passes that were running, so the parts add
+/// up to the whole.
+///
+/// On a tile-based GPU a pass's interval runs from the start of its vertex
+/// work to the end of its fragment work, and the next pass's vertex work starts
+/// before that. Interval lengths therefore overlap and sum to several times the
+/// frame. Here every instant is divided evenly between the intervals covering
+/// it: the results sum to [`union_length`] of the same intervals, and a pass
+/// that only ever ran alongside two others gets a third of its span.
+///
+/// Returns one value per input interval, in ticks.
+fn fair_shares(spans: &[(u64, u64)]) -> Vec<f64> {
+    let mut cuts: Vec<u64> = spans
+        .iter()
+        .filter(|(b, e)| e > b)
+        .flat_map(|&(b, e)| [b, e])
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = vec![0.0; spans.len()];
+    for w in cuts.windows(2) {
+        let (lo, hi) = (w[0], w[1]);
+        let active: Vec<usize> = spans
+            .iter()
+            .enumerate()
+            .filter(|(_, &(b, e))| e > b && b <= lo && e >= hi)
+            .map(|(i, _)| i)
+            .collect();
+        if active.is_empty() {
+            continue;
+        }
+        let each = (hi - lo) as f64 / active.len() as f64;
+        for i in active {
+            out[i] += each;
+        }
+    }
+    out
 }
 
 struct RollingStats {
@@ -415,10 +457,8 @@ impl Profiler {
                 readback.unmap();
                 let period = self.timestamp_period_ns as f64;
                 // A label can cover several passes (the bloom mip chain), and
-                // on tile-based GPUs consecutive passes overlap: each label
-                // reports the time covered by its intervals, and the frame the
-                // time covered by all of them, not their sums.
-                let mut spans: HashMap<&'static str, Vec<(u64, u64)>> = HashMap::new();
+                // on tile-based GPUs consecutive passes overlap.
+                let mut labels = Vec::with_capacity(self.pending_gpu.len());
                 let mut all = Vec::with_capacity(self.pending_gpu.len());
                 for (label, b, e) in &self.pending_gpu {
                     let bo = (*b as usize) * 8;
@@ -432,16 +472,18 @@ impl Profiler {
                     if et <= bt {
                         continue;
                     }
-                    spans.entry(*label).or_default().push((bt, et));
+                    labels.push(*label);
                     all.push((bt, et));
                 }
-                let ticks_to_us = |t: u64| t as f64 * period / 1000.0;
-                let mut by_label: HashMap<&'static str, f64> = spans
-                    .into_iter()
-                    .map(|(label, v)| (label, ticks_to_us(union_length(v))))
-                    .collect();
+                let ticks_to_us = |t: f64| t * period / 1000.0;
+                // Each label reports its SHARE of the GPU's busy time (see
+                // `fair_shares`), so the rows add up to the frame total.
+                let mut by_label: HashMap<&'static str, f64> = HashMap::new();
+                for (label, share) in labels.iter().zip(fair_shares(&all)) {
+                    *by_label.entry(*label).or_default() += ticks_to_us(share);
+                }
                 if !all.is_empty() {
-                    self.gpu_union_us = Some(ticks_to_us(union_length(all)));
+                    self.gpu_union_us = Some(ticks_to_us(union_length(all) as f64));
                 }
                 for s in self.frame.iter_mut() {
                     if let Some(us) = by_label.remove(s.label) {
@@ -726,6 +768,20 @@ mod tests {
         // Skip the gpu readback path (no device available) and go
         // straight to the CPU-only histogram + drain path.
         p.frame_end_cpu();
+    }
+
+    #[test]
+    fn fair_shares_add_up_to_the_union() {
+        // a: 0..10 alone for 4, shared with b for 6; b: 4..12; c: 20..25 alone;
+        // d is empty and gets nothing.
+        let spans = [(0, 10), (4, 12), (20, 25), (7, 7)];
+        let s = fair_shares(&spans);
+        assert!((s[0] - 7.0).abs() < 1e-9, "a = 4 + 6/2, got {}", s[0]);
+        assert!((s[1] - 5.0).abs() < 1e-9, "b = 6/2 + 2, got {}", s[1]);
+        assert!((s[2] - 5.0).abs() < 1e-9);
+        assert_eq!(s[3], 0.0);
+        let total: f64 = s.iter().sum();
+        assert!((total - union_length(spans.to_vec()) as f64).abs() < 1e-9);
     }
 
     #[test]
