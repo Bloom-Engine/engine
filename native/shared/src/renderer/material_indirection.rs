@@ -1011,6 +1011,18 @@ impl MaterialIndirection {
         }
     }
 
+    /// Give a resident texture another view and size, keeping its id. Every
+    /// material record that names the id then samples the new texture, with
+    /// nothing to rewrite. False when the id is not resident.
+    pub fn replace_texture(&mut self, id: TextureId, texture: ResidentTexture) -> bool {
+        let (Some(slot), ResolveStatus::Resident) = self.textures.resolve_mut(id) else {
+            return false;
+        };
+        *slot = texture;
+        self.resources_dirty = true;
+        true
+    }
+
     pub fn register_sampler(&mut self, sampler: wgpu::Sampler) -> SamplerId {
         match self.samplers.insert(ResidentSampler { sampler }) {
             Ok(id) => {

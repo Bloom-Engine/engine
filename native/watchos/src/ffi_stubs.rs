@@ -378,6 +378,9 @@
 #[no_mangle] pub extern "C" fn bloom_set_shadow_cascade_stagger(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_texture_streaming(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_shadow_distance(_p0: f64) -> f64 {
     0.0
 }

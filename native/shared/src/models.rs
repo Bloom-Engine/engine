@@ -402,6 +402,45 @@ pub(crate) fn physical_transmission_requested() -> bool {
         .unwrap_or(true)
 }
 
+/// See `ModelManager::exclusive_texture_indices`. Anything else that holds a
+/// primitive counts as sharing it, so a scene node with a level of detail
+/// from this model (`set_lod_model_mesh` keeps the `Arc`) keeps the textures
+/// alive: the safe side, and the reason to destroy a model's nodes first. The
+/// textures of the layered-material extensions (clearcoat, sheen, ...) are
+/// not released here. A primitive that appears
+/// several times in `meshes` (repeated glTF nodes clone the `Arc`) still
+/// belongs to this model alone when every strong reference is one of those.
+pub(crate) fn exclusive_texture_indices(meshes: &[Arc<MeshData>]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for mesh in meshes {
+        let here = meshes.iter().filter(|m| Arc::ptr_eq(m, mesh)).count();
+        if Arc::strong_count(mesh) > here {
+            continue;
+        }
+        for idx in [
+            mesh.texture_idx,
+            mesh.normal_texture_idx,
+            mesh.metallic_roughness_texture_idx,
+            mesh.emissive_texture_idx,
+            mesh.occlusion_texture_idx,
+            mesh.transmission
+                .texture
+                .and_then(|b| b.runtime_texture_idx),
+            mesh.transmission
+                .thickness_texture
+                .and_then(|b| b.runtime_texture_idx),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if idx != 0 && !out.contains(&idx) {
+                out.push(idx);
+            }
+        }
+    }
+    out
+}
+
 #[derive(Clone)]
 pub struct MeshData {
     pub vertices: Vec<Vertex3D>,
@@ -675,12 +714,15 @@ impl ModelManager {
         let base_dir = source_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        match gltf_load::load_gltf_with_textures(
+        renderer.set_streaming_source(Some(source_path));
+        let loaded = gltf_load::load_gltf_with_textures(
             file_data,
             renderer,
             Some(base_dir),
             Some(&source_path.display().to_string()),
-        ) {
+        );
+        renderer.set_streaming_source(None);
+        match loaded {
             Some(model) => {
                 self.source_cache.remember(source_path, file_data, &model);
                 self.models.alloc(model)
@@ -717,6 +759,18 @@ impl ModelManager {
 
     pub fn unload_model(&mut self, handle: f64) {
         self.models.free(handle);
+    }
+
+    /// The renderer texture slots that only this model uses: those of its
+    /// primitives that no other loaded model shares (two loads of one file
+    /// share their primitives through the source cache). The caller unloads
+    /// them together with the model; a model's textures are most of its
+    /// memory, and nothing else would ever release them.
+    pub fn exclusive_texture_indices(&self, handle: f64) -> Vec<u32> {
+        let Some(model) = self.models.get(handle) else {
+            return Vec::new();
+        };
+        exclusive_texture_indices(&model.meshes)
     }
 
     pub fn gen_mesh_cube(&mut self, w: f32, h: f32, d: f32) -> f64 {

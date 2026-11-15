@@ -92,6 +92,19 @@ impl Default for PbrMaterial {
 }
 
 impl PbrMaterial {
+    /// Whether the material shows one of the texture slots in `slots`.
+    pub(crate) fn shows_any_texture(&self, slots: &[u32]) -> bool {
+        [
+            self.texture_idx,
+            self.normal_texture_idx,
+            self.metallic_roughness_texture_idx,
+            self.emissive_texture_idx,
+            self.occlusion_texture_idx,
+        ]
+        .iter()
+        .any(|slot| *slot != 0 && slots.contains(slot))
+    }
+
     /// True only when the dielectric transmission lobe retains non-zero
     /// energy after metallic suppression. Camera refraction still keeps an
     /// authored all-metal material in its established material bucket, but GI
@@ -191,6 +204,10 @@ pub struct SceneNode {
     /// reflections, GI, LODs and ray tracing remain byte-for-byte unchanged.
     pub(crate) gpu_geometry: Option<GeometrySlice>,
     gpu_geometry_key: Option<SceneGeometryKey>,
+    /// The arena had no room for this geometry (device buffer limit). The
+    /// node stays on the compatibility path and is not offered again until
+    /// its geometry changes, so a full arena costs no hashing per frame.
+    gpu_geometry_refused: bool,
     /// Shared compatibility resources (VB/IB, BLAS, local SDF). Separate from
     /// the GPU-driven arena key because fallback passes need these on every
     /// backend, including adapters where GPU-driven submission is disabled.
@@ -295,6 +312,9 @@ pub struct SceneNode {
 
 /// One reduced-detail variant for a SceneNode.
 pub struct LodLevel {
+    /// A model primitive shared with other nodes. When set, the Vec fields
+    /// stay empty and the GPU buffers come from the scene's shared-mesh cache.
+    shared: Option<Arc<MeshData>>,
     pub vertices: Vec<Vertex3D>,
     secondary_tex_coords: Option<Vec<[f32; 2]>>,
     pub indices: Vec<u32>,
@@ -343,6 +363,7 @@ impl SceneNode {
             gpu_ib: None,
             gpu_geometry: None,
             gpu_geometry_key: None,
+            gpu_geometry_refused: false,
             gpu_resource_key: None,
             gpu_material_id: MaterialId::FALLBACK,
             gpu_material_key: None,
@@ -400,6 +421,11 @@ impl SceneNode {
             .as_ref()
             .and_then(|mesh| mesh.secondary_tex_coords.as_deref())
             .or(self.secondary_tex_coords.as_deref())
+    }
+
+    /// Visible and inside the camera's frustum as of the last `prepare()`.
+    pub(crate) fn shown_on_screen(&self) -> bool {
+        self.visible && self.in_view_frustum
     }
 
     pub(crate) fn shared_geometry_identity(&self) -> Option<usize> {
@@ -536,6 +562,7 @@ pub struct SceneGraph {
     pub pending_sdf_bakes: Vec<f64>,
     shared_gpu_resources: HashMap<SceneGeometryKey, SharedSceneGpuResources>,
     shared_gpu_geometry: HashMap<SceneGeometryKey, SharedSceneGeometry>,
+    shared_mesh_cache: SharedMeshCache,
     retired_gpu_geometry: Vec<GeometrySlice>,
     shared_gpu_materials: HashMap<SceneMaterialKey, SharedSceneMaterial>,
     retired_gpu_materials: Vec<MaterialId>,
@@ -575,6 +602,7 @@ impl SceneGraph {
             pending_sdf_bakes: Vec::new(),
             shared_gpu_resources: HashMap::new(),
             shared_gpu_geometry: HashMap::new(),
+            shared_mesh_cache: SharedMeshCache::default(),
             retired_gpu_geometry: Vec::new(),
             shared_gpu_materials: HashMap::new(),
             retired_gpu_materials: Vec::new(),
@@ -841,6 +869,7 @@ impl SceneGraph {
             0,
             usize::MAX,
             0.0,
+            None,
             &mut vbuf,
             &mut ibuf,
         );
@@ -853,12 +882,17 @@ impl SceneGraph {
     /// from, the triangles appended, and whether every node has been visited.
     /// A scene SDF rebake uses it to spread the gather over several frames.
     /// `min_feature` thins sub-voxel triangles (see `scene_gi_soup`); 0 keeps all.
+    /// `region` (world-space min and max) leaves out every node whose bounds
+    /// lie wholly outside it: the field covers a few tens of metres round the
+    /// camera, and a large world gathered whole is hundreds of megabytes that
+    /// the bake then discards. A node without valid world bounds is kept.
     pub(crate) fn append_world_triangles_for_gi(
         &self,
         exclude_physical_transmission: bool,
         first_node: usize,
         max_vertices: usize,
         min_feature: f32,
+        region: Option<([f32; 3], [f32; 3])>,
         vbuf: &mut Vec<f32>,
         ibuf: &mut Vec<u32>,
     ) -> (usize, u32, bool) {
@@ -877,15 +911,19 @@ impl SceneGraph {
             {
                 continue;
             }
-            appended += node.vertices().len();
-            tri_count += crate::scene_gi_soup::append_node_triangles(
+            let before = vbuf.len();
+            tri_count += crate::scene_gi_soup::append_node_triangles_in(
                 node.vertices(),
                 node.indices(),
                 &node.world_transform(),
                 min_feature,
+                region,
+                (node.world_bounds_min, node.world_bounds_max),
                 vbuf,
                 ibuf,
             );
+            // The budget counts the vertices that went into the soup.
+            appended += (vbuf.len() - before) / crate::scene_gi_soup::STRIDE;
         }
         (next_node, tri_count, true)
     }
@@ -939,6 +977,7 @@ impl SceneGraph {
         }
         while node.lods.len() <= lod_index {
             node.lods.push(LodLevel {
+                shared: None,
                 vertices: Vec::new(),
                 secondary_tex_coords: None,
                 indices: Vec::new(),
@@ -953,11 +992,44 @@ impl SceneGraph {
         let lod = &mut node.lods[lod_index];
         let secondary_tex_coords =
             secondary_tex_coords.filter(|coords| coords.len() == vertices.len());
+        lod.shared = None;
         lod.vertices = vertices;
         lod.secondary_tex_coords = secondary_tex_coords;
         lod.indices = indices;
         lod.max_coverage = max_coverage;
         lod.dirty = true;
+    }
+
+    /// Set (or replace) a reduced-detail variant with a model primitive. The
+    /// primitive is not copied: every node that uses it shares one pair of
+    /// GPU buffers.
+    pub fn set_lod_model_mesh(
+        &mut self,
+        handle: f64,
+        lod_index: usize,
+        mesh: Arc<MeshData>,
+        max_coverage: f32,
+    ) {
+        if mesh.vertices.is_empty() {
+            self.set_lod_geometry(handle, lod_index, Vec::new(), Vec::new(), max_coverage);
+            return;
+        }
+        // An empty placeholder creates the level; the shared mesh replaces it.
+        self.set_lod_geometry(
+            handle,
+            lod_index,
+            vec![Vertex3D::default()],
+            Vec::new(),
+            max_coverage,
+        );
+        if let Some(lod) = self
+            .nodes
+            .get_mut(handle)
+            .and_then(|node| node.lods.get_mut(lod_index))
+        {
+            lod.vertices = Vec::new();
+            lod.shared = Some(mesh);
+        }
     }
 
     pub fn update_geometry(&mut self, handle: f64, vertices: Vec<Vertex3D>, indices: Vec<u32>) {
@@ -1507,6 +1579,7 @@ impl SceneGraph {
         let shared_gpu_resources = &mut self.shared_gpu_resources;
         let shared_gpu_geometry = &mut self.shared_gpu_geometry;
         let retired_gpu_geometry = &mut self.retired_gpu_geometry;
+        let shared_mesh_cache = &mut self.shared_mesh_cache;
         let gpu_driven_scene_active = self.gpu_driven_scene_active;
         let mut visible_count: u32 = 0;
         self.has_transparent_nodes = false;
@@ -1637,25 +1710,36 @@ impl SceneGraph {
                 || node.material.layered_pbr.has_resolved_tex_coord(1);
             for lod in &mut node.lods {
                 if lod.dirty {
-                    lod.gpu_vb = Some(device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("scene_node_lod_vb"),
-                            contents: bytemuck::cast_slice(&lod.vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
-                    ));
-                    lod.gpu_ib = Some(device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("scene_node_lod_ib"),
-                            contents: bytemuck::cast_slice(&lod.indices),
-                            usage: wgpu::BufferUsages::INDEX,
-                        },
-                    ));
-                    lod.gpu_index_count = lod.indices.len() as u32;
+                    if let Some(mesh) = lod.shared.as_ref() {
+                        let (vertex, index) = shared_mesh_cache.lod_buffers(device, mesh);
+                        lod.gpu_vb = Some(vertex);
+                        lod.gpu_ib = Some(index);
+                        lod.gpu_index_count = mesh.indices.len() as u32;
+                    } else {
+                        lod.gpu_vb = Some(device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("scene_node_lod_vb"),
+                                contents: bytemuck::cast_slice(&lod.vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            },
+                        ));
+                        lod.gpu_ib = Some(device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("scene_node_lod_ib"),
+                                contents: bytemuck::cast_slice(&lod.indices),
+                                usage: wgpu::BufferUsages::INDEX,
+                            },
+                        ));
+                        lod.gpu_index_count = lod.indices.len() as u32;
+                    }
                     lod.dirty = false;
                 }
+                let lod_uv1 = match lod.shared.as_ref() {
+                    Some(mesh) => mesh.secondary_tex_coords.as_ref(),
+                    None => lod.secondary_tex_coords.as_ref(),
+                };
                 if needs_secondary_uv && lod.gpu_secondary_uv_vb.is_none() {
-                    lod.gpu_secondary_uv_vb = lod.secondary_tex_coords.as_ref().map(|coords| {
+                    lod.gpu_secondary_uv_vb = lod_uv1.map(|coords| {
                         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("scene_node_lod_refractive_uv1_vb"),
                             contents: bytemuck::cast_slice(coords),
@@ -1670,7 +1754,7 @@ impl SceneGraph {
             let geometry_changed = node.geo_dirty;
             if geometry_changed || node.gpu_vb.is_none() {
                 let resource_key = (!node.vertices().is_empty() && !node.indices().is_empty())
-                    .then(|| scene_geometry_key(node.vertices(), node.indices()));
+                    .then(|| node_geometry_key(node, shared_mesh_cache));
                 if node.gpu_resource_key != resource_key {
                     if let Some(old_key) = node.gpu_resource_key.take() {
                         release_scene_gpu_resources(shared_gpu_resources, old_key);
@@ -1946,20 +2030,24 @@ impl SceneGraph {
                 }
                 node.gpu_geometry = None;
             }
+            if geometry_changed {
+                node.gpu_geometry_refused = false;
+            }
             if gpu_driven.enabled()
                 && gpu_driven_scene_active
-                && (geometry_changed || node.gpu_geometry.is_none())
+                && (geometry_changed || (node.gpu_geometry.is_none() && !node.gpu_geometry_refused))
                 && !node.vertices().is_empty()
                 && !node.indices().is_empty()
             {
-                let key = scene_geometry_key(node.vertices(), node.indices());
+                let key = node_geometry_key(node, shared_mesh_cache);
                 if node.gpu_geometry_key != Some(key) {
                     if let Some(old_key) = node.gpu_geometry_key.take() {
                         release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
                     }
+                    node.gpu_geometry = None;
                     let slice = if let Some(cached) = shared_gpu_geometry.get_mut(&key) {
                         cached.references = cached.references.saturating_add(1);
-                        cached.slice
+                        Some(cached.slice)
                     } else {
                         let slice = gpu_driven.upload_static(
                             device,
@@ -1967,17 +2055,25 @@ impl SceneGraph {
                             node.vertices(),
                             node.indices(),
                         );
-                        shared_gpu_geometry.insert(
-                            key,
-                            SharedSceneGeometry {
-                                slice,
-                                references: 1,
-                            },
-                        );
+                        if let Some(slice) = slice {
+                            shared_gpu_geometry.insert(
+                                key,
+                                SharedSceneGeometry {
+                                    slice,
+                                    references: 1,
+                                },
+                            );
+                        }
                         slice
                     };
-                    node.gpu_geometry = Some(slice);
-                    node.gpu_geometry_key = Some(key);
+                    match slice {
+                        Some(slice) => {
+                            node.gpu_geometry = Some(slice);
+                            node.gpu_geometry_key = Some(key);
+                        }
+                        // Arena full: the node keeps its own buffers.
+                        None => node.gpu_geometry_refused = true,
+                    }
                 }
             }
             if node.uniform_slot.is_none() {
@@ -2100,7 +2196,13 @@ impl SceneGraph {
         renderer.retire_scene_gpu_materials(self.retired_gpu_materials.drain(..));
         let shared_gpu_materials = &mut self.shared_gpu_materials;
         let retired_gpu_materials = &mut self.retired_gpu_materials;
+        // Texture streaming put other textures in these slots: the bind
+        // groups of the nodes that show them hold the old views.
+        let replaced = renderer.take_replaced_textures();
         for (_handle, node) in self.nodes.iter_mut() {
+            if !replaced.is_empty() && node.material.shows_any_texture(&replaced) {
+                node.mat_dirty = true;
+            }
             if !node.visible || node.indices().is_empty() {
                 continue;
             }
@@ -2109,6 +2211,20 @@ impl SceneGraph {
                 renderer.imported_refraction_enabled() && node.material.transmission.is_active();
             let needs_layered = node.material.layered_pbr.is_active();
             let needs_layered_scene = needs_layered && !needs_refractive;
+            if (needs_refractive || needs_layered) && node.gpu_material_bg.is_none() {
+                let m = &node.material;
+                renderer.pin_special_material_textures(
+                    [
+                        m.texture_idx,
+                        m.normal_texture_idx,
+                        m.metallic_roughness_texture_idx,
+                        m.emissive_texture_idx,
+                        m.occlusion_texture_idx,
+                    ],
+                    &m.transmission,
+                    &m.layered_pbr,
+                );
+            }
             if material_changed
                 || node.gpu_material_bg.is_none()
                 || (needs_refractive && node.gpu_refractive_material_bg.is_none())
@@ -2496,5 +2612,7 @@ impl SceneGraph {
 
 mod draw_lists;
 mod helpers;
+mod shared_mesh;
 use helpers::*;
 pub(crate) use helpers::{aabb_outside_frustum, extract_frustum_planes};
+use shared_mesh::{node_geometry_key, SharedMeshCache};

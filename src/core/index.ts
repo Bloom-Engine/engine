@@ -41,6 +41,7 @@ declare function bloom_set_sharpen_strength(strength: number): number;
 declare function bloom_set_ssgi_probe_spacing(pixels: number): number;
 declare function bloom_set_shadow_distance(metres: number): number;
 declare function bloom_set_shadow_cascade_stagger(on: number): number;
+declare function bloom_set_texture_streaming(budgetMb: number): number;
 declare function bloom_set_shadow_filter_4tap(on: number): number;
 declare function bloom_set_shadow_map_size(texels: number): number;
 declare function bloom_set_ssao_downscale(divisor: number): number;
@@ -809,7 +810,8 @@ export function setSsgiProbeSpacing(pixels: number): boolean {
 
 /**
  * How far from the camera the sun's shadow cascades reach, in metres. Engine
- * default 80, range 5 to 1000. The three cascades split this range: a scene
+ * default 80, range 5 to 20000 (kilometres are for views from the air: one
+ * cascade texel is then metres wide). The three cascades split this range: a scene
  * that ends or fogs out at 30 m gets much sharper shadows by saying so, and
  * casters beyond the range are no longer drawn into the maps.
  */
@@ -846,6 +848,23 @@ export function setShadowFilter4Tap(on: boolean): boolean {
  */
 export function setShadowCascadeStagger(on: boolean): boolean {
   return bloom_set_shadow_cascade_stagger(on ? 1 : 0) !== 0;
+}
+
+/**
+ * Texture streaming: keep only the mip levels each texture needs at its
+ * present distance, inside a budget of `budgetMb` megabytes (0 = off, the
+ * default). A far-off prop then holds a 64 px version of its 2048 px texture
+ * instead of all of it; the engine raises and lowers textures as the camera
+ * moves, reading the levels from the model's file on a worker thread.
+ *
+ * Call it BEFORE loading models: it applies to textures loaded afterwards.
+ * Only block-compressed (KTX2) textures embedded in a .glb are streamed.
+ * Meant for large worlds on phones, tablets and TV, where everything that is
+ * loaded does not fit in memory at full size. Returns false where it is not
+ * available (the web, where models have no file to read levels from later).
+ */
+export function setTextureStreaming(budgetMb: number): boolean {
+  return bloom_set_texture_streaming(budgetMb) !== 0;
 }
 
 /** SSGI max view-space march distance in meters. Default 20. Tune to scene scale. */

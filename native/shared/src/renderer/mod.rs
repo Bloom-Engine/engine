@@ -124,6 +124,7 @@ mod temporal_diagnostics;
 mod temporal_history;
 mod temporal_reactive;
 mod texture_store;
+pub(crate) mod texture_streaming;
 mod tonemap_lut;
 pub use color_grade::write_neutral as write_color_grade_neutral;
 mod transmitted_shadows;
@@ -285,6 +286,10 @@ struct GpuMesh {
     /// model-upload time so draw_model_cached doesn't build one per
     /// frame.
     material_bg: wgpu::BindGroup,
+    /// The texture slots `material_bg` shows (texture streaming remakes it).
+    material_textures: [u32; 5],
+    /// Texture coordinates per metre of the mesh (texture streaming).
+    uv_density: f32,
     /// Per-material uniform buffer backing the `material` binding in
     /// the scene pipeline's group 2. Kept alongside `material_bg` so
     /// its lifetime matches (bind groups reference buffers internally
@@ -1416,6 +1421,7 @@ pub struct Renderer {
     // Cached model GPU buffers (static AND skinned — skinned VBs keep
     // raw bind-pose joint indices; the scene VS skins them per draw)
     model_gpu_cache: HashMap<u64, Option<Vec<GpuMesh>>>,
+    texture_streaming: texture_streaming::TextureStreaming,
     /// Original model-mesh indices represented by a compact compatibility-only
     /// cache. Absent means the handle owns an ordinary complete model cache.
     #[cfg(feature = "models3d")]
@@ -8640,6 +8646,7 @@ impl Renderer {
             persistent_vb_3d_capacity: vb_3d_cap,
             persistent_ib_3d_capacity: ib_3d_cap,
             model_gpu_cache: HashMap::new(),
+            texture_streaming: Default::default(),
             #[cfg(feature = "models3d")]
             model_virtual_compatibility_sources: HashMap::new(),
             gpu_driven,
@@ -12591,6 +12598,7 @@ impl Renderer {
     }
 
     pub fn begin_frame(&mut self) {
+        self.texture_streaming_tick();
         self.lighting_upload_tracker.begin_frame();
         self.frame_resource_stats
             .begin_frame(self.total_pipeline_creation_count());
@@ -13057,6 +13065,7 @@ impl Renderer {
         profiler: &mut crate::profiler::Profiler,
     ) {
         self.prewarm_pipelines(true);
+        self.texture_streaming_observe_scene(scene);
         self.has_refractive_scene_nodes =
             self.imported_refraction_enabled && scene.has_refractive_nodes();
         (
@@ -14194,25 +14203,36 @@ impl Renderer {
                     }
                 } else {
                     let geometry_identity = (*mesh as *const crate::models::MeshData) as usize;
-                    let slice = if let Some(slice) = shared_static_geometry.get(&geometry_identity)
-                    {
-                        *slice
+                    if let Some(slice) = shared_static_geometry.get(&geometry_identity) {
+                        gpu_driven::MeshGeometry::Shared(*slice)
                     } else {
-                        let slice = self.gpu_driven.upload_static(
+                        let geometry = self.gpu_driven.upload_static_or_dedicated(
                             &self.device,
                             &self.queue,
                             &mesh.vertices,
                             &mesh.indices,
                         );
-                        shared_static_geometry.insert(geometry_identity, slice);
-                        slice
-                    };
-                    gpu_driven::MeshGeometry::Shared(slice)
+                        if let gpu_driven::MeshGeometry::Shared(slice) = &geometry {
+                            shared_static_geometry.insert(geometry_identity, *slice);
+                        }
+                        geometry
+                    }
                 };
                 let base_color_idx = mesh.texture_idx.unwrap_or(0);
                 let normal_idx = mesh.normal_texture_idx.unwrap_or(0);
                 let mr_idx = mesh.metallic_roughness_texture_idx.unwrap_or(0);
                 let em_idx = mesh.emissive_texture_idx.unwrap_or(0);
+                self.pin_special_material_textures(
+                    [
+                        base_color_idx,
+                        normal_idx,
+                        mr_idx,
+                        em_idx,
+                        mesh.occlusion_texture_idx.unwrap_or(0),
+                    ],
+                    &mesh.transmission,
+                    &mesh.layered_pbr,
+                );
                 let occ_idx = mesh.occlusion_texture_idx.unwrap_or(0);
                 let shader_alpha = mesh.alpha_mode.shader_alpha_value(mesh.alpha_cutoff);
                 let material_id = self.allocate_model_gpu_material(mesh);
@@ -14425,6 +14445,8 @@ impl Renderer {
                     layered_uv1_buffer,
                     layered_uses_uv1,
                     material_bg,
+                    material_textures: [base_color_idx, normal_idx, mr_idx, em_idx, occ_idx],
+                    uv_density: texture_streaming::uv_density(&mesh.vertices, &mesh.indices),
                     _material_uniform: material_uniform,
                     shadow_cutout_bg,
                     _shadow_cutoff_buf: shadow_cutoff_buf,

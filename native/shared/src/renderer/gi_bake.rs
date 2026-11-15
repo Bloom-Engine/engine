@@ -35,7 +35,17 @@ struct SdfTriCache {
     vertices: Vec<f32>,
     indices: Vec<u32>,
     tri_count: u32,
+    /// The part of the world the soup was gathered from.
+    region: ([f32; 3], [f32; 3]),
 }
+/// How far the camera can travel from where a soup was gathered before it is
+/// gathered again, in multiples of the field's extent.
+const SDF_GATHER_MARGIN_EXTENTS: f32 = 1.0;
+/// The width a gathered region has to cover for the field to be baked from
+/// it: the field's box and, on every side, the one bin cell beyond it that
+/// the binner and the bake shader also read triangles from.
+const SDF_COVERED_EXTENT: f32 =
+    SCENE_SDF_CLIPMAP_EXTENT + 2.0 * SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_BIN_CELLS as f32;
 fn sdf_tri_cache() -> &'static std::sync::Mutex<Option<SdfTriCache>> {
     static INSTANCE: std::sync::OnceLock<std::sync::Mutex<Option<SdfTriCache>>> =
         std::sync::OnceLock::new();
@@ -143,25 +153,42 @@ impl Renderer {
             // A soup gathered for this scene version is reused as is (a
             // travel-triggered rebake only re-bins); a stale one donates its
             // allocations to the new gather.
-            let (vertices, indices, tri_count, gathered) =
+            // Only what lies near the camera is gathered: the field is
+            // SCENE_SDF_CLIPMAP_EXTENT wide, and a whole large world as a
+            // soup is hundreds of megabytes (568 MB for a 5 km city, more
+            // than an iPad will allocate). A cached soup is reused while the
+            // field still fits inside the region it was gathered from.
+            let cam = self.current_camera_pos;
+            let fresh_region = crate::scene_gi_soup::gather_region(
+                cam,
+                SCENE_SDF_CLIPMAP_EXTENT,
+                SCENE_SDF_CLIPMAP_EXTENT * SDF_GATHER_MARGIN_EXTENTS,
+            );
+            let (vertices, indices, tri_count, gathered, region) =
                 match sdf_tri_cache().lock().unwrap().take() {
                     Some(c)
                         if c.version == scene.tlas_version
-                            && c.excludes_transmission == transparent_gi =>
+                            && c.excludes_transmission == transparent_gi
+                            && crate::scene_gi_soup::region_covers(
+                                c.region,
+                                cam,
+                                SDF_COVERED_EXTENT,
+                            ) =>
                     {
-                        (c.vertices, c.indices, c.tri_count, true)
+                        (c.vertices, c.indices, c.tri_count, true, c.region)
                     }
                     Some(mut c) => {
                         c.vertices.clear();
                         c.indices.clear();
-                        (c.vertices, c.indices, 0, false)
+                        (c.vertices, c.indices, 0, false, fresh_region)
                     }
-                    None => (Vec::new(), Vec::new(), 0, false),
+                    None => (Vec::new(), Vec::new(), 0, false, fresh_region),
                 };
             *prep_guard = Some(sdf_clipmap_prep::ClipmapPrep {
                 scene_version: scene.tlas_version,
                 transparent_gi,
                 next_node: 0,
+                region,
                 gathered,
                 vertices,
                 indices,
@@ -190,6 +217,7 @@ impl Renderer {
                 gather_budget,
                 // An eighth of a voxel: far below what the field resolves.
                 SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_RES as f32 * 0.125,
+                Some(prep.region),
                 &mut prep.vertices,
                 &mut prep.indices,
             );
@@ -208,6 +236,21 @@ impl Renderer {
             let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
             let voxel = SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_RES as f32;
             let cam = self.current_camera_pos;
+            if !crate::scene_gi_soup::region_covers(prep.region, cam, SDF_COVERED_EXTENT) {
+                // The camera left the gathered region while an amortized
+                // gather ran: gather again round where it is now.
+                prep.region = crate::scene_gi_soup::gather_region(
+                    cam,
+                    SCENE_SDF_CLIPMAP_EXTENT,
+                    SCENE_SDF_CLIPMAP_EXTENT * SDF_GATHER_MARGIN_EXTENTS,
+                );
+                prep.vertices.clear();
+                prep.indices.clear();
+                prep.tri_count = 0;
+                prep.next_node = 0;
+                prep.gathered = false;
+                return;
+            }
             prep.origin = [
                 (cam[0] / voxel).round() * voxel,
                 (cam[1] / voxel).round() * voxel,
@@ -240,7 +283,7 @@ impl Renderer {
         let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
         let aabb_min = [origin[0] - half, origin[1] - half, origin[2] - half, 0.0];
         let aabb_max = [origin[0] + half, origin[1] + half, origin[2] + half, 0.0];
-        let (offsets, tri_refs) = (binner.offsets, binner.tri_refs);
+        let (offsets, mut tri_refs) = (binner.offsets, binner.tri_refs);
         // Keep the soup for the next rebake of this scene version.
         *sdf_tri_cache().lock().unwrap() = Some(SdfTriCache {
             version: prep.scene_version,
@@ -248,15 +291,35 @@ impl Renderer {
             vertices: prep.vertices,
             indices: prep.indices,
             tri_count,
+            region: prep.region,
         });
         if tri_count == 0 {
             return;
         }
         let cache_guard = sdf_tri_cache().lock().unwrap();
         let cached = cache_guard.as_ref().unwrap();
-        let vertices = &cached.vertices;
-        let indices = &cached.indices;
-
+        // Only the triangles the field's cells refer to go to the GPU.
+        let (vertices, indices) = sdf_clipmap_prep::pack_binned_triangles(
+            &cached.vertices,
+            &cached.indices,
+            tri_count as usize,
+            offsets.last().copied().unwrap_or(0) as usize,
+            &mut tri_refs,
+        );
+        if std::env::var_os("BLOOM_SDF_STATS").is_some() {
+            eprintln!(
+                "bloom sdf soup: {} triangles in {} MB, {} uploaded in {} MB, cell refs {} MB",
+                tri_count,
+                (std::mem::size_of_val(cached.vertices.as_slice())
+                    + std::mem::size_of_val(cached.indices.as_slice()))
+                    >> 20,
+                indices.len() / 3,
+                (std::mem::size_of_val(vertices.as_slice())
+                    + std::mem::size_of_val(indices.as_slice()))
+                    >> 20,
+                std::mem::size_of_val(tri_refs.as_slice()) >> 20,
+            );
+        }
         let vbuf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {

@@ -89,6 +89,32 @@ mod tests {
     use crate::models::ModelManager;
 
     #[test]
+    fn a_models_textures_are_its_own_only_while_no_other_model_shares_its_primitives() {
+        let mut models = ModelManager::new();
+        let handle = models.gen_mesh_cube(1.0, 1.0, 1.0);
+        let mut mesh = (*models.get(handle).unwrap().meshes[0]).clone();
+        mesh.texture_idx = Some(7);
+        mesh.normal_texture_idx = Some(8);
+        mesh.occlusion_texture_idx = Some(8);
+        mesh.emissive_texture_idx = Some(0);
+        let mesh = Arc::new(mesh);
+        // the same primitive placed twice, as repeated glTF nodes do
+        let meshes = vec![mesh.clone(), mesh];
+        assert_eq!(
+            crate::models::exclusive_texture_indices(&meshes),
+            vec![7, 8]
+        );
+        // a second load of the file shares the primitive: nothing may be freed
+        let other_model = meshes[0].clone();
+        assert!(crate::models::exclusive_texture_indices(&meshes).is_empty());
+        drop(other_model);
+        assert_eq!(
+            crate::models::exclusive_texture_indices(&meshes),
+            vec![7, 8]
+        );
+    }
+
+    #[test]
     fn repeated_load_shares_meshes_until_the_file_changes_or_is_unloaded() {
         let mut models = ModelManager::new();
         let handle = models.gen_mesh_cube(1.0, 1.0, 1.0);

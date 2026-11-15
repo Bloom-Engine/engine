@@ -1926,6 +1926,13 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_texture_streaming",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_shadow_distance",
           "params": [
             "f64"

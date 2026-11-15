@@ -9,10 +9,14 @@
 
 use super::lazy_pipeline::{LazyComputePipeline, LazyRenderPipeline};
 use super::{
-    material_indirection::GpuCompletionTracker, MeshDrawRef, Renderer, Uniforms3D, Vertex3D,
-    DEPTH_FORMAT, HDR_FORMAT, MATERIAL_FORMAT, VELOCITY_FORMAT,
+    MeshDrawRef, Renderer, Uniforms3D, Vertex3D, DEPTH_FORMAT, HDR_FORMAT, MATERIAL_FORMAT,
+    VELOCITY_FORMAT,
 };
 use std::sync::OnceLock;
+
+#[path = "geometry_arena.rs"]
+mod geometry_arena;
+use geometry_arena::GeometryArena;
 
 pub const GPU_DRIVEN_FEATURES: wgpu::Features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
 pub(crate) const DRAW_FLAG_DOUBLE_SIDED: u32 = 1 << 0;
@@ -63,264 +67,6 @@ pub enum MeshGeometry {
         vertex: wgpu::Buffer,
         index: wgpu::Buffer,
     },
-}
-
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-struct FreeRange {
-    offset: u64,
-    size: u64,
-}
-
-struct RetiredGeometry {
-    epoch: u64,
-    slice: GeometrySlice,
-}
-
-struct GeometryArena {
-    vertex: wgpu::Buffer,
-    index: wgpu::Buffer,
-    vertex_capacity: u64,
-    index_capacity: u64,
-    vertex_end: u64,
-    index_end: u64,
-    free_vertices: Vec<FreeRange>,
-    free_indices: Vec<FreeRange>,
-    retired: Vec<RetiredGeometry>,
-    completion: GpuCompletionTracker,
-    generation: u64,
-}
-
-impl GeometryArena {
-    const INITIAL_CAPACITY: u64 = 64 * 1024;
-
-    fn new(device: &wgpu::Device) -> Self {
-        Self {
-            vertex: create_vertex_arena(device, Self::INITIAL_CAPACITY),
-            index: create_index_arena(device, Self::INITIAL_CAPACITY),
-            vertex_capacity: Self::INITIAL_CAPACITY,
-            index_capacity: Self::INITIAL_CAPACITY,
-            vertex_end: 0,
-            index_end: 0,
-            free_vertices: Vec::new(),
-            free_indices: Vec::new(),
-            retired: Vec::new(),
-            completion: GpuCompletionTracker::default(),
-            generation: 0,
-        }
-    }
-
-    fn upload(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        vertices: &[Vertex3D],
-        indices: &[u32],
-    ) -> GeometrySlice {
-        self.collect();
-        let vertex_size = std::mem::size_of_val(vertices) as u64;
-        let index_size = std::mem::size_of_val(indices) as u64;
-        let previous_vertex_end = self.vertex_end;
-        let previous_index_end = self.index_end;
-        let vertex_offset = allocate_range(
-            &mut self.free_vertices,
-            &mut self.vertex_end,
-            vertex_size,
-            std::mem::align_of::<Vertex3D>() as u64,
-        );
-        let index_offset =
-            allocate_range(&mut self.free_indices, &mut self.index_end, index_size, 4);
-        self.grow_if_needed(
-            device,
-            queue,
-            vertex_offset + vertex_size,
-            index_offset + index_size,
-            previous_vertex_end,
-            previous_index_end,
-        );
-        if vertex_size > 0 {
-            queue.write_buffer(&self.vertex, vertex_offset, bytemuck::cast_slice(vertices));
-        }
-        if index_size > 0 {
-            queue.write_buffer(&self.index, index_offset, bytemuck::cast_slice(indices));
-        }
-        GeometrySlice {
-            vertex_offset,
-            vertex_size,
-            index_offset,
-            index_size,
-            first_index: (index_offset / 4) as u32,
-            base_vertex: (vertex_offset / std::mem::size_of::<Vertex3D>() as u64) as i32,
-        }
-    }
-
-    fn retire_many(
-        &mut self,
-        queue: &wgpu::Queue,
-        slices: impl IntoIterator<Item = GeometrySlice>,
-    ) {
-        let slices: Vec<_> = slices.into_iter().collect();
-        if slices.is_empty() {
-            return;
-        }
-        let epoch = self.completion.track_submitted_work(queue);
-        self.retired.extend(
-            slices
-                .into_iter()
-                .map(|slice| RetiredGeometry { epoch, slice }),
-        );
-    }
-
-    fn collect(&mut self) {
-        let completed = self.completion.completed_epoch();
-        let mut keep = Vec::with_capacity(self.retired.len());
-        for retired in self.retired.drain(..) {
-            if retired.epoch > completed {
-                keep.push(retired);
-                continue;
-            }
-            if retired.slice.vertex_size > 0 {
-                self.free_vertices.push(FreeRange {
-                    offset: retired.slice.vertex_offset,
-                    size: retired.slice.vertex_size,
-                });
-            }
-            if retired.slice.index_size > 0 {
-                self.free_indices.push(FreeRange {
-                    offset: retired.slice.index_offset,
-                    size: retired.slice.index_size,
-                });
-            }
-        }
-        self.retired = keep;
-        merge_ranges(&mut self.free_vertices);
-        merge_ranges(&mut self.free_indices);
-    }
-
-    fn grow_if_needed(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        required_vertex: u64,
-        required_index: u64,
-        copy_vertex_end: u64,
-        copy_index_end: u64,
-    ) {
-        let new_vertex_capacity = grown_capacity(self.vertex_capacity, required_vertex);
-        let new_index_capacity = grown_capacity(self.index_capacity, required_index);
-        if new_vertex_capacity == self.vertex_capacity && new_index_capacity == self.index_capacity
-        {
-            return;
-        }
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("gpu_geometry_arena_grow"),
-        });
-        if new_vertex_capacity != self.vertex_capacity {
-            let next = create_vertex_arena(device, new_vertex_capacity);
-            if copy_vertex_end > 0 {
-                encoder.copy_buffer_to_buffer(&self.vertex, 0, &next, 0, copy_vertex_end);
-            }
-            self.vertex = next;
-            self.vertex_capacity = new_vertex_capacity;
-        }
-        if new_index_capacity != self.index_capacity {
-            let next = create_index_arena(device, new_index_capacity);
-            if copy_index_end > 0 {
-                encoder.copy_buffer_to_buffer(&self.index, 0, &next, 0, copy_index_end);
-            }
-            self.index = next;
-            self.index_capacity = new_index_capacity;
-        }
-        self.generation = self.generation.wrapping_add(1);
-        queue.submit(std::iter::once(encoder.finish()));
-    }
-}
-
-fn create_vertex_arena(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("gpu_driven_shared_vertices"),
-        size,
-        usage: wgpu::BufferUsages::VERTEX
-            | wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-fn create_index_arena(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("gpu_driven_shared_indices"),
-        size,
-        usage: wgpu::BufferUsages::INDEX
-            | wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-fn grown_capacity(current: u64, required: u64) -> u64 {
-    if required <= current {
-        current
-    } else {
-        required
-            .next_power_of_two()
-            .max(GeometryArena::INITIAL_CAPACITY)
-    }
-}
-
-fn align_up(value: u64, alignment: u64) -> u64 {
-    value.div_ceil(alignment) * alignment
-}
-
-fn allocate_range(free: &mut Vec<FreeRange>, end: &mut u64, size: u64, alignment: u64) -> u64 {
-    if size == 0 {
-        return 0;
-    }
-    for index in 0..free.len() {
-        let aligned = align_up(free[index].offset, alignment);
-        let padding = aligned - free[index].offset;
-        if padding + size > free[index].size {
-            continue;
-        }
-        let original = free.swap_remove(index);
-        if padding > 0 {
-            free.push(FreeRange {
-                offset: original.offset,
-                size: padding,
-            });
-        }
-        let tail_offset = aligned + size;
-        let tail_size = original.size - padding - size;
-        if tail_size > 0 {
-            free.push(FreeRange {
-                offset: tail_offset,
-                size: tail_size,
-            });
-        }
-        return aligned;
-    }
-    let offset = align_up(*end, alignment);
-    *end = offset + size;
-    offset
-}
-
-fn merge_ranges(ranges: &mut Vec<FreeRange>) {
-    ranges.sort_by_key(|range| range.offset);
-    let mut write = 0usize;
-    for read in 0..ranges.len() {
-        let current = ranges[read];
-        if write > 0 {
-            let previous = &mut ranges[write - 1];
-            if previous.offset + previous.size == current.offset {
-                previous.size += current.size;
-                continue;
-            }
-        }
-        ranges[write] = current;
-        write += 1;
-    }
-    ranges.truncate(write);
 }
 
 #[repr(C)]
@@ -647,8 +393,35 @@ impl GpuDrivenRenderer {
         queue: &wgpu::Queue,
         vertices: &[Vertex3D],
         indices: &[u32],
-    ) -> GeometrySlice {
+    ) -> Option<GeometrySlice> {
         self.arena.upload(device, queue, vertices, indices)
+    }
+
+    /// Static geometry for a cached model draw: a slice of the shared arena,
+    /// or buffers of its own once the arena has reached the device limit.
+    pub fn upload_static_or_dedicated(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vertices: &[Vertex3D],
+        indices: &[u32],
+    ) -> MeshGeometry {
+        use wgpu::util::DeviceExt;
+        match self.arena.upload(device, queue, vertices, indices) {
+            Some(slice) => MeshGeometry::Shared(slice),
+            None => MeshGeometry::Dedicated {
+                vertex: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("cached_static_model_vb"),
+                    contents: bytemuck::cast_slice(vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+                index: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("cached_static_model_ib"),
+                    contents: bytemuck::cast_slice(indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                }),
+            },
+        }
     }
 
     pub fn retire_shared(
@@ -1755,30 +1528,6 @@ fn cull_shader_source(routed_visibility: bool) -> std::borrow::Cow<'static, str>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn allocator_reuses_and_merges_ranges() {
-        let mut free = vec![FreeRange {
-            offset: 16,
-            size: 16,
-        }];
-        let mut end = 64;
-        assert_eq!(allocate_range(&mut free, &mut end, 8, 4), 16);
-        free.push(FreeRange {
-            offset: 24,
-            size: 8,
-        });
-        free.push(FreeRange {
-            offset: 16,
-            size: 8,
-        });
-        merge_ranges(&mut free);
-        assert!(free.iter().any(|range| *range
-            == FreeRange {
-                offset: 16,
-                size: 16
-            }));
-    }
 
     #[test]
     fn gpu_record_matches_wgsl_alignment() {
