@@ -31,6 +31,10 @@
 //! This path is independent of them and fails OPEN: a light without a slot is
 //! an ordinary unshadowed light.
 //!
+//! The engine's own scene shader (skinned and static models: characters,
+//! props, weapons) samples the same maps through two bindings of its lighting
+//! group; see [`scene_receivers`] and [`scene_shader`].
+//!
 //! Off by default and absent on mobile and web: see [`supported`].
 
 use super::shadow_pass::ShadowDrawEntry;
@@ -147,6 +151,116 @@ pub(crate) fn push_material_bind_entries<'a>(
         binding: MATERIAL_PARAMS_BINDING,
         resource: params.as_entire_binding(),
     });
+}
+
+/// The scene shader's lighting group (group 1) carries the same two resources
+/// here. 10 to 12 are the froxel lists and 13 to 15 the virtual shadow maps.
+pub(crate) const SCENE_TEXTURE_BINDING: u32 = 16;
+pub(crate) const SCENE_PARAMS_BINDING: u32 = 17;
+
+/// Sampled textures per fragment stage the device must grant before the scene
+/// shader takes one more: the most any scene pipeline asks for without the
+/// virtual shadow maps is 28 (layered materials with refraction, see
+/// `layered_pbr_refraction.rs`), and every gate in front of those pipelines
+/// counts exactly. With 30 granted (what the high tier requests) one more
+/// fits under all of them without touching a single gate.
+const SCENE_SAMPLED_TEXTURES_NEEDED: u32 = 30;
+
+static SCENE_RECEIVERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Decide, once per process and before the lighting layout is created,
+/// whether the engine's own scene shader samples the local-light shadow maps.
+///
+/// As [`supported`], and also: not together with the virtual shadow maps
+/// (`BLOOM_VSM=1`), which shadow their own local lights in the same loop and
+/// with which the largest layered pipeline already sits at the limit of
+/// sampled textures; and only where the device grants
+/// [`SCENE_SAMPLED_TEXTURES_NEEDED`]. Where this is false the lighting layout,
+/// its bind group and every scene shader source are what they were.
+/// `BLOOM_LOCAL_LIGHT_SHADOWS=material` leaves the scene shader out and keeps
+/// the material receivers, for comparing the two.
+pub(crate) fn decide_scene_receivers(device: &wgpu::Device) -> bool {
+    *SCENE_RECEIVERS.get_or_init(|| {
+        supported()
+            && !crate::virtual_shadows::virtual_shadows_requested()
+            && device.limits().max_sampled_textures_per_shader_stage
+                >= SCENE_SAMPLED_TEXTURES_NEEDED
+            && std::env::var("BLOOM_LOCAL_LIGHT_SHADOWS")
+                .map_or(true, |value| value.trim() != "material")
+    })
+}
+
+/// What [`decide_scene_receivers`] decided; false before any renderer exists
+/// (shader-source unit tests then see the canonical sources).
+pub(crate) fn scene_receivers() -> bool {
+    SCENE_RECEIVERS.get().copied().unwrap_or(false)
+}
+
+pub(crate) fn scene_layout_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
+    let mut entries = material_layout_entries();
+    entries[0].binding = SCENE_TEXTURE_BINDING;
+    entries[1].binding = SCENE_PARAMS_BINDING;
+    entries
+}
+
+/// The two entries of the lighting bind group, when [`scene_receivers`].
+pub(crate) fn scene_bind_entries(lights: &LocalLightShadows) -> Vec<wgpu::BindGroupEntry<'_>> {
+    let Some((maps, params)) = lights.material_resources().filter(|_| scene_receivers()) else {
+        return Vec::new();
+    };
+    vec![
+        wgpu::BindGroupEntry {
+            binding: SCENE_TEXTURE_BINDING,
+            resource: wgpu::BindingResource::TextureView(maps),
+        },
+        wgpu::BindGroupEntry {
+            binding: SCENE_PARAMS_BINDING,
+            resource: params.as_entire_binding(),
+        },
+    ]
+}
+
+/// The point-light term every variant of the scene shader's light loop ends
+/// in (the plain loop, the froxel one, the layered-material ones).
+const SCENE_POINT_INTENSITY: &str = "pl.color.w * atten2";
+
+/// The sampling helper as the scene shader needs it: the material helper with
+/// the scene's lighting block and binding numbers. One source, so the two
+/// receivers cannot drift apart.
+fn scene_helper() -> String {
+    MATERIAL_HELPER
+        .replace("view.point_lights", "lighting.point_lights")
+        .replace(
+            "@group(1) @binding(13)",
+            &format!("@group(1) @binding({SCENE_TEXTURE_BINDING})"),
+        )
+        .replace(
+            "@group(1) @binding(14)",
+            &format!("@group(1) @binding({SCENE_PARAMS_BINDING})"),
+        )
+}
+
+/// The scene shader with its point lights shadowed: the helper is put in
+/// front and every point light's intensity is multiplied by
+/// `local_light_shadow`. `source` is the canonical shader or any variant of it
+/// that still holds the light loop; the froxel variant names the light's index
+/// in `lighting.point_lights` `light_index`, the plain loop `i`. A source
+/// without the loop is returned as it is.
+pub(crate) fn scene_shader(source: &str) -> String {
+    if !source.contains(SCENE_POINT_INTENSITY) {
+        return source.to_owned();
+    }
+    let light_index = if source.contains("let light_index = cluster_indices[") {
+        "light_index"
+    } else {
+        "i"
+    };
+    let shadowed = format!(
+        "{SCENE_POINT_INTENSITY} * local_light_shadow({light_index}, in.world_pos, in.normal)"
+    );
+    let mut output = scene_helper();
+    output.push_str(&source.replace(SCENE_POINT_INTENSITY, &shadowed));
+    output
 }
 
 #[repr(C)]
@@ -1085,12 +1199,26 @@ impl Renderer {
             for bind_group in self.planar_probe_view_bgs.iter_mut() {
                 *bind_group = None;
             }
+            // So does the scene shader's lighting bind group.
+            if scene_receivers() {
+                if self.lighting_bg_is_procedural {
+                    self.swap_lighting_bg_to_procedural();
+                } else {
+                    self.swap_lighting_bg_to_panorama();
+                }
+            }
         }
         self.shadow_map.local_lights.active()
     }
 
+    /// Whether the engine's own lit models (everything the scene shader
+    /// draws) receive these shadows too, not only material-path receivers.
+    pub fn local_light_shadows_on_scene_models(&self) -> bool {
+        scene_receivers()
+    }
+
     /// `add_point_light`, plus a request that this light cast shadows on
-    /// material-path receivers. Never fewer lights than `add_point_light`
+    /// material-path receivers and on the engine's own lit models. Never fewer lights than `add_point_light`
     /// would give: without a shadow cube to spare, or with the feature off,
     /// the light is simply unshadowed. True when the light was submitted and
     /// shadows from local lights are switched on (it may still be one of the
@@ -1260,6 +1388,39 @@ mod tests {
         assert_eq!(static_work(true, false, true, false), StaticWork::Nothing);
         // Not due yet, but something new arrived: still add it meanwhile.
         assert_eq!(static_work(true, true, true, false), StaticWork::Add);
+    }
+
+    #[test]
+    fn the_scene_variant_shadows_both_light_loops_and_still_parses() {
+        let canonical = crate::renderer::shaders::SCENE_SHADER;
+        let clustered = crate::renderer::froxel::clustered_scene_shader(canonical);
+        for (source, index) in [(canonical, "i"), (clustered.as_str(), "light_index")] {
+            let variant = scene_shader(source);
+            let call = format!(
+                "pl.color.w * atten2 * local_light_shadow({index}, in.world_pos, in.normal)"
+            );
+            assert_eq!(variant.matches(&call).count(), 1, "{index}");
+            assert_eq!(variant.matches(SCENE_POINT_INTENSITY).count(), 1);
+            assert!(variant.contains("@group(1) @binding(16) var local_shadow_maps"));
+            assert!(variant.contains("@group(1) @binding(17) var<uniform> local_shadows"));
+            assert!(!variant.contains("view.point_lights"));
+            assert!(!variant.contains("@binding(13)") || source.contains("@binding(13)"));
+            wgpu::naga::front::wgsl::parse_str(&variant)
+                .unwrap_or_else(|error| panic!("{index}: {}", error.emit_to_string(&variant)));
+        }
+        // Nothing to shadow, nothing changed.
+        assert_eq!(scene_shader("fn f() {}"), "fn f() {}");
+        // The canonical source never carries the feature.
+        assert!(!canonical.contains("local_light_shadow"));
+    }
+
+    #[test]
+    fn the_scene_bindings_are_free_in_the_lighting_group() {
+        // 0 to 9: lighting, 10 to 12: froxels, 13 to 15: virtual shadow maps.
+        assert!(SCENE_TEXTURE_BINDING > 15 && SCENE_PARAMS_BINDING > SCENE_TEXTURE_BINDING);
+        let entries = scene_layout_entries();
+        assert_eq!(entries[0].binding, SCENE_TEXTURE_BINDING);
+        assert_eq!(entries[1].binding, SCENE_PARAMS_BINDING);
     }
 
     #[test]
