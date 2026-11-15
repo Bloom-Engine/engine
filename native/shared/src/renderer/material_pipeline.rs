@@ -168,6 +168,9 @@ fn create_per_view_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             },
         ]);
     }
+    if super::local_light_shadows::supported() {
+        entries.extend(super::local_light_shadows::material_layout_entries());
+    }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("abi_per_view"),
         entries: &entries,
@@ -661,6 +664,14 @@ fn expand_material_source(
 ) -> Result<String, IncludeError> {
     let mut entries: Vec<(&str, &str)> = BAKED_ENTRIES_SNAPSHOT.to_vec();
     entries.extend(extra_sources.iter().copied());
+    if super::local_light_shadows::supported() {
+        // Same include name, the version that samples the shadow maps.
+        for entry in entries.iter_mut() {
+            if entry.0 == super::local_light_shadows::MATERIAL_HELPER_INCLUDE {
+                entry.1 = super::local_light_shadows::MATERIAL_HELPER;
+            }
+        }
+    }
     let source = BakedSource { entries: &entries };
     let expanded = process(&source, entry_path)?;
     let expanded = if crate::virtual_shadows::virtual_shadows_requested() {
@@ -1119,6 +1130,10 @@ const BAKED_ENTRIES_SNAPSHOT: &[(&str, &str)] = &[
     (
         "common/instance_lod.wgsl",
         include_str!("../../../shared/shaders/common/instance_lod.wgsl"),
+    ),
+    (
+        "common/local_shadows.wgsl",
+        include_str!("../../../shared/shaders/common/local_shadows.wgsl"),
     ),
     (
         "materials/test_minimal.wgsl",

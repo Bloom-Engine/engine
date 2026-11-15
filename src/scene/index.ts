@@ -139,6 +139,12 @@ declare function bloom_add_shadowed_point_light(
   r: number, g: number, b: number,
   intensity: number,
 ): number;
+declare function bloom_set_local_light_shadows(maxLights: number, resolution: number): number;
+declare function bloom_add_point_light_with_shadow(
+  x: number, y: number, z: number, range: number,
+  r: number, g: number, b: number,
+  intensity: number,
+): number;
 declare function bloom_add_shadowed_spot_light(
   x: number, y: number, z: number,
   directionX: number, directionY: number, directionZ: number,
@@ -1001,6 +1007,44 @@ export function addShadowedPointLight(
   intensity: number,
 ): boolean {
   return bloom_add_shadowed_point_light(
+    x, y, z, range, r, g, b, intensity,
+  ) !== 0;
+}
+
+/**
+ * Turn on shadows from local lights for surfaces drawn by custom material
+ * shaders (terrain, buildings), or turn them off with `maxLights` 0.
+ *
+ * Up to `maxLights` (1 to 4) of the lights submitted with
+ * `addPointLightWithShadow` get a cube of six depth maps, `resolution` texels
+ * a side (0 = 512; 128 to 1024); the nearest to the camera win. A material
+ * shader receives them by including `common/local_shadows.wgsl` and
+ * multiplying a light's contribution by
+ * `local_light_shadow(lightIndex, worldPos, normal)`. Needs `enableShadows()`.
+ *
+ * Returns false where the renderer does not carry the feature (mobile, web,
+ * lower capability tiers): everything then draws as before.
+ */
+export function setLocalLightShadows(maxLights: number, resolution: number = 0): boolean {
+  return bloom_set_local_light_shadows(maxLights, resolution) !== 0;
+}
+
+/**
+ * `addPointLight`, plus a request that this light cast shadows (see
+ * `setLocalLightShadows`). Call each frame. The light is always submitted:
+ * without a shadow cube to spare, or where the feature is off, it is an
+ * ordinary unshadowed point light. Meant for lights that stay put (a lamp):
+ * what does not move around them is drawn once and kept.
+ *
+ * Returns true when shadows from local lights are switched on; the light may
+ * still be one of those left without a cube this frame.
+ */
+export function addPointLightWithShadow(
+  x: number, y: number, z: number, range: number,
+  r: number, g: number, b: number,
+  intensity: number,
+): boolean {
+  return bloom_add_point_light_with_shadow(
     x, y, z, range, r, g, b, intensity,
   ) !== 0;
 }

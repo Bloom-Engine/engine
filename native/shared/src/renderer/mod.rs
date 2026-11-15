@@ -85,6 +85,7 @@ pub(crate) mod lazy_pipeline;
 mod light_api;
 mod lighting;
 mod lighting_upload;
+pub(crate) mod local_light_shadows;
 mod material_api;
 pub mod material_indirection;
 mod material_instancing;
@@ -12770,6 +12771,9 @@ impl Renderer {
                         .as_entire_binding(),
                 },
             ]);
+        }
+        if let Some((maps, params)) = self.shadow_map.local_lights.material_resources() {
+            local_light_shadows::push_material_bind_entries(&mut entries, maps, params);
         }
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material_per_view_bg_live"),

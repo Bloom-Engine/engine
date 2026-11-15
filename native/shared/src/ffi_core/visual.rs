@@ -984,6 +984,43 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_local_light_shadows  [renderer/local_light_shadows.rs]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_local_light_shadows(max_lights: f64, resolution: f64) -> f64 {
+            $crate::ffi::guard("bloom_set_local_light_shadows", move || {
+                f64::from(engine().renderer.set_local_light_shadows(
+                    max_lights.clamp(0.0, 16.0) as u32,
+                    resolution.clamp(0.0, 4096.0) as u32,
+                ))
+            })
+        }
+
+        // bloom_add_point_light_with_shadow  [renderer/local_light_shadows.rs]
+        #[no_mangle]
+        pub extern "C" fn bloom_add_point_light_with_shadow(
+            x: f64,
+            y: f64,
+            z: f64,
+            range: f64,
+            r: f64,
+            g: f64,
+            b: f64,
+            intensity: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_add_point_light_with_shadow", move || {
+                f64::from(engine().renderer.add_point_light_with_shadow(
+                    x as f32,
+                    y as f32,
+                    z as f32,
+                    range as f32,
+                    r as f32,
+                    g as f32,
+                    b as f32,
+                    intensity as f32,
+                ))
+            })
+        }
+
         // bloom_add_shadowed_spot_light  [issue #132 local VSM]
         #[no_mangle]
         pub extern "C" fn bloom_add_shadowed_spot_light(

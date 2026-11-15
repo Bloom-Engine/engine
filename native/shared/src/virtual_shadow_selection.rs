@@ -55,6 +55,14 @@ pub(super) fn selection() -> VirtualShadowSelection {
     )
 }
 
+/// Whether the negotiated renderer tier is the high one (or none was
+/// configured, as in unit tests). Shared by the optional shadow paths.
+pub(crate) fn capability_tier_is_high_end() -> bool {
+    CONFIGURED_CAPABILITY_TIER
+        .get()
+        .is_none_or(|tier| *tier >= RendererCapabilityTier::HighEnd)
+}
+
 pub(crate) fn virtual_shadows_requested() -> bool {
     selection().enabled
 }

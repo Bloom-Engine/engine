@@ -154,6 +154,7 @@ export {
   getSceneNodeCount,
   registerFrameCallback, unregisterFrameCallback,
   addDirectionalLight, addPointLight, addShadowedPointLight, addShadowedSpotLight,
+  setLocalLightShadows, addPointLightWithShadow,
   extrudePolygon, subtractBox,
   pickScene,
   enableShadows, disableShadows, dumpShadowMap,
