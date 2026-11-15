@@ -37,6 +37,7 @@ declare function bloom_compile_material_cutout(source: number): number;
 declare function bloom_compile_material_instanced(source: number): number;
 declare function bloom_create_instance_buffer(dataPtr: any, instanceCount: number): number;
 declare function bloom_create_instance_buffer_scratch(instanceCount: number): number;
+declare function bloom_create_instance_buffer_lod_scratch(instanceCount: number, start: number, end: number, minFraction: number, band: number, minDensity: number): number;
 declare function bloom_submit_material_draw_instanced(material: number, meshHandle: number, meshIdx: number, instanceBuffer: number, instanceCount: number): void;
 declare function bloom_destroy_instance_buffer(handle: number): void;
 declare function bloom_create_planar_reflection(planeY: number, normalX: number, normalY: number, normalZ: number, resolution: number): number;
@@ -478,6 +479,38 @@ export function createInstanceBuffer(data: number[], instanceCount: number): num
   const n = instanceCount * 9;
   for (let i = 0; i < n; i++) bloom_mesh_scratch_push_f32(data[i]);
   return bloom_create_instance_buffer_scratch(instanceCount);
+}
+
+/// EN-060 — `createInstanceBuffer` with distance thinning, for a dense
+/// static scatter (grass). Between `start` and `end` metres from the
+/// camera the share of instances that is drawn falls from all of them to
+/// `minFraction`; past `end` it stays there. `band` (0.05 to 0.3 is
+/// sensible) is how gradually one instance goes: the slice of the field
+/// that is part-way gone at any one distance. `minDensity` (instances per
+/// square metre of ground, 0 for no limit) protects the places where the
+/// scatter is sparse and each instance can be told apart: nothing is
+/// thinned below that density, and ground at or under it is left alone.
+///
+/// This is only half of it. The MATERIAL has to shrink each instance away
+/// before the engine stops drawing it, or the field thins in visible
+/// tile-sized steps: `#include "common/instance_lod.wgsl"`, read the
+/// per-instance rank and floor from `@location(11) instance_extra.xy`, and
+/// pass `start`, `end`, `minFraction` and `band` to the shader as material
+/// parameters. That file's
+/// header is the recipe. With a material that does not do this, use
+/// `createInstanceBuffer`.
+///
+/// Instances are stored in a different order than `createInstanceBuffer`
+/// would store them, which changes nothing for opaque and cutout
+/// materials (the only ones the thinning applies to).
+export function createInstanceBufferLod(
+  data: number[], instanceCount: number,
+  start: number, end: number, minFraction: number, band: number, minDensity: number,
+): number {
+  bloom_mesh_scratch_reset();
+  const n = instanceCount * 9;
+  for (let i = 0; i < n; i++) bloom_mesh_scratch_push_f32(data[i]);
+  return bloom_create_instance_buffer_lod_scratch(instanceCount, start, end, minFraction, band, minDensity);
 }
 
 /// EN-001 — draw `mesh` (a single primitive at `meshIdx`)

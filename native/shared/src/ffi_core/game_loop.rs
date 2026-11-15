@@ -117,6 +117,32 @@ macro_rules! __bloom_ffi_game_loop {
             })
         }
 
+        // bloom_create_instance_buffer_lod_scratch — EN-060. As above, plus
+        // distance thinning (start, end, min fraction, band, min density); see
+        // `renderer::material_instancing::InstanceLod`.
+        #[no_mangle]
+        pub extern "C" fn bloom_create_instance_buffer_lod_scratch(
+            instance_count: f64,
+            start: f64,
+            end: f64,
+            min_fraction: f64,
+            band: f64,
+            min_density: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_create_instance_buffer_lod_scratch", move || {
+                let eng = engine();
+                let count = instance_count as u32;
+                let need = (count as usize) * 9;
+                if count == 0 || eng.models.scratch_f32.len() < need {
+                    return 0.0;
+                }
+                let data: Vec<f32> = eng.models.scratch_f32[..need].to_vec();
+                eng.models.mesh_scratch_reset();
+                let lod = [start, end, min_fraction, band, min_density].map(|v| v as f32);
+                eng.renderer.create_instance_buffer_lod(&data, count, lod) as f64
+            })
+        }
+
         // bloom_destroy_instance_buffer  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_destroy_instance_buffer(handle: f64) {

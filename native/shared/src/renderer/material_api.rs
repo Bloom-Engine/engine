@@ -173,6 +173,25 @@ impl Renderer {
             .create_instance_buffer(&self.device, &self.queue, raw, count)
     }
 
+    /// EN-060 — like `create_instance_buffer`, with distance thinning:
+    /// from `start` to `end` metres from the eye the drawn fraction falls
+    /// to `min_fraction`, each instance shrinking away over `band` of
+    /// rank, and never below `min_density` instances per square metre.
+    /// `lod` is those five numbers. The material must do its half; see
+    /// `material_instancing::InstanceLod`.
+    pub fn create_instance_buffer_lod(&mut self, raw: &[f32], count: u32, lod: [f32; 5]) -> u32 {
+        let [start, end, min_fraction, band, min_density] = lod;
+        let lod = super::material_instancing::InstanceLod::new(
+            start,
+            end,
+            min_fraction,
+            band,
+            min_density,
+        );
+        self.material_system
+            .create_instance_buffer_lod(&self.device, &self.queue, raw, count, lod)
+    }
+
     /// EN-001 — release the GPU memory backing an instance buffer.
     /// Safe to call with handle 0 or stale handles (no-op).
     pub fn destroy_instance_buffer(&mut self, handle: u32) {

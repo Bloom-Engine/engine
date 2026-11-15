@@ -143,6 +143,9 @@
 #[no_mangle] pub extern "C" fn bloom_create_instance_buffer_scratch(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_create_instance_buffer_lod_scratch(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_material_params_scratch(_p0: f64, _p1: f64) -> f64 {
     0.0
 }

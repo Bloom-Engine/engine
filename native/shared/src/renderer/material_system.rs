@@ -188,6 +188,8 @@ pub struct InstanceBuffer {
     /// stops rasterizing the half behind the camera. Translucent draws
     /// ignore tiles (their submission order is author-controlled).
     pub tiles: Vec<InstanceTile>,
+    /// EN-060: distance thinning, see `material_instancing.rs`. None = off.
+    pub lod: Option<super::material_instancing::InstanceLod>,
 }
 
 /// One spatial tile of an instance buffer: a contiguous instance range
@@ -202,6 +204,8 @@ pub struct InstanceTile {
     pub pmin: [f32; 3],
     pub pmax: [f32; 3],
     pub max_scale: f32,
+    /// EN-060: the thinning level this tile never goes below (0 = no floor).
+    pub lod_floor: f32,
 }
 
 /// EN-014 — owned wgpu::Texture + view + layer-count for a texture
@@ -2022,11 +2026,13 @@ impl MaterialSystem {
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
         planes: Option<&[[f32; 4]; 6]>,
+        lod_eye: Option<[f32; 3]>,
         mesh_fetch: F,
     ) where
         F: FnMut(u64, usize) -> Option<(super::MeshDrawRef<'pass>, [f32; 3], [f32; 3])>,
     {
-        self.dispatch_with_view(pass, &self.per_view_bg, |_| true, false, planes, mesh_fetch);
+        let bg = &self.per_view_bg;
+        self.dispatch_with_view(pass, bg, |_| true, false, planes, lod_eye, mesh_fetch);
     }
 
     /// EN-011 — like `dispatch`, but uses a caller-supplied PerView
@@ -2055,6 +2061,9 @@ impl MaterialSystem {
         // View frustum for instance-tile culling (`mesh_fetch` supplies
         // the mesh's local AABB). None = no per-tile culling.
         planes: Option<&[[f32; 4]; 6]>,
+        // EN-060: the eye the bound view UBO carries, for distance thinning
+        // of instance buffers that asked for it. None = no thinning.
+        lod_eye: Option<[f32; 3]>,
         mut mesh_fetch: F,
     ) where
         F: FnMut(u64, usize) -> Option<(super::MeshDrawRef<'pass>, [f32; 3], [f32; 3])>,
@@ -2106,61 +2115,15 @@ impl MaterialSystem {
                 if instance_range.end <= instance_range.start {
                     continue;
                 }
-                // Instance-tile culling: `commands` holds only the
-                // opaque + cutout buckets (translucent draws dispatch
-                // elsewhere), so emitting the visible tile ranges is
-                // output-identical to the full-range draw. Tiles' pos
-                // AABBs are inflated by max_scale × the mesh's local
-                // half-diagonal (rotation-safe). Adjacent visible tiles
-                // merge into one draw.
-                let tiles = cmd
-                    .instance
-                    .as_ref()
-                    .filter(|_| planes.is_some() && lmin[0] <= lmax[0])
-                    .and_then(|inst| {
-                        self.instance_buffers
-                            .get(inst.buffer_handle as usize - 1)
-                            .and_then(|s| s.as_ref())
-                            .map(|s| &s.tiles)
-                    })
-                    .filter(|t| !t.is_empty());
-                match (tiles, planes) {
-                    (Some(tiles), Some(planes)) => {
-                        let half_diag = 0.5
-                            * ((lmax[0] - lmin[0]).powi(2)
-                                + (lmax[1] - lmin[1]).powi(2)
-                                + (lmax[2] - lmin[2]).powi(2))
-                            .sqrt();
-                        let mut run: Option<(u32, u32)> = None;
-                        for tile in tiles.iter() {
-                            let r = tile.max_scale * half_diag;
-                            let bmin = [tile.pmin[0] - r, tile.pmin[1] - r, tile.pmin[2] - r];
-                            let bmax = [tile.pmax[0] + r, tile.pmax[1] + r, tile.pmax[2] + r];
-                            if crate::scene::aabb_outside_frustum(planes, bmin, bmax) {
-                                if let Some((s, e)) = run.take() {
-                                    pass.draw_indexed(mesh.index_range(), mesh.base_vertex, s..e);
-                                }
-                                continue;
-                            }
-                            run = match run {
-                                Some((s, e)) if e == tile.first => {
-                                    Some((s, tile.first + tile.count))
-                                }
-                                Some((s, e)) => {
-                                    pass.draw_indexed(mesh.index_range(), mesh.base_vertex, s..e);
-                                    Some((tile.first, tile.first + tile.count))
-                                }
-                                None => Some((tile.first, tile.first + tile.count)),
-                            };
-                        }
-                        if let Some((s, e)) = run {
-                            pass.draw_indexed(mesh.index_range(), mesh.base_vertex, s..e);
-                        }
-                    }
-                    _ => {
-                        pass.draw_indexed(mesh.index_range(), mesh.base_vertex, instance_range);
-                    }
-                }
+                self.draw_instance_tiles(
+                    pass,
+                    &mesh,
+                    cmd.instance.as_ref(),
+                    instance_range,
+                    planes,
+                    lod_eye,
+                    (lmin, lmax),
+                );
             }
         }
     }

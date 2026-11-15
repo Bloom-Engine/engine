@@ -115,8 +115,11 @@ impl Renderer {
             self.current_proj_matrix_unjittered,
             self.current_view_matrix,
         ));
+        // EN-060: the eye the per-view UBO carries (`view.camera_pos`), so the
+        // engine's per-tile thinning and the material's per-instance one agree.
+        let lod_eye = Some(self.current_camera_pos).filter(|_| !self.dbg_skip("instance_lod"));
         self.material_system
-            .dispatch(pass, Some(&camera_planes), |handle, mesh_index| {
+            .dispatch(pass, Some(&camera_planes), lod_eye, |handle, mesh_index| {
                 let mesh = self
                     .model_gpu_cache
                     .get(&handle)?
