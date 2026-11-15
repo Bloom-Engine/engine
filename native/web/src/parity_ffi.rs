@@ -112,6 +112,29 @@ pub fn bloom_create_instance_buffer_scratch(instance_count: f64) -> f64 {
     eng.renderer.create_instance_buffer(&data, count) as f64
 }
 
+/// EN-060: as above, plus distance thinning (see the shared crate's
+/// `renderer::material_instancing::InstanceLod`).
+#[wasm_bindgen]
+pub fn bloom_create_instance_buffer_lod_scratch(
+    instance_count: f64,
+    start: f64,
+    end: f64,
+    min_fraction: f64,
+    band: f64,
+    min_density: f64,
+) -> f64 {
+    let eng = engine();
+    let count = instance_count as u32;
+    let need = (count as usize) * 9;
+    if count == 0 || eng.models.scratch_f32.len() < need {
+        return 0.0;
+    }
+    let data: Vec<f32> = eng.models.scratch_f32[..need].to_vec();
+    eng.models.mesh_scratch_reset();
+    let lod = [start, end, min_fraction, band, min_density].map(|v| v as f32);
+    eng.renderer.create_instance_buffer_lod(&data, count, lod) as f64
+}
+
 /// Params arrive via the mesh scratch (reset + push_f32 × N) — the idiom the
 /// TS `setMaterialParams` wrapper uses everywhere (Perry 0.5.x rejects JS
 /// arrays in pointer params). Forwards to the existing floats path.

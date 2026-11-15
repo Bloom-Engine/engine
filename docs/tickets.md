@@ -2046,25 +2046,81 @@ because the fix lands in different repos depending on the answer. Note
 Perry-upstream involvement is plausible (same class as the EN-020 slice
 scanners: byte-level string handling).
 
-## EN-060 — Grass distance LOD (quality-gated) 🟡 *(2026-07-16 audit)*
+## EN-060 — Grass distance LOD (quality-gated) ✅ *(2026-11-15, opt-in; shooter desktop only)*
 
 > **Numbering note (2026-07-16):** the spatial-audio-v2 work was developed
 > on a branch named `feat/en-060-spatial-audio-v2` but shipped as
 > **EN-062** (07c2c29, entry below) — the branch name is the only leftover
 > of the collision. This EN-060 remains the grass-LOD ticket.
 
-Grass tiles are frustum-culled (`material_system.rs:1776`) but in-frustum
-tiles draw at full authored density regardless of distance — 120k blades in
-the shooter, `material_pass` ~1.9 ms. The July audit's "concentric rings /
-instance_count by distance" idea remains unimplemented.
+**The ask (2026-07-16 audit).** Grass tiles are frustum-culled but in-frustum
+tiles draw at full authored density regardless of distance. Hard constraint
+from the product owner: no visible quality loss; a naive density cut is
+rejected by definition; if it cannot be made imperceptible, close as won't-do.
 
-**Hard constraint from the product owner: no visible quality loss.** A naive
-density cut reads as the far field thinning and is REJECTED by definition.
-Acceptable shapes: dithered per-instance dropout beyond the distance where a
-blade is sub-pixel (its coverage already handled by the shader's distance
-ramp), with A/B screenshots at multiple distances proving indistinguishable.
-If it cannot be made imperceptible, close as won't-do — 1.9 ms is not worth
-a visible regression here.
+**Where the grass is drawn.** Once per frame, in the opaque material draws
+inside the main pass. It is not in the depth prepass and not in the shadow
+cascades (`shadow_pass.rs` skips instanced material draws), and the shooter
+keeps it out of the water probe. So there was nothing to skip in other passes,
+and the frustum culling per tile (3.8 m tiles for the shooter's 80,000 tufts)
+is already fine. What is left is the far tufts themselves.
+
+**What shipped: `createInstanceBufferLod(data, count, start, end, minFraction,
+band, minDensity)`**, a second way to make a static instance buffer. Nothing
+changes for a buffer made with `createInstanceBuffer`.
+
+- Every instance gets a *rank* in (0, 1), spread evenly inside its tile (the
+  tile's instances are stored in a scrambled order, so it does not matter in
+  what order the game scattered them). A thinning *level* falls with the
+  distance from the eye: `1 + band` up to `start`, a straight line down to
+  `minFraction` at `end`. An instance is whole while the level is above
+  `rank + band` and gone when the level reaches its rank.
+- **The material does the visible half** (`common/instance_lod.wgsl`, rank
+  in `instance_extra.x`): it shrinks an instance away as the level comes
+  down through its band and widens what is left by exactly the mass that
+  went (`instance_lod_fill`). This is a continuous function of the camera
+  position per instance, so there is no pop and no line where the density
+  steps.
+- **The engine does the cheap half** (`material_instancing.rs`,
+  `draw_instance_tiles`): a tile whose nearest point is at distance `d` draws
+  only its first `ceil(count * level(d))` instances. Those it leaves out are
+  ones the shader has already shrunk to nothing (unit-tested as a contract
+  between `InstanceLod::level` and its WGSL twin). Measured: all of the gain
+  is here. With the shader half alone (`BLOOM_SKIP=instance_lod`) the frame
+  is 0.03 ms faster, i.e. not at all: collapsed tufts still cost their
+  vertices.
+- **`minDensity`** (instances per square metre) leaves sparse ground alone:
+  a tile is never thinned below that density, and each tile's floor reaches
+  the shader in `instance_extra.y`. This was added after looking: on the
+  shooter's Quarry the lone tufts on bare soil could be counted going missing
+  in a side-by-side crop. With the floor they are untouched.
+- Only the main view thins. The planar probe passes no eye, so a material
+  drawn there is drawn whole by the engine (the shader still thins by that
+  view's own camera position, which is consistent).
+
+**Shooter settings and result** (M1 Max, 3456 x 2168, title screen, the
+shooter's `--harness grassab`, which alternates thinned and whole grass in
+90-frame windows inside one run so the machine's load cancels): start 22 m,
+end 55 m, least fraction 0.4, band 0.2, floor 2.5 tufts/m2.
+
+| view | whole | thinned | gain |
+|---|---|---|---|
+| arena_02, render scale 0.5 | 16.83 ms | 16.30 ms | 0.52 ms (also 0.51; 0.68 and 0.85 on a busier machine) |
+| arena_02, render scale 0.75 | 22.12 ms | 21.53 ms | 0.59 ms (also 0.56, 0.90) |
+| arena_05 (Quarry), 0.5 | 15.87 ms | 14.92 ms | 0.95 ms (also 0.98) |
+
+`perfstages`, one pair: `main_hdr_pass` 2.73 ms to 2.33 ms of GPU time, 4
+microseconds more CPU for the extra draw calls. The whole grass costs about
+1.1 ms in the arena_02 view, so this is roughly half of everything there was
+to win. In before/after captures of arena_02 and arena_05 (fixed views and a
+twelve-step walk) the far and middle field could not be told apart.
+
+**Not done, on purpose.** A lower-detail far mesh (per-tile mesh choice
+would need a second index range and buys less than dropping whole tufts).
+Thinning on mobile and web: the shooter leaves it off there because nobody
+looked. The engine code is the same on every backend (no new bindings, one
+more vertex attribute read from a buffer that already carried it), but only
+Metal was run.
 
 ---
 

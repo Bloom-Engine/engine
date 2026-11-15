@@ -1117,6 +1117,10 @@ const BAKED_ENTRIES_SNAPSHOT: &[(&str, &str)] = &[
         include_str!("../../../shared/shaders/common/clouds.wgsl"),
     ),
     (
+        "common/instance_lod.wgsl",
+        include_str!("../../../shared/shaders/common/instance_lod.wgsl"),
+    ),
+    (
         "materials/test_minimal.wgsl",
         include_str!("../../../shared/shaders/materials/test_minimal.wgsl"),
     ),

@@ -691,6 +691,8 @@ impl Renderer {
                     true,
                     // Instance tiles cull against the MIRRORED frustum.
                     Some(&mirror_planes),
+                    // No distance thinning in a probe: its eye is mirrored.
+                    None,
                     |handle, idx| {
                         if let Some(Some(meshes)) = cache.get(&handle) {
                             if idx < meshes.len() {
