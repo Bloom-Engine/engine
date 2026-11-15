@@ -2528,8 +2528,7 @@ and the expanded shader sources are what they were; `setLocalLightShadows` retur
 `addPointLightWithShadow` is `addPointLight`. It also needs the sun's shadow pass
 (`enableShadows`), whose caster lists it reuses; with that off, nothing is shadowed.
 
-**Not done.** The built-in PBR shader does not sample these maps: characters and props are
-still lit by a lamp through a wall. Spot lights have no single-face variant here. Only point
+**Not done.** (The built-in PBR shader did not sample these maps; EN-069 below adds that.) Spot lights have no single-face variant here. Only point
 lights submitted through the new call are considered; nothing picks lights automatically.
 
 **Checked.** macOS on an M1 Max only. `cargo fmt --check`, 552 unit tests (seven new: the
@@ -2541,3 +2540,70 @@ crates, where the feature is compiled out of the layouts and shaders; Android, L
 Windows were not compiled. Linux and Windows are the two targets where the new path is ON and
 has never run. In the shooter: looked at in three arenas (see its SH-064), boot, AI and menu
 checks pass, and a run with the sun's shadows switched off draws the lamps unshadowed.
+
+## EN-069 — Shadows from local lights on the engine's own lit models ✅ *(2026-11-15, branch feat/local-shadows-scene)*
+
+EN-068 shadowed a lamp only on surfaces drawn by a game's material shaders. Everything the
+engine's own scene shader draws (skinned characters, props, weapons, scene nodes) was still
+lit by a lamp straight through a wall and took no lamp shadow.
+
+**What this adds.** The scene shader's point-light loop multiplies each light by the same
+`local_light_shadow(index, world_pos, normal)` the materials use. The helper is one source:
+`local_light_shadows::scene_shader` takes the material helper, swaps `view.point_lights` for
+`lighting.point_lights` and the binding numbers, puts it in front of the scene shader and
+rewrites the one term every variant of the loop ends in (`pl.color.w * atten2`). It is applied
+in `specialized_scene_shader_source_from`, after the froxel splice, so every pipeline that
+derives from that function gets it: the forward scene pipelines (static, skinned, prepassed),
+the GPU-driven and visibility-buffer shading, the layered, refractive, weighted and reactive
+variants. The lighting bind group (group 1) gains bindings 16 (the depth array) and 17 (the
+parameter block); 10 to 12 are the froxel lists and 13 to 15 the virtual shadow maps. The
+comparison sampler is the sun's (binding 8).
+
+**The light index.** `add_point_light_with_shadow` records the light's index in
+`lighting_uniforms.point_lights`. The plain loop reads that array by `i`; the froxel lists
+hold indices into the same array (`refresh_froxel_lights` copies it in order), and the froxel
+loop's `light_index` is what the helper is given. The material path copies the array index
+for index. So one index serves all three.
+
+**Where it is on** (`decide_scene_receivers`, once per process, before the lighting layout
+exists): where EN-068 is supported (desktop, high tier), AND the virtual shadow maps are not
+requested (`BLOOM_VSM=1` shadows its own local lights in the same loop, and its largest
+layered pipeline already sits at 30 sampled textures), AND the device grants 30 sampled
+textures per fragment stage. The last is the honest limit: the largest scene pipeline without
+virtual shadow maps asks for 28 (layered materials with refraction), every gate in front of
+those pipelines counts exactly, and with 30 granted one more texture fits under all of them
+without touching a gate. The high tier requests 30 (`device_negotiation.rs`); the M1 Max
+grants it. Elsewhere the lighting layout, its bind group and every scene shader source are
+byte for byte what they were. `BLOOM_LOCAL_LIGHT_SHADOWS=material` keeps EN-068 and leaves
+the scene shader out, for an A/B on one build.
+
+**Cost when unused.** One uniform word is read per light and the function returns 1; no
+texture is sampled. When `setLocalLightShadows` reallocates the maps the lighting bind group
+is rebuilt once.
+
+**Cost in the shooter** (M1 Max, native output, Checkpoint arena, `perftest`, the first 24
+windows without the eight that stall on a screenshot, three interleaved rounds): lamp shadows
+off 22.92 / 22.89 / 22.83 ms; on with this ticket 22.70 / 22.79 / 22.88 ms; on with the scene
+shader left out (EN-068 alone) 22.64 / 22.64 / 22.65 ms. So about 0.15 ms over EN-068 alone and
+nothing measurable against off; all three are inside what two runs of one build differ by.
+
+**Test.** `tests/golden_render/local_light_shadows.rs`, self-checking: a lamp, a wall, a cube
+behind it and a cube beside it. With the shadow on, the cube behind the wall falls to what it
+shows without the lamp (131.1 lit, 114.5 shadowed, 114.6 without the lamp), the cube in the
+light keeps its light (134.9 / 135.0), and with the feature switched off a shadow-asking lamp
+draws as a plain one. It needs the high tier, which the suite's plain device is not; it takes
+the path-tracing goldens' device. The tier is fixed per process by the first renderer, so in
+a full run of the suite the test does its work only when a high-tier renderer came first, and
+says "skip" otherwise; run by name it always works. Two unit tests: the variant parses and
+shadows both loops; the binding numbers are free.
+
+**Not done.** The immediate-mode 3D shader (`SHADER_3D`, `draw_cube` and friends) is not
+shadowed. Together with `BLOOM_VSM=1` the scene shader keeps the virtual maps' own local
+shadows and not these. A translucent surface is shadowed like an opaque one. The fog's lamp
+halos (`volumetric_fog.rs`) are still unshadowed.
+
+**Checked.** macOS, M1 Max only. Compile-checked for iOS, tvOS and both wasm crates (feature
+absent there). Android, Linux and Windows not compiled; Linux and Windows are where it is ON
+and has never run. Layered, refractive, weighted, reactive, GPU-driven and visibility-buffer
+variants are covered by construction and by the suites compiling them, not by a picture of a
+shadow on each.

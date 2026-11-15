@@ -2,8 +2,8 @@
 //!
 //! The scene + immediate-mode 3D pipelines share one bind-group layout
 //! for lighting data: the Lighting UBO, env/IBL textures, the shadow
-//! cascade, and (on clustered devices) the froxel buffers at bindings
-//! 10-12. The bind group is rebuilt whenever the env source changes
+//! cascade, (on clustered devices) the froxel buffers at bindings
+//! 10-12, and (on desktop) the local-light shadow maps at 16-17. The bind group is rebuilt whenever the env source changes
 //! (HDR load, panorama, procedural sky); every rebuild goes through
 //! [`Renderer::make_lighting_bind_group`] so the entry list exists in
 //! exactly one place and cannot drift between call sites.
@@ -129,6 +129,11 @@ pub(super) fn create_lighting_layout(
             },
         ]);
     }
+    // 16/17: shadows from local lights for the scene shader's own point-light
+    // loop (renderer/local_light_shadows.rs), where the device carries them.
+    if super::local_light_shadows::decide_scene_receivers(device) {
+        entries.extend(super::local_light_shadows::scene_layout_entries());
+    }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("lighting_layout"),
         entries: &entries,
@@ -225,6 +230,9 @@ pub(super) fn create_lighting_bind_group(
             },
         ]);
     }
+    entries.extend(super::local_light_shadows::scene_bind_entries(
+        &src.shadow_map.local_lights,
+    ));
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),
         layout,

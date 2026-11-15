@@ -1920,6 +1920,8 @@ fn specialized_scene_shader_source_from(
     };
     let source: std::borrow::Cow<'static, str> = if virtual_shadows_requested {
         crate::virtual_shadows::directional_scene_shader(&source).into()
+    } else if local_light_shadows::scene_receivers() {
+        local_light_shadows::scene_shader(&source).into()
     } else {
         source
     };
