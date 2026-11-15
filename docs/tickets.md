@@ -2607,3 +2607,62 @@ absent there). Android, Linux and Windows not compiled; Linux and Windows are wh
 and has never run. Layered, refractive, weighted, reactive, GPU-driven and visibility-buffer
 variants are covered by construction and by the suites compiling them, not by a picture of a
 shadow on each.
+## EN-070 — Many skinned characters no longer abort the ray scene ✅ *(2026-11-15, branch fix/traced-skin-buffer-limit)*
+
+The shooter's `./main --harness crowdshot --crowd 42` aborted on the owner's build:
+
+```
+wgpu error: Validation Error
+  In Device::create_bind_group, label = 'pt_skin_bg'
+    Buffer binding 2 range 268435456 exceeds `max_*_buffer_binding_size` limit 134217728
+```
+
+**What happened.** Every skinned mesh drawn in a frame is copied into one vertex buffer and
+one index buffer (`pt_geo_vertices` / `pt_geo_indices`, "the megabuffers"), a compute pass
+poses it there (`pt_dynamic_skin.rs`), and its acceleration structure is built from that
+window. A vertex is 96 bytes and a shooter character has about 45,000 of them, so one
+character is 4.3 MB. The buffer is allocated at the next power of two, and the posing pass
+bound the WHOLE buffer as a storage binding. On a device with wgpu's default limits (128 MiB
+per storage binding, 256 MiB per buffer):
+
+- up to 30 characters: under 128 MiB, fine (the shooter's pool is 31 and the player, so a
+  full pool on screen was already past it);
+- 31 to 62 characters (crowd 42 is 43 with the player, 186 MB): the buffer becomes 256 MiB,
+  the whole-buffer binding is illegal, the process aborts;
+- 63 and more (crowd 84 is 85, 369 MB): the buffer itself would pass 256 MiB, so the upload
+  was refused BEFORE the bind group was made. That is why 84 "worked": every skinned mesh,
+  the player included, was dropped from the ray scene, `[bloom] path tracing disabled: ...`
+  was printed every frame (229 times in one harness run) and 369 MB of vertices were copied
+  on the CPU every frame for nothing.
+
+Since `52dc666` the engine asks the adapter for up to 1 GiB for both limits, and an M1 Max
+grants it, so current `main` reproduces neither case on that machine; the owner's build was
+older. The fault is still there on any adapter that grants less, and at 1 GiB with about 250
+characters. The path tracer had the same abort one step on: `pt_pass.rs` binds both
+megabuffers whole.
+
+**What changed** (`renderer/pt_geometry.rs`, `PtGeometryBudget`).
+
+- The posing pass binds only the window of the mesh it poses (the mesh, plus at most seven
+  vertices in front of it so the offset is a whole vertex AND a multiple of the device's
+  storage offset alignment). The buffer may now be as large as a buffer may be.
+- A skinned mesh that would take a megabuffer past the device's buffer size is left out of
+  the ray scene for that frame: it is drawn as before, it only casts no ray-traced light or
+  occlusion. One line on stderr, once per process (`bloom: ray scene full: ...`). Meshes are
+  admitted in draw order.
+- While the path tracer is on, the ceiling is the storage binding size instead, because its
+  kernel reads both buffers whole; a buffer grown larger before it was switched on is made
+  again at the smaller size.
+- Nothing changes for a frame that fits: same layout, same bytes, same builds.
+
+**Checked** (M1 Max, Metal). With the two device limits forced back to wgpu's defaults by a
+temporary environment switch (not committed): before, crowd 42 aborts as above and crowd 84
+drops all 85 meshes; after, crowd 42 runs with all 43 in the ray scene and crowd 84 with 62
+of 85 and the one line. Path tracer on, same forced limits: before aborts, after runs with
+28 of 43. With the real limits both crowds run with every mesh, before and after. Unit tests
+for the budget and the window arithmetic. Not run: any backend but Metal.
+
+**Seen on the way, not changed.** With 84 extra characters the frame is about 60 ms; with
+global illumination off it is 24 ms. So some 35 ms goes to the ray scene (posing, one
+acceleration-structure refit per character, the larger trace), not to shadows (3 ms) or the
+main pass.
