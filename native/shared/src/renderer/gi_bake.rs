@@ -283,7 +283,7 @@ impl Renderer {
         let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
         let aabb_min = [origin[0] - half, origin[1] - half, origin[2] - half, 0.0];
         let aabb_max = [origin[0] + half, origin[1] + half, origin[2] + half, 0.0];
-        let (offsets, tri_refs) = (binner.offsets, binner.tri_refs);
+        let (offsets, mut tri_refs) = (binner.offsets, binner.tri_refs);
         // Keep the soup for the next rebake of this scene version.
         *sdf_tri_cache().lock().unwrap() = Some(SdfTriCache {
             version: prep.scene_version,
@@ -298,9 +298,28 @@ impl Renderer {
         }
         let cache_guard = sdf_tri_cache().lock().unwrap();
         let cached = cache_guard.as_ref().unwrap();
-        let vertices = &cached.vertices;
-        let indices = &cached.indices;
-
+        // Only the triangles the field's cells refer to go to the GPU.
+        let (vertices, indices) = sdf_clipmap_prep::pack_binned_triangles(
+            &cached.vertices,
+            &cached.indices,
+            tri_count as usize,
+            offsets.last().copied().unwrap_or(0) as usize,
+            &mut tri_refs,
+        );
+        if std::env::var_os("BLOOM_SDF_STATS").is_some() {
+            eprintln!(
+                "bloom sdf soup: {} triangles in {} MB, {} uploaded in {} MB, cell refs {} MB",
+                tri_count,
+                (std::mem::size_of_val(cached.vertices.as_slice())
+                    + std::mem::size_of_val(cached.indices.as_slice()))
+                    >> 20,
+                indices.len() / 3,
+                (std::mem::size_of_val(vertices.as_slice())
+                    + std::mem::size_of_val(indices.as_slice()))
+                    >> 20,
+                std::mem::size_of_val(tri_refs.as_slice()) >> 20,
+            );
+        }
         let vbuf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {

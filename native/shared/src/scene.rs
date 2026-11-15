@@ -911,25 +911,19 @@ impl SceneGraph {
             {
                 continue;
             }
-            if let Some((lo, hi)) = region {
-                if crate::scene_gi_soup::bounds_outside(
-                    node.world_bounds_min,
-                    node.world_bounds_max,
-                    lo,
-                    hi,
-                ) {
-                    continue;
-                }
-            }
-            appended += node.vertices().len();
-            tri_count += crate::scene_gi_soup::append_node_triangles(
+            let before = vbuf.len();
+            tri_count += crate::scene_gi_soup::append_node_triangles_in(
                 node.vertices(),
                 node.indices(),
                 &node.world_transform(),
                 min_feature,
+                region,
+                (node.world_bounds_min, node.world_bounds_max),
                 vbuf,
                 ibuf,
             );
+            // The budget counts the vertices that went into the soup.
+            appended += (vbuf.len() - before) / crate::scene_gi_soup::STRIDE;
         }
         (next_node, tri_count, true)
     }
