@@ -539,6 +539,9 @@ pub(super) fn load_gltf_with_textures(
                             is_normal,
                             is_srgb,
                             mask_coverage_references.contains_key(&image_idx),
+                            crate::renderer::texture_streaming::glb_view_file_range(
+                                data, offset, length,
+                            ),
                         ) {
                             texture_indices.push(index);
                         } else if let Some((rgba, w, h)) =
@@ -599,7 +602,7 @@ pub(super) fn load_gltf_with_textures(
                     };
                 let direct = bytes.as_deref().and_then(|b| {
                     let masked = mask_coverage_references.contains_key(&image_idx);
-                    register_compressed_image(renderer, b, is_normal, is_srgb, masked)
+                    register_compressed_image(renderer, b, is_normal, is_srgb, masked, None)
                 });
                 let decoded = match direct {
                     Some(_) => None,

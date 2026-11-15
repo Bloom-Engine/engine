@@ -120,6 +120,7 @@ mod temporal_diagnostics;
 mod temporal_history;
 mod temporal_reactive;
 mod texture_store;
+pub(crate) mod texture_streaming;
 mod tonemap_lut;
 mod transmitted_shadows;
 mod transparent_gi;
@@ -12471,6 +12472,7 @@ impl Renderer {
     }
 
     pub fn begin_frame(&mut self) {
+        self.texture_streaming_tick();
         self.lighting_upload_tracker.begin_frame();
         self.frame_resource_stats
             .begin_frame(self.total_pipeline_creation_count());

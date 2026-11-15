@@ -561,6 +561,7 @@ impl Renderer {
         if i == 0 || i >= self.textures.len() {
             return;
         }
+        super::texture_streaming::forget(idx);
         if let Some(old_id) = self.global_texture_ids.get(i).copied() {
             self.material_system
                 .indirection
@@ -806,6 +807,43 @@ impl Renderer {
         is_normal_map: bool,
         srgb_rgb: bool,
     ) -> Option<u32> {
+        let (texture, view, bind_group) = self.create_compressed_texture(image)?;
+        let (width, height) = (image.width, image.height);
+        let mip_count = image.levels.len() as u32;
+        let idx = self.texture_bind_groups.len() as u32;
+        let srgb = srgb_rgb && !is_normal_map;
+        let global_id = self.register_global_texture(
+            &view,
+            width,
+            height,
+            mip_count,
+            if srgb {
+                TextureColorSpace::Srgb
+            } else {
+                TextureColorSpace::Linear
+            },
+            if is_normal_map {
+                TextureSemantic::Normal
+            } else if srgb {
+                TextureSemantic::BaseColor
+            } else {
+                TextureSemantic::MetallicRoughness
+            },
+            false,
+        );
+        self.texture_bind_groups.push(bind_group);
+        self.textures.push(texture);
+        self.texture_sizes.push((width, height));
+        self.global_texture_ids.push(global_id);
+        Some(idx)
+    }
+
+    /// The GPU texture, its view and its bind group for a block-compressed
+    /// image, every level uploaded. `None` when the adapter lacks the format.
+    pub(crate) fn create_compressed_texture(
+        &self,
+        image: &crate::compressed_texture::CompressedImage,
+    ) -> Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)> {
         if !self.supports_compressed_image(image) {
             return None;
         }
@@ -866,32 +904,7 @@ impl Renderer {
                 },
             ],
         });
-        let idx = self.texture_bind_groups.len() as u32;
-        let srgb = srgb_rgb && !is_normal_map;
-        let global_id = self.register_global_texture(
-            &view,
-            width,
-            height,
-            mip_count,
-            if srgb {
-                TextureColorSpace::Srgb
-            } else {
-                TextureColorSpace::Linear
-            },
-            if is_normal_map {
-                TextureSemantic::Normal
-            } else if srgb {
-                TextureSemantic::BaseColor
-            } else {
-                TextureSemantic::MetallicRoughness
-            },
-            false,
-        );
-        self.texture_bind_groups.push(bind_group);
-        self.textures.push(texture);
-        self.texture_sizes.push((width, height));
-        self.global_texture_ids.push(global_id);
-        Some(idx)
+        Some((texture, view, bind_group))
     }
 
     /// Register a cooked DDS texture (output of bloom-cook).

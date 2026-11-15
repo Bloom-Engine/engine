@@ -714,12 +714,15 @@ impl ModelManager {
         let base_dir = source_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        match gltf_load::load_gltf_with_textures(
+        crate::renderer::texture_streaming::set_current_source(Some(source_path));
+        let loaded = gltf_load::load_gltf_with_textures(
             file_data,
             renderer,
             Some(base_dir),
             Some(&source_path.display().to_string()),
-        ) {
+        );
+        crate::renderer::texture_streaming::set_current_source(None);
+        match loaded {
             Some(model) => {
                 self.source_cache.remember(source_path, file_data, &model);
                 self.models.alloc(model)
