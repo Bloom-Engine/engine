@@ -126,6 +126,7 @@ impl Renderer {
         // Per-slot: params upload, BLAS pool upkeep, bind group.
         let mut bind_groups: Vec<wgpu::BindGroup> = Vec::with_capacity(dyn_count);
         let mut dispatch_counts: Vec<u32> = Vec::with_capacity(dyn_count);
+        let geo_budget = self.pt_geometry_budget(false);
         for i in 0..dyn_count {
             let w = &self.pt_dyn_windows[i];
             let mut words = [0f32; 20];
@@ -134,7 +135,13 @@ impl Renderer {
                     words[c * 4 + r] = w.model[c][r];
                 }
             }
-            words[16] = f32::from_bits(w.v_base);
+            // Binding 2 is this mesh's window of the megabuffer, not the
+            // whole buffer: the buffer may be larger than a storage binding
+            // is allowed to be (EN-070). The shader's vertex base counts
+            // from the window's start.
+            let (window_offset, window_bytes, local_base) =
+                geo_budget.skin_window(w.v_base, u64::from(w.v_count));
+            words[16] = f32::from_bits(local_base);
             words[17] = f32::from_bits(w.v_count);
             words[18] =
                 f32::from_bits(super::joint_pages::joint_offset_in_page(w.joint_offset) as u32);
@@ -235,11 +242,11 @@ impl Renderer {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: self
-                                .pt_geo_vertex_buffer
-                                .as_ref()
-                                .unwrap()
-                                .as_entire_binding(),
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: self.pt_geo_vertex_buffer.as_ref().unwrap(),
+                                offset: window_offset,
+                                size: std::num::NonZeroU64::new(window_bytes),
+                            }),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
