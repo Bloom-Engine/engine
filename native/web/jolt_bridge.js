@@ -951,6 +951,66 @@ export function constraintSixDofLockedTranslation(
   }
 }
 
+// Ragdoll joint: swing-twist about the bone (`twist` axis), world-space anchor
+// and axes. Mirrors bj_constraint_swing_twist in the native shim. Returns 0 if
+// this JoltPhysics.js build lacks the type, and the caller falls back.
+export function constraintSwingTwist(
+  bodyA, bodyB, ax, ay, az, tx, ty, tz, px, py, pz, swing, twistRange,
+) {
+  if (warnUninit('constraintSwingTwist')) return 0;
+  const J = JoltModule;
+  if (!J.SwingTwistConstraintSettings) return 0;
+  const ctx = resolveConstraintBodies(bodyA, bodyB); if (!ctx) return 0;
+  try {
+    const settings = new J.SwingTwistConstraintSettings();
+    settings.mSpace = J.EConstraintSpace_WorldSpace;
+    settings.mPosition1 = rvec3(ax, ay, az);
+    settings.mPosition2 = rvec3(ax, ay, az);
+    settings.mTwistAxis1 = new J.Vec3(tx, ty, tz);
+    settings.mTwistAxis2 = new J.Vec3(tx, ty, tz);
+    settings.mPlaneAxis1 = new J.Vec3(px, py, pz);
+    settings.mPlaneAxis2 = new J.Vec3(px, py, pz);
+    settings.mNormalHalfConeAngle = swing;
+    settings.mPlaneHalfConeAngle = swing;
+    settings.mTwistMinAngle = -twistRange;
+    settings.mTwistMaxAngle = twistRange;
+    const c = settings.Create(ctx.body1, ctx.body2);
+    ctx.release();
+    return registerConstraint(state.bodies.get(bodyA).world, c);
+  } catch (e) {
+    ctx.release();
+    console.warn('[jolt_bridge] SwingTwist constraint unavailable:', e);
+    return 0;
+  }
+}
+
+// One collision group in which body i ignores body parents[i] (-1 = none) and
+// any body sharing that parent. Mirrors bj_bodies_set_linked_group.
+let nextLinkedGroup = 1;
+export function bodiesSetLinkedGroup(bodies, parents) {
+  if (warnUninit('bodiesSetLinkedGroup')) return;
+  const J = JoltModule;
+  const n = bodies.length;
+  if (!n || !J.GroupFilterTable || !J.CollisionGroup) return;
+  try {
+    const table = new J.GroupFilterTable(n);
+    for (let i = 0; i < n; i++) {
+      const p = parents[i];
+      if (p < 0 || p >= n || p === i) continue;
+      table.DisableCollision(i, p);
+      for (let j = i + 1; j < n; j++) if (parents[j] === p) table.DisableCollision(i, j);
+    }
+    const group = nextLinkedGroup++;
+    for (let i = 0; i < n; i++) {
+      const b = state.bodies.get(bodies[i]); if (!b) continue;
+      const w = state.worlds.get(b.world); if (!w) continue;
+      w.system.GetBodyInterface().SetCollisionGroup(b.bodyId, new J.CollisionGroup(table, group, i));
+    }
+  } catch (e) {
+    console.warn('[jolt_bridge] collision groups unavailable:', e);
+  }
+}
+
 export function constraintDestroy(h) {
   const c = state.constraints.get(h); if (!c) return;
   const w = state.worlds.get(c.world); if (w) w.system.RemoveConstraint(c.constraint);

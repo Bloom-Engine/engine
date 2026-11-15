@@ -14,6 +14,7 @@ pub(super) fn create_scene_depth_pipeline(
     label: &'static str,
     visibility_target: bool,
     cull_mode: Option<wgpu::Face>,
+    cutout: bool,
 ) -> super::lazy_pipeline::LazyRenderPipeline {
     let targets = [visibility_target.then_some(wgpu::ColorTargetState {
         format: visibility_buffer::VISIBILITY_FORMAT,
@@ -34,7 +35,11 @@ pub(super) fn create_scene_depth_pipeline(
             },
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: Some("fs_depth_prepass"),
+                entry_point: Some(if cutout {
+                    "fs_depth_prepass"
+                } else {
+                    "fs_depth_prepass_opaque"
+                }),
                 targets: &targets,
                 compilation_options: Default::default(),
             }),
@@ -197,11 +202,6 @@ impl Renderer {
                         &self.joint_bind_group,
                     );
                 }
-                pass.set_pipeline(
-                    self.scene_depth_visibility_pipeline
-                        .as_ref()
-                        .unwrap_or(&self.scene_depth_pipeline),
-                );
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);
                 pass.set_bind_group(3, &self.joint_bind_group, &[]);
                 let cam_vp = mat4_multiply(
@@ -209,40 +209,61 @@ impl Renderer {
                     self.current_view_matrix,
                 );
                 let cam_planes = crate::scene::extract_frustum_planes(&cam_vp);
-                for cmd in &self.model_draw_commands {
-                    if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
-                        if cmd.mesh_idx < meshes.len() {
-                            let mesh = &meshes[cmd.mesh_idx];
-                            if mesh.alpha_mode == MaterialAlphaMode::Blend
-                                || (self.imported_refraction_enabled
-                                    && mesh.transmission.is_active())
-                            {
-                                continue;
+                // Solid meshes first, through the pipeline whose fragment stage
+                // cannot discard, then the cutouts through the one that can:
+                // the solid ones cost rasterisation only, and a leaf card
+                // behind a trunk is rejected before its alpha test runs.
+                let one_pipeline = self.dbg_skip("prepass_split"); // A/B diag
+                for cutout_round in [false, true] {
+                    pass.set_pipeline(match &self.scene_depth_visibility_pipeline {
+                        Some(visibility) => visibility,
+                        None if cutout_round || one_pipeline => &self.scene_depth_pipeline,
+                        None => &self.scene_depth_opaque_pipeline,
+                    });
+                    for cmd in &self.model_draw_commands {
+                        if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
+                            if cmd.mesh_idx < meshes.len() {
+                                let mesh = &meshes[cmd.mesh_idx];
+                                let cutout = mesh.alpha_mode != MaterialAlphaMode::Opaque
+                                    || mesh.shadow_cutout_bg.is_some();
+                                if cutout != cutout_round {
+                                    continue;
+                                }
+                                if mesh.alpha_mode == MaterialAlphaMode::Blend
+                                    || (self.imported_refraction_enabled
+                                        && mesh.transmission.is_active())
+                                {
+                                    continue;
+                                }
+                                if self.gpu_driven.submitting()
+                                    && !cmd.skinned
+                                    && matches!(&mesh.geometry, gpu_driven::MeshGeometry::Shared(_))
+                                {
+                                    continue;
+                                }
+                                let (wmin, wmax) = cmd.bounds_override.unwrap_or_else(|| {
+                                    transform_aabb(&cmd.model, mesh.local_min, mesh.local_max)
+                                });
+                                if wmin[0] <= wmax[0]
+                                    && crate::scene::aabb_outside_frustum(&cam_planes, wmin, wmax)
+                                {
+                                    continue;
+                                }
+                                let draw =
+                                    self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
+                                pass.set_bind_group(
+                                    0,
+                                    &self.model_uniform_bind_groups[cmd.uniform_slot],
+                                    &[],
+                                );
+                                pass.set_bind_group(2, &mesh.material_bg, &[]);
+                                pass.set_vertex_buffer(0, draw.vertex.slice(..));
+                                pass.set_index_buffer(
+                                    draw.index.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
+                                pass.draw_indexed(draw.index_range(), draw.base_vertex, 0..1);
                             }
-                            if self.gpu_driven.submitting()
-                                && !cmd.skinned
-                                && matches!(&mesh.geometry, gpu_driven::MeshGeometry::Shared(_))
-                            {
-                                continue;
-                            }
-                            let (wmin, wmax) = cmd.bounds_override.unwrap_or_else(|| {
-                                transform_aabb(&cmd.model, mesh.local_min, mesh.local_max)
-                            });
-                            if wmin[0] <= wmax[0]
-                                && crate::scene::aabb_outside_frustum(&cam_planes, wmin, wmax)
-                            {
-                                continue;
-                            }
-                            let draw = self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
-                            pass.set_bind_group(
-                                0,
-                                &self.model_uniform_bind_groups[cmd.uniform_slot],
-                                &[],
-                            );
-                            pass.set_bind_group(2, &mesh.material_bg, &[]);
-                            pass.set_vertex_buffer(0, draw.vertex.slice(..));
-                            pass.set_index_buffer(draw.index.slice(..), wgpu::IndexFormat::Uint32);
-                            pass.draw_indexed(draw.index_range(), draw.base_vertex, 0..1);
                         }
                     }
                 }
@@ -778,7 +799,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("hdr_overlay_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

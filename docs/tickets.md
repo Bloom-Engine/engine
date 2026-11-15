@@ -2191,3 +2191,91 @@ out-of-reach, pole side, kept hand rotation and the joint turn. Web mirrors
 and watchOS stubs included. Not done: additive clips, more than one masked
 layer, foot IK against the ground, look-at.
 
+
+## EN-065 — Shooter engine pass: two frame-rate bugs, ragdoll, depth of field, crash capture, colour grade ✅ *(shipped 2026-11-15, local/phone)*
+
+Work the shooter's plan listed as "blocked on the engine". Measured on an M1 Max at
+3456 x 2168, the shooter's title screen at render scale 0.5, uncapped.
+
+**Frame rate: two bugs, both of the "it ran every frame and nobody noticed" kind.**
+
+- *The radiance cache rebaked every frame.* `maybe_invalidate_wsrc` decided whether the
+  sun had moved from `dot(light_dir, last_light_dir) < 0.99985`, which is a cosine only for
+  unit vectors. The shooter's direction is 0.998 long, its dot with itself 0.996: the nearest
+  cascade was rebaked on every frame (2.3 ms), and because one cascade bakes per frame,
+  nearest first, the two wider ones were never baked at all. The lengths are divided out
+  now. 20.8 ms to 18.8 ms.
+- *An output scale below 1 rebuilt every render target every frame.* Each platform decided
+  "the window changed size" by comparing the window with the surface; under an output scale
+  they never agree. macOS (and the web glue) made that comparison per frame, so all targets
+  were recreated and the temporal history cut on every frame: 75% output measured 30 ms
+  against 25 ms at native, and TAA never accumulated. `Renderer::window_resized` compares
+  the window with the window; macOS, Linux, Windows and web call it. Render 0.5 at 75%
+  output: 14.1 ms (71 fps), was 30.
+
+In a fight, the shooter's own settings went from 36 to about 41 fps; 75% output with render
+scale 0.67 runs at about 57.
+
+**Profiler.** Per-pass GPU times are now each pass's SHARE of the GPU's busy time
+(`fair_shares`): on a tile-based GPU pass intervals overlap, the old per-pass numbers summed
+to several times the frame, and the bloom chain's tiny mips each "took" 1.8 ms. The rows now
+add up to the frame total. Still approximate inside a chain of dependent passes: a small
+pass waiting on its input is credited with part of the wait. Timestamp budget 32 to 96
+pairs; eleven passes that had no timestamp have one (compose, DoF, motion blur, SSS, CAS,
+exposure, the 2D overlay, SSR temporal and resolve, SSGI apply, the HDR overlay).
+
+**Depth prepass.** Solid meshes go through a fragment entry point that cannot `discard`
+(`fs_depth_prepass_opaque`), drawn before the cutouts. Correct in principle (a may-discard
+fragment stage defeats hidden-surface removal and early depth writes for every draw using
+it); **no measurable gain in the shooter**, whose prepass is leaf cards. `BLOOM_SKIP=
+prepass_split` restores the single pipeline for an A/B. The entry point must stay ABOVE
+`fs_depth_prepass`: the visibility-buffer variant splices that function by the text after it.
+
+**Ragdoll (EN-025 was wrong in three ways).** (1) A body spanning joint p to joint j drove
+joint j, so every stretch of skin followed the bone before its own: the "plank". It drives
+the joint its bone leaves now. (2) Neighbouring capsules collided with each other; they
+overlap at the shared joint, so the solver fought the joints. A ragdoll's bodies are one
+collision group in which a bone ignores its parent and siblings (`bj_bodies_set_linked_group`).
+(3) Joints were six-DOF limits on WORLD axes. They are swing-twist about the bone
+(`bj_constraint_swing_twist`). Also: one body per joint with a parent (a leaf gets a stub),
+the trunk as thick as its sockets are wide, 24 bodies by default with the shortest dropped
+first, unbodied joints keep their pose at death instead of snapping to bind, and
+`configureRagdoll` / `setRagdollJoint` for a rig's own limits. Seen on the shooter's
+23-joint creatures: a body that folds and lies. Web: bridged the same way, not run.
+
+**The Jolt shim was not rebuilt when it changed.** `build.rs` skipped cmake whenever the
+archives existed, so a shim edit linked the old archive and surfaced as an undefined symbol
+in the GAME's link. It compares modification times now. The cached archives for iOS, tvOS
+and Android rebuild on their next build; published `@bloomengine/jolt-prebuilt` archives
+need a release before they carry the two new functions.
+
+**Depth of field.** A sharp band (`setDepthOfFieldRange(near, far, maxBlur)`): the circle
+of confusion is zero from `focus - near` to `focus + far` and grows from the band's edges.
+Without it only one exact distance is sharp, which softens whatever was focused on. Depth
+is linearised from `proj[2][2]` / `proj[3][2]` (unit-tested), the centre pixel and the
+samples use one circle function (they used two, in different units), and the disc is round
+on a wide frame. Shader moved to `shaders/dof.rs`.
+
+**Crash capture off Windows** (`crash.rs`). A panic hook and a handler for SIGSEGV, SIGBUS,
+SIGILL, SIGFPE and SIGABRT write the message or signal, the fault address and a backtrace
+to stderr and to the file named by `setCrashReportPath`; the signal is then handed on, so
+the system's own report still happens. No backtrace on Android or musl (no `backtrace(3)`).
+Compiled and run on macOS only; **no crash has been provoked to test it end to end.**
+
+**Colour grade** (`color_grade.rs`). `setColorGrade(path, strength)` loads a strip PNG
+(N*N by N) as a display-referred 3D table applied in the composite after the tonemap;
+`writeNeutralColorGradeLut` writes the identity strip to grade in an image editor. Not
+loadable on web (no synchronous file read there). **No graded table has been loaded and
+looked at**; the strip parsing is unit-tested.
+
+**Joint palette.** Still 1024 matrices a frame. Overflow now says so once on stderr instead
+of silently posing the model with another's matrices. Raising it means a storage buffer in
+five shader sources that about a hundred `create_shader_module` sites derive variants from
+by text splicing, on nine backends; not attempted.
+
+**Not started:** shadows from local lights on material-path geometry, volumetric fog, a
+display-mode list and monitor choice, the connected pad's type, grass LOD (EN-060).
+
+Tests: 531 unit tests and the golden-image suite pass. `visibility_shading_matches_forward_
+reference` fails with max delta 2 against a 1-LSB bound, identically on the commit before
+this work. The wasm check does not build on this branch (`mobile_shading`, unrelated).

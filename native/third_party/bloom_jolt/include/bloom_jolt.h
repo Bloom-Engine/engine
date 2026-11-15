@@ -351,6 +351,23 @@ bj_constraint bj_constraint_six_dof (bj_world world, const bj_constraint_anchors
                                       const float *translation_limits_xyz_minmax, /* 6 floats or NULL */
                                       const float *rotation_limits_xyz_minmax);   /* 6 floats or NULL */
 
+/* Swing-twist: the ragdoll joint. Axes are world space when the anchors are,
+ * else local to each body. `twist_axis` runs down the child bone, `plane_axis`
+ * is perpendicular to it; the two half cone angles bound the swing about the
+ * plane axis and about (twist x plane), the twist range is about the twist axis.
+ * All angles in radians. */
+bj_constraint bj_constraint_swing_twist(bj_world world, const bj_constraint_anchors *a,
+                                      bj_vec3 twist_axis, bj_vec3 plane_axis,
+                                      float normal_half_cone, float plane_half_cone,
+                                      float twist_min, float twist_max);
+
+/* Put `count` bodies into one collision group in which body i does not collide
+ * with body parents[i] (-1 = none) nor with a body that shares its parent.
+ * Everything else, inside the group and out of it, collides as its layers say.
+ * `group_id` must be unique per set of bodies (a ragdoll, a chain). */
+void bj_bodies_set_linked_group(bj_world world, const bj_body *bodies,
+                                const int32_t *parents, uint32_t count, uint32_t group_id);
+
 void bj_constraint_destroy    (bj_world world, bj_constraint c);
 void bj_constraint_set_enabled(bj_world world, bj_constraint c, uint8_t enabled);
 

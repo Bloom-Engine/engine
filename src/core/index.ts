@@ -80,6 +80,7 @@ declare function bloom_path_tracing_supported(): number;
 declare function bloom_set_ssgi_intensity(intensity: number): number;
 declare function bloom_set_ssgi_radius(radius: number): number;
 declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): number;
+declare function bloom_set_dof_range(nearSharp: number, farSharp: number, maxBlur: number): number;
 declare function bloom_set_quality_preset(preset: number): number;
 declare function bloom_set_shadows_enabled(on: number): number;
 declare function bloom_set_shadows_always_fresh(on: number): number;
@@ -87,6 +88,9 @@ declare function bloom_set_bloom_enabled(on: number): number;
 declare function bloom_set_bloom_intensity(value: number): number;
 declare function bloom_set_tonemap(kind: number): number;
 declare function bloom_set_color_saturation(value: number): number;
+declare function bloom_set_color_grade(path: number, strength: number): number;
+declare function bloom_set_color_grade_strength(strength: number): number;
+declare function bloom_write_color_grade_neutral(path: number, size: number): number;
 declare function bloom_set_auto_exposure_key(key: number): number;
 declare function bloom_set_auto_exposure_rate(rate: number): number;
 declare function bloom_set_ssao_enabled(on: number): number;
@@ -201,6 +205,7 @@ declare function bloom_get_clipboard_text(): number;
 declare function bloom_open_file_dialog(filter: number, title: number): number;
 declare function bloom_save_file_dialog(defaultName: number, title: number): number;
 declare function bloom_write_file(path: number, data: number): number;
+declare function bloom_set_crash_report_path(path: number): void;
 declare function bloom_file_exists(path: number): number;
 declare function bloom_read_file(path: number): number;
 declare function bloom_run_game(callback: number): void;
@@ -822,6 +827,18 @@ export function setDepthOfField(focusDistance: number, aperture: number): boolea
   return bloom_set_dof(aperture > 0 ? 1 : 0, focusDistance, aperture) !== 0;
 }
 
+/**
+ * The band around the focus distance that stays sharp: `nearSharp` metres in
+ * front of it and `farSharp` behind it. Blur starts at the band's edges and
+ * grows with `aperture`. Without a band (the default, 0 / 0) only the exact
+ * focus distance is sharp, which softens whatever you focused on.
+ * `maxBlur` caps the blur radius as a fraction of the frame's height
+ * (default 0.006; 0 leaves it as it is).
+ */
+export function setDepthOfFieldRange(nearSharp: number, farSharp: number, maxBlur: number = 0): boolean {
+  return bloom_set_dof_range(nearSharp, farSharp, maxBlur) !== 0;
+}
+
 // ============================================================
 // Render quality — let games pick a preset for the target device
 // or toggle individual effects. Presets apply a known-good set of
@@ -896,6 +913,32 @@ export function setTonemap(kind: Tonemap): boolean {
 /** Post-tonemap output saturation. 1 is neutral; 0 is grayscale. */
 export function setColorSaturation(saturation: number): boolean {
   return bloom_set_color_saturation(saturation) !== 0;
+}
+
+/**
+ * Colour-grade the final image through a lookup table. `path` is a strip PNG:
+ * N*N pixels wide and N high (N = 16, 32 or 64), N tiles side by side with red
+ * along each tile, green down it and blue from tile to tile, the layout most
+ * grading tools export. The table is display-referred (sRGB in, sRGB out) and
+ * applied after the tonemap. `strength` blends it: 0 off, 1 as authored.
+ * An empty path removes the grade. Returns false if the file is missing or is
+ * not a strip. Not available in the web build yet.
+ *
+ * To author one: `writeNeutralColorGradeLut('neutral.png')`, apply to that
+ * image the same adjustments you would make to a screenshot, save, load.
+ */
+export function setColorGrade(path: string, strength: number = 1): boolean {
+  return bloom_set_color_grade(path as any, strength) !== 0;
+}
+
+/** Blend of the loaded colour grade: 0 = off, 1 = as authored. */
+export function setColorGradeStrength(strength: number): boolean {
+  return bloom_set_color_grade_strength(strength) !== 0;
+}
+
+/** Write the neutral (identity) grade strip of edge `size` as a PNG. */
+export function writeNeutralColorGradeLut(path: string, size: number = 32): boolean {
+  return bloom_write_color_grade_neutral(path as any, size) !== 0;
 }
 
 /**
@@ -1503,6 +1546,19 @@ export function saveFileDialog(defaultName: string, title: string): string {
 
 export function writeFile(path: string, data: string): boolean {
   return bloom_write_file(path as any, data as any) !== 0.0;
+}
+
+/**
+ * Name the file a crash writes its report to: the panic message or the fatal
+ * signal, with a backtrace where the platform can produce one. The path
+ * resolves like `writeFile`'s. Call it once at start-up, then on the NEXT
+ * launch `readFile` it: text there means the last run crashed. Show it or
+ * send it, then clear it with `writeFile(path, '')`. Nothing is sent anywhere
+ * by the engine. Windows writes a minidump besides (see
+ * docs/crash-triage-windows.md); the web build has no file and ignores this.
+ */
+export function setCrashReportPath(path: string): void {
+  bloom_set_crash_report_path(path as any);
 }
 
 export function fileExists(path: string): boolean {

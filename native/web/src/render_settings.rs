@@ -195,6 +195,28 @@ pub fn bloom_set_dof(enabled: f64, focus_distance: f64, aperture: f64) -> f64 {
     r.set_dof_aperture(aperture as f32);
     1.0
 }
+// Colour grading reads a file; the web build has no synchronous file read, so
+// the table is not loadable there yet. Strength still applies (to nothing).
+#[wasm_bindgen]
+pub fn bloom_set_color_grade(_path: f64, _strength: f64) -> f64 {
+    0.0
+}
+#[wasm_bindgen]
+pub fn bloom_set_color_grade_strength(strength: f64) -> f64 {
+    engine().renderer.set_color_grade_strength(strength as f32);
+    1.0
+}
+#[wasm_bindgen]
+pub fn bloom_write_color_grade_neutral(_path: f64, _size: f64) -> f64 {
+    0.0
+}
+#[wasm_bindgen]
+pub fn bloom_set_dof_range(near_sharp: f64, far_sharp: f64, max_blur: f64) -> f64 {
+    engine()
+        .renderer
+        .set_dof_range(near_sharp as f32, far_sharp as f32, max_blur as f32);
+    1.0
+}
 
 #[wasm_bindgen]
 pub fn bloom_set_bloom_intensity(value: f64) -> f64 {

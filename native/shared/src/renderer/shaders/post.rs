@@ -179,138 +179,6 @@ fn fs_upsample(in: VsOut) -> @location(0) vec4<f32> {
 }
 ";
 
-pub(in crate::renderer) const DOF_SHADER_WGSL: &str = "
-struct DofParams {
-    params: vec4<f32>,  // x = focus_distance (view-space Z, positive), y = aperture (CoC scale), z = max_blur_radius (UV), w = unused
-    inv_proj: mat4x4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> u: DofParams;
-@group(0) @binding(1) var color_tex: texture_2d<f32>;
-@group(0) @binding(2) var color_samp: sampler;
-@group(0) @binding(3) var depth_tex: texture_depth_2d;
-@group(0) @binding(4) var depth_samp: sampler;
-
-struct VsOut {
-    @builtin(position) clip_pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-    let x = f32((vid & 1u) * 4u) - 1.0;
-    let y = f32((vid >> 1u) * 4u) - 1.0;
-    var out: VsOut;
-    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
-    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
-    return out;
-}
-
-// Reconstruct view-space Z from depth buffer value via inverse projection.
-fn linearize_depth(depth: f32) -> f32 {
-    let ndc = vec4<f32>(0.0, 0.0, depth, 1.0);
-    let vp = u.inv_proj * ndc;
-    return -vp.z / vp.w; // positive distance from camera
-}
-
-// 16-sample Poisson disc (same offsets used by shadow PCF).
-const POISSON_16: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
-    vec2<f32>(-0.94201624, -0.39906216),
-    vec2<f32>( 0.94558609, -0.76890725),
-    vec2<f32>(-0.09418410, -0.92938870),
-    vec2<f32>( 0.34495938,  0.29387760),
-    vec2<f32>(-0.91588581,  0.45771432),
-    vec2<f32>(-0.81544232, -0.87912464),
-    vec2<f32>(-0.38277543,  0.27676845),
-    vec2<f32>( 0.97484398,  0.75648379),
-    vec2<f32>( 0.44323325, -0.97511554),
-    vec2<f32>( 0.53742981, -0.47373420),
-    vec2<f32>(-0.26496911, -0.41893023),
-    vec2<f32>( 0.79197514,  0.19090188),
-    vec2<f32>(-0.24188840,  0.99706507),
-    vec2<f32>(-0.81409955,  0.91437590),
-    vec2<f32>( 0.19984126,  0.78641367),
-    vec2<f32>( 0.14383161, -0.14100790),
-);
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let focus_dist = u.params.x;
-    let aperture   = u.params.y;
-    let max_blur   = u.params.z;
-
-    let center_depth_raw = textureSampleLevel(depth_tex, depth_samp, in.uv, 0u);
-
-    // Sky pixels (depth ~1.0) get maximum blur — they are at infinity.
-    var view_z: f32;
-    if (center_depth_raw >= 0.9999) {
-        view_z = 1000.0; // treat as very far
-    } else {
-        view_z = linearize_depth(center_depth_raw);
-    }
-
-    // Circle of confusion: thin-lens approximation.
-    // Dividing by view_z ensures distant objects don't get disproportionately
-    // blurred — CoC grows with defocus distance but falls off with depth.
-    // max(view_z, 0.1) prevents division by zero for geometry very close to
-    // the camera.
-    let coc = clamp(aperture * abs(view_z - focus_dist) / max(view_z, 0.1), 0.0, max_blur);
-
-    // If CoC is negligibly small, return the source pixel unchanged.
-    let threshold = 0.0005;
-    if (coc < threshold) {
-        return textureSampleLevel(color_tex, color_samp, in.uv, 0.0);
-    }
-
-    // Gather 16 Poisson disc samples scaled by CoC.
-    var color_sum = vec3<f32>(0.0);
-    var weight_sum = 0.0;
-
-    let center_color = textureSampleLevel(color_tex, color_samp, in.uv, 0.0).rgb;
-
-    for (var i = 0u; i < 16u; i = i + 1u) {
-        let offset = POISSON_16[i] * coc;
-        let sample_uv = in.uv + offset;
-
-        let sample_color = textureSampleLevel(color_tex, color_samp, sample_uv, 0.0).rgb;
-
-        // Read the depth at the sample location to compute its own CoC.
-        // This prevents sharp foreground objects from bleeding into
-        // blurred background — only samples that are themselves blurry
-        // (or at least as blurry as this pixel) contribute fully.
-        let sample_depth_raw = textureSampleLevel(depth_tex, depth_samp, sample_uv, 0u);
-        var sample_z: f32;
-        if (sample_depth_raw >= 0.9999) {
-            sample_z = 1000.0;
-        } else {
-            sample_z = linearize_depth(sample_depth_raw);
-        }
-        let sample_coc = clamp(abs(sample_z - focus_dist) * aperture, 0.0, max_blur);
-
-        // Weight: accept the sample if its CoC is at least as large as
-        // the center pixel's CoC, or if the sample is behind the center
-        // (background blurring into foreground is expected). Otherwise
-        // attenuate by the ratio of sample_coc / coc.
-        var w = 1.0;
-        if (sample_z < view_z) {
-            // Sample is in front of center — only contribute if it is
-            // itself blurry enough.
-            w = saturate(sample_coc / coc);
-        }
-
-        color_sum += sample_color * w;
-        weight_sum += w;
-    }
-
-    // Also blend in the center pixel with weight 1.
-    color_sum += center_color;
-    weight_sum += 1.0;
-
-    let result = color_sum / weight_sum;
-    return vec4<f32>(result, 1.0);
-}
-";
-
 pub(in crate::renderer) const MOTION_BLUR_SHADER_WGSL: &str = "
 struct MotionBlurParams {
     /// x = strength (velocity multiplier), y = max_blur (UV clamp), zw = unused.
@@ -1662,7 +1530,8 @@ struct CompositeParams {
     /// y = sharpen strength (0 = off, ~0.25 subtle, ~0.5 punchy);
     /// z = authored camera-motion flag; w = path-tracing session.
     misc: vec4<f32>,
-    /// x = output saturation (1 = neutral); yzw reserved.
+    /// x = output saturation (1 = neutral); y = colour-grade strength
+    /// (0 = off); z = the grade table's edge in texels; w reserved.
     color: vec4<f32>,
 };
 
@@ -1675,6 +1544,7 @@ struct CompositeParams {
 @group(0) @binding(6) var ssao_samp: sampler;
 @group(0) @binding(7) var scene_depth_tex: texture_depth_2d;
 @group(0) @binding(8) var tonemap_lut: texture_3d<f32>;
+@group(0) @binding(9) var grade_lut: texture_3d<f32>;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1973,6 +1843,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             graded / 12.92,
             pow((graded + 0.055) / 1.055, vec3<f32>(2.4)),
             graded > vec3<f32>(0.04045),
+        );
+    }
+
+    // --- Colour grade (renderer/color_grade.rs) ---
+    // A display-referred table: encode, look up, blend, decode. Texel centres
+    // are the table's samples, hence the half-texel inset.
+    let grade_strength = u.color.y;
+    if (grade_strength > 0.0) {
+        let c = clamp(ldr, vec3<f32>(0.0), vec3<f32>(1.0));
+        let display = select(
+            12.92 * c,
+            1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055,
+            c > vec3<f32>(0.0031308),
+        );
+        let n = max(u.color.z, 2.0);
+        let graded_display = mix(
+            display,
+            textureSampleLevel(grade_lut, hdr_samp, (display * (n - 1.0) + 0.5) / n, 0.0).rgb,
+            grade_strength,
+        );
+        ldr = select(
+            graded_display / 12.92,
+            pow((graded_display + 0.055) / 1.055, vec3<f32>(2.4)),
+            graded_display > vec3<f32>(0.04045),
         );
     }
 

@@ -56,7 +56,12 @@ impl Renderer {
                 if camera_moving { 1.0 } else { 0.0 },
                 if path_tracing_active { 1.0 } else { 0.0 },
             ],
-            color: [self.color_saturation, 0.0, 0.0, 0.0],
+            color: [
+                self.color_saturation,
+                self.color_grade.strength,
+                self.color_grade.size as f32,
+                0.0,
+            ],
         };
         self.queue.write_buffer(
             &self.composite_uniform_buffer,
@@ -110,6 +115,10 @@ impl Renderer {
                     wgpu::BindGroupEntry {
                         binding: 8,
                         resource: wgpu::BindingResource::TextureView(&self.tonemap_lut.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(&self.color_grade.view),
                     },
                 ],
             });
@@ -248,7 +257,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("overlay_2d_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

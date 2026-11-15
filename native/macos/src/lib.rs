@@ -779,15 +779,11 @@ pub extern "C" fn bloom_begin_drawing() {
                 let physical_w = ((frame.size.width * scale) as u32).max(1);
                 let physical_h = ((frame.size.height * scale) as u32).max(1);
                 let eng = engine();
-                if logical_w > 0
-                    && logical_h > 0
-                    && (physical_w != eng.renderer.physical_width()
-                        || physical_h != eng.renderer.physical_height()
-                        || logical_w != eng.renderer.width()
-                        || logical_h != eng.renderer.height())
-                {
+                // The renderer compares with the window size it last saw (not
+                // with its surface, which is smaller under an output scale).
+                if logical_w > 0 && logical_h > 0 {
                     eng.renderer
-                        .resize(physical_w, physical_h, logical_w, logical_h);
+                        .window_resized(physical_w, physical_h, logical_w, logical_h);
                 }
             }
         }

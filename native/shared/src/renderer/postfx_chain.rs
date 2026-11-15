@@ -529,7 +529,11 @@ impl Renderer {
     /// shafts into composed_rt. Runs unconditionally so the TAA-on path
     /// (TAA consumes this) and the TAA-off path (composite consumes it)
     /// see the same atmospherics.
-    pub(super) fn record_scene_compose(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn record_scene_compose(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+    ) {
         // Composite input views (were locals in end_frame_with_scene).
         // PT-1: while path tracing, the SSR passes are skipped entirely,
         // so history is stale — route compose to ssr_rt, which the march
@@ -729,7 +733,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("scene_compose_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1093,7 +1097,7 @@ impl Renderer {
         let pre_dof_source = self.resolved_postfx_source(taa_dst_idx, PostFxSource::Hdr);
 
         if self.dof_enabled && self.dof_aperture > 0.0 {
-            let inv_proj = self.current_inv_proj_matrix;
+            let proj = self.current_proj_matrix;
             let dp = DofParams {
                 params: [
                     self.dof_focus_distance,
@@ -1101,7 +1105,13 @@ impl Renderer {
                     self.dof_max_blur,
                     0.0,
                 ],
-                inv_proj,
+                range: [
+                    self.dof_sharp_range[0],
+                    self.dof_sharp_range[1],
+                    self.surface_config.height as f32 / (self.surface_config.width as f32).max(1.0),
+                    0.0,
+                ],
+                proj: [proj[2][2], proj[3][2], 0.0, 0.0],
             };
             self.queue
                 .write_buffer(&self.dof_uniform_buffer, 0, bytemuck::bytes_of(&dp));
@@ -1151,7 +1161,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("dof_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1238,7 +1248,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("motion_blur_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1320,7 +1330,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("sss_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1395,7 +1405,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("cas_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1628,6 +1638,7 @@ impl Renderer {
     pub(super) fn record_auto_exposure(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
         exposure_src_idx: usize,
         exposure_dst_idx: usize,
     ) {
@@ -1697,7 +1708,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("exposure_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

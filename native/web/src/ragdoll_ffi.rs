@@ -9,8 +9,8 @@
 //! `eng.jolt.*` swapped for the bridge externs, plus one new bridge function
 //! (`constraintSixDofLockedTranslation`) for the joint type ragdolls use.
 //!
-//! Tuning constants (12 bodies, 0.38 radius fraction, the rot limits, the
-//! friction/damping set) are copied from the native FFI verbatim — a corpse
+//! The plan and its limits come from the slot's `RagdollConfig`, the
+//! friction/damping set is copied from the native FFI verbatim — a corpse
 //! must read the same on every platform.
 
 use crate::engine;
@@ -18,7 +18,7 @@ use crate::physics_ffi::{
     jb_body_add_impulse, jb_body_create, jb_body_destroy, jb_body_get_position,
     jb_body_get_rotation, jb_body_set_angular_damping, jb_body_set_friction,
     jb_body_set_linear_damping, jb_body_set_restitution, jb_constraint_destroy,
-    jb_constraint_six_dof, jb_shape_capsule,
+    jb_bodies_set_linked_group, jb_constraint_six_dof, jb_constraint_swing_twist, jb_shape_capsule,
 };
 use wasm_bindgen::prelude::*;
 
@@ -44,16 +44,16 @@ pub fn bloom_ragdoll_activate(
         let Some(a) = eng.models.get_animation(anim) else {
             return 0.0;
         };
-        // 12 bodies / 0.38 radius fraction — same sweet spot as native (spine
-        // + limbs; past that you buy fingers, which cost solver time and buy
-        // jitter).
+        let cfg = match eng.ragdolls.get(rag as u32) {
+            Some(r) => r.config.clone(),
+            None => return 0.0,
+        };
         bloom_shared::ragdoll::plan(
             a,
             scale as f32,
             [px as f32, py as f32, pz as f32],
             rot_y as f32,
-            12,
-            0.38,
+            &cfg,
         )
     };
     if builds.is_empty() {
@@ -93,9 +93,22 @@ pub fn bloom_ragdoll_activate(
         bodies.push(body);
     }
 
-    // --- joints. Tight-ish; twist (y) held hardest — an over-twisted limb is
-    // the single most obviously WRONG thing a ragdoll can do.
-    let rot_limits: [f64; 6] = [-0.8, 0.8, -0.25, 0.25, -0.8, 0.8];
+    // --- collisions inside the ragdoll: a bone ignores its parent and its
+    // siblings, whose capsules overlap its own at the shared joint.
+    let parents: Vec<i32> = builds
+        .iter()
+        .map(|b| {
+            if b.parent_bone == usize::MAX {
+                -1
+            } else {
+                b.parent_bone as i32
+            }
+        })
+        .collect();
+    jb_bodies_set_linked_group(&bodies, &parents);
+
+    // --- joints: swing-twist about the bone, as native. A JoltPhysics.js
+    // build without that type falls back to the six-DOF joint on world axes.
     let mut constraints: Vec<f64> = Vec::new();
     for (i, b) in builds.iter().enumerate() {
         if b.parent_bone == usize::MAX {
@@ -106,23 +119,41 @@ pub fn bloom_ragdoll_activate(
         if pa == 0.0 || pb == 0.0 {
             continue;
         }
-        let c = jb_constraint_six_dof(
+        let mut c = jb_constraint_swing_twist(
             pa,
             pb,
             b.anchor[0] as f64,
             b.anchor[1] as f64,
             b.anchor[2] as f64,
-            b.anchor[0] as f64,
-            b.anchor[1] as f64,
-            b.anchor[2] as f64,
-            rot_limits[0],
-            rot_limits[1],
-            rot_limits[2],
-            rot_limits[3],
-            rot_limits[4],
-            rot_limits[5],
-            1.0, // anchors given in world space
+            b.dir[0] as f64,
+            b.dir[1] as f64,
+            b.dir[2] as f64,
+            b.world[0][0] as f64,
+            b.world[0][1] as f64,
+            b.world[0][2] as f64,
+            b.swing as f64,
+            b.twist as f64,
         );
+        if c == 0.0 {
+            let (s, t) = (b.swing as f64, b.twist as f64);
+            c = jb_constraint_six_dof(
+                pa,
+                pb,
+                b.anchor[0] as f64,
+                b.anchor[1] as f64,
+                b.anchor[2] as f64,
+                b.anchor[0] as f64,
+                b.anchor[1] as f64,
+                b.anchor[2] as f64,
+                -s,
+                s,
+                -t,
+                t,
+                -s,
+                s,
+                1.0, // anchors given in world space
+            );
+        }
         if c != 0.0 {
             constraints.push(c);
         }
@@ -250,6 +281,39 @@ pub fn bloom_ragdoll_release(rag: f64) {
         jb_body_destroy(b);
     }
     if let Some(r) = eng.ragdolls.get_mut(rag as u32) {
-        *r = bloom_shared::ragdoll::Ragdoll::new();
+        r.reset();
     }
+}
+
+#[wasm_bindgen]
+pub fn bloom_ragdoll_configure(rag: f64, max_bodies: f64, radius_scale: f64, swing: f64, twist: f64) {
+    let Some(r) = engine().ragdolls.get_mut(rag as u32) else {
+        return;
+    };
+    if max_bodies >= 1.0 {
+        r.config.max_bodies = (max_bodies as usize).min(64);
+    }
+    if radius_scale > 0.0 {
+        r.config.radius_scale = (radius_scale as f32).clamp(0.02, 0.5);
+    }
+    if swing > 0.0 {
+        r.config.swing = (swing as f32).min(3.0);
+    }
+    if twist > 0.0 {
+        r.config.twist = (twist as f32).min(3.0);
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_ragdoll_set_joint(rag: f64, joint: f64, simulate: f64, swing: f64, twist: f64) {
+    let Some(r) = engine().ragdolls.get_mut(rag as u32) else {
+        return;
+    };
+    if joint < 0.0 {
+        r.config.joints.clear();
+        return;
+    }
+    let j = joint as usize;
+    r.config.joints.retain(|o| o.0 != j);
+    r.config.joints.push((j, simulate != 0.0, swing as f32, twist as f32));
 }

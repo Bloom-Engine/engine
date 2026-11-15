@@ -235,7 +235,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("ssr_temporal_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -245,7 +245,11 @@ impl Renderer {
 
     /// SSR temporal denoiser: 3x3 pre-filter + neighborhood-clamped
     /// history blend; compose reads ssr_history[cur].
-    pub(super) fn record_ssr_temporal(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn record_ssr_temporal(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+    ) {
         // ============================================================
         // SSR temporal denoiser: blend the noisy single-ray SSR with
         // the reprojected previous history so 4–8 frames of GGX-sampled
@@ -343,7 +347,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.pass_timestamp_writes("ssr_resolve_pass"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

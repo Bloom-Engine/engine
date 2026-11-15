@@ -1604,6 +1604,28 @@
           "returns": "void"
         },
         {
+          "name": "bloom_ragdoll_configure",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_ragdoll_set_joint",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_particles_create",
           "params": [
             "f64"
@@ -2078,6 +2100,15 @@
         },
         {
           "name": "bloom_set_dof",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_dof_range",
           "params": [
             "f64",
             "f64",
@@ -2620,6 +2651,36 @@
             "string"
           ],
           "returns": "f64"
+        },
+        {
+          "name": "bloom_set_color_grade",
+          "params": [
+            "string",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_color_grade_strength",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_write_color_grade_neutral",
+          "params": [
+            "string",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_crash_report_path",
+          "params": [
+            "string"
+          ],
+          "returns": "void"
         },
         {
           "name": "bloom_file_exists",

@@ -174,7 +174,24 @@ fn build_jolt() {
         .join("lib")
         .join(format!("{}Jolt.{}", lib_prefix, lib_ext));
 
-    if !(bloom_jolt_lib.exists() && jolt_lib.exists()) {
+    // The cache is keyed on the archives existing, so an edit to the shim was
+    // silently ignored: the old archive linked, and a new shim function showed
+    // up as an undefined symbol in the game's link, far from its cause. Rebuild
+    // when any shim source is newer than the archive (cmake recompiles the shim
+    // only; Jolt's own objects are still in the build directory).
+    let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let shim_stale = match modified(&bloom_jolt_lib) {
+        Some(built) => [
+            shim_dir.join("CMakeLists.txt"),
+            shim_dir.join("include/bloom_jolt.h"),
+            shim_dir.join("src/bloom_jolt.cpp"),
+        ]
+        .iter()
+        .any(|src| modified(src).is_some_and(|t| t > built)),
+        None => true,
+    };
+
+    if shim_stale || !jolt_lib.exists() {
         let mut cfg = cmake::Config::new(&shim_dir);
         cfg.out_dir(&dst)
             .profile("Release")

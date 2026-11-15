@@ -60,6 +60,9 @@
 #include <Jolt/Physics/Constraints/SliderConstraint.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Constraints/SixDOFConstraint.h>
+#include <Jolt/Physics/Constraints/SwingTwistConstraint.h>
+#include <Jolt/Physics/Collision/GroupFilterTable.h>
+#include <Jolt/Physics/Collision/CollisionGroup.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
 #include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
@@ -1297,6 +1300,58 @@ bj_constraint bj_constraint_six_dof(bj_world world, const bj_constraint_anchors 
         }
         return s.Create(b1, b2);
     });
+}
+
+bj_constraint bj_constraint_swing_twist(bj_world world, const bj_constraint_anchors *a,
+                                        bj_vec3 twist_axis, bj_vec3 plane_axis,
+                                        float normal_half_cone, float plane_half_cone,
+                                        float twist_min, float twist_max)
+{
+    WorldImpl *w = as_world(world);
+    if (!w || !a) return BJ_INVALID;
+    Vec3 twist = to_jph(twist_axis);
+    Vec3 plane = to_jph(plane_axis);
+    if (twist.LengthSq() < 1.0e-12f) return BJ_INVALID;
+    twist = twist.Normalized();
+    /* Re-orthogonalise: a plane axis that is not perpendicular to the twist
+     * axis makes Jolt assert in debug and misbehave in release. */
+    plane = plane - twist * twist.Dot(plane);
+    if (plane.LengthSq() < 1.0e-12f) plane = twist.GetNormalizedPerpendicular();
+    else plane = plane.Normalized();
+    return make_constraint(w, a, [&](Body &b1, Body &b2) -> TwoBodyConstraint * {
+        SwingTwistConstraintSettings s;
+        s.mSpace = a->use_world_space ? EConstraintSpace::WorldSpace : EConstraintSpace::LocalToBodyCOM;
+        s.mPosition1 = to_jph(a->anchor_a);
+        s.mPosition2 = to_jph(a->anchor_b);
+        s.mTwistAxis1 = s.mTwistAxis2 = twist;
+        s.mPlaneAxis1 = s.mPlaneAxis2 = plane;
+        s.mNormalHalfConeAngle = normal_half_cone;
+        s.mPlaneHalfConeAngle  = plane_half_cone;
+        s.mTwistMinAngle = twist_min;
+        s.mTwistMaxAngle = twist_max;
+        return s.Create(b1, b2);
+    });
+}
+
+void bj_bodies_set_linked_group(bj_world world, const bj_body *bodies,
+                                const int32_t *parents, uint32_t count, uint32_t group_id)
+{
+    WorldImpl *w = as_world(world);
+    if (!w || !bodies || !parents || count == 0) return;
+    Ref<GroupFilterTable> table = new GroupFilterTable(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        int32_t p = parents[i];
+        if (p < 0 || (uint32_t)p >= count || (uint32_t)p == i) continue;
+        table->DisableCollision(i, (uint32_t)p);
+        for (uint32_t j = i + 1; j < count; ++j)
+            if (parents[j] == p) table->DisableCollision(i, j);
+    }
+    BodyInterface &bi = w->system.GetBodyInterface();
+    for (uint32_t i = 0; i < count; ++i) {
+        if (bodies[i] == BJ_INVALID) continue;
+        bi.SetCollisionGroup(decode_body_id(bodies[i]),
+                             CollisionGroup(table, group_id, i));
+    }
 }
 
 void bj_constraint_destroy(bj_world world, bj_constraint c) {
