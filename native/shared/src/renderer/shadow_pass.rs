@@ -5,6 +5,55 @@
 
 use super::*;
 
+/// One shadow caster of this frame, shared by the cascade pass, the virtual
+/// shadow pages and the local-light shadow maps.
+pub(crate) struct ShadowDrawEntry {
+    pub(crate) vb_idx: usize,
+    pub(crate) ib_idx: usize,
+    pub(crate) index_start: u32,
+    pub(crate) index_count: u32,
+    pub(crate) base_vertex: i32,
+    pub(crate) transform: [[f32; 4]; 4],
+    pub(crate) wmin: [f32; 3],
+    pub(crate) wmax: [f32; 3],
+    // Index into `cutout_bgs` for an alpha-tested caster (cutout
+    // foliage), or -1 for an opaque caster (plain depth pipeline).
+    pub(crate) cutout_idx: i32,
+    // Immediate-mode segment containing skinned characters —
+    // rendered with the skinning-aware shadow pipeline so animated
+    // player/enemies cast a posed shadow instead of a rest pose at
+    // the origin. (Mixed segments: non-skinned verts still
+    // transform by the model matrix via the shader's weight branch.)
+    pub(crate) skinned: bool,
+    // Content identity for the per-cascade cache: stable across
+    // frames for static casters, salted with `frame_nonce` for
+    // animated ones so their cascades re-render every frame.
+    pub(crate) sig: u64,
+    // Immediate-batch content (animated characters, per-frame
+    // primitives). Dynamic casters render into the live cascade
+    // texture every frame on top of the cached static depth;
+    // they never invalidate the static cache.
+    pub(crate) dynamic: bool,
+    // Base slot of a skinned cached draw's pose in the shared
+    // joint buffer (the cached VB keeps RAW joint indices, so
+    // vs_shadow_skinned adds this via ShadowUniforms.misc.x).
+    // 0.0 for everything else — including immediate-batch
+    // skinned segments, whose vertex joints are pre-offset.
+    pub(crate) joint_offset: f32,
+    // Foliage wind amount for this caster (0 = rigid). Non-zero makes the
+    // caster MOVE, which is why it also forces `dynamic` — a swaying tree
+    // cannot reuse its cached static shadow depth.
+    pub(crate) foliage: f32,
+    // Rigid opaque geometry resident in the shared arena can use
+    // the workload-gated per-page indirect path.
+    pub(crate) gpu_opaque_shared: bool,
+    pub(crate) gpu_index_start: u32,
+    pub(crate) gpu_base_vertex: i32,
+    // EN-043 — stable identity (NOT including the transform), so a caster
+    // that moved can be told apart from a caster that appeared.
+    pub(crate) key: u64,
+}
+
 impl Renderer {
     pub(super) fn record_shadow_pass(
         &mut self,
@@ -183,52 +232,6 @@ impl Renderer {
             // A caster outside cascade N's frustum can't write pixels
             // into cascade N; near/far pancaking already covers
             // behind-camera casters via the cascade's own far plane.
-            struct ShadowDrawEntry {
-                vb_idx: usize,
-                ib_idx: usize,
-                index_start: u32,
-                index_count: u32,
-                base_vertex: i32,
-                transform: [[f32; 4]; 4],
-                wmin: [f32; 3],
-                wmax: [f32; 3],
-                // Index into `cutout_bgs` for an alpha-tested caster (cutout
-                // foliage), or -1 for an opaque caster (plain depth pipeline).
-                cutout_idx: i32,
-                // Immediate-mode segment containing skinned characters —
-                // rendered with the skinning-aware shadow pipeline so animated
-                // player/enemies cast a posed shadow instead of a rest pose at
-                // the origin. (Mixed segments: non-skinned verts still
-                // transform by the model matrix via the shader's weight branch.)
-                skinned: bool,
-                // Content identity for the per-cascade cache: stable across
-                // frames for static casters, salted with `frame_nonce` for
-                // animated ones so their cascades re-render every frame.
-                sig: u64,
-                // Immediate-batch content (animated characters, per-frame
-                // primitives). Dynamic casters render into the live cascade
-                // texture every frame on top of the cached static depth;
-                // they never invalidate the static cache.
-                dynamic: bool,
-                // Base slot of a skinned cached draw's pose in the shared
-                // joint buffer (the cached VB keeps RAW joint indices, so
-                // vs_shadow_skinned adds this via ShadowUniforms.misc.x).
-                // 0.0 for everything else — including immediate-batch
-                // skinned segments, whose vertex joints are pre-offset.
-                joint_offset: f32,
-                // Foliage wind amount for this caster (0 = rigid). Non-zero makes the
-                // caster MOVE, which is why it also forces `dynamic` — a swaying tree
-                // cannot reuse its cached static shadow depth.
-                foliage: f32,
-                // Rigid opaque geometry resident in the shared arena can use
-                // the workload-gated per-page indirect path.
-                gpu_opaque_shared: bool,
-                gpu_index_start: u32,
-                gpu_base_vertex: i32,
-                // EN-043 — stable identity (NOT including the transform), so a caster
-                // that moved can be told apart from a caster that appeared.
-                key: u64,
-            }
             fn entry_sig(kind: u8, id: u64, idx: u64, transform: &[[f32; 4]; 4]) -> u64 {
                 let mut h = FNV_OFFSET;
                 h = fnv1a_bytes(h, &[kind]);
@@ -1502,6 +1505,28 @@ impl Renderer {
                 );
                 profiler.end("virtual_shadow_pages");
             }
+            // Shadow cubes of the few local lights a game asked for, drawn
+            // from the same caster lists (renderer/local_light_shadows.rs).
+            let local_inputs = local_light_shadows::PassInputs {
+                queue: &self.queue,
+                nodes: &shadow_nodes,
+                vbs: &shadow_vbs,
+                ibs: &shadow_ibs,
+                cutout_bgs: &cutout_bgs,
+                pipeline: &self.shadow_map.pipeline,
+                pipeline_cutout: &self.shadow_map.pipeline_cutout,
+                pipeline_skinned: &self.shadow_map.pipeline_skinned,
+                joint_bind_group: &self.joint_bind_group,
+                camera_pos: self.current_camera_pos,
+                camera_planes: crate::scene::extract_frustum_planes(&mat4_multiply(
+                    self.current_proj_matrix_unjittered,
+                    self.current_view_matrix,
+                )),
+                wind: self.lighting_uniforms.wind,
+            };
+            self.shadow_map
+                .local_lights
+                .record(encoder, profiler, &local_inputs);
             // Cache bookkeeping — next frame skips every cascade whose VP
             // and caster content stay put.
             self.shadow_caster_tf = caster_ids_now;
@@ -1509,6 +1534,8 @@ impl Renderer {
             self.shadow_map.rendered_light_dir = Some(light_dir);
             self.shadow_map.rendered_scene_version = scene_ver;
             self.shadow_map.dirty = false;
+        } else {
+            self.shadow_map.local_lights.skip_frame(&self.queue);
         }
 
         profiler.end("shadow_pass");

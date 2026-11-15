@@ -516,6 +516,9 @@ impl Renderer {
                         },
                     ]);
                 }
+                if let Some((maps, params)) = self.shadow_map.local_lights.material_resources() {
+                    local_light_shadows::push_material_bind_entries(&mut entries, maps, params);
+                }
                 self.planar_probe_view_bgs[i] =
                     Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("planar_probe_per_view_bg_live"),

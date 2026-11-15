@@ -50,6 +50,10 @@ const ENTRIES: &[(&str, &str)] = &[
         include_str!("../../../shared/shaders/common/instance_lod.wgsl"),
     ),
     (
+        "common/local_shadows.wgsl",
+        include_str!("../../../shared/shaders/common/local_shadows.wgsl"),
+    ),
+    (
         "materials/test_minimal.wgsl",
         include_str!("../../../shared/shaders/materials/test_minimal.wgsl"),
     ),

@@ -202,5 +202,6 @@ impl Renderer {
         self.lighting_uniforms.dir_light_count = [0.0, shadows_flag, ssr_share, filter_4tap];
         self.lighting_uniforms.point_light_count = [0.0; 4];
         self.shadow_map.virtual_map.clear_local_requests();
+        self.shadow_map.local_lights.clear_requests();
     }
 }

@@ -25,7 +25,9 @@ pub(crate) use local_lights::{
     LocalShadowAdmissionStats, LocalShadowProjection, LocalShadowRequest,
 };
 use selection::selection as virtual_shadow_selection;
-pub(crate) use selection::{configure_capability_tier, virtual_shadows_requested};
+pub(crate) use selection::{
+    capability_tier_is_high_end, configure_capability_tier, virtual_shadows_requested,
+};
 
 pub const VSM_CLIP_LEVELS: u8 = 3;
 pub const VSM_VIRTUAL_PAGES_PER_AXIS: u16 = 32;
@@ -1516,6 +1518,41 @@ pub(crate) fn directional_material_shader(source: String) -> String {
     output.push_str(DIRECTIONAL_VSM_MATERIAL_HELPER);
     output.push_str(&renamed[offset..]);
     output
+}
+
+/// Placeholder page table and sampling parameters for the material system's
+/// first per-view bind group, built before the renderer's own exist.
+pub(crate) fn material_stub_resources(
+    device: &wgpu::Device,
+) -> Option<(wgpu::Texture, wgpu::TextureView, wgpu::Buffer)> {
+    virtual_shadows_requested().then(|| {
+        let page_table = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("material_stub_vsm_page_table"),
+            size: wgpu::Extent3d {
+                width: VSM_VIRTUAL_PAGES_PER_AXIS as u32,
+                height: VSM_VIRTUAL_PAGES_PER_AXIS as u32,
+                depth_or_array_layers: VSM_CLIP_LEVELS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let page_table_view = page_table.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("material_stub_vsm_page_table_view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("material_stub_vsm_params"),
+            size: VSM_SAMPLING_PARAMS_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        (page_table, page_table_view, params)
+    })
 }
 
 fn env_u16(name: &str, default: u16, min: u16, max: u16) -> u16 {
