@@ -27,9 +27,11 @@
 //! thread reads and parses the levels, and a later frame uploads them. Where
 //! threads cannot be started (the web) the read stays on the frame.
 //!
-//! Streaming is on by default on iOS, tvOS and Android, and off elsewhere.
-//! `BLOOM_TEXTURE_STREAM=1` or `=0` overrides that; `BLOOM_TEXTURE_STREAM_MB`
-//! sets the budget for the streamed textures (default 384).
+//! Streaming is off until the game turns it on with a budget
+//! (`setTextureStreaming(megabytes)`, before it loads its models): how much
+//! memory there is to spend is the game's knowledge, not the engine's. For
+//! tests, `BLOOM_TEXTURE_STREAM=1` turns it on without the game and
+//! `BLOOM_TEXTURE_STREAM_MB` sets the budget (default 384).
 //! `BLOOM_TEXTURE_STREAM_RAISE=1` is a test driver: it ignores demand and
 //! raises every streamed texture to full size, a few a frame.
 //!
@@ -250,6 +252,10 @@ pub(crate) struct TextureStreaming {
     /// Slots given another texture since the scene last rebuilt its material
     /// bind groups (`take_replaced_textures`).
     replaced: Vec<u32>,
+    /// What the game asked for (`set_texture_streaming`); `None` leaves it
+    /// to the environment.
+    enabled: Option<bool>,
+    budget: Option<u64>,
     /// Texture coordinates per metre of each mesh seen, by the address of its
     /// vertices (shared model primitives are measured once).
     uv_density: HashMap<usize, f32>,
@@ -310,16 +316,11 @@ fn env_flag(name: &str) -> Option<bool> {
     }
 }
 
-/// Whether textures are streamed in this process.
-pub(crate) fn enabled() -> bool {
+/// Whether textures are streamed when the game has not said: only when
+/// `BLOOM_TEXTURE_STREAM=1` asks for it.
+fn enabled_by_environment() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        env_flag("BLOOM_TEXTURE_STREAM").unwrap_or(cfg!(any(
-            target_os = "ios",
-            target_os = "tvos",
-            target_os = "android"
-        )))
-    })
+    *ENABLED.get_or_init(|| env_flag("BLOOM_TEXTURE_STREAM").unwrap_or(false))
 }
 
 /// The file range of an image that is `view_length` bytes at `view_offset` in
@@ -408,7 +409,11 @@ impl Renderer {
         srgb: bool,
         file_range: Option<(u64, u64)>,
     ) -> Option<u32> {
-        let source = if enabled() {
+        let source = if self
+            .texture_streaming
+            .enabled
+            .unwrap_or_else(enabled_by_environment)
+        {
             let path = self.texture_streaming.current_source.clone();
             path.zip(file_range)
                 .map(|(path, (offset, length))| StreamSource {
@@ -597,6 +602,18 @@ impl Renderer {
         // again from the slots as they are now.
         self.pt_tex_bg = None;
         true
+    }
+
+    /// Turn streaming on with a budget of `budget_mb` megabytes for the
+    /// streamed textures, or off with 0. It applies to textures loaded from
+    /// here on: call it before loading models. Textures already streamed
+    /// stay streamed (and keep being scheduled) when it is turned off.
+    pub fn set_texture_streaming(&mut self, budget_mb: f32) {
+        let on = budget_mb > 0.0;
+        self.texture_streaming.enabled = Some(on);
+        if on {
+            self.texture_streaming.budget = Some((f64::from(budget_mb) * 1024.0 * 1024.0) as u64);
+        }
     }
 
     /// The model loader names the file it is importing (and `None` when
@@ -841,7 +858,11 @@ impl Renderer {
                 .filter(|(_, e)| e.pending.is_some())
                 .count();
             let raises = SCHEDULED_RAISES_PER_FRAME.min(READS_IN_FLIGHT.saturating_sub(in_flight));
-            plan_tick(&view, budget_bytes(), raises)
+            plan_tick(
+                &view,
+                self.texture_streaming.budget.unwrap_or_else(budget_bytes),
+                raises,
+            )
         };
         for (slot, level) in plan {
             if !self.request_texture_resident_level(slot, level) {

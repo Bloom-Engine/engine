@@ -329,6 +329,14 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_texture_streaming
+        #[no_mangle]
+        pub extern "C" fn bloom_set_texture_streaming(budget_mb: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_texture_streaming", move || {
+                engine().renderer.set_texture_streaming(budget_mb as f32);
+            })
+        }
+
         // bloom_set_shadow_distance
         #[no_mangle]
         pub extern "C" fn bloom_set_shadow_distance(metres: f64) -> f64 {
