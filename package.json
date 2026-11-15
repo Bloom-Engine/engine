@@ -2339,6 +2339,13 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_cutout_env_specular",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_cloud_shadows",
           "params": [
             "f64",

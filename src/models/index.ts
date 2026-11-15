@@ -17,6 +17,7 @@ declare function bloom_draw_model_transform16(
 declare function bloom_set_model_foliage_wind(handle: number, amount: number): number;
 declare function bloom_set_foliage_shadow_motion(on: number): number;
 declare function bloom_set_cutout_edge_fade(full: number, none: number): number;
+declare function bloom_set_cutout_env_specular(keep: number): number;
 declare function bloom_unload_model(handle: number): void;
 declare function bloom_draw_cube(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_cube_wires(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
@@ -1399,4 +1400,13 @@ export function setFoliageShadowMotion(on: boolean): boolean {
 /// A tree needs cards in more than one orientation for this to leave something to look at.
 export function setCutoutEdgeFade(full: number, none: number): boolean {
   return bloom_set_cutout_edge_fade(full, none) !== 0;
+}
+
+/// How much of the environment's specular reflection leaf cards (glTF alpha MASK materials
+/// drawn by the engine's own shader) keep: 1 = all of it (the default), 0 = none. A card in a
+/// crown mirrors mostly other leaves, and its shading normal is made up; at 1 the sky's
+/// reflection can be as strong as the leaf's own colour and a crown renders flat and pale.
+/// `setCutoutEnvSpecular(0.2)` is a good value for trees.
+export function setCutoutEnvSpecular(keep: number): boolean {
+  return bloom_set_cutout_env_specular(keep) !== 0;
 }

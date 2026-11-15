@@ -270,7 +270,9 @@ pub(super) struct LightingUniforms {
     /// emit a correct motion vector for swaying foliage — without it TAA sees
     /// velocity 0 on every moving leaf and ghosts them. Appended last so existing
     /// field offsets stay stable. y / z = the two facings between which a cut-out card
-    /// seen edge on is thinned out (`set_cutout_edge_fade`; 0 / 0 = off).
+    /// seen edge on is thinned out (`set_cutout_edge_fade`; 0 / 0 = off). w = the share of the
+    /// environment's specular reflection taken away from cut-out materials
+    /// (`set_cutout_env_specular`; 0 = none taken).
     pub(super) frame_misc: [f32; 4],
 }
 

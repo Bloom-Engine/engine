@@ -2672,14 +2672,17 @@ main pass.
 Found while making the shooter's trees photoreal. Both are about alpha cut-out (glTF MASK)
 materials drawn by the engine's own scene shader.
 
-- **Image-based specular on cut-out foliage is cut to a fifth.** A leaf card inside a crown
+- **`setCutoutEnvSpecular(keep)`** (`bloom_set_cutout_env_specular`, every platform; 1 = all
+  of it, the default). How much image-based specular cut-out foliage keeps. A leaf card inside a crown
   mirrors mostly other leaves, and its shading normal is made up (a crown normal, or flipped
   toward the viewer), yet it took the full prefiltered sky reflection. On the shooter's trees
   that reflection was as strong as the leaves' own diffuse colour: every crown was a flat pale
   mint whatever its texture said. Seen by skipping image-based lighting (`BLOOM_SKIP=ibl`):
   the crowns turned their real green with a lit and a shaded side. Direct specular was already
-  skipped for these materials for the same reason. This changes the look of every cut-out
-  material; nothing opts in.
+  skipped for these materials for the same reason. It was first landed as a fixed fifth for
+  every cut-out material; the golden test `fractional_procedural_foliage_tracks_native` then
+  missed its bound by a hair (darker foliage against a bright sky), so it is a setting and
+  the default leaves every existing scene as it was. The shooter uses 0.2.
 - **`setCutoutEdgeFade(full, none)`** (`bloom_set_cutout_edge_fade`, every platform; off by
   default). A card seen edge on squeezes its picture into a few pixel rows, and a crown of
   cards shows a streak wherever one stands along the view. With the fade on, a card is

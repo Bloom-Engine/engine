@@ -359,6 +359,12 @@ pub fn bloom_set_foliage_shadow_motion(on: f64) -> f64 {
 }
 
 #[wasm_bindgen]
+pub fn bloom_set_cutout_env_specular(keep: f64) -> f64 {
+    engine().renderer.set_cutout_env_specular(keep as f32);
+    1.0
+}
+
+#[wasm_bindgen]
 pub fn bloom_set_cutout_edge_fade(full: f64, none: f64) -> f64 {
     engine().renderer.set_cutout_edge_fade(full as f32, none as f32);
     1.0

@@ -88,7 +88,7 @@ export {
 
 export {
   loadModel, drawModel, drawModelRotated, drawModelTransform, unloadModel, getModelBounds, genMeshSplineRibbon,
-  setModelFoliageWind, setFoliageShadowMotion, setCutoutEdgeFade,
+  setModelFoliageWind, setFoliageShadowMotion, setCutoutEdgeFade, setCutoutEnvSpecular,
   drawCube, drawCubeWires, drawSphere, drawSphereWires,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
   loadShader, compileMaterial, drawMeshWithMaterial,
