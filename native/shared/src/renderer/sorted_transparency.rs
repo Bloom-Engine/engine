@@ -287,8 +287,15 @@ impl Renderer {
         };
         pass.set_bind_group(1, &self.lighting_bind_group, &[]);
         pass.set_bind_group(3, &self.joint_bind_group, &[]);
+        let mut joint_page = 0;
         let mut current_pipeline_key = None;
         for draw in draws {
+            self.bind_joint_page(
+                pass,
+                3,
+                self.cached_draw_joint_offset(draw.stable_id),
+                &mut joint_page,
+            );
             let secondary_uv = draw.secondary_uv.is_some();
             let pipeline_key = (draw.layered, secondary_uv, draw.double_sided);
             if current_pipeline_key != Some(pipeline_key) {
@@ -317,6 +324,7 @@ impl Renderer {
             );
             pass.draw_indexed(draw.mesh.index_range(), draw.mesh.base_vertex, 0..1);
         }
+        self.bind_joint_page(pass, 3, 0.0, &mut joint_page);
     }
 
     /// Draw conventional imported and custom translucency in one global order.
@@ -359,6 +367,7 @@ impl Renderer {
             )
         };
         let mut current_pipeline = None;
+        let mut joint_page = 0;
         while imported.peek().is_some() || custom.peek().is_some() {
             let take_imported = match (imported.peek(), custom.peek()) {
                 (Some(imported), Some((stable_id, custom))) => compare_sorted_transparency(
@@ -404,8 +413,15 @@ impl Renderer {
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(1, &self.lighting_bind_group, &[]);
                     pass.set_bind_group(3, &self.joint_bind_group, &[]);
+                    joint_page = 0;
                     current_pipeline = Some(key);
                 }
+                self.bind_joint_page(
+                    pass,
+                    3,
+                    self.cached_draw_joint_offset(draw.stable_id),
+                    &mut joint_page,
+                );
                 pass.set_bind_group(0, draw.uniforms, &[]);
                 pass.set_bind_group(2, draw.material, &[]);
                 pass.set_vertex_buffer(0, draw.mesh.vertex.slice(draw.vertex_byte_offset..));

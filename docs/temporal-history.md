@@ -202,7 +202,8 @@ Telemetry reports `immediate_motion_entries`,
 
 Both retained and Raylib-style immediate skinned draws consume current and
 previous joint palettes at the same offsets in the existing 1024-matrix GPU
-buffers. The legacy immediate vertex shader now reconstructs `prev_clip` from
+buffers (one pair per palette page since EN-066; a frame within 1024 joints
+has the one pair). The legacy immediate vertex shader now reconstructs `prev_clip` from
 the previous palette instead of silently using the current pose for both
 frames. This adds only the previous-palette matrix operations to weighted
 vertices; the buffer, bind group, two palette uploads, velocity attachment,
