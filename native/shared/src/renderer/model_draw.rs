@@ -223,6 +223,7 @@ impl Renderer {
         scale: f32,
         tint: [f32; 4],
     ) {
+        self.texture_streaming_observe_model(handle_bits, position, scale);
         self.has_blend_model_draws |= self.model_blended.contains(&handle_bits);
         self.has_layered_blend_model_draws |= self.model_layered_blended.contains(&handle_bits);
         self.has_refractive_model_draws |=
@@ -663,6 +664,7 @@ impl Renderer {
         scale: f32,
         tint: [f32; 4],
     ) {
+        self.texture_streaming_observe_model(handle_bits, position, scale);
         self.has_blend_model_draws |= self.model_blended.contains(&handle_bits);
         self.has_layered_blend_model_draws |= self.model_layered_blended.contains(&handle_bits);
         self.has_refractive_model_draws |=
