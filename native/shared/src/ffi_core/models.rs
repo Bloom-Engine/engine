@@ -221,7 +221,15 @@ macro_rules! __bloom_ffi_models {
                 // handle dies — without this the buffers leak and a slot-
                 // reusing future model would render the stale geometry.
                 eng.renderer.evict_model_cache(handle.to_bits());
+                // The model's own textures go with it. They are most of a
+                // model's memory, and unloading used to keep every one of
+                // them. A scene node still showing one renders white, as
+                // after `unloadTexture`: destroy a model's nodes first.
+                let textures = eng.models.exclusive_texture_indices(handle);
                 eng.models.unload_model(handle);
+                for idx in textures {
+                    eng.renderer.unload_texture(idx);
+                }
             })
         }
         #[cfg(not(feature = "models3d"))]
