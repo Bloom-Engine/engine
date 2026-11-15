@@ -280,6 +280,8 @@ struct GpuMesh {
     /// model-upload time so draw_model_cached doesn't build one per
     /// frame.
     material_bg: wgpu::BindGroup,
+    /// The texture slots `material_bg` shows (texture streaming remakes it).
+    material_textures: [u32; 5],
     /// Per-material uniform buffer backing the `material` binding in
     /// the scene pipeline's group 2. Kept alongside `material_bg` so
     /// its lifetime matches (bind groups reference buffers internally
@@ -1402,6 +1404,7 @@ pub struct Renderer {
     // Cached model GPU buffers (static AND skinned — skinned VBs keep
     // raw bind-pose joint indices; the scene VS skins them per draw)
     model_gpu_cache: HashMap<u64, Option<Vec<GpuMesh>>>,
+    texture_streaming: texture_streaming::TextureStreaming,
     /// Original model-mesh indices represented by a compact compatibility-only
     /// cache. Absent means the handle owns an ordinary complete model cache.
     #[cfg(feature = "models3d")]
@@ -8590,6 +8593,7 @@ impl Renderer {
             persistent_vb_3d_capacity: vb_3d_cap,
             persistent_ib_3d_capacity: ib_3d_cap,
             model_gpu_cache: HashMap::new(),
+            texture_streaming: Default::default(),
             #[cfg(feature = "models3d")]
             model_virtual_compatibility_sources: HashMap::new(),
             gpu_driven,
@@ -14306,6 +14310,7 @@ impl Renderer {
                     layered_uv1_buffer,
                     layered_uses_uv1,
                     material_bg,
+                    material_textures: [base_color_idx, normal_idx, mr_idx, em_idx, occ_idx],
                     _material_uniform: material_uniform,
                     shadow_cutout_bg,
                     _shadow_cutoff_buf: shadow_cutoff_buf,

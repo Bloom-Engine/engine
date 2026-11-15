@@ -561,7 +561,7 @@ impl Renderer {
         if i == 0 || i >= self.textures.len() {
             return;
         }
-        super::texture_streaming::forget(idx);
+        self.forget_streamed_texture(idx);
         if let Some(old_id) = self.global_texture_ids.get(i).copied() {
             self.material_system
                 .indirection

@@ -92,6 +92,19 @@ impl Default for PbrMaterial {
 }
 
 impl PbrMaterial {
+    /// Whether the material shows one of the texture slots in `slots`.
+    pub(crate) fn shows_any_texture(&self, slots: &[u32]) -> bool {
+        [
+            self.texture_idx,
+            self.normal_texture_idx,
+            self.metallic_roughness_texture_idx,
+            self.emissive_texture_idx,
+            self.occlusion_texture_idx,
+        ]
+        .iter()
+        .any(|slot| *slot != 0 && slots.contains(slot))
+    }
+
     /// True only when the dielectric transmission lobe retains non-zero
     /// energy after metallic suppression. Camera refraction still keeps an
     /// authored all-metal material in its established material bucket, but GI
@@ -2184,7 +2197,13 @@ impl SceneGraph {
         renderer.retire_scene_gpu_materials(self.retired_gpu_materials.drain(..));
         let shared_gpu_materials = &mut self.shared_gpu_materials;
         let retired_gpu_materials = &mut self.retired_gpu_materials;
+        // Texture streaming put other textures in these slots: the bind
+        // groups of the nodes that show them hold the old views.
+        let replaced = renderer.take_replaced_textures();
         for (_handle, node) in self.nodes.iter_mut() {
+            if !replaced.is_empty() && node.material.shows_any_texture(&replaced) {
+                node.mat_dirty = true;
+            }
             if !node.visible || node.indices().is_empty() {
                 continue;
             }

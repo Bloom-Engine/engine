@@ -22,8 +22,9 @@
 //! raise a texture when it comes near, turning it on leaves near surfaces
 //! soft. The next stage makes it the default on phones, tablets and TV.
 //!
-//! State lives in a module-local static, like `gi_bake`'s caches, so the
-//! ratcheted `renderer/mod.rs` gains no field.
+//! Bind groups hold texture views, so a swap also rebuilds the material bind
+//! groups that show the slot: those of cached models here, those of scene
+//! nodes when the scene next prepares its materials.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -56,17 +57,16 @@ struct StreamedTexture {
     srgb: bool,
 }
 
+/// One renderer's streamed textures. Slot indices mean nothing outside the
+/// renderer that handed them out, so this is a field of it, not process state.
 #[derive(Default)]
-struct TextureStreaming {
+pub(crate) struct TextureStreaming {
     /// The file being imported, set by the model loader round its work.
     current_source: Option<PathBuf>,
     entries: HashMap<u32, StreamedTexture>,
-}
-
-fn state() -> &'static std::sync::Mutex<TextureStreaming> {
-    static INSTANCE: std::sync::OnceLock<std::sync::Mutex<TextureStreaming>> =
-        std::sync::OnceLock::new();
-    INSTANCE.get_or_init(|| std::sync::Mutex::new(TextureStreaming::default()))
+    /// Slots given another texture since the scene last rebuilt its material
+    /// bind groups (`take_replaced_textures`).
+    replaced: Vec<u32>,
 }
 
 fn env_flag(name: &str) -> Option<bool> {
@@ -82,12 +82,6 @@ fn env_flag(name: &str) -> Option<bool> {
 pub(crate) fn enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| env_flag("BLOOM_TEXTURE_STREAM").unwrap_or(false))
-}
-
-/// The model loader names the file it is importing (and `None` when done), so
-/// images found inside it can be streamed from it later.
-pub(crate) fn set_current_source(path: Option<&Path>) {
-    state().lock().unwrap().current_source = path.map(Path::to_path_buf);
 }
 
 /// The file range of an image that is `view_length` bytes at `view_offset` in
@@ -129,6 +123,18 @@ pub(crate) fn floor_level(width: u32, height: u32, level_count: u32, floor_dim: 
     level
 }
 
+/// The nearest level at or above `level` in size (so at or below it in
+/// number) whose width and height are whole blocks, which a compressed
+/// texture's base level has to be. `None` when not even level 0 is: such an
+/// image is not streamed.
+pub(crate) fn block_aligned_level(image: &CompressedImage, level: u32) -> Option<u32> {
+    let (block_width, block_height) = image.format.block_size();
+    (0..=level).rev().find(|&l| {
+        (image.width >> l).max(1) % block_width == 0
+            && (image.height >> l).max(1) % block_height == 0
+    })
+}
+
 /// `image` from `level` down: the same texture with its largest levels left out.
 pub(crate) fn sub_image(image: &CompressedImage, level: u32) -> CompressedImage {
     let level = (level as usize).min(image.levels.len().saturating_sub(1));
@@ -161,7 +167,7 @@ impl Renderer {
         file_range: Option<(u64, u64)>,
     ) -> Option<u32> {
         let source = if enabled() {
-            let path = state().lock().unwrap().current_source.clone();
+            let path = self.texture_streaming.current_source.clone();
             path.zip(file_range)
                 .map(|(path, (offset, length))| StreamSource {
                     path,
@@ -171,17 +177,21 @@ impl Renderer {
         } else {
             None
         };
-        let level = floor_level(
-            image.width,
-            image.height,
-            image.levels.len() as u32,
-            FLOOR_DIM,
-        );
+        let level = block_aligned_level(
+            image,
+            floor_level(
+                image.width,
+                image.height,
+                image.levels.len() as u32,
+                FLOOR_DIM,
+            ),
+        )
+        .unwrap_or(0);
         let Some(source) = source.filter(|_| level > 0) else {
             return self.register_texture_compressed(image, is_normal, srgb);
         };
         let index = self.register_texture_compressed(&sub_image(image, level), is_normal, srgb)?;
-        state().lock().unwrap().entries.insert(
+        self.texture_streaming.entries.insert(
             index,
             StreamedTexture {
                 source,
@@ -201,8 +211,7 @@ impl Renderer {
     /// keeps what it has.
     pub(crate) fn set_texture_resident_level(&mut self, idx: u32, level: u32) -> bool {
         let (source, level, is_normal, srgb) = {
-            let streaming = state().lock().unwrap();
-            let Some(entry) = streaming.entries.get(&idx) else {
+            let Some(entry) = self.texture_streaming.entries.get(&idx) else {
                 return false;
             };
             let level = level.min(entry.floor_level);
@@ -215,10 +224,13 @@ impl Renderer {
         else {
             return false;
         };
+        let Some(level) = block_aligned_level(&image, level) else {
+            return false;
+        };
         if !self.replace_texture_compressed(idx, &sub_image(&image, level), is_normal, srgb) {
             return false;
         }
-        if let Some(entry) = state().lock().unwrap().entries.get_mut(&idx) {
+        if let Some(entry) = self.texture_streaming.entries.get_mut(&idx) {
             entry.resident_level = level;
         }
         true
@@ -272,7 +284,62 @@ impl Renderer {
         self.textures[i] = texture;
         self.texture_bind_groups[i] = bind_group;
         self.texture_sizes[i] = (image.width, image.height);
+        self.refresh_cached_model_materials(idx);
+        self.texture_streaming.replaced.push(idx);
         true
+    }
+
+    /// The model loader names the file it is importing (and `None` when
+    /// done), so images found inside it can be streamed from it later.
+    pub(crate) fn set_streaming_source(&mut self, path: Option<&Path>) {
+        self.texture_streaming.current_source = path.map(Path::to_path_buf);
+    }
+
+    /// The slot was unloaded: it is no longer streamed.
+    pub(crate) fn forget_streamed_texture(&mut self, idx: u32) {
+        self.texture_streaming.entries.remove(&idx);
+    }
+
+    /// Streamed textures, and how many of them are not whole.
+    pub(crate) fn streamed_texture_counts(&self) -> (usize, usize) {
+        let entries = &self.texture_streaming.entries;
+        let partial = entries.values().filter(|e| e.resident_level > 0).count();
+        (entries.len(), partial)
+    }
+
+    /// The slots given another texture since the last call. The scene rebuilds
+    /// the material bind groups of the nodes that show one of them.
+    pub(crate) fn take_replaced_textures(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.texture_streaming.replaced)
+    }
+
+    /// Cached models bind their textures through a bind group made when the
+    /// model was first drawn; it holds the old views. Make those again.
+    fn refresh_cached_model_materials(&mut self, idx: u32) {
+        let mut rebuilt = Vec::new();
+        for (&key, meshes) in &self.model_gpu_cache {
+            for (at, mesh) in meshes.iter().flatten().enumerate() {
+                let t = mesh.material_textures;
+                if t.contains(&idx) {
+                    let bg = self.create_scene_material_bg(
+                        t[0],
+                        t[1],
+                        t[2],
+                        t[3],
+                        t[4],
+                        &mesh._material_uniform,
+                    );
+                    rebuilt.push((key, at, bg));
+                }
+            }
+        }
+        for (key, at, bg) in rebuilt {
+            if let Some(Some(meshes)) = self.model_gpu_cache.get_mut(&key) {
+                meshes[at].material_bg = bg;
+                // made again on next use, from the slot as it is now
+                meshes[at].layered_material_bg = None;
+            }
+        }
     }
 
     /// Once a frame. Stage 1 has only the test driver here.
@@ -281,9 +348,8 @@ impl Renderer {
         if !*RAISE.get_or_init(|| env_flag("BLOOM_TEXTURE_STREAM_RAISE").unwrap_or(false)) {
             return;
         }
-        let pending: Vec<u32> = state()
-            .lock()
-            .unwrap()
+        let pending: Vec<u32> = self
+            .texture_streaming
             .entries
             .iter()
             .filter(|(_, entry)| entry.resident_level > 0)
@@ -293,32 +359,16 @@ impl Renderer {
         let last = !pending.is_empty();
         for idx in pending {
             if !self.set_texture_resident_level(idx, 0) {
-                forget(idx); // unreadable: leave it small and stop trying
+                self.forget_streamed_texture(idx); // unreadable: leave it small and stop trying
             }
         }
-        let (streamed, partial) = counts();
+        let (streamed, partial) = self.streamed_texture_counts();
         if last && partial == 0 {
             crate::ffi::log_error(&format!(
                 "bloom: texture streaming test driver: all {streamed} streamed textures are whole"
             ));
         }
     }
-}
-
-/// The slot was unloaded: it is no longer streamed.
-pub(crate) fn forget(idx: u32) {
-    state().lock().unwrap().entries.remove(&idx);
-}
-
-/// Streamed textures, and how many of them are not whole. For logs and tests.
-pub(crate) fn counts() -> (usize, usize) {
-    let streaming = state().lock().unwrap();
-    let partial = streaming
-        .entries
-        .values()
-        .filter(|entry| entry.resident_level > 0)
-        .count();
-    (streaming.entries.len(), partial)
 }
 
 #[cfg(test)]
@@ -357,6 +407,18 @@ mod tests {
         assert_eq!(floor_level(64, 64, 7, 256), 0);
         // a chain that stops early cannot go below its last level
         assert_eq!(floor_level(2048, 2048, 2, 256), 1);
+    }
+
+    #[test]
+    fn a_streamed_base_level_is_whole_blocks() {
+        assert_eq!(block_aligned_level(&image(2048), 3), Some(3));
+        // 1032 px: level 3 would be 129 px, not whole 4 px blocks; level 1 (516) is
+        let mut odd = image(1024);
+        odd.width = 1032;
+        odd.height = 1032;
+        assert_eq!(block_aligned_level(&odd, 3), Some(1));
+        odd.width = 1030;
+        assert_eq!(block_aligned_level(&odd, 3), None);
     }
 
     #[test]
