@@ -819,6 +819,18 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_cutout_edge_fade  [EN-071]
+        //
+        // Thin out leaf cards as they turn edge on to the view (0 / 0 = off).
+        #[no_mangle]
+        pub extern "C" fn bloom_set_cutout_edge_fade(full: f64, none: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_cutout_edge_fade", move || {
+                engine()
+                    .renderer
+                    .set_cutout_edge_fade(full as f32, none as f32);
+            })
+        }
+
         // bloom_set_output_scale  [EN-046]
         //
         // Shrink the SWAPCHAIN, not the G-buffer. This is the only knob that touches

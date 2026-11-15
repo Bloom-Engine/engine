@@ -109,6 +109,7 @@ const RENDERER_STATUS_FUNCTIONS = new Set([
   'bloom_set_output_scale',
   'bloom_set_model_foliage_wind',
   'bloom_set_foliage_shadow_motion',
+  'bloom_set_cutout_edge_fade',
   'bloom_set_cloud_shadows',
   'bloom_add_shadowed_point_light',
   'bloom_add_shadowed_spot_light',

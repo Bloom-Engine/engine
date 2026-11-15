@@ -2331,6 +2331,14 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_cutout_edge_fade",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_cloud_shadows",
           "params": [
             "f64",
