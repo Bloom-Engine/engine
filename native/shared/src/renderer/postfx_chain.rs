@@ -747,6 +747,8 @@ impl Renderer {
             );
             pass.draw(0..3, 0..1);
         }
+        // The lit fog (volumetric_fog.rs) blends into what was just composed.
+        self.record_volumetric_fog(encoder, profiler);
     }
 
     fn ssr_composite_source(&self) -> SsrCompositeSource {

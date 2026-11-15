@@ -259,6 +259,46 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_volumetric_fog: the lit fog (renderer/volumetric_fog.rs).
+        #[no_mangle]
+        pub extern "C" fn bloom_set_volumetric_fog(
+            enabled: f64,
+            density: f64,
+            height_ref: f64,
+            height_falloff: f64,
+            range: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_volumetric_fog", move || {
+                engine().renderer.set_volumetric_fog(
+                    enabled != 0.0,
+                    density as f32,
+                    height_ref as f32,
+                    height_falloff as f32,
+                    range as f32,
+                );
+            })
+        }
+
+        // bloom_set_volumetric_fog_light
+        #[no_mangle]
+        pub extern "C" fn bloom_set_volumetric_fog_light(
+            r: f64,
+            g: f64,
+            b: f64,
+            sun_strength: f64,
+            light_strength: f64,
+            anisotropy: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_volumetric_fog_light", move || {
+                engine().renderer.set_volumetric_fog_light(
+                    [r as f32, g as f32, b as f32],
+                    sun_strength as f32,
+                    light_strength as f32,
+                    anisotropy as f32,
+                );
+            })
+        }
+
         // bloom_set_chromatic_aberration  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) -> f64 {
