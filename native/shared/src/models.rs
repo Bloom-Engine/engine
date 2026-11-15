@@ -402,7 +402,12 @@ pub(crate) fn physical_transmission_requested() -> bool {
         .unwrap_or(true)
 }
 
-/// See `ModelManager::exclusive_texture_indices`. A primitive that appears
+/// See `ModelManager::exclusive_texture_indices`. Anything else that holds a
+/// primitive counts as sharing it, so a scene node with a level of detail
+/// from this model (`set_lod_model_mesh` keeps the `Arc`) keeps the textures
+/// alive: the safe side, and the reason to destroy a model's nodes first. The
+/// textures of the layered-material extensions (clearcoat, sheen, ...) are
+/// not released here. A primitive that appears
 /// several times in `meshes` (repeated glTF nodes clone the `Arc`) still
 /// belongs to this model alone when every strong reference is one of those.
 pub(crate) fn exclusive_texture_indices(meshes: &[Arc<MeshData>]) -> Vec<u32> {
@@ -418,6 +423,12 @@ pub(crate) fn exclusive_texture_indices(meshes: &[Arc<MeshData>]) -> Vec<u32> {
             mesh.metallic_roughness_texture_idx,
             mesh.emissive_texture_idx,
             mesh.occlusion_texture_idx,
+            mesh.transmission
+                .texture
+                .and_then(|b| b.runtime_texture_idx),
+            mesh.transmission
+                .thickness_texture
+                .and_then(|b| b.runtime_texture_idx),
         ]
         .into_iter()
         .flatten()
