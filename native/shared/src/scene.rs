@@ -423,6 +423,11 @@ impl SceneNode {
             .or(self.secondary_tex_coords.as_deref())
     }
 
+    /// Visible and inside the camera's frustum as of the last `prepare()`.
+    pub(crate) fn shown_on_screen(&self) -> bool {
+        self.visible && self.in_view_frustum
+    }
+
     pub(crate) fn shared_geometry_identity(&self) -> Option<usize> {
         self.shared_model_mesh
             .as_ref()

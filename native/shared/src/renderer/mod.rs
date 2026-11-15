@@ -282,6 +282,8 @@ struct GpuMesh {
     material_bg: wgpu::BindGroup,
     /// The texture slots `material_bg` shows (texture streaming remakes it).
     material_textures: [u32; 5],
+    /// Texture coordinates per metre of the mesh (texture streaming).
+    uv_density: f32,
     /// Per-material uniform buffer backing the `material` binding in
     /// the scene pipeline's group 2. Kept alongside `material_bg` so
     /// its lifetime matches (bind groups reference buffers internally
@@ -12942,6 +12944,7 @@ impl Renderer {
         profiler: &mut crate::profiler::Profiler,
     ) {
         self.prewarm_pipelines(true);
+        self.texture_streaming_observe_scene(scene);
         self.has_refractive_scene_nodes =
             self.imported_refraction_enabled && scene.has_refractive_nodes();
         (
@@ -14322,6 +14325,7 @@ impl Renderer {
                     layered_uses_uv1,
                     material_bg,
                     material_textures: [base_color_idx, normal_idx, mr_idx, em_idx, occ_idx],
+                    uv_density: texture_streaming::uv_density(&mesh.vertices, &mesh.indices),
                     _material_uniform: material_uniform,
                     shadow_cutout_bg,
                     _shadow_cutoff_buf: shadow_cutoff_buf,
