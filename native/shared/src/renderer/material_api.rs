@@ -582,6 +582,13 @@ impl Renderer {
         self.lighting_uniforms.frame_misc[2] = none;
     }
 
+    /// How much of the environment's specular reflection alpha cut-out materials keep (1 = all
+    /// of it, the default; 0 = none). Leaf cards carry made-up shading normals and sit among
+    /// other leaves: at 1 the sky's reflection can be as strong as their diffuse colour.
+    pub fn set_cutout_env_specular(&mut self, keep: f32) {
+        self.lighting_uniforms.frame_misc[3] = 1.0 - keep.clamp(0.0, 1.0);
+    }
+
     /// Synchronize material PerFrame and PerView uniforms.
     pub fn material_system_begin_frame(&mut self, time_seconds: f32, delta_time: f32) {
         self.lighting_uniforms.wind = [self.wind[0], self.wind[1], self.wind[2], time_seconds];

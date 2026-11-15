@@ -49,7 +49,7 @@ struct Lighting {
     shadow_view_matrix: mat4x4<f32>,
     wind: vec4<f32>,   // xy=dir, z=amplitude, w=time (foliage sway)
     cloud: vec4<f32>,  // x=shadow strength, y=deck height, z=scale, w=drift m/s
-    frame_misc: vec4<f32>, // x=delta_time (prev-frame wind, for motion vectors); y,z=cut-out edge fade
+    frame_misc: vec4<f32>, // x=delta_time (prev-frame wind, for motion vectors); y,z=cut-out edge fade; w=cut-out env specular removed
 };
 
 struct MaterialFactors {
@@ -1322,9 +1322,11 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // Cut-out foliage: a leaf card inside a crown mirrors mostly other leaves, not the open
     // sky, and its shading normal is a made-up crown normal (or one flipped toward the viewer),
     // so the full sky reflection laid an even pale-blue sheen over every canopy that was as
-    // strong as the leaf's own diffuse colour: trees rendered mint and flat. Keep a fifth of it.
+    // strong as the leaf's own diffuse colour: trees rendered mint and flat. A game says how
+    // much of it to keep (set_cutout_env_specular; frame_misc.w holds what is taken AWAY, so
+    // the default 0 leaves every existing scene as it was).
     // (Direct specular is already skipped for these materials above, for the same reason.)
-    let foliage_spec_occ = select(1.0, 0.2, alpha_cutoff > 0.0);
+    let foliage_spec_occ = select(1.0, 1.0 - lighting.frame_misc.w, alpha_cutoff > 0.0);
     let ibl_spec = ibl_spec_raw * spec_occ * cap2 * (1.0 - ssr_own) * foliage_spec_occ;
     //IBL_STRIP_END
 
