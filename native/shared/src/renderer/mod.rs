@@ -129,6 +129,7 @@ mod transmitted_shadows;
 mod transparent_gi;
 #[cfg(feature = "models3d")]
 mod virtual_geometry_integration;
+mod volumetric_fog;
 #[cfg(feature = "models3d")]
 pub use virtual_geometry_integration::RendererVirtualGeometryError;
 pub(crate) mod visibility_buffer;
@@ -631,6 +632,7 @@ pub struct Renderer {
     tonemap_lut: tonemap_lut::TonemapLut,
     /// The game's colour grade (color_grade.rs), read by the composite.
     color_grade: color_grade::ColorGrade,
+    volumetric_fog: volumetric_fog::VolumetricFog,
     pub composite_sampler: wgpu::Sampler,
     composite_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::CompositeSource::COUNT * 2],
     /// 0 = ACES (default, matches bloom-reference), 1 = AgX.
@@ -8239,6 +8241,7 @@ impl Renderer {
             composite_layout,
             tonemap_lut,
             color_grade,
+            volumetric_fog: volumetric_fog::VolumetricFog::new(),
             composite_sampler,
             composite_bind_group_cache: std::array::from_fn(|_| None),
             // 1 = AgX (Troy Sobotka 2022). Matches Blender 4.0+ and
@@ -9056,6 +9059,7 @@ impl Renderer {
             self.composite_bind_group_cache = std::array::from_fn(|_| None);
             self.exposure_bind_group_cache = std::array::from_fn(|_| None);
             self.scene_compose_bind_group_cache = std::array::from_fn(|_| None);
+            self.volumetric_fog.drop_target_bindings();
             self.ssr_temporal_bind_group_cache = [None, None];
             self.taa_bind_group_cache = [None, None];
             self.taa_reactive_bind_group_cache = [None, None];
