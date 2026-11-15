@@ -10248,11 +10248,25 @@ impl Renderer {
         // shortcut is limited to frames without it.
         let mut dyn_layout: Vec<(u64, usize, usize, u32, u32)> =
             Vec::with_capacity(dyn_draws.len());
+        // EN-070: a mesh that no longer fits the megabuffers is left out of
+        // the ray scene (both loops below skip the same ones).
+        let geo_budget = self.pt_geometry_budget(build_static_pt_geometry);
+        let mut dyn_vertex_cursor = (geo_vertices.len() / 24) as u32;
+        let mut dyn_index_cursor = geo_indices.len() as u32;
+        let mut dyn_left_out = 0;
         for d in &dyn_draws {
             if let Some(Some(meshes)) = self.model_gpu_cache.get(&d.cache_handle) {
                 if let Some(mesh) = meshes.get(d.mesh_idx) {
                     if let (Some(v), Some(i)) = (&mesh.cpu_vertices, &mesh.cpu_indices) {
-                        if !v.is_empty() && !i.is_empty() {
+                        let (vc, ic) = (dyn_vertex_cursor, dyn_index_cursor);
+                        if !v.is_empty()
+                            && !i.is_empty()
+                            && !geo_budget.admits(vc, ic, v.len(), i.len())
+                        {
+                            dyn_left_out += 1;
+                        } else if !v.is_empty() && !i.is_empty() {
+                            dyn_vertex_cursor += v.len() as u32;
+                            dyn_index_cursor += i.len() as u32;
                             dyn_layout.push((
                                 d.cache_handle as u64,
                                 d.mesh_idx,
@@ -10270,8 +10284,9 @@ impl Renderer {
             && dyn_layout == self.pt_dyn_uploaded_layout
             && self.pt_geo_vertex_buffer.is_some()
             && self.pt_geo_index_buffer.is_some();
-        let mut dyn_vertex_cursor = (geo_vertices.len() / 24) as u32;
-        let mut dyn_index_cursor = geo_indices.len() as u32;
+        pt_geometry::report_pt_geometry_overflow(dyn_left_out, &geo_budget);
+        dyn_vertex_cursor = (geo_vertices.len() / 24) as u32;
+        dyn_index_cursor = geo_indices.len() as u32;
         for d in &dyn_draws {
             let mesh = match self.model_gpu_cache.get(&d.cache_handle) {
                 Some(Some(meshes)) => match meshes.get(d.mesh_idx) {
@@ -10286,6 +10301,9 @@ impl Renderer {
             };
             let vb = dyn_vertex_cursor;
             let ib = dyn_index_cursor;
+            if !geo_budget.admits(vb, ib, cv.len(), ci.len()) {
+                continue;
+            }
             dyn_vertex_cursor += cv.len() as u32;
             dyn_index_cursor += ci.len() as u32;
             if !reuse_dyn_geometry {
