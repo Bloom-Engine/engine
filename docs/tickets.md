@@ -2340,3 +2340,62 @@ Tests: `joint_pages::tests` (placement arithmetic) and two rendering tests in
 pages), each moved to its own grid cell by the last joint of its palette and tinted by its
 index, every cell showing its own colour; and 36 models of 512 joints against the cap, 32
 drawn right and 4 absent. Run on Metal only.
+
+
+## EN-067 — Volumetric fog: a mist the sun and the lamps light 🟡 *(2026-11-15, branch `feat/volumetric-fog`)*
+
+The height fog in the scene compose is one colour everywhere. `setVolumetricFog(enabled,
+density, heightRef, heightFalloff, range)` and `setVolumetricFogLight(r, g, b, sunStrength,
+lightStrength, anisotropy)` add a second medium whose brightness depends on what reaches it:
+the sun through the cascaded shadow maps (shafts between trees, a dark volume behind a
+building), the eight nearest point lights (a halo round a lamp), and a flat colour for the
+rest. Off by default; with it off nothing is recorded and nothing is allocated, so every
+other game and every golden image is as before. `renderer/volumetric_fog.rs` holds all of it.
+
+**Design: a grid in the view frustum, not a ray march per pixel.** 160 x 90 x 64 cells, the
+depth slices spaced exponentially from 0.3 m to the range. Three passes right after the
+scene compose:
+
+1. *scatter* (compute): one jittered sample per cell per frame (density, one hardware-filtered
+   shadow lookup, the lights), blended 10 / 90 with last frame's grid looked up at the same
+   world position.
+2. *integrate* (compute): each column front to back, storing in-scatter and transmittance up
+   to every cell.
+3. *apply* (fullscreen, blended into the composed HDR image): one depth read, one trilinear
+   lookup; `colour = colour * transmittance + in-scatter`, the target's alpha untouched.
+
+Reasons: the cost does not depend on the output resolution; the temporal filter lives in the
+grid, in world space, and the per-pixel step uses this frame's depth only, so a moving
+character cannot leave a trail; nothing has to be upsampled across depth edges. The apply
+pass is its own pass rather than new bindings on the scene compose so that the compose
+pipeline (which every platform runs) is byte-for-byte unchanged.
+
+**What it does not do.**
+
+- Point lights are not shadowed in it (the engine has no shadow maps for them). Their halo is
+  therefore an inverse square softened at 0.4 m inside the light's own range, which is mostly
+  gone by three metres, instead of filling the range and showing through walls.
+- Transparent surfaces (water, glass, particles) do not write depth, so they get the fog of
+  the opaque surface behind them. The height fog has always done the same; nothing is fogged
+  twice, and nothing pops in front of the fog, but smoke close to the camera in front of a
+  distant background is fogged as if it were distant.
+- The medium does not know about interiors: a room gets the ambient share of the fog (not the
+  sun's, the shadow maps see to that).
+- It reads the cascaded shadow maps only (not the virtual shadow map), perspective cameras
+  only, and steps aside while the path tracer owns the frame.
+- Desktop only. The pass is not created on iOS, tvOS, Android, watchOS or web
+  (`platform_supported`); the setters exist everywhere and store the values.
+
+`BLOOM_SKIP=volumetric_fog` skips it. Profiler rows: `vfog_scatter`, `vfog_integrate`,
+`vfog_apply`.
+
+**Cost** (M1 Max, the shooter's Checkpoint arena, 3456 x 2168 output at render scale 0.75,
+title screen, uncapped, interleaved off / on / off / on / off / on): 22.58, 22.39, 22.52 ms
+off against 22.81, 22.79, 22.69 ms on, so about 0.27 ms. The profiler's rows agree:
+`vfog_scatter` 0.03 ms, `vfog_integrate` 0.03 ms, `vfog_apply` 0.20 ms (render scale 0.5).
+
+**Checked**: macOS (Metal) only, in the shooter's three foggy arenas. Compile-checked for
+iOS, the web crate and the shared crate for wasm, and watchOS; Windows and Linux cannot be
+built from a Mac and run the same code as macOS, unseen. Four unit tests (uniform layout
+against the WGSL, the three shaders through naga's validator, the view inverse, light
+selection).

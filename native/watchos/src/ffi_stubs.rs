@@ -354,6 +354,12 @@
 #[no_mangle] pub extern "C" fn bloom_set_fog(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_volumetric_fog(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_volumetric_fog_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_sharpen_strength(_p0: f64) -> f64 {
     0.0
 }

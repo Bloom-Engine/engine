@@ -32,6 +32,8 @@ declare function bloom_capture_frame_ready(): number;
 declare function bloom_clear_background(r: number, g: number, b: number, a: number): void;
 declare function bloom_set_env_clear_from_hdr(path: number): number;
 declare function bloom_set_fog(r: number, g: number, b: number, density: number, height_ref: number, height_falloff: number): number;
+declare function bloom_set_volumetric_fog(enabled: number, density: number, height_ref: number, height_falloff: number, range: number): number;
+declare function bloom_set_volumetric_fog_light(r: number, g: number, b: number, sun_strength: number, light_strength: number, anisotropy: number): number;
 declare function bloom_set_chromatic_aberration(strength: number): number;
 declare function bloom_set_vignette(strength: number, softness: number): number;
 declare function bloom_set_film_grain(strength: number): number;
@@ -349,6 +351,27 @@ export function setEnvClearFromHdr(path: string): boolean {
 // All default to off. Calling these turns the corresponding
 // composite-pass / TAA-pass effect on for the rest of the run
 // (or until called again with 0 / disabled values).
+
+/**
+ * Lit fog: a second, optional medium whose brightness depends on what reaches
+ * it (the sun through its shadow maps, the nearest point lights, a flat
+ * ambient colour). `density` is per metre at and below `heightRef`, thinning by
+ * `heightFalloff` per metre above it (0 = uniform), out to `range` metres from
+ * the camera. Off by default; desktop only (ignored on mobile and web).
+ */
+export function setVolumetricFog(enabled: boolean, density: number, heightRef: number, heightFalloff: number, range: number = 80): boolean {
+  return bloom_set_volumetric_fog(enabled ? 1 : 0, density, heightRef, heightFalloff, range) !== 0;
+}
+
+/**
+ * How the lit fog is lit: its colour where no light reaches it (linear, the
+ * units of `setFog`'s colour), how strongly the sun and the point lights
+ * scatter in it (1 = an isotropic medium), and how much of the sun's share is
+ * thrown forward (0 = the same from every side, up to 0.9).
+ */
+export function setVolumetricFogLight(r: number, g: number, b: number, sunStrength: number, lightStrength: number, anisotropy: number = 0.4): boolean {
+  return bloom_set_volumetric_fog_light(r, g, b, sunStrength, lightStrength, anisotropy) !== 0;
+}
 
 /** Height-based exponential fog. Density 0 = off. */
 export function setFog(r: number, g: number, b: number, density: number, heightRef: number, heightFalloff: number): boolean {

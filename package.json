@@ -1834,6 +1834,29 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_volumetric_fog",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_volumetric_fog_light",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_chromatic_aberration",
           "params": [
             "f64"
