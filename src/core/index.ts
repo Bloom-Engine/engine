@@ -805,7 +805,8 @@ export function setShadowCascadeStagger(on: boolean): boolean {
  * Call it BEFORE loading models: it applies to textures loaded afterwards.
  * Only block-compressed (KTX2) textures embedded in a .glb are streamed.
  * Meant for large worlds on phones, tablets and TV, where everything that is
- * loaded does not fit in memory at full size.
+ * loaded does not fit in memory at full size. Returns false where it is not
+ * available (the web, where models have no file to read levels from later).
  */
 export function setTextureStreaming(budgetMb: number): boolean {
   return bloom_set_texture_streaming(budgetMb) !== 0;

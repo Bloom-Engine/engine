@@ -378,6 +378,13 @@ pub(crate) fn block_aligned_level(image: &CompressedImage, level: u32) -> Option
     (0..=level).rev().find(|&l| whole(l))
 }
 
+/// Whether every level from 0 to `floor` is whole blocks. Only such a texture
+/// is streamed: the scheduler budgets a level by its bytes, and a level that
+/// had to be moved to a larger one on loading would cost more than planned.
+pub(crate) fn every_level_is_whole_blocks(image: &CompressedImage, floor: u32) -> bool {
+    (0..=floor).all(|level| block_aligned_level(image, level) == Some(level))
+}
+
 /// `image` from `level` down: the same texture with its largest levels left out.
 pub(crate) fn sub_image(image: &CompressedImage, level: u32) -> CompressedImage {
     let level = (level as usize).min(image.levels.len().saturating_sub(1));
@@ -434,7 +441,8 @@ impl Renderer {
             ),
         )
         .unwrap_or(0);
-        let Some(source) = source.filter(|_| level > 0) else {
+        let streamable = level > 0 && every_level_is_whole_blocks(image, level);
+        let Some(source) = source.filter(|_| streamable) else {
             return self.register_texture_compressed(image, is_normal, srgb);
         };
         let index = self.register_texture_compressed(&sub_image(image, level), is_normal, srgb)?;
@@ -726,10 +734,16 @@ impl Renderer {
         }
     }
 
-    /// Metres one output pixel covers at one metre from the camera.
-    fn streaming_pixel_metres(&self) -> f32 {
+    /// Metres one output pixel covers at one metre from the camera, and
+    /// whether the projection is orthographic: a pixel then covers that many
+    /// metres at any distance.
+    fn streaming_pixel_metres(&self) -> (f32, bool) {
         let focal = self.current_proj_matrix[1][1].abs().max(1e-3);
-        2.0 / focal / self.surface_config.height.max(1) as f32
+        let orthographic = self.current_proj_matrix[3][3].abs() > 0.5;
+        (
+            2.0 / focal / self.surface_config.height.max(1) as f32,
+            orthographic,
+        )
     }
 
     /// Every scene node on screen asks for its textures.
@@ -738,7 +752,7 @@ impl Renderer {
             return;
         }
         let camera = self.current_camera_pos;
-        let pixel_metres = self.streaming_pixel_metres();
+        let (pixel_metres, orthographic) = self.streaming_pixel_metres();
         for (_, node) in scene.nodes.iter() {
             if !node.shown_on_screen() || node.indices().is_empty() {
                 continue;
@@ -768,7 +782,9 @@ impl Renderer {
                 .map(|c| (world[c][0].powi(2) + world[c][1].powi(2) + world[c][2].powi(2)).sqrt())
                 .fold(0.0f32, f32::max)
                 .max(1e-4);
-            let distance = if node.world_bounds_min[0] <= node.world_bounds_max[0] {
+            let distance = if orthographic {
+                1.0
+            } else if node.world_bounds_min[0] <= node.world_bounds_max[0] {
                 distance_to_box(camera, node.world_bounds_min, node.world_bounds_max)
             } else {
                 0.0
@@ -788,20 +804,50 @@ impl Renderer {
             return;
         }
         let camera = self.current_camera_pos;
-        let pixel_metres = self.streaming_pixel_metres();
+        let (pixel_metres, orthographic) = self.streaming_pixel_metres();
         let asks: Vec<([u32; 5], f32, f32)> = match self.model_gpu_cache.get(&handle_bits) {
             Some(Some(meshes)) => meshes
                 .iter()
                 .map(|mesh| {
+                    // The mesh is drawn through translate(position) * scale *
+                    // its own source transform: bounds and density follow it.
+                    let t = &mesh.source_transform;
                     let s = scale.abs().max(1e-4);
-                    let lo = [0, 1, 2].map(|a| position[a] + mesh.local_min[a] * s);
-                    let hi = [0, 1, 2].map(|a| position[a] + mesh.local_max[a] * s);
-                    let distance = if mesh.local_min[0] <= mesh.local_max[0] {
+                    let source_scale = (0..3)
+                        .map(|c| (t[c][0].powi(2) + t[c][1].powi(2) + t[c][2].powi(2)).sqrt())
+                        .fold(0.0f32, f32::max)
+                        .max(1e-4);
+                    let distance = if orthographic {
+                        1.0
+                    } else if mesh.local_min[0] <= mesh.local_max[0] {
+                        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                        for corner in 0..8 {
+                            let p = [0, 1, 2].map(|a| {
+                                if corner >> a & 1 == 0 {
+                                    mesh.local_min[a]
+                                } else {
+                                    mesh.local_max[a]
+                                }
+                            });
+                            for a in 0..3 {
+                                let w = position[a]
+                                    + s * (t[0][a] * p[0]
+                                        + t[1][a] * p[1]
+                                        + t[2][a] * p[2]
+                                        + t[3][a]);
+                                lo[a] = lo[a].min(w);
+                                hi[a] = hi[a].max(w);
+                            }
+                        }
                         distance_to_box(camera, lo, hi)
                     } else {
                         0.0
                     };
-                    (mesh.material_textures, mesh.uv_density / s, distance)
+                    (
+                        mesh.material_textures,
+                        mesh.uv_density / (s * source_scale),
+                        distance,
+                    )
                 })
                 .collect(),
             _ => return,
@@ -864,7 +910,16 @@ impl Renderer {
                 raises,
             )
         };
-        for (slot, level) in plan {
+        // Lowerings are reads too. The plan puts each one before the raise it
+        // makes room for, so cutting it short leaves a plan that still holds.
+        let in_flight = self
+            .texture_streaming
+            .entries
+            .values()
+            .filter(|e| e.pending.is_some())
+            .count();
+        let room = READS_IN_FLIGHT.saturating_sub(in_flight);
+        for (slot, level) in plan.into_iter().take(room) {
             if !self.request_texture_resident_level(slot, level) {
                 self.forget_streamed_texture(slot); // unreadable: leave it as it is
             }
@@ -1058,6 +1113,16 @@ mod tests {
         odd.width = 1030;
         odd.height = 1030;
         assert_eq!(block_aligned_level(&odd, 3), None);
+    }
+
+    #[test]
+    fn only_a_texture_whose_levels_are_all_whole_blocks_is_streamed() {
+        assert!(every_level_is_whole_blocks(&image(2048), 3));
+        // 4100 px: level 0 is whole blocks, level 1 (2050 px) is not
+        let mut odd = image(4096);
+        odd.width = 4100;
+        odd.height = 4100;
+        assert!(!every_level_is_whole_blocks(&odd, 4));
     }
 
     #[test]

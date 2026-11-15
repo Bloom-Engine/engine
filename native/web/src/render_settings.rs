@@ -73,9 +73,10 @@ pub fn bloom_set_shadow_cascade_stagger(on: f64) -> f64 {
     1.0
 }
 #[wasm_bindgen]
-pub fn bloom_set_texture_streaming(budget_mb: f64) -> f64 {
-    engine().renderer.set_texture_streaming(budget_mb as f32);
-    1.0
+pub fn bloom_set_texture_streaming(_budget_mb: f64) -> f64 {
+    // Not on the web: models arrive as bytes with no file to read levels
+    // from later. 0 tells the game nothing was turned on.
+    0.0
 }
 #[wasm_bindgen]
 pub fn bloom_set_shadow_distance(metres: f64) -> f64 {
