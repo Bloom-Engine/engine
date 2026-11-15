@@ -15,6 +15,56 @@ pub(super) const REBAKE_GATHER_VERTICES_PER_FRAME: usize = 40_000;
 /// Triangle-to-cell references a rebake counts or writes per frame.
 pub(super) const REBAKE_BIN_REFS_PER_FRAME: usize = 400_000;
 
+use crate::scene_gi_soup::STRIDE as SOUP_STRIDE;
+/// Floats per vertex in the buffer the bake shader reads (`Vertex3D`'s stride).
+const GPU_STRIDE: usize = 12;
+
+/// The triangles a bake reads, packed for upload: the vertex and index
+/// buffers hold only the triangles some cell refers to and the vertices those
+/// use (each once, at the shader's stride), and `tri_refs` is rewritten to
+/// number them.
+///
+/// The soup covers the whole gather region so that the camera can travel
+/// before it is gathered again, nine times the field's area with the default
+/// margin, and the field's cells refer to only the part inside the field.
+/// Uploading all of it was 260 MB a bake in a dense city street, an
+/// allocation an iPad refused.
+pub(super) fn pack_binned_triangles(
+    vertices: &[f32],
+    indices: &[u32],
+    tri_count: usize,
+    ref_count: usize,
+    tri_refs: &mut [u32],
+) -> (Vec<f32>, Vec<u32>) {
+    let mut packed_tri = vec![u32::MAX; tri_count];
+    let mut packed_vertex = vec![u32::MAX; vertices.len() / SOUP_STRIDE];
+    let mut out_vertices: Vec<f32> = Vec::new();
+    let mut out_indices: Vec<u32> = Vec::new();
+    for r in tri_refs.iter_mut().take(ref_count) {
+        let tri = *r as usize;
+        if packed_tri[tri] == u32::MAX {
+            packed_tri[tri] = (out_indices.len() / 3) as u32;
+            for corner in 0..3 {
+                let source = indices[tri * 3 + corner] as usize;
+                if packed_vertex[source] == u32::MAX {
+                    packed_vertex[source] = (out_vertices.len() / GPU_STRIDE) as u32;
+                    let p = source * SOUP_STRIDE;
+                    out_vertices.extend_from_slice(&vertices[p..p + 3]);
+                    out_vertices.extend_from_slice(&[0.0; GPU_STRIDE - 3]);
+                }
+                out_indices.push(packed_vertex[source]);
+            }
+        }
+        *r = packed_tri[tri];
+    }
+    // wgpu rejects zero-sized buffers: keep one degenerate triangle.
+    if out_indices.is_empty() {
+        out_vertices.resize(GPU_STRIDE, 0.0);
+        out_indices.extend_from_slice(&[0, 0, 0]);
+    }
+    (out_vertices, out_indices)
+}
+
 /// A scene SDF clipmap bake whose CPU preparation is still in progress.
 pub(super) struct ClipmapPrep {
     /// Scene version when the gather began. The published clipmap carries
@@ -77,9 +127,9 @@ impl TriangleBinner {
     ) -> Option<([usize; 3], [usize; 3])> {
         // Written out per corner: filling `[f32::MAX; 3]` first compiles to a
         // memset_pattern16 call per array, which was most of this function.
-        let p0 = indices[tri * 3] as usize * 12;
-        let p1 = indices[tri * 3 + 1] as usize * 12;
-        let p2 = indices[tri * 3 + 2] as usize * 12;
+        let p0 = indices[tri * 3] as usize * SOUP_STRIDE;
+        let p1 = indices[tri * 3 + 1] as usize * SOUP_STRIDE;
+        let p2 = indices[tri * 3 + 2] as usize * SOUP_STRIDE;
         let (a, b, c) = (
             &vertices[p0..p0 + 3],
             &vertices[p1..p1 + 3],
@@ -198,7 +248,6 @@ mod tests {
         let mut vertices = Vec::new();
         for c in corners {
             vertices.extend_from_slice(&[c[0], c[1], c[2]]);
-            vertices.extend_from_slice(&[0.0; 9]);
         }
         (vertices, (0..12).collect(), 4)
     }
@@ -224,5 +273,58 @@ mod tests {
         assert!(steps > 2, "a small budget spreads the work over calls");
         assert_eq!(stepped.offsets, whole.offsets);
         assert_eq!(stepped.tri_refs, whole.tri_refs);
+    }
+
+    #[test]
+    fn packing_keeps_only_the_binned_triangles_and_their_positions() {
+        let (vertices, indices, tri_count) = soup();
+        let mut binner = TriangleBinner::new([-8.0; 3], 16.0, 8);
+        assert!(binner.step(&vertices, &indices, tri_count, usize::MAX));
+        let ref_count = *binner.offsets.last().unwrap() as usize;
+        let before = binner.tri_refs.clone();
+        let (packed_vertices, packed_indices) = pack_binned_triangles(
+            &vertices,
+            &indices,
+            tri_count,
+            ref_count,
+            &mut binner.tri_refs,
+        );
+        // Three of the four triangles are inside the grid.
+        assert_eq!(packed_indices.len(), 9);
+        assert_eq!(packed_vertices.len(), 9 * GPU_STRIDE);
+        // Every reference still names the same three positions.
+        for (old, new) in before.iter().zip(&binner.tri_refs) {
+            for corner in 0..3 {
+                let o = indices[*old as usize * 3 + corner] as usize * SOUP_STRIDE;
+                let n = packed_indices[*new as usize * 3 + corner] as usize * GPU_STRIDE;
+                assert_eq!(vertices[o..o + 3], packed_vertices[n..n + 3]);
+                assert_eq!(
+                    packed_vertices[n + 3..n + GPU_STRIDE],
+                    [0.0; GPU_STRIDE - 3]
+                );
+            }
+        }
+        // Nothing binned: one degenerate triangle, so no buffer is empty.
+        let mut none = [0u32];
+        let (v, i) = pack_binned_triangles(&vertices, &indices, tri_count, 0, &mut none);
+        assert_eq!((v.len(), i.len()), (GPU_STRIDE, 3));
+    }
+
+    #[test]
+    fn packing_keeps_a_shared_vertex_once() {
+        // Two triangles over one edge: four vertices, not six.
+        let vertices = [
+            0.5, 0.5, 0.5, 1.5, 0.5, 0.5, 0.5, 1.5, 0.5, 1.5, 1.5, 0.5f32,
+        ];
+        let indices = [0u32, 1, 2, 1, 3, 2];
+        let mut binner = TriangleBinner::new([-8.0; 3], 16.0, 8);
+        assert!(binner.step(&vertices, &indices, 2, usize::MAX));
+        let ref_count = *binner.offsets.last().unwrap() as usize;
+        let (v, i) = pack_binned_triangles(&vertices, &indices, 2, ref_count, &mut binner.tri_refs);
+        assert_eq!((v.len(), i.len()), (4 * GPU_STRIDE, 6));
+        for (old, new) in indices.iter().zip(&i) {
+            let (o, n) = (*old as usize * SOUP_STRIDE, *new as usize * GPU_STRIDE);
+            assert_eq!(vertices[o..o + 3], v[n..n + 3]);
+        }
     }
 }
