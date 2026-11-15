@@ -24,7 +24,9 @@
 //!
 //! Bind groups hold texture views, so a swap also rebuilds the material bind
 //! groups that show the slot: those of cached models here, those of scene
-//! nodes when the scene next prepares its materials.
+//! nodes when the scene next prepares its materials. Materials with
+//! transmission or layered-PBR extensions have further bind groups; their
+//! textures are made whole and not streamed (`pin_special_material_textures`).
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -129,10 +131,14 @@ pub(crate) fn floor_level(width: u32, height: u32, level_count: u32, floor_dim: 
 /// image is not streamed.
 pub(crate) fn block_aligned_level(image: &CompressedImage, level: u32) -> Option<u32> {
     let (block_width, block_height) = image.format.block_size();
-    (0..=level).rev().find(|&l| {
+    let whole = |l: u32| {
         (image.width >> l).max(1) % block_width == 0
             && (image.height >> l).max(1) % block_height == 0
-    })
+    };
+    if !whole(0) {
+        return None; // it could never be raised to its full size
+    }
+    (0..=level).rev().find(|&l| whole(l))
 }
 
 /// `image` from `level` down: the same texture with its largest levels left out.
@@ -286,6 +292,9 @@ impl Renderer {
         self.texture_sizes[i] = (image.width, image.height);
         self.refresh_cached_model_materials(idx);
         self.texture_streaming.replaced.push(idx);
+        // The path tracer binds every texture view in one group; it is made
+        // again from the slots as they are now.
+        self.pt_tex_bg = None;
         true
     }
 
@@ -336,8 +345,50 @@ impl Renderer {
         for (key, at, bg) in rebuilt {
             if let Some(Some(meshes)) = self.model_gpu_cache.get_mut(&key) {
                 meshes[at].material_bg = bg;
-                // made again on next use, from the slot as it is now
-                meshes[at].layered_material_bg = None;
+            }
+        }
+    }
+
+    /// A material with transmission or layered-PBR extensions binds its
+    /// textures through bind groups of its own, which a swap does not
+    /// remake. Its textures are therefore not streamed: each is made whole
+    /// and left alone from here on. Call it before the material's bind groups
+    /// are built.
+    pub(crate) fn pin_special_material_textures(
+        &mut self,
+        standard: [u32; 5],
+        transmission: &crate::models::MaterialTransmission,
+        layered: &crate::models::MaterialLayeredPbr,
+    ) {
+        if self.texture_streaming.entries.is_empty()
+            || !(transmission.is_active() || layered.is_active())
+        {
+            return;
+        }
+        let bindings = [
+            transmission.texture,
+            transmission.thickness_texture,
+            layered.clearcoat_texture,
+            layered.clearcoat_roughness_texture,
+            layered.clearcoat_normal_texture,
+            layered.specular_texture,
+            layered.specular_color_texture,
+            layered.sheen_color_texture,
+            layered.sheen_roughness_texture,
+            layered.anisotropy_texture,
+            layered.iridescence_texture,
+            layered.iridescence_thickness_texture,
+        ];
+        let slots = standard.into_iter().chain(
+            bindings
+                .into_iter()
+                .flatten()
+                .filter_map(|binding| binding.runtime_texture_idx),
+        );
+        for slot in slots.collect::<Vec<u32>>() {
+            if self.texture_streaming.entries.contains_key(&slot) {
+                self.set_texture_resident_level(slot, 0);
+                self.forget_streamed_texture(slot);
             }
         }
     }
@@ -417,7 +468,9 @@ mod tests {
         odd.width = 1032;
         odd.height = 1032;
         assert_eq!(block_aligned_level(&odd, 3), Some(1));
+        // 1030 px: level 3 (128 px) is whole blocks, but level 0 is not
         odd.width = 1030;
+        odd.height = 1030;
         assert_eq!(block_aligned_level(&odd, 3), None);
     }
 

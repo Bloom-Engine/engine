@@ -14098,6 +14098,17 @@ impl Renderer {
                 let normal_idx = mesh.normal_texture_idx.unwrap_or(0);
                 let mr_idx = mesh.metallic_roughness_texture_idx.unwrap_or(0);
                 let em_idx = mesh.emissive_texture_idx.unwrap_or(0);
+                self.pin_special_material_textures(
+                    [
+                        base_color_idx,
+                        normal_idx,
+                        mr_idx,
+                        em_idx,
+                        mesh.occlusion_texture_idx.unwrap_or(0),
+                    ],
+                    &mesh.transmission,
+                    &mesh.layered_pbr,
+                );
                 let occ_idx = mesh.occlusion_texture_idx.unwrap_or(0);
                 let shader_alpha = mesh.alpha_mode.shader_alpha_value(mesh.alpha_cutoff);
                 let material_id = self.allocate_model_gpu_material(mesh);

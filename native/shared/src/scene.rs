@@ -2212,6 +2212,20 @@ impl SceneGraph {
                 renderer.imported_refraction_enabled() && node.material.transmission.is_active();
             let needs_layered = node.material.layered_pbr.is_active();
             let needs_layered_scene = needs_layered && !needs_refractive;
+            if (needs_refractive || needs_layered) && node.gpu_material_bg.is_none() {
+                let m = &node.material;
+                renderer.pin_special_material_textures(
+                    [
+                        m.texture_idx,
+                        m.normal_texture_idx,
+                        m.metallic_roughness_texture_idx,
+                        m.emissive_texture_idx,
+                        m.occlusion_texture_idx,
+                    ],
+                    &m.transmission,
+                    &m.layered_pbr,
+                );
+            }
             if material_changed
                 || node.gpu_material_bg.is_none()
                 || (needs_refractive && node.gpu_refractive_material_bg.is_none())
