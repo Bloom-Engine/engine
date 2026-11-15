@@ -75,6 +75,7 @@ pub mod gpu_driven;
 mod hiz;
 mod immediate_draw3d;
 mod immediate_motion;
+mod joint_pages;
 mod layered_pbr;
 mod layered_pbr_pt;
 mod layered_pbr_refraction;
@@ -388,6 +389,8 @@ pub(crate) struct ImportedIridescenceDrawRef<'a> {
     pub(crate) secondary_uv: Option<&'a wgpu::Buffer>,
     pub(crate) vertex_byte_offset: u64,
     pub(crate) index_byte_offset: u64,
+    /// Absolute offset of a skinned cached draw's joints (0 otherwise).
+    pub(crate) joint_offset: f32,
 }
 
 /// PT-6 — a dynamic instance's megabuffer window for this frame:
@@ -554,6 +557,8 @@ pub struct Renderer {
     joint_prev_buffer: wgpu::Buffer,
     joint_layout: wgpu::BindGroupLayout,
     joint_bind_group: wgpu::BindGroup,
+    /// Palette pages past the first 1024 joints (`joint_pages.rs`).
+    joint_extra_pages: Vec<joint_pages::JointPage>,
 
     // False until the material system's per-view bind group has been
     // rebuilt with the LIVE env/BRDF/shadow resources. The group is
@@ -8202,6 +8207,7 @@ impl Renderer {
             joint_prev_buffer,
             joint_layout,
             joint_bind_group,
+            joint_extra_pages: Vec::new(),
             material_per_view_bg_live: false,
             texture_bind_group_layout,
             texture_bind_groups,
@@ -12946,12 +12952,13 @@ impl Renderer {
                 pass.set_pipeline(&self.scene_pipeline);
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);
                 pass.set_bind_group(3, &self.joint_bind_group, &[]);
-
+                let mut joint_page = 0;
                 for cmd in &self.model_draw_commands {
                     if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
                         if cmd.mesh_idx < meshes.len() {
                             let mesh = &meshes[cmd.mesh_idx];
                             let draw = self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
+                            self.bind_joint_page(&mut pass, 3, cmd.joint_offset, &mut joint_page);
                             pass.set_bind_group(
                                 0,
                                 &self.model_uniform_bind_groups[cmd.uniform_slot],
@@ -14445,39 +14452,6 @@ impl Renderer {
 
         self.model_gpu_cache.insert(handle_bits, Some(gpu_meshes));
         true
-    }
-
-    fn flush_joint_matrices(&mut self) {
-        // Accumulator = all skinned poses staged by skinned drawModel
-        // calls this frame, packed consecutively. Each draw's vertex
-        // joint indices were pre-offset at submit time, so a single
-        // flat upload here is all the GPU needs.
-        const MAX_JOINT_SLOTS: usize = 1024;
-        let count = self.frame_joint_data.len().min(MAX_JOINT_SLOTS);
-        if count > 0 {
-            let mut all_data = vec![[[0.0f32; 4]; 4]; MAX_JOINT_SLOTS];
-            for i in 0..count {
-                all_data[i] = self.frame_joint_data[i];
-            }
-            self.queue
-                .write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(&all_data));
-            // PT-7 — previous frame's palette, same offsets.
-            let prev_count = self.frame_joint_data_prev.len().min(count);
-            for i in 0..count {
-                all_data[i] = if i < prev_count {
-                    self.frame_joint_data_prev[i]
-                } else {
-                    self.frame_joint_data[i]
-                };
-            }
-            self.queue
-                .write_buffer(&self.joint_prev_buffer, 0, bytemuck::cast_slice(&all_data));
-        }
-        self.frame_joint_data.clear();
-        self.frame_joint_data_prev.clear();
-        // Any leftover staged poses are stale (no draw consumed them).
-        self.pending_skin_groups.clear();
-        self.pending_skin_groups_prev.clear();
     }
 
     // 3D texture tracking

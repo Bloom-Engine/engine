@@ -889,7 +889,7 @@ impl Renderer {
                             light_vp: cascade_vp,
                             model: shadow_nodes[ei].transform,
                             misc: [
-                                shadow_nodes[ei].joint_offset,
+                                joint_pages::joint_offset_in_page(shadow_nodes[ei].joint_offset),
                                 0.0,
                                 shadow_nodes[ei].foliage,
                                 0.0,
@@ -968,7 +968,13 @@ impl Renderer {
                                     &[],
                                 );
                             } else if kind == 2 {
-                                shadow_pass.set_bind_group(1, &self.joint_bind_group, &[]);
+                                shadow_pass.set_bind_group(
+                                    1,
+                                    self.joint_page_bind_group(joint_pages::joint_page_of(
+                                        entry.joint_offset,
+                                    )),
+                                    &[],
+                                );
                             }
                             shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
                             shadow_pass.set_index_buffer(
@@ -1041,7 +1047,7 @@ impl Renderer {
                             light_vp: cascade_vp,
                             model: shadow_nodes[ei].transform,
                             misc: [
-                                shadow_nodes[ei].joint_offset,
+                                joint_pages::joint_offset_in_page(shadow_nodes[ei].joint_offset),
                                 0.0,
                                 shadow_nodes[ei].foliage,
                                 0.0,
@@ -1113,7 +1119,13 @@ impl Renderer {
                             } else if kind == 2 {
                                 // Joint matrices for skinning the animated
                                 // characters in the immediate-mode batch.
-                                shadow_pass.set_bind_group(1, &self.joint_bind_group, &[]);
+                                shadow_pass.set_bind_group(
+                                    1,
+                                    self.joint_page_bind_group(joint_pages::joint_page_of(
+                                        entry.joint_offset,
+                                    )),
+                                    &[],
+                                );
                             }
                             shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
                             shadow_pass.set_index_buffer(
@@ -1361,7 +1373,12 @@ impl Renderer {
                         let uniforms = crate::shadows::ShadowUniforms {
                             light_vp: page_vp,
                             model: entry.transform,
-                            misc: [entry.joint_offset, 0.0, entry.foliage, 0.0],
+                            misc: [
+                                joint_pages::joint_offset_in_page(entry.joint_offset),
+                                0.0,
+                                entry.foliage,
+                                0.0,
+                            ],
                             wind: self.lighting_uniforms.wind,
                         };
                         let offset = slot * stride;
@@ -1450,7 +1467,13 @@ impl Renderer {
                                     &[],
                                 );
                             } else if kind == 2 {
-                                page_pass.set_bind_group(1, &self.joint_bind_group, &[]);
+                                page_pass.set_bind_group(
+                                    1,
+                                    self.joint_page_bind_group(joint_pages::joint_page_of(
+                                        entry.joint_offset,
+                                    )),
+                                    &[],
+                                );
                             }
                             page_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
                             page_pass.set_index_buffer(

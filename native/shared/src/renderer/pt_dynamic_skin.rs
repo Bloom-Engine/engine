@@ -136,7 +136,8 @@ impl Renderer {
             }
             words[16] = f32::from_bits(w.v_base);
             words[17] = f32::from_bits(w.v_count);
-            words[18] = f32::from_bits(w.joint_offset.max(0.0) as u32);
+            words[18] =
+                f32::from_bits(super::joint_pages::joint_offset_in_page(w.joint_offset) as u32);
             words[19] = 0.0;
             self.queue
                 .write_buffer(&self.pt_skin_params[i], 0, bytemuck::cast_slice(&words));
@@ -242,7 +243,11 @@ impl Renderer {
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
-                            resource: self.joint_buffer.as_entire_binding(),
+                            resource: self
+                                .joint_page_buffer(super::joint_pages::joint_page_of(
+                                    w.joint_offset,
+                                ))
+                                .as_entire_binding(),
                         },
                     ],
                 }),

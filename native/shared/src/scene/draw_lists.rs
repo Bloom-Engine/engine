@@ -141,6 +141,7 @@ impl SceneGraph {
                 secondary_uv,
                 vertex_byte_offset: 0,
                 index_byte_offset: 0,
+                joint_offset: 0.0,
             });
         }
     }

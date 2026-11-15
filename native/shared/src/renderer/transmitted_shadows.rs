@@ -1266,7 +1266,12 @@ impl Renderer {
                     light_vp: self.shadow_map.light_vps[cascade],
                     model: draw.model,
                     tint: draw.tint,
-                    misc: [draw.joint_offset, 0.0, 0.0, 0.0],
+                    misc: [
+                        joint_pages::joint_offset_in_page(draw.joint_offset),
+                        0.0,
+                        0.0,
+                        0.0,
+                    ],
                 };
                 let offset = slot * stride;
                 payload[offset..offset + std::mem::size_of_val(&uniforms)]
@@ -1305,9 +1310,11 @@ impl Renderer {
             });
             pass.set_bind_group(2, &resources.blocker_bind_groups[cascade], &[]);
             pass.set_bind_group(3, &self.joint_bind_group, &[]);
+            let mut joint_page = 0;
             let mut current_uses_uv1 = None;
             for (slot, &draw_index) in indices.iter().enumerate() {
                 let draw = &draws[draw_index];
+                self.bind_joint_page(&mut pass, 3, draw.joint_offset, &mut joint_page);
                 let uses_uv1 = draw.secondary_uv.is_some();
                 if current_uses_uv1 != Some(uses_uv1) {
                     pass.set_pipeline(if uses_uv1 {
