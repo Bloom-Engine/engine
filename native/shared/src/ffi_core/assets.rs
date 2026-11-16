@@ -17,10 +17,9 @@ macro_rules! __bloom_ffi_assets {
                 // process's working directory is `/` (read-only), so a relative capture
                 // path must land under the app's files directory. Desktop resolvers
                 // return the path unchanged.
-                let path = bloom_resolve_asset_path(
-                    $crate::string_header::str_from_header(path_ptr),
-                )
-                .into_owned();
+                let path =
+                    bloom_resolve_asset_path($crate::string_header::str_from_header(path_ptr))
+                        .into_owned();
                 eprintln!("bloom: screenshot requested -> '{}'", path);
                 let eng = engine();
                 eng.renderer.screenshot_requested = true;

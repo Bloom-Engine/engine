@@ -67,12 +67,7 @@ fn with_shading(source: &str, shading: &str) -> String {
         + source[start..]
             .find(AFTER_SHADE_MAIN_SCENE)
             .expect("scene shader missing fs_main_scene after shade_main_scene");
-    let source = format!(
-        "{}{}{}",
-        &source[..start],
-        shading,
-        &source[end..]
-    );
+    let source = format!("{}{}{}", &source[..start], shading, &source[end..]);
     // The sun shadow takes the 4-tap tent only. The 16-tap Poisson disc
     // behind the runtime filter switch costs a mobile GPU even when it never
     // runs (its code is the pass's register budget): 10 ms of a 36 ms main
@@ -133,8 +128,14 @@ mod tests {
         let low = with_shading(SCENE_SHADER, LOW_TIER_SHADE_MAIN_SCENE);
         for (label, source) in [
             ("plain", low.clone()),
-            ("clustered", super::super::froxel::clustered_scene_shader(&low)),
-            ("gpu-driven", super::super::gpu_driven::make_gpu_scene_shader(&low)),
+            (
+                "clustered",
+                super::super::froxel::clustered_scene_shader(&low),
+            ),
+            (
+                "gpu-driven",
+                super::super::gpu_driven::make_gpu_scene_shader(&low),
+            ),
         ] {
             let module = wgpu::naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|error| panic!("low-tier {label} WGSL failed: {error:?}"));

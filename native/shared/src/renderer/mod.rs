@@ -86,11 +86,11 @@ mod light_api;
 mod lighting;
 mod lighting_upload;
 pub(crate) mod local_light_shadows;
+#[cfg(feature = "models3d")]
+pub mod low_tier;
 mod material_api;
 pub mod material_indirection;
 mod material_instancing;
-#[cfg(feature = "models3d")]
-pub mod low_tier;
 mod mobile_shading;
 mod model_draw;
 mod model_material;
