@@ -1215,3 +1215,6 @@
 #[no_mangle] pub extern "C" fn bloom_set_virtual_geometry_proxy_error(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_weather(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}

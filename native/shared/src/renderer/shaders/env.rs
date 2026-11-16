@@ -715,7 +715,7 @@ struct SkyUniforms {
     right:    vec4<f32>,
     up:       vec4<f32>,
     forward:  vec4<f32>,
-    intensity: vec4<f32>, // x = scene-wide intensity multiplier, y = time (s)
+    intensity: vec4<f32>, // x = scene-wide intensity multiplier, y = time (s), z = weather cloud cover (< 0 = unset)
     cloud:    vec4<f32>,  // x = shadow strength, y = deck height, z = scale, w = drift speed
     wind:     vec4<f32>,  // xy = wind direction in the XZ plane
 };
@@ -813,10 +813,25 @@ fn sky_fs(in: VsOut) -> SkyOut {
     // means the clouds now hold still as the player walks under them, instead of
     // sliding along pinned to the camera.
     let cam = vec3<f32>(u.right.w, u.up.w, u.forward.w);
-    let cc = cloud_cover_view(cam, dir, sun_dir, u.wind.xy, u.intensity.y, u.cloud);
+    let cover = u.intensity.z;
+    let cc = cloud_cover_view_weather(cam, dir, sun_dir, u.wind.xy, u.intensity.y, u.cloud, cover);
     if (cc.x > 0.0) {
         let lit = cc.y * cc.y;
-        let cloud_col = mix(vec3<f32>(0.62, 0.66, 0.76), vec3<f32>(2.6, 2.5, 2.35), lit);
+        var cloud_col = mix(vec3<f32>(0.62, 0.66, 0.76), vec3<f32>(2.6, 2.5, 2.35), lit);
+        // A closing sky stops being sunlit puffs: the deck thickens, the sun
+        // no longer reaches its underside, and what is seen from below is a
+        // grey ceiling, darkest where it is densest.
+        let closed = smoothstep(0.45, 0.95, cover);
+        if (closed > 0.0) {
+            // The same field at a lower cover picks out where the deck is
+            // thickest: those cores are the dark bellies of an overcast, and
+            // the thinner cloud between them is where the light comes through.
+            let core = cloud_cover_view_weather(
+                cam, dir, sun_dir, u.wind.xy, u.intensity.y, u.cloud, cover - 0.38).x;
+            let ceiling = mix(vec3<f32>(1.30, 1.34, 1.42), vec3<f32>(0.46, 0.49, 0.56), core)
+                * mix(0.9, 1.2, lit);
+            cloud_col = mix(cloud_col, ceiling, closed);
+        }
         radiance = mix(radiance, cloud_col, cc.x);
     }
 

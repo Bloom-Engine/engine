@@ -38,7 +38,8 @@ pub struct PerFrameUniforms {
     pub screen_resolution: [f32; 2],
     pub render_resolution: [f32; 2],
     pub taa_jitter: [f32; 2],
-    pub _pad1: [f32; 2],
+    /// Weather (`set_weather`): x = cloud cover (negative = unset), y = surface wetness.
+    pub weather: [f32; 2],
     /// Global wind: x=dir_x, y=dir_z, z=amplitude, w=frequency.
     pub wind: [f32; 4],
     /// Cloud deck: x = shadow strength, y = deck height (m), z = feature scale,

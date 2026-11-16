@@ -50,6 +50,7 @@ struct Lighting {
     wind: vec4<f32>,   // xy=dir, z=amplitude, w=time (foliage sway)
     cloud: vec4<f32>,  // x=shadow strength, y=deck height, z=scale, w=drift m/s
     frame_misc: vec4<f32>, // x=delta_time (prev-frame wind, for motion vectors); y,z=cut-out edge fade; w=cut-out env specular removed
+    weather: vec4<f32>, // x=cloud cover (<0 = unset), y=surface wetness
 };
 
 struct MaterialFactors {
@@ -1068,6 +1069,20 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     let dielectric_floor = select(0.15, 0.045, has_spec_gloss);
     var roughness = max(roughness_raw,
                         dielectric_floor * (1.0 - metallic));
+    // Weather wetness (set_weather). Water in the pores of a rough surface
+    // darkens it; a film on top makes it shine. Surfaces facing the sky take
+    // the most, walls somewhat less, undersides little. Metals do not soak.
+    let wetness = clamp(lighting.weather.y, 0.0, 1.0);
+    if (wetness > 0.0) {
+        let exposure = mix(0.35, 1.0, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
+        let wet = wetness * exposure;
+        let porosity = clamp((roughness - 0.25) / 0.5, 0.0, 1.0) * (1.0 - metallic);
+        let darkening = mix(1.0, 0.58, wet * porosity);
+        base_color = base_color * darkening;
+        // The albedo the screen-space passes read is the wet colour too.
+        ssr_base_color = ssr_base_color * darkening;
+        roughness = mix(roughness, min(roughness, 0.10), wet * 0.85);
+    }
     // What the lights see of either workflow: a diffuse colour and an F0
     // (see shade_pbr_f0).
     let light_diffuse = select(base_color * (1.0 - metallic), base_color, has_spec_gloss);
@@ -1149,8 +1164,9 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // blocks the sun, it does not stop the sky from being blue. Multiplying it
     // into ambient as well is what makes cloud shadows read as flat grey paint
     // instead of shade. Costs nothing when strength is 0 (the default).
-    let direct_shadow = direct_shadow_raw * cloud_shadow_at(
-        in.world_pos, legacy_dir, lighting.wind.xy, lighting.wind.w, lighting.cloud);
+    let direct_shadow = direct_shadow_raw * cloud_shadow_at_weather(
+        in.world_pos, legacy_dir, lighting.wind.xy, lighting.wind.w, lighting.cloud,
+        lighting.weather.x);
     if (alpha_cutoff > 0.0) {
         // Foliage wrap-lambert (energy-conserving wrap, w = 0.45): a leaf
         // turning from the sun rolls off softly — light transmits and

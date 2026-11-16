@@ -71,12 +71,34 @@ fn cloud_drift(wind_xy: vec2<f32>, t: f32, speed: f32) -> vec2<f32> {
 }
 
 // Coverage of the deck at a point ON the deck. 0 = clear sky, 1 = solid cloud.
-fn cloud_density(deck_xz: vec2<f32>, wind_xy: vec2<f32>, t: f32, cp: vec4<f32>) -> f32 {
+//
+// `cover` is the weather's cloud cover (set_weather): the share of the sky the
+// deck fills, 0 = a clear day, 1 = a closed overcast. A negative cover means no
+// weather was set and keeps the fair-weather deck this file always drew.
+fn cloud_density_weather(deck_xz: vec2<f32>, wind_xy: vec2<f32>, t: f32, cp: vec4<f32>,
+                         cover: f32) -> f32 {
     let p = (deck_xz - cloud_drift(wind_xy, t, cp.w)) * cp.z;
-    // The threshold is high on purpose: it buys mostly-open sky with the
-    // occasional real cloud, instead of a permanent grey smear. A low threshold
-    // here is what makes a procedural deck read as fog.
-    return smoothstep(0.56, 1.04, cloud_fbm(p));
+    let f = cloud_fbm(p);
+    if (cover < 0.0) {
+        // The threshold is high on purpose: it buys mostly-open sky with the
+        // occasional real cloud, instead of a permanent grey smear. A low
+        // threshold here is what makes a procedural deck read as fog.
+        return smoothstep(0.56, 1.04, f);
+    }
+    // The noise sits around 0.48 with nearly all of it between 0.2 and 0.8.
+    // Sliding the threshold through that band is what moves the sky from open
+    // to closed; the edge narrows as it closes so an overcast is a ceiling and
+    // not a haze.
+    let c = clamp(cover, 0.0, 1.0);
+    // At full cover the whole edge lies below zero, the least the noise can
+    // be, so a closed deck has no hole anywhere.
+    let lo = mix(0.86, -0.26, c);
+    let width = mix(0.42, 0.20, c);
+    return smoothstep(lo, lo + width, f);
+}
+
+fn cloud_density(deck_xz: vec2<f32>, wind_xy: vec2<f32>, t: f32, cp: vec4<f32>) -> f32 {
+    return cloud_density_weather(deck_xz, wind_xy, t, cp, -1.0);
 }
 
 // Where a ray from `origin` along `dir` pierces the deck.
@@ -90,19 +112,32 @@ fn cloud_deck_hit(origin: vec3<f32>, dir: vec3<f32>, deck_y: f32) -> vec2<f32> {
 // SKY: coverage along a view ray. Returns (coverage, sun-alignment) — the caller
 // colours the cloud from the second component so puffs facing the sun burn white
 // and the ones facing away stay cool grey.
-fn cloud_cover_view(cam: vec3<f32>, dir: vec3<f32>, sun_dir: vec3<f32>,
-                    wind_xy: vec2<f32>, t: f32, cp: vec4<f32>) -> vec2<f32> {
-    if (dir.y <= 0.02) { return vec2<f32>(0.0, 0.0); }
-    var cov = cloud_density(cloud_deck_hit(cam, dir, cp.y), wind_xy, t, cp);
+fn cloud_cover_view_weather(cam: vec3<f32>, dir: vec3<f32>, sun_dir: vec3<f32>,
+                            wind_xy: vec2<f32>, t: f32, cp: vec4<f32>,
+                            cover: f32) -> vec2<f32> {
+    // How closed the sky is: 0 until the deck is mostly cloud, 1 at overcast.
+    let closed = smoothstep(0.55, 0.95, cover);
+    let sun_amt = clamp(dot(dir, sun_dir) * 0.5 + 0.5, 0.0, 1.0);
+    // At and below the horizon there is no deck to hit. A closed sky still
+    // closes it (seen from a height, the band under the horizon is cloud too).
+    if (dir.y <= 0.02) { return vec2<f32>(closed, sun_amt); }
+    var cov = cloud_density_weather(cloud_deck_hit(cam, dir, cp.y), wind_xy, t, cp, cover);
     // Toward the horizon a view ray runs so far through the deck that modelling
     // it as an infinitely thin plane stops being defensible — fade out instead
-    // of drawing the smear the maths would give.
+    // of drawing the smear the maths would give. Under a closed sky the far
+    // deck is simply cloud, so the fade runs toward that and not toward blue.
     let horizon_fade = smoothstep(0.03, 0.24, dir.y);
-    // Thin the deck right around the sun so the disk still burns through.
+    // Thin the deck right around the sun so the disk still burns through; a
+    // closed sky hides it.
     let near_sun = smoothstep(0.90, 0.999, dot(dir, sun_dir));
-    cov = cov * horizon_fade * (1.0 - near_sun * 0.8) * 0.9;
-    let sun_amt = clamp(dot(dir, sun_dir) * 0.5 + 0.5, 0.0, 1.0);
+    cov = cov * (1.0 - near_sun * 0.8 * (1.0 - closed)) * mix(0.9, 1.0, closed);
+    cov = mix(closed, cov, horizon_fade);
     return vec2<f32>(cov, sun_amt);
+}
+
+fn cloud_cover_view(cam: vec3<f32>, dir: vec3<f32>, sun_dir: vec3<f32>,
+                    wind_xy: vec2<f32>, t: f32, cp: vec4<f32>) -> vec2<f32> {
+    return cloud_cover_view_weather(cam, dir, sun_dir, wind_xy, t, cp, -1.0);
 }
 
 // GROUND: how much sun a world point keeps. 1.0 = full sun, lower = under cloud.
@@ -111,12 +146,23 @@ fn cloud_cover_view(cam: vec3<f32>, dir: vec3<f32>, sun_dir: vec3<f32>,
 // cloud shadows read as flat grey paint rather than as shade.
 fn cloud_shadow_at(world_pos: vec3<f32>, sun_dir: vec3<f32>,
                    wind_xy: vec2<f32>, t: f32, cp: vec4<f32>) -> f32 {
-    if (cp.x <= 0.0) { return 1.0; }
+    return cloud_shadow_at_weather(world_pos, sun_dir, wind_xy, t, cp, -1.0);
+}
+
+// The same with the weather's cloud cover. A sky that is closing takes the
+// sun away whether or not the game asked for cloud shadows: under an overcast
+// the direct light is gone, and what is left is the sky.
+fn cloud_shadow_at_weather(world_pos: vec3<f32>, sun_dir: vec3<f32>,
+                           wind_xy: vec2<f32>, t: f32, cp: vec4<f32>,
+                           cover: f32) -> f32 {
+    let strength = max(cp.x, smoothstep(0.35, 0.9, cover) * 0.94);
+    if (strength <= 0.0) { return 1.0; }
     // Sun on the horizon: the shadow ray runs nearly parallel to the deck and
     // the intersection shoots off to infinity, so the noise lookup lands a
     // kilometre away and swims. Fade the whole effect out as the sun sets.
     let up = sun_dir.y;
     if (up <= 0.02) { return 1.0; }
-    let cov = cloud_density(cloud_deck_hit(world_pos, sun_dir, cp.y), wind_xy, t, cp);
-    return 1.0 - cov * cp.x * smoothstep(0.02, 0.20, up);
+    let cov = cloud_density_weather(
+        cloud_deck_hit(world_pos, sun_dir, cp.y), wind_xy, t, cp, cover);
+    return 1.0 - cov * strength * smoothstep(0.02, 0.20, up);
 }
