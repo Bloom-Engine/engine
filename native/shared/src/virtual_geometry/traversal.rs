@@ -31,6 +31,16 @@ const ID_SLOT_MASK: u32 = (1 << 20) - 1;
 const ALL_SOURCE_MESHES: u32 = u32::MAX;
 #[cfg(test)]
 const TRAVERSAL_GROUP_STACK_CAPACITY: usize = 32;
+/// Levels of the breadth-first hand-off queue and groups each can hold. One
+/// invocation walks one queued group; children go to the next level. A full
+/// level is not an error: the group that could not queue its children walks
+/// them itself, as every group did before the queue existed.
+const TRAVERSAL_QUEUE_LEVELS: u32 = 12;
+const TRAVERSAL_QUEUE_GROUPS_PER_LEVEL: u32 = 65_536;
+const TRAVERSAL_QUEUE_HEADER_BYTES: u64 = TRAVERSAL_QUEUE_LEVELS as u64 * 4;
+const TRAVERSAL_QUEUE_ITEM_BYTES: u64 = 16;
+/// A queued group packs its cluster count under its depth.
+const TRAVERSAL_QUEUE_MAX_GROUP_CLUSTERS: u32 = 0xf_ffff;
 static NEXT_SELECTOR_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Fixed GPU input record for one virtual-geometry instance (224 bytes).
@@ -359,6 +369,9 @@ pub struct GpuVirtualHierarchySelector {
     bind_group: wgpu::BindGroup,
     hiz: GpuVirtualHiZ,
     pipeline: wgpu::ComputePipeline,
+    /// One pipeline per queue level; empty when the queue is not used.
+    queue_pipelines: Vec<wgpu::ComputePipeline>,
+    queue_groups_per_level: u32,
     max_workgroups_per_dimension: u32,
 }
 
@@ -369,6 +382,19 @@ impl GpuVirtualHierarchySelector {
         config: GpuVirtualTraversalConfig,
     ) -> Result<Self, VirtualGeometryTraversalError> {
         validate_selector_config(device, config)?;
+        // The queue rides behind the counters in their buffer: the traversal
+        // layout already uses every storage binding a stage may have.
+        let queue_bytes = traversal_counter_buffer_bytes(TRAVERSAL_QUEUE_GROUPS_PER_LEVEL);
+        let limits = device.limits();
+        let queue_groups_per_level = if pool.config().max_clusters_per_group
+            <= TRAVERSAL_QUEUE_MAX_GROUP_CLUSTERS
+            && queue_bytes <= limits.max_buffer_size
+            && queue_bytes <= limits.max_storage_buffer_binding_size as u64
+        {
+            TRAVERSAL_QUEUE_GROUPS_PER_LEVEL
+        } else {
+            0
+        };
         let instance_buffer = create_buffer(
             device,
             "virtual_geometry_instances",
@@ -396,7 +422,7 @@ impl GpuVirtualHierarchySelector {
         let counter_buffer = create_buffer(
             device,
             "virtual_geometry_traversal_counters",
-            std::mem::size_of::<GpuVirtualTraversalCounters>() as u64,
+            traversal_counter_buffer_bytes(queue_groups_per_level),
             wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -441,6 +467,30 @@ impl GpuVirtualHierarchySelector {
             compilation_options: Default::default(),
             cache: None,
         });
+        let queue_pipelines = if queue_groups_per_level == 0 {
+            Vec::new()
+        } else {
+            (0..TRAVERSAL_QUEUE_LEVELS)
+                .map(|level| {
+                    let source = TRAVERSAL_SHADER.replace(
+                        "const PASS_LEVEL: u32 = 0u;",
+                        &format!("const PASS_LEVEL: u32 = {level}u;"),
+                    );
+                    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("virtual_geometry_traversal_queue_shader"),
+                        source: wgpu::ShaderSource::Wgsl(source.into()),
+                    });
+                    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("virtual_geometry_traversal_queue_pipeline"),
+                        layout: Some(&pipeline_layout),
+                        module: &module,
+                        entry_point: Some("select_queued_groups"),
+                        compilation_options: Default::default(),
+                        cache: None,
+                    })
+                })
+                .collect()
+        };
         Ok(Self {
             id: NEXT_SELECTOR_ID.fetch_add(1, Ordering::Relaxed),
             config,
@@ -454,6 +504,8 @@ impl GpuVirtualHierarchySelector {
             bind_group,
             hiz,
             pipeline,
+            queue_pipelines,
+            queue_groups_per_level,
             max_workgroups_per_dimension: device.limits().max_compute_workgroups_per_dimension,
         })
     }
@@ -558,6 +610,11 @@ impl GpuVirtualHierarchySelector {
             0,
             bytemuck::bytes_of(&GpuVirtualTraversalCounters::default()),
         );
+        queue.write_buffer(
+            &self.counter_buffer,
+            std::mem::size_of::<GpuVirtualTraversalCounters>() as u64,
+            &[0u8; TRAVERSAL_QUEUE_HEADER_BYTES as usize],
+        );
         let params = TraversalParams {
             planes: view.frustum_planes,
             view_projection: view.view_projection,
@@ -582,7 +639,7 @@ impl GpuVirtualHierarchySelector {
             limits: [
                 pool.config().max_hierarchy_levels,
                 pool.config().max_clusters_per_group,
-                0,
+                self.queue_groups_per_level,
                 0,
             ],
         };
@@ -617,6 +674,13 @@ impl GpuVirtualHierarchySelector {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_bind_group(1, self.hiz.sample_bind_group(), &[]);
             pass.dispatch_workgroups(workgroups_x, instances.len() as u32, 1);
+            // Each level's dispatch covers the whole level; invocations past
+            // the queued count return at once.
+            let queue_workgroups = self.queue_groups_per_level.div_ceil(WORKGROUP_SIZE);
+            for pipeline in &self.queue_pipelines {
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(queue_workgroups, 1, 1);
+            }
         }
 
         Ok(VirtualGeometryTraversalDispatch {
@@ -751,6 +815,19 @@ fn create_buffer(
         usage,
         mapped_at_creation: false,
     })
+}
+
+/// Counters, then the queue's per-level counts, then its items. With no queue
+/// one item is still allocated so the shader's runtime array is never empty.
+const fn traversal_counter_buffer_bytes(queue_groups_per_level: u32) -> u64 {
+    let items = if queue_groups_per_level == 0 {
+        1
+    } else {
+        TRAVERSAL_QUEUE_LEVELS as u64 * queue_groups_per_level as u64
+    };
+    std::mem::size_of::<GpuVirtualTraversalCounters>() as u64
+        + TRAVERSAL_QUEUE_HEADER_BYTES
+        + items * TRAVERSAL_QUEUE_ITEM_BYTES
 }
 
 const fn buffer_bytes<T>(records: u32) -> u64 {
