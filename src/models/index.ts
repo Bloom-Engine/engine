@@ -990,7 +990,7 @@ export function animSetBlend(handle: number, slot: number, clip: number, weight:
 }
 
 /// Turn one joint, and with it everything below it, by `angle` radians about
-/// a model-space axis, after the clips are sampled. `slot` is 0..7 and slots
+/// a model-space axis, after the clips are sampled. `slot` is 0..23 and slots
 /// apply in order, so list a chain root first (spine, spine1, spine2 for an
 /// aim offset). `joint = -1` frees the slot.
 export function animSetJointRotation(handle: number, slot: number, joint: number, ax: number, ay: number, az: number, angle: number): void {

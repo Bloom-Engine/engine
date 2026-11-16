@@ -19,7 +19,8 @@
 //! `models3d` and can be unit-tested without a GLB.
 
 pub const BLEND_SLOTS: usize = 3;
-pub const ROT_SLOTS: usize = 8;
+// (24: a hand closing on what it holds is two joints of four fingers, on top of spine and limb offsets.)
+pub const ROT_SLOTS: usize = 24;
 pub const IK_SLOTS: usize = 2;
 
 #[derive(Clone, Copy)]

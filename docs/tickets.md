@@ -2233,7 +2233,7 @@ Shipped, all per-instance state in `AnimMixer::rig`, applied inside
 - `animSetBlend(h, slot 0..2, clip, weight)`: partner clips mixed into the
   base clip by weight, sampled at the base clip's phase. This is also the
   two-clip locomotion blend EN-028 promised and never built.
-- `animSetJointRotation(h, slot 0..7, joint, ax, ay, az, angle)`: a
+- `animSetJointRotation(h, slot 0..23, joint, ax, ay, az, angle)`: a
   model-space axis-angle turn of one joint and its subtree, applied in slot
   order after the masked layer.
 - `animSetIK(h, slot 0..1, endJoint, tx, ty, tz, weight, keepEndRotation)`
