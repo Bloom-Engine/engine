@@ -274,6 +274,11 @@ pub(super) struct LightingUniforms {
     /// environment's specular reflection taken away from cut-out materials
     /// (`set_cutout_env_specular`; 0 = none taken).
     pub(super) frame_misc: [f32; 4],
+    /// Weather (`set_weather`): x = cloud cover, 0 a clear day to 1 a closed
+    /// overcast, negative = no weather set (the fair-weather deck); y = how
+    /// wet surfaces are, 0 to 1. zw reserved. Appended last so existing field
+    /// offsets stay stable.
+    pub(super) weather: [f32; 4],
 }
 
 impl LightingUniforms {
@@ -302,6 +307,7 @@ impl LightingUniforms {
             wind: [0.0, 0.0, 0.0, 0.0],
             cloud: [0.0, 420.0, 0.0035, 8.0],
             frame_misc: [0.0; 4],
+            weather: [-1.0, 0.0, 0.0, 0.0],
         }
     }
 }

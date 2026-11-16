@@ -2725,3 +2725,12 @@ stand-in included. **Found and not fixed here:** hierarchy selection costs 14 ms
 house (one GPU thread walks its one large root group), and the cooker stops simplifying at 21,000
 triangles because it will not collapse across UV seams. Both are the next two changes. Not run:
 any other backend, iOS, tvOS.
+
+## EN-073 — Weather, first piece: one state for cloud cover and wetness 🟡 *(2026-11-16, branch feat/weather)*
+
+Asked for by The Deep (Jonah). `setWeather(cloudCover, wetness)` (`bloom_set_weather`, every
+platform). Cover moves the shared cloud field from clear to a closed overcast: the sky draws a
+ceiling, the sun's direct light goes with it. Wetness darkens and smooths surfaces in the
+built-in scene shader. Unset (the default) changes nothing: the 89 golden images are unchanged.
+What is in, how it travels and what is still missing (the sky's light does not follow the cover
+yet; no rain, lightning, shelter or water): `docs/weather.md`.

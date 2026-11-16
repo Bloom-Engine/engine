@@ -874,6 +874,16 @@ macro_rules! __bloom_ffi_visual {
         // (the default) = sky-only clouds, which is what every game that never
         // calls this keeps.
         #[no_mangle]
+        pub extern "C" fn bloom_set_weather(cloud_cover: f64, wetness: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_weather", move || {
+                engine()
+                    .renderer
+                    .set_weather(cloud_cover as f32, wetness as f32);
+            })
+        }
+
+        // bloom_set_cloud_shadows
+        #[no_mangle]
         pub extern "C" fn bloom_set_cloud_shadows(
             strength: f64,
             deck_height: f64,

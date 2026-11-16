@@ -237,7 +237,7 @@ fn fs_reactive(_in: VsOut) -> ReactiveTranslucentOut {
             screen_resolution: [64.0, 64.0],
             render_resolution: [64.0, 64.0],
             taa_jitter: [0.0; 2],
-            _pad1: [0.0; 2],
+            weather: [-1.0, 0.0],
             wind: [0.0; 4],
             cloud: [0.0; 4],
         };
@@ -511,7 +511,7 @@ fn fs_reactive(_in: VsOut) -> ReactiveTranslucentOut {
             screen_resolution: [8.0, 8.0],
             render_resolution: [8.0, 8.0],
             taa_jitter: [0.0; 2],
-            _pad1: [0.0; 2],
+            weather: [-1.0, 0.0],
             wind: [0.0; 4],
             cloud: [0.0; 4],
         };
@@ -812,7 +812,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             screen_resolution: [64.0, 64.0],
             render_resolution: [64.0, 64.0],
             taa_jitter: [0.0; 2],
-            _pad1: [0.0; 2],
+            weather: [-1.0, 0.0],
             wind: [0.0; 4],
             cloud: [0.0; 4],
         };

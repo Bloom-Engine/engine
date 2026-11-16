@@ -108,6 +108,7 @@ declare function bloom_clear_all_post_passes(): number;
 declare function bloom_set_ssao_intensity(intensity: number): number;
 declare function bloom_set_ssao_radius(worldRadius: number): number;
 declare function bloom_set_wind(dirX: number, dirZ: number, amplitude: number, frequency: number): number;
+declare function bloom_set_weather(cloudCover: number, wetness: number): number;
 declare function bloom_set_cloud_shadows(strength: number, deckHeight: number, featureScale: number, driftSpeed: number): number;
 declare function bloom_set_ssr_enabled(on: number): number;
 declare function bloom_set_ssr_strength(strength: number): number;
@@ -1090,6 +1091,25 @@ export function clearAllPostPasses(): boolean {
 /// frequency is in Hz (~1.0 typical).
 export function setWind(dirX: number, dirZ: number, amplitude: number, frequency: number): boolean {
   return bloom_set_wind(dirX, dirZ, amplitude, frequency) !== 0;
+}
+
+/// The weather, as two numbers the whole picture reads.
+///
+/// `cloudCover` is how much of the sky the cloud deck fills: 0 a clear day,
+/// about 0.3 fair-weather puffs, 0.6 broken cloud, 1 a closed overcast. As it
+/// closes, the clouds turn from sunlit white to a grey ceiling, the sun's
+/// direct light is taken away by the same field the sky draws (whether or not
+/// `setCloudShadows` was called), and the sky's own light is what remains.
+///
+/// `wetness` is how wet surfaces are, 0 to 1: rough materials darken, a film
+/// makes them shine, and what faces the sky takes the most. It is global;
+/// set it to 0 while the camera is indoors.
+///
+/// A negative `cloudCover` returns to the deck of a game that never set any
+/// weather. Change both a little each frame for weather that rolls in.
+/// (No default parameter values: Perry 0.5.x silently drops the call.)
+export function setWeather(cloudCover: number, wetness: number): boolean {
+  return bloom_set_weather(cloudCover, wetness) !== 0;
 }
 
 /// Cloud deck — the clouds the sky draws and the shadows they cast, from ONE

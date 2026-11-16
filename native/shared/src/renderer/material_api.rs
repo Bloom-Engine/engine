@@ -593,6 +593,7 @@ impl Renderer {
     pub fn material_system_begin_frame(&mut self, time_seconds: f32, delta_time: f32) {
         self.lighting_uniforms.wind = [self.wind[0], self.wind[1], self.wind[2], time_seconds];
         self.lighting_uniforms.cloud = self.cloud_params;
+        self.lighting_uniforms.weather = self.weather_params;
         self.lighting_uniforms.frame_misc[0] = delta_time;
         let screen_w = self.surface_config.width as f32;
         let screen_h = self.surface_config.height as f32;
@@ -605,7 +606,7 @@ impl Renderer {
             screen_resolution: [screen_w, screen_h],
             render_resolution: [render_w as f32, render_h as f32],
             taa_jitter: [0.0, 0.0],
-            _pad1: [0.0, 0.0],
+            weather: [self.weather_params[0], self.weather_params[1]],
             wind: self.wind,
             cloud: self.cloud_params,
         };

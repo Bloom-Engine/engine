@@ -1497,6 +1497,7 @@ pub struct Renderer {
     /// every existing game keeps the look it shipped with; the sky still draws
     /// them. See `common/clouds.wgsl`.
     cloud_params: [f32; 4],
+    weather_params: [f32; 4],
     /// EN-043 — last frame's transform hash per static shadow caster, keyed by its
     /// stable identity. A caster whose transform CHANGED since last frame is
     /// promoted to the dynamic set instead of being left in the static set with a
@@ -8694,6 +8695,7 @@ impl Renderer {
             // decision, and silently darkening every existing game's terrain
             // is not the engine's call to make.
             cloud_params: [0.0, 420.0, 0.0035, 8.0],
+            weather_params: [-1.0, 0.0, 0.0, 0.0],
             shadow_caster_tf: std::collections::HashSet::new(),
             foliage_wind: std::collections::HashMap::new(),
             foliage_shadow_motion: false,
@@ -9398,6 +9400,19 @@ impl Renderer {
     ///
     /// Drift direction comes from [`Renderer::set_wind`], so the deck travels the
     /// way the foliage beneath it is leaning.
+    /// The weather, as two numbers every part of the picture reads: how much
+    /// of the sky the cloud deck fills (0 a clear day, 1 a closed overcast)
+    /// and how wet surfaces are (0 to 1). A negative cover returns to the
+    /// fair-weather deck of a renderer that never set any weather.
+    pub fn set_weather(&mut self, cloud_cover: f32, wetness: f32) {
+        let cover = if cloud_cover < 0.0 {
+            -1.0
+        } else {
+            cloud_cover.min(1.0)
+        };
+        self.weather_params = [cover, wetness.clamp(0.0, 1.0), 0.0, 0.0];
+    }
+
     pub fn set_cloud_shadows(
         &mut self,
         strength: f32,
@@ -11399,7 +11414,7 @@ impl Renderer {
                 cam[1],
             ],
             forward: [forward_world[0], forward_world[1], forward_world[2], cam[2]],
-            intensity: [intensity, time, 0.0, 0.0],
+            intensity: [intensity, time, self.weather_params[0], 0.0],
             cloud: self.cloud_params,
             wind: self.lighting_uniforms.wind,
         };
@@ -11891,7 +11906,12 @@ impl Renderer {
             ],
             forward: [forward_world[0], forward_world[1], forward_world[2], cam[2]],
             // .y carries current time (seconds) so the cloud deck can drift.
-            intensity: [intensity, self.lighting_uniforms.wind[3], 0.0, 0.0],
+            intensity: [
+                intensity,
+                self.lighting_uniforms.wind[3],
+                self.weather_params[0],
+                0.0,
+            ],
             cloud: self.cloud_params,
             wind: self.lighting_uniforms.wind,
         };

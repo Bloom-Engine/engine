@@ -113,6 +113,7 @@ const RENDERER_STATUS_FUNCTIONS = new Set([
   'bloom_set_cutout_edge_fade',
   'bloom_set_cutout_env_specular',
   'bloom_set_cloud_shadows',
+  'bloom_set_weather',
   'bloom_add_shadowed_point_light',
   'bloom_add_shadowed_spot_light',
   'bloom_set_ssr_enabled',

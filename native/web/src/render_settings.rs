@@ -369,6 +369,12 @@ pub fn bloom_set_foliage_shadow_motion(on: f64) -> f64 {
 }
 
 #[wasm_bindgen]
+pub fn bloom_set_weather(cloud_cover: f64, wetness: f64) -> f64 {
+    engine().renderer.set_weather(cloud_cover as f32, wetness as f32);
+    1.0
+}
+
+#[wasm_bindgen]
 pub fn bloom_set_cutout_env_specular(keep: f64) -> f64 {
     engine().renderer.set_cutout_env_specular(keep as f32);
     1.0

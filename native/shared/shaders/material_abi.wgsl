@@ -29,7 +29,11 @@ struct PerFrame {
 
   // TAA / TSR jitter applied to the projection this frame
   taa_jitter:        vec2<f32>,
-  _pad1:             vec2<f32>,
+  // Weather (set_weather). x = cloud cover, 0 a clear day to 1 a closed
+  // overcast, negative when no weather was set; y = how wet surfaces are,
+  // 0 to 1. Pass x to `cloud_shadow_at_weather` in place of `cloud_shadow_at`
+  // to have a closing sky take the sun away.
+  weather:           vec2<f32>,
 
   // Global wind field. xy = direction in the XZ plane (need not be
   // normalised; magnitude scales effective amplitude); z = amplitude
