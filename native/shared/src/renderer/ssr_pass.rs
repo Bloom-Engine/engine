@@ -185,7 +185,9 @@ impl Renderer {
                     6.0,
                     self.lighting_uniforms.camera_pos[3],
                     self.ssr_range[2],
-                    0.0,
+                    // w = weather cloud cover (negative = unset): the miss
+                    // fallback greys the sky as the scene shader does.
+                    self.weather_params[0],
                 ],
             };
             self.queue
