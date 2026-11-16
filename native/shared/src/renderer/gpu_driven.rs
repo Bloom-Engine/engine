@@ -17,6 +17,7 @@ use std::sync::OnceLock;
 #[path = "geometry_arena.rs"]
 mod geometry_arena;
 use geometry_arena::GeometryArena;
+pub(crate) use geometry_arena::DepthVertex;
 
 pub const GPU_DRIVEN_FEATURES: wgpu::Features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
 pub(crate) const DRAW_FLAG_DOUBLE_SIDED: u32 = 1 << 0;
@@ -385,6 +386,14 @@ impl GpuDrivenRenderer {
 
     pub(super) fn shared_geometry(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
         (&self.arena.vertex, &self.arena.index)
+    }
+
+    /// The depth-only twin of a draw's vertex buffer, when it has one: a draw
+    /// from the shared arena reads `geometry_arena::DepthVertex` at the same
+    /// vertex index (same `base_vertex`, same index range). Anything else
+    /// (dedicated buffers, immediate batches) has no twin.
+    pub(crate) fn depth_twin(&self, vertex: &wgpu::Buffer) -> Option<&wgpu::Buffer> {
+        std::ptr::eq(vertex, &self.arena.vertex).then_some(&self.arena.depth)
     }
 
     pub fn upload_static(

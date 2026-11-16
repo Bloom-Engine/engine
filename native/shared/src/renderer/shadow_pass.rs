@@ -844,6 +844,17 @@ impl Renderer {
                 &prepared_local_lights,
             );
 
+            // Each caster's depth-only twin stream, when it is drawn from the
+            // shared arena (gpu_driven::DepthVertex: 24 bytes a vertex instead
+            // of 96). Same triangles, same depths; on an integrated GPU the
+            // forest's vertex fetch is most of what a shadow pass costs.
+            // BLOOM_SKIP=shadow_compact draws everything from the full stream.
+            let shadow_depth_vbs: Vec<Option<&wgpu::Buffer>> = if self.dbg_skip("shadow_compact") {
+                vec![None; shadow_vbs.len()]
+            } else {
+                shadow_vbs.iter().map(|vb| self.gpu_driven.depth_twin(vb)).collect()
+            };
+
             // Render each cascade. Static casters live in a cached depth
             // texture ("cached whole-scene shadows") re-rendered only when
             // the cascade's VP or static content changes; every frame the
@@ -951,10 +962,15 @@ impl Renderer {
                             } else {
                                 0
                             };
+                            // 3 / 4: kinds 0 / 1 drawn from the depth twin.
+                            let twin = if kind == 2 { None } else { shadow_depth_vbs[entry.vb_idx] };
+                            let kind = if twin.is_some() { kind + 3 } else { kind };
                             if kind != cur_kind {
                                 shadow_pass.set_pipeline(match kind {
                                     1 => &self.shadow_map.pipeline_cutout,
                                     2 => &self.shadow_map.pipeline_skinned,
+                                    3 => &self.shadow_map.pipeline_compact,
+                                    4 => &self.shadow_map.pipeline_cutout_compact,
                                     _ => &self.shadow_map.pipeline,
                                 });
                                 cur_kind = kind;
@@ -964,7 +980,7 @@ impl Renderer {
                                 &self.shadow_map.uniform_bind_group,
                                 &[offset],
                             );
-                            if kind == 1 {
+                            if kind == 1 || kind == 4 {
                                 shadow_pass.set_bind_group(
                                     1,
                                     cutout_bgs[entry.cutout_idx as usize],
@@ -979,7 +995,10 @@ impl Renderer {
                                     &[],
                                 );
                             }
-                            shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
+                            shadow_pass.set_vertex_buffer(
+                                0,
+                                twin.unwrap_or(shadow_vbs[entry.vb_idx]).slice(..),
+                            );
                             shadow_pass.set_index_buffer(
                                 shadow_ibs[entry.ib_idx].slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -1100,10 +1119,15 @@ impl Renderer {
                             } else {
                                 0
                             };
+                            // 3 / 4: kinds 0 / 1 drawn from the depth twin.
+                            let twin = if kind == 2 { None } else { shadow_depth_vbs[entry.vb_idx] };
+                            let kind = if twin.is_some() { kind + 3 } else { kind };
                             if kind != cur_kind {
                                 shadow_pass.set_pipeline(match kind {
                                     1 => &self.shadow_map.pipeline_cutout,
                                     2 => &self.shadow_map.pipeline_skinned,
+                                    3 => &self.shadow_map.pipeline_compact,
+                                    4 => &self.shadow_map.pipeline_cutout_compact,
                                     _ => &self.shadow_map.pipeline,
                                 });
                                 cur_kind = kind;
@@ -1113,7 +1137,7 @@ impl Renderer {
                                 &self.shadow_map.uniform_bind_group,
                                 &[offset],
                             );
-                            if kind == 1 {
+                            if kind == 1 || kind == 4 {
                                 shadow_pass.set_bind_group(
                                     1,
                                     cutout_bgs[entry.cutout_idx as usize],
@@ -1130,7 +1154,10 @@ impl Renderer {
                                     &[],
                                 );
                             }
-                            shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
+                            shadow_pass.set_vertex_buffer(
+                                0,
+                                twin.unwrap_or(shadow_vbs[entry.vb_idx]).slice(..),
+                            );
                             shadow_pass.set_index_buffer(
                                 shadow_ibs[entry.ib_idx].slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -1511,10 +1538,13 @@ impl Renderer {
                 queue: &self.queue,
                 nodes: &shadow_nodes,
                 vbs: &shadow_vbs,
+                depth_vbs: &shadow_depth_vbs,
                 ibs: &shadow_ibs,
                 cutout_bgs: &cutout_bgs,
                 pipeline: &self.shadow_map.pipeline,
                 pipeline_cutout: &self.shadow_map.pipeline_cutout,
+                pipeline_compact: &self.shadow_map.pipeline_compact,
+                pipeline_cutout_compact: &self.shadow_map.pipeline_cutout_compact,
                 pipeline_skinned: &self.shadow_map.pipeline_skinned,
                 joint_bind_group: &self.joint_bind_group,
                 camera_pos: self.current_camera_pos,
