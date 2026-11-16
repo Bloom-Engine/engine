@@ -139,6 +139,20 @@ export function weatherFlash(): number { return flash; }
 /// Advance the weather by `dt` seconds and hand it to the renderer. Call once
 /// a frame, before drawing.
 export function weatherUpdate(dt: number): void {
+  // Lightning is its own thing: a strike flashes whether or not the game
+  // has set a weather.
+  flashAge = flashAge + dt;
+  flash = 0.0;
+  if (flashAge < 0.7) {
+    // A sharp first stroke and one or two weaker return strokes.
+    let f = Math.exp(-flashAge * 9.0);
+    const again = flashAge - 0.16;
+    if (again > 0.0) { f = f + 0.55 * Math.exp(-again * 14.0); }
+    const third = flashAge - 0.31;
+    if (third > 0.0) { f = f + 0.3 * Math.exp(-third * 16.0); }
+    flash = f * flashPower;
+  }
+
   if (!active) { return; }
   if (easeT < 1.0) {
     easeT = easeT + dt / easeSeconds;
@@ -153,18 +167,6 @@ export function weatherUpdate(dt: number): void {
     wetness = wetness - dt / drySeconds;
   }
   wetness = clamp01(wetness);
-
-  flashAge = flashAge + dt;
-  flash = 0.0;
-  if (flashAge < 0.7) {
-    // A sharp first stroke and one or two weaker return strokes.
-    let f = Math.exp(-flashAge * 9.0);
-    const again = flashAge - 0.16;
-    if (again > 0.0) { f = f + 0.55 * Math.exp(-again * 14.0); }
-    const third = flashAge - 0.31;
-    if (third > 0.0) { f = f + 0.3 * Math.exp(-third * 16.0); }
-    flash = f * flashPower;
-  }
 
   let shownWet = wetness;
   if (indoors) { shownWet = 0.0; }
@@ -255,8 +257,10 @@ fn fs_main(in: VsOut) -> TranslucentOut {
 
 function rainInit(): void {
   rainReady = true;
-  const verts: number[] = [];
-  const idx: number[] = [];
+  // Twelve floats a vertex: position, normal, colour, uv. Sized once and
+  // filled by index (Perry: no growing arrays in engine code).
+  const verts: number[] = new Array(RAIN_DROPS * 4 * 12);
+  const idx: number[] = new Array(RAIN_DROPS * 6);
   for (let i = 0; i < RAIN_DROPS; i = i + 1) {
     const sx = nextRandom() - 0.5;
     const sy = nextRandom() - 0.5;
@@ -269,14 +273,16 @@ function rainInit(): void {
       let v = 0.0;
       if (k === 1 || k === 2) { u = 1.0; }
       if (k >= 2) { v = 1.0; }
-      verts.push(sx); verts.push(sy); verts.push(sz);
-      verts.push(0.0); verts.push(1.0); verts.push(0.0);
-      verts.push(sp); verts.push(br); verts.push(th); verts.push(1.0);
-      verts.push(u); verts.push(v);
+      const o = (i * 4 + k) * 12;
+      verts[o] = sx; verts[o + 1] = sy; verts[o + 2] = sz;
+      verts[o + 3] = 0.0; verts[o + 4] = 1.0; verts[o + 5] = 0.0;
+      verts[o + 6] = sp; verts[o + 7] = br; verts[o + 8] = th; verts[o + 9] = 1.0;
+      verts[o + 10] = u; verts[o + 11] = v;
     }
     const b = i * 4;
-    idx.push(b); idx.push(b + 1); idx.push(b + 2);
-    idx.push(b); idx.push(b + 2); idx.push(b + 3);
+    const q = i * 6;
+    idx[q] = b; idx[q + 1] = b + 1; idx[q + 2] = b + 2;
+    idx[q + 3] = b; idx[q + 4] = b + 2; idx[q + 5] = b + 3;
   }
   rainMesh = createMeshExplicit(verts, RAIN_DROPS * 4, idx, RAIN_DROPS * 6);
   rainMaterial = compileAdditiveMaterial(RAIN_WGSL);
@@ -285,11 +291,10 @@ function rainInit(): void {
 /// Draw what the weather puts in the air and light its flash. Call inside the
 /// 3D pass, after the scene, with the camera's position.
 export function weatherDraw(camX: number, camY: number, camZ: number): void {
-  if (!active) { return; }
   if (flash > 0.01) {
     addDirectionalLight(flashX, 0.85, flashZ, 0.82, 0.88, 1.0, flash * 6.0);
   }
-  if (indoors || rain < 0.02) { return; }
+  if (!active || indoors || rain < 0.02) { return; }
   if (!rainReady) { rainInit(); }
   if (rainMaterial <= 0) { return; }
   // Faint by day: a streak is a glint of sky light, not a white line.
