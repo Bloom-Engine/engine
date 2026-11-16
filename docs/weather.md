@@ -74,7 +74,8 @@ going, and does the three things a game would otherwise write itself:
   the rain holds still in the world while the camera turns. Lighter rain
   shows fewer of the drops. It slants with `weatherWind` and is lit by the
   scene's ambient and fog colour, so it is a faint glint by day and nearly
-  invisible in the dark until lightning.
+  invisible in the dark until lightning. `weatherRainLook` sets how bright
+  and how long the streaks are.
 - **Lightning.** `weatherLightning(power)` lights the scene from a high
   direction for about half a second, with a first stroke and two weaker
   returns, and brightens the rain. It is an extra directional light, so it

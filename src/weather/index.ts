@@ -44,6 +44,8 @@ let flashPower = 0.0;
 let flashX = 0.3;
 let flashZ = 0.2;
 let strikes = 0;
+let rainBrightness = 0.42;  // a streak's light as a multiple of the scene's ambient glint
+let rainLength = 0.30;      // half a streak's length in metres, at full rain
 
 /// Seconds of full rain that soak a dry surface, and seconds a soaked one
 /// takes to dry once the rain has stopped.
@@ -100,6 +102,14 @@ export function weatherWind(dirX: number, dirZ: number, speed: number): void {
   if (len > 0.0001) { windX = dirX / len; windZ = dirZ / len; }
   windSpeed = speed;
   if (windSpeed < 0.0) { windSpeed = 0.0; }
+}
+
+/// How the streaks look: `brightness` scales their light (0.42 unless set: a
+/// faint glint by day; a night storm wants about 1) and `halfLength` is half
+/// a streak's length in metres at full rain (0.30 unless set).
+export function weatherRainLook(brightness: number, halfLength: number): void {
+  if (brightness > 0.0) { rainBrightness = brightness; }
+  if (halfLength > 0.0) { rainLength = halfLength; }
 }
 
 /// Under a roof: no rain is drawn and surfaces are shown dry, while the
@@ -188,7 +198,7 @@ const RAIN_WGSL = `
 struct RainParams {
   // x = brightness, y = rain amount 0..1, z = wind speed (m/s), w = fall speed (m/s)
   rain: vec4<f32>,
-  // xy = wind direction in the XZ plane
+  // xy = wind direction in the XZ plane, z = half a streak's length (m)
   wind: vec4<f32>,
 };
 @group(2) @binding(11) var<uniform> user: RainParams;
@@ -218,7 +228,7 @@ fn vs_main(in: VertexInput) -> VsOut {
   // A hair's width near the lens, never thinner than a pixel far away.
   let pixel = dist * 2.0 / (view.proj[1][1] * frame.render_resolution.y);
   let half_width = max(0.0045, pixel * 0.8);
-  let half_length = 0.30 * speed * (0.6 + 0.4 * user.rain.y);
+  let half_length = user.wind.z * speed * (0.6 + 0.4 * user.rain.y);
   let corner = in.uv * 2.0 - vec2<f32>(1.0);
   // Lighter rain is fewer drops: each drop has a threshold it falls above.
   let shown = step(in.color.b, user.rain.y);
@@ -283,12 +293,13 @@ export function weatherDraw(camX: number, camY: number, camZ: number): void {
   if (!rainReady) { rainInit(); }
   if (rainMaterial <= 0) { return; }
   // Faint by day: a streak is a glint of sky light, not a white line.
-  rainParams[0] = 0.42 + flash * 2.5;
+  rainParams[0] = rainBrightness * (1.0 + flash * 2.5);
   rainParams[1] = rain;
   rainParams[2] = windSpeed;
   rainParams[3] = 15.0 + 4.0 * rain;
   rainParams[4] = windX;
   rainParams[5] = windZ;
+  rainParams[6] = rainLength;
   setMaterialParams(rainMaterial, rainParams);
   // Scale 24 puts the mesh's bounds round the camera so it is never culled;
   // the shader places the drops itself.
