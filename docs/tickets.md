@@ -2734,3 +2734,8 @@ ceiling, the sun's direct light goes with it. Wetness darkens and smooths surfac
 built-in scene shader. Unset (the default) changes nothing: the 89 golden images are unchanged.
 What is in, how it travels and what is still missing (the sky's light does not follow the cover
 yet; no rain, lightning, shelter or water): `docs/weather.md`.
+
+**Since (2026-11-16):** the sky's ambient and reflected light follow the cover (`weather_sky_light`);
+and `@bloomengine/engine/weather`, a TypeScript module on the material system: weather eased over
+time, wetness that builds with rain and dries, rain streaks slanted by the wind, lightning. Still
+open: shelter (rain and wetness know no roof), splashes, lightning on the clouds, water.

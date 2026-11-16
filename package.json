@@ -21,6 +21,7 @@
     "./physics": "./src/physics/index.ts",
     "./world": "./src/world/index.ts",
     "./vfx": "./src/vfx/index.ts",
+    "./weather": "./src/weather/index.ts",
     "./quality": "./src/quality/index.ts"
   },
   "files": [
