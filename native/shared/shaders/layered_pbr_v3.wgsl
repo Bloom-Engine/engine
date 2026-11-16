@@ -403,10 +403,13 @@ fn layered_sheen_visibility(
 }
 
 fn layered_sheen_directional_albedo(n_dot: f32, roughness: f32) -> f32 {
-    return textureSample(
+    // A lookup table: explicit level 0. An implicit-derivative sample here is called from
+    // per-light branches, which WGSL uniformity analysis (Chrome) rejects.
+    return textureSampleLevel(
         layered_sheen_albedo_tex,
         layered_sampler,
         vec2<f32>(clamp(n_dot, 0.0, 1.0), clamp(roughness, 0.0, 1.0)),
+        0.0,
     ).r;
 }
 
@@ -649,8 +652,8 @@ fn evaluate_layered_surface(
     }
 
     var clearcoat_roughness = clamp(layered_material.clearcoat_ior.y, 0.04, 1.0);
-    if (clearcoat_factor > 0.0
-        && layered_material.clearcoat_roughness_rotation.z > 0.5) {
+    // Uniform-only condition (see the sheen roughness note below): WGSL uniformity analysis.
+    if (layered_material.clearcoat_roughness_rotation.z > 0.5) {
         let uv = layered_transform_uv(
             in.uv,
             secondary_uv,
@@ -670,8 +673,8 @@ fn evaluate_layered_surface(
     }
 
     var clearcoat_normal = base_normal;
-    if (clearcoat_factor > 0.0
-        && layered_material.clearcoat_normal_rotation.z > 0.5) {
+    // Uniform-only condition (see the sheen roughness note below): WGSL uniformity analysis.
+    if (layered_material.clearcoat_normal_rotation.z > 0.5) {
         let source_uv = select(
             in.uv,
             secondary_uv,
@@ -762,8 +765,8 @@ fn evaluate_layered_surface(
     }
     var iridescence_thickness_nm =
         max(layered_material.iridescence.w, 0.0);
-    if (iridescence_factor > 0.0
-        && layered_material.iridescence_thickness_rotation.z > 0.5) {
+    // Uniform-only condition (see the sheen roughness note below): WGSL uniformity analysis.
+    if (layered_material.iridescence_thickness_rotation.z > 0.5) {
         let uv = layered_transform_uv(
             in.uv,
             secondary_uv,
@@ -826,8 +829,10 @@ fn evaluate_layered_surface(
         ).rgb);
     }
     var sheen_roughness = clamp(layered_material.sheen.w, 0.04, 1.0);
-    if (max(sheen_color.r, max(sheen_color.g, sheen_color.b)) > 0.0
-        && layered_material.sheen_roughness_rotation.z > 0.5) {
+    // The condition is the uniform alone. Also testing sheen_color (a texture sample by now)
+    // makes this branch non-uniform control flow, and Chrome's WGSL compiler then rejects the
+    // implicit-derivative sample inside it: the whole layered shader was invalid on the web.
+    if (layered_material.sheen_roughness_rotation.z > 0.5) {
         let uv = layered_transform_uv(
             in.uv,
             secondary_uv,

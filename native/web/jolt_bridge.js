@@ -1130,7 +1130,9 @@ export function compoundEnd() {
   if (state.compoundChildren.length === 0) return 0;
   const settings = new J.StaticCompoundShapeSettings();
   for (const c of state.compoundChildren) {
-    settings.AddShape(vec3(c.px, c.py, c.pz), quat(c.rx, c.ry, c.rz, c.rw), c.shape, 0);
+    // AddShapeShape, not AddShape: in JoltPhysics.js AddShape takes ShapeSettings, and a
+    // built Shape passed there is read as one ("RuntimeError: null function" in Create).
+    settings.AddShapeShape(vec3(c.px, c.py, c.pz), quat(c.rx, c.ry, c.rz, c.rw), c.shape, 0);
   }
   state.compoundChildren.length = 0;
   const result = settings.Create();
