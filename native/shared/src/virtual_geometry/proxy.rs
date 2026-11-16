@@ -53,6 +53,11 @@ fn group_error(clusters: &[ClusterRecord], index: usize) -> f32 {
 /// the error and the group that would replace it is not.
 fn on_cut(clusters: &[ClusterRecord], index: usize, max_error: f32) -> bool {
     let cluster = &clusters[index];
+    // Zero asks for the source triangles themselves. A parent group can carry
+    // an error of exactly zero and would otherwise be taken in their place.
+    if max_error <= 0.0 {
+        return cluster.first_child == NO_RELATION;
+    }
     if cluster.first_child != NO_RELATION && group_error(clusters, index) > max_error {
         return false;
     }

@@ -71,6 +71,11 @@ pub(crate) struct VirtualModelState {
     instances: Vec<GpuVirtualInstance>,
     placements: Vec<PlacementKey>,
     previous_placements: Vec<PlacementKey>,
+    /// World transform each submitting scene node had last frame, by node
+    /// handle. Kept here because the scene's own `prev_transform` is advanced
+    /// during scene preparation, and only for nodes it draws.
+    node_transforms: HashMap<u64, [[f32; 4]; 4]>,
+    previous_node_transforms: HashMap<u64, [[f32; 4]; 4]>,
     target_error_pixels: f32,
     proxy_relative_error: f32,
     submitted_last_frame: bool,
@@ -85,6 +90,8 @@ impl Default for VirtualModelState {
             instances: Vec::new(),
             placements: Vec::new(),
             previous_placements: Vec::new(),
+            node_transforms: HashMap::new(),
+            previous_node_transforms: HashMap::new(),
             target_error_pixels: DEFAULT_TARGET_ERROR_PIXELS,
             proxy_relative_error: DEFAULT_PROXY_RELATIVE_ERROR,
             submitted_last_frame: false,
@@ -224,6 +231,15 @@ impl Renderer {
         let Some(binding) = self.virtual_models.bindings.remove(&handle_bits) else {
             return false;
         };
+        // Draws of this model queued earlier in the frame name a mesh that is
+        // about to be retired; one stale instance would fail the whole batch.
+        let mesh = binding.mesh;
+        self.virtual_models
+            .instances
+            .retain(|instance| instance.mesh_id() != mesh);
+        self.virtual_models
+            .placements
+            .retain(|placement| placement.handle_bits != handle_bits);
         self.retire_virtual_mesh(binding.mesh);
         if binding.draws_compatibility {
             self.evict_model_cache(binding.compatibility_handle);
@@ -340,7 +356,7 @@ impl Renderer {
         }
         let mut instances = std::mem::take(&mut self.virtual_models.instances);
         if !self.virtual_models.bindings.is_empty() {
-            for (_, node) in scene.nodes.iter() {
+            for (node_handle, node) in scene.nodes.iter() {
                 let Some(link) = node.virtual_link else {
                     continue;
                 };
@@ -354,12 +370,21 @@ impl Renderer {
                 let Ok(instance_id) = u32::try_from(instances.len()) else {
                     break;
                 };
+                let world = node.world_transform();
+                let node_key = node_handle.to_bits();
+                let previous = self
+                    .virtual_models
+                    .previous_node_transforms
+                    .get(&node_key)
+                    .copied()
+                    .unwrap_or(world);
+                self.virtual_models.node_transforms.insert(node_key, world);
                 if let Ok(instance) = GpuVirtualInstance::with_source_mesh_render_state(
                     binding.mesh,
                     link.source_mesh_index,
                     instance_id,
-                    node.world_transform(),
-                    node.previous_world_transform(),
+                    world,
+                    previous,
                     [1.0; 4],
                 ) {
                     instances.push(instance);
@@ -387,6 +412,11 @@ impl Renderer {
             &mut self.virtual_models.placements,
         );
         self.virtual_models.placements.clear();
+        std::mem::swap(
+            &mut self.virtual_models.previous_node_transforms,
+            &mut self.virtual_models.node_transforms,
+        );
+        self.virtual_models.node_transforms.clear();
     }
 
     /// Resident and capacity bytes of the page pool, pages resident, and the

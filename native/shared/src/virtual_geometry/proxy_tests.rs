@@ -76,3 +76,14 @@ fn proxy_leaves_alpha_masked_clusters_to_the_ordinary_renderer() {
     let asset = hierarchy_asset(archive);
     assert!(build_proxy(&asset, 0.0).unwrap().is_empty());
 }
+
+#[test]
+fn zero_proxy_error_keeps_the_leaves_even_under_a_lossless_parent() {
+    let mut archive = hierarchy_archive();
+    for cluster in &mut archive.clusters {
+        cluster.geometric_error = 0.0;
+    }
+    let asset = hierarchy_asset(archive);
+    assert_eq!(triangles(&asset, 0.0), 4);
+    assert_eq!(triangles(&asset, 0.5), 2, "any allowance takes the roots");
+}
