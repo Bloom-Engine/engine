@@ -2284,6 +2284,11 @@ pub fn bloom_get_profiler_frame_cpu_us() -> f64 {
 pub fn bloom_get_profiler_frame_gpu_us() -> f64 {
     engine().profiler.avg_frame_gpu_us()
 }
+/// SH-069: a browser is never the low tier unless BLOOM_LOW_TIER=1 forced it (it cannot here).
+#[wasm_bindgen]
+pub fn bloom_is_low_tier_gpu() -> f64 {
+    0.0
+}
 #[wasm_bindgen]
 pub fn bloom_print_profiler_summary() {
     // No stdout in the browser — route through the existing

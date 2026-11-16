@@ -186,7 +186,7 @@ struct SsrParams {
     /// into a world direction for the equirect lookup.
     inv_view_rot: mat4x4<f32>,
     /// EN-021 — x = env max LOD (matches the material path's
-    /// roughness×6 mip ramp), y = env intensity, zw unused.
+    /// roughness×6 mip ramp), y = env intensity, z = step curve, w unused.
     params2: vec4<f32>,
 };
 
@@ -369,7 +369,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let step_size = max_dist / n_steps_f;
 
     let jitter = ign_jitter(in.clip_pos.xy, u.params.w);
+    // Step curve (set_ssr_range). 1 = the even march. Above 1 the i-th
+    // sample sits at max_dist * ((i + 0.5 + jitter) / n)^curve: short steps
+    // beside the surface, long ones far out, which is what lets a road
+    // mirror a building 300 m away without losing the car next to it.
+    let curve = max(u.params2.z, 1.0);
+    let curved = curve > 1.001;
     var t = step_size * (0.5 + jitter);
+    if (curved) {
+        t = max_dist * pow((0.5 + jitter) / n_steps_f, curve);
+    }
 
     var hit_uv = vec2<f32>(-1.0);
     var hit_found = false;
@@ -399,11 +408,35 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             if (thickness < step_world * 2.0 + 0.1) {
                 hit_uv = ray_uv;
                 hit_found = true;
+                if (curved) {
+                    // Long steps overshoot: bisect between the last sample
+                    // in front of the surface and this one behind it.
+                    var lo = prev_t;
+                    var hi = t;
+                    for (var b = 0u; b < 5u; b = b + 1u) {
+                        let mid = 0.5 * (lo + hi);
+                        let mid_view = view_pos + r * mid;
+                        let mid_clip = u.proj * vec4<f32>(mid_view, 1.0);
+                        let mid_ndc = mid_clip.xyz / mid_clip.w;
+                        let mid_uv = vec2<f32>(mid_ndc.x * 0.5 + 0.5, 1.0 - (mid_ndc.y * 0.5 + 0.5));
+                        let mid_depth = textureSampleLevel(depth_tex, depth_samp, mid_uv, 0i);
+                        if (mid_ndc.z >= mid_depth) {
+                            hi = mid;
+                            hit_uv = mid_uv;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                }
             }
             break;
         }
         prev_t = t;
-        t = t + step_size;
+        if (curved) {
+            t = max_dist * pow((f32(i) + 1.5 + jitter) / n_steps_f, curve);
+        } else {
+            t = t + step_size;
+        }
     }
     if (!hit_found) {
         // March left the screen or found nothing — env fallback (EN-021).

@@ -1022,6 +1022,7 @@ declare function bloom_anim_play(handle: number, clip: number, fade: number, spe
 declare function bloom_anim_set_layer(handle: number, clip: number, weight: number, maskRoot: number, speed: number, looping: number): void;
 declare function bloom_anim_set_root_motion(handle: number, on: number): void;
 declare function bloom_anim_update(handle: number, dt: number, scale: number, px: number, py: number, pz: number, rotY: number): void;
+declare function bloom_anim_update_matrix(handle: number, dt: number, m0: number, m1: number, m2: number, m3: number, m4: number, m5: number, m6: number, m7: number, m8: number, m9: number, m10: number, m11: number, m12: number, m13: number, m14: number, m15: number): void;
 declare function bloom_anim_finished(handle: number): number;
 declare function bloom_anim_clip_duration(handle: number, clip: number): number;
 declare function bloom_anim_root_delta(handle: number, axis: number): number;
@@ -1058,6 +1059,16 @@ export function animSetRootMotion(handle: number, on: boolean): void {
 /// model per frame, in place of `updateModelAnimation`.
 export function animUpdate(handle: number, dt: number, scale: number, px: number, py: number, pz: number, rotY: number): void {
   bloom_anim_update(handle, dt, scale, px, py, pz, rotY);
+}
+
+/// `animUpdate` for a character carried by something that pitches and rolls
+/// (a driver in a car): `m16` is the full column-major model matrix that
+/// places the character, in place of scale, position and a turn about Y.
+/// IK targets and `jointWorld` stay in the character's own model space.
+export function animUpdateMatrix(handle: number, dt: number, m16: number[]): void {
+  bloom_anim_update_matrix(handle, dt,
+    m16[0], m16[1], m16[2], m16[3], m16[4], m16[5], m16[6], m16[7],
+    m16[8], m16[9], m16[10], m16[11], m16[12], m16[13], m16[14], m16[15]);
 }
 
 /// True once a non-looping clip has run past its end — the death/attack

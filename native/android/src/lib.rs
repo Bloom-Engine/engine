@@ -320,6 +320,14 @@ pub extern "C" fn bloom_init_window(
             ))
             .unwrap();
             __android_log_print(3, b"BloomEngine\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
+            // SH-069: decide the low tier before any pipeline is built.
+            bloom_shared::renderer::low_tier::note_android_adapter(&info.name);
+            let tier = std::ffi::CString::new(format!(
+                "low tier: {}",
+                bloom_shared::renderer::low_tier::low_tier()
+            ))
+            .unwrap();
+            __android_log_print(3, b"BloomEngine\0".as_ptr(), b"%s\0".as_ptr(), tier.as_ptr());
         }
 
         let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
@@ -1133,6 +1141,12 @@ pub extern "C" fn JNI_OnLoad(_vm: *mut libc::c_void, _reserved: *mut libc::c_voi
     if sysprop("debug.bloom.skipsky") == "1" {
         std::env::set_var("BLOOM_SKIP_SKY", "1");
     }
+    // SH-069 — force the low tier on (1) or off (0) on this phone:
+    //   adb shell setprop debug.bloom.lowtier 1
+    let low_tier = sysprop("debug.bloom.lowtier");
+    if low_tier == "0" || low_tier == "1" {
+        std::env::set_var("BLOOM_LOW_TIER", low_tier);
+    }
     // SH-055 diag — frame-graph bisection: comma list of pass-node names to
     // skip (see Renderer::dbg_skip). e.g.
     //   adb shell setprop debug.bloom.skip hdr_scene,translucent
@@ -1231,6 +1245,29 @@ pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSurface
             life = LIFE_CHANGED.wait_timeout(life, deadline - now).unwrap().0;
         }
     }
+}
+
+/// SH-069 — whether this phone's GPU is in the low tier, asked by the Activity before it has
+/// a surface (it sizes the surface from the answer). Records the same decision
+/// bloom_init_window would; `debug.bloom.lowtier` (JNI_OnLoad) overrides it either way.
+#[no_mangle]
+pub extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeIsLowTier(
+    _env: *mut libc::c_void,
+    _class: *mut libc::c_void,
+) -> u8 {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: backend_choice(),
+        flags: wgpu::InstanceFlags::default(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let name = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))
+    .map(|a| a.get_info().name)
+    .unwrap_or_default();
+    bloom_shared::renderer::low_tier::note_android_adapter(&name);
+    u8::from(bloom_shared::renderer::low_tier::low_tier())
 }
 
 /// The surface's new size in pixels (SurfaceHolder.Callback.surfaceChanged:

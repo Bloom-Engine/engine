@@ -365,14 +365,11 @@ unsafe fn handle_touches(touches: *const AnyObject, phase: TouchPhase) {
             let sy = loc.y * SCREEN_SCALE;
             eng.input.set_touch(index, sx, sy, active);
 
-            if index == 0 {
-                eng.input.set_mouse_position(sx, sy);
-                if active {
-                    eng.input.set_mouse_button_down(0);
-                } else {
-                    eng.input.set_mouse_button_up(0);
-                }
-            }
+            // No mouse from these touches. On tvOS every touch is a finger on the remote's touch
+            // surface (UITouchTypeIndirect): it has no place on the screen, and as "left mouse
+            // button down" it fired the weapon of any game whose fire is the mouse button the
+            // moment the player reached for the pad. The surface is read as the micro gamepad's
+            // d-pad instead (poll_controllers).
         }
     }
 }
@@ -1344,110 +1341,108 @@ fn request_renderer_device(
 // GCController — Siri Remote and game controller monitoring
 // ============================================================
 
-/// Poll connected game controllers and feed their state into the engine input system.
-/// Called once during init and also from bloom_begin_drawing to poll controller state.
-fn poll_game_controllers() {
-    unsafe {
-        let gc_cls = match AnyClass::get(c"GCController") {
-            Some(c) => c,
-            None => return,
-        };
-        let controllers: Retained<AnyObject> = msg_send![gc_cls, controllers];
-        let count: usize = msg_send![&*controllers, count];
-        if count == 0 { return; }
-
-        // Use the first connected controller
-        let controller: Retained<AnyObject> = msg_send![&*controllers, objectAtIndex: 0usize];
-
-        // Try extended gamepad profile first (MFi, PS, Xbox controllers)
-        let extended: *const AnyObject = msg_send![&*controller, extendedGamepad];
-        if !extended.is_null() {
-            if let Some(eng) = ENGINE.get_mut() {
-                eng.input.gamepad_available = true;
-
-                // Left thumbstick
-                let left_stick: Retained<AnyObject> = msg_send![&*extended, leftThumbstick];
-                let lx: f64 = msg_send![&*left_stick, xAxis_value];
-                let ly: f64 = msg_send![&*left_stick, yAxis_value];
-                eng.input.set_gamepad_axis(0, lx as f32);
-                eng.input.set_gamepad_axis(1, -ly as f32); // Invert Y
-
-                // Right thumbstick
-                let right_stick: Retained<AnyObject> = msg_send![&*extended, rightThumbstick];
-                let rx: f64 = msg_send![&*right_stick, xAxis_value];
-                let ry: f64 = msg_send![&*right_stick, yAxis_value];
-                eng.input.set_gamepad_axis(2, rx as f32);
-                eng.input.set_gamepad_axis(3, -ry as f32);
-
-                // Buttons: A(0), B(1), X(2), Y(3)
-                let btn_a: Retained<AnyObject> = msg_send![&*extended, buttonA];
-                let btn_b: Retained<AnyObject> = msg_send![&*extended, buttonB];
-                let btn_x: Retained<AnyObject> = msg_send![&*extended, buttonX];
-                let btn_y: Retained<AnyObject> = msg_send![&*extended, buttonY];
-                let a_pressed: Bool = msg_send![&*btn_a, isPressed];
-                let b_pressed: Bool = msg_send![&*btn_b, isPressed];
-                let x_pressed: Bool = msg_send![&*btn_x, isPressed];
-                let y_pressed: Bool = msg_send![&*btn_y, isPressed];
-                if a_pressed.as_bool() { eng.input.set_gamepad_button_down(0); }
-                if b_pressed.as_bool() { eng.input.set_gamepad_button_down(1); }
-                if x_pressed.as_bool() { eng.input.set_gamepad_button_down(2); }
-                if y_pressed.as_bool() { eng.input.set_gamepad_button_down(3); }
-
-                // D-pad
-                let dpad: Retained<AnyObject> = msg_send![&*extended, dpad];
-                let up: Retained<AnyObject> = msg_send![&*dpad, up];
-                let down: Retained<AnyObject> = msg_send![&*dpad, down];
-                let left: Retained<AnyObject> = msg_send![&*dpad, left];
-                let right: Retained<AnyObject> = msg_send![&*dpad, right];
-                let up_p: Bool = msg_send![&*up, isPressed];
-                let down_p: Bool = msg_send![&*down, isPressed];
-                let left_p: Bool = msg_send![&*left, isPressed];
-                let right_p: Bool = msg_send![&*right, isPressed];
-                if up_p.as_bool() { eng.input.set_gamepad_button_down(12); }
-                if down_p.as_bool() { eng.input.set_gamepad_button_down(13); }
-                if left_p.as_bool() { eng.input.set_gamepad_button_down(14); }
-                if right_p.as_bool() { eng.input.set_gamepad_button_down(15); }
-
-                // Shoulders and triggers
-                let l_shoulder: Retained<AnyObject> = msg_send![&*extended, leftShoulder];
-                let r_shoulder: Retained<AnyObject> = msg_send![&*extended, rightShoulder];
-                let ls_p: Bool = msg_send![&*l_shoulder, isPressed];
-                let rs_p: Bool = msg_send![&*r_shoulder, isPressed];
-                if ls_p.as_bool() { eng.input.set_gamepad_button_down(4); }
-                if rs_p.as_bool() { eng.input.set_gamepad_button_down(5); }
-
-                let l_trigger: Retained<AnyObject> = msg_send![&*extended, leftTrigger];
-                let r_trigger: Retained<AnyObject> = msg_send![&*extended, rightTrigger];
-                eng.input.set_gamepad_axis(4, { let v: f64 = msg_send![&*l_trigger, value]; v as f32 });
-                eng.input.set_gamepad_axis(5, { let v: f64 = msg_send![&*r_trigger, value]; v as f32 });
-            }
-            return;
-        }
-
-        // Fall back to micro gamepad profile (Siri Remote)
-        let micro: *const AnyObject = msg_send![&*controller, microGamepad];
-        if !micro.is_null() {
-            if let Some(eng) = ENGINE.get_mut() {
-                eng.input.gamepad_available = true;
-
-                // Siri Remote touchpad → axes 0/1
-                let dpad: Retained<AnyObject> = msg_send![&*micro, dpad];
-                let x_val: f64 = { let axis: Retained<AnyObject> = msg_send![&*dpad, xAxis]; msg_send![&*axis, value] };
-                let y_val: f64 = { let axis: Retained<AnyObject> = msg_send![&*dpad, yAxis]; msg_send![&*axis, value] };
-                eng.input.set_gamepad_axis(0, x_val as f32);
-                eng.input.set_gamepad_axis(1, -y_val as f32);
-
-                // Button A (select/click) and Button X (play/pause)
-                let btn_a: Retained<AnyObject> = msg_send![&*micro, buttonA];
-                let btn_x: Retained<AnyObject> = msg_send![&*micro, buttonX];
-                let a_pressed: Bool = msg_send![&*btn_a, isPressed];
-                let x_pressed: Bool = msg_send![&*btn_x, isPressed];
-                if a_pressed.as_bool() { eng.input.set_gamepad_button_down(0); }
-                if x_pressed.as_bool() { eng.input.set_gamepad_button_down(9); } // start/pause
-            }
+/// Read the controllers into the engine's gamepad state, once a frame on the game thread
+/// (GCController values are safe to read there). A real gamepad (extended profile) wins over
+/// the Siri Remote wherever it sits in the list; with the remote alone the kind is
+/// GAMEPAD_KIND_REMOTE, so a game can give it a scheme of its own: it has one touch surface
+/// (left stick axes), a click (A) and play/pause (Start), nothing else.
+unsafe fn poll_controllers() {
+    let gc_cls = match AnyClass::get(c"GCController") { Some(c) => c, None => return };
+    let controllers: Retained<AnyObject> = msg_send![gc_cls, controllers];
+    let count: usize = msg_send![&*controllers, count];
+    {
+        static POLL_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = POLL_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n < 3 {
+            std::io::Write::write_all(&mut std::io::stderr(),
+                format!("[bloom-tvos] GC poll: {} controllers\n", count).as_bytes()).ok();
         }
     }
+    let eng = engine();
+    if count == 0 {
+        if eng.input.gamepad_available { eng.input.reset_gamepad(); }
+        eng.input.gamepad_available = false;
+        return;
+    }
+    let mut extended: *const AnyObject = std::ptr::null();
+    let mut micro: *const AnyObject = std::ptr::null();
+    for i in 0..count {
+        let c: *const AnyObject = msg_send![&*controllers, objectAtIndex: i];
+        if c.is_null() { continue; }
+        let e: *const AnyObject = msg_send![c, extendedGamepad];
+        if !e.is_null() { if extended.is_null() { extended = e; } continue; }
+        let m: *const AnyObject = msg_send![c, microGamepad];
+        if !m.is_null() && micro.is_null() { micro = m; }
+    }
+    if extended.is_null() && micro.is_null() { return; }
+    // A poll only ever sets what is held: without this a released button stays down for ever.
+    eng.input.reset_gamepad();
+    eng.input.gamepad_available = true;
+
+    unsafe fn axis2(pad: *const AnyObject) -> (f32, f32) {
+        let x_axis: *const AnyObject = msg_send![pad, xAxis];
+        let y_axis: *const AnyObject = msg_send![pad, yAxis];
+        let x: f32 = msg_send![x_axis, value];
+        let y: f32 = msg_send![y_axis, value];
+        (x, y)
+    }
+    unsafe fn held(button: *const AnyObject) -> bool {
+        if button.is_null() { return false; }
+        let v: f32 = msg_send![button, value];
+        v > 0.5
+    }
+
+    if !extended.is_null() {
+        eng.input.gamepad_kind = bloom_shared::input::GAMEPAD_KIND_UNKNOWN;
+        let ls: *const AnyObject = msg_send![extended, leftThumbstick];
+        let rs: *const AnyObject = msg_send![extended, rightThumbstick];
+        let (lx, ly) = axis2(ls);
+        let (rx, ry) = axis2(rs);
+        eng.input.set_gamepad_axis(0, lx);
+        eng.input.set_gamepad_axis(1, -ly);
+        eng.input.set_gamepad_axis(2, rx);
+        eng.input.set_gamepad_axis(3, -ry);
+        let lt: *const AnyObject = msg_send![extended, leftTrigger];
+        let rt: *const AnyObject = msg_send![extended, rightTrigger];
+        let ltv: f32 = msg_send![lt, value];
+        let rtv: f32 = msg_send![rt, value];
+        eng.input.set_gamepad_axis(4, ltv);
+        eng.input.set_gamepad_axis(5, rtv);
+        // The standard layout the other platforms report: A B X Y, LB RB, Back Start, LS RS,
+        // then the d-pad up, down, left, right at 12..15.
+        let b: [*const AnyObject; 8] = [
+            msg_send![extended, buttonA], msg_send![extended, buttonB],
+            msg_send![extended, buttonX], msg_send![extended, buttonY],
+            msg_send![extended, leftShoulder], msg_send![extended, rightShoulder],
+            msg_send![extended, buttonOptions], msg_send![extended, buttonMenu],
+        ];
+        for (i, btn) in b.iter().enumerate() {
+            if held(*btn) { eng.input.set_gamepad_button_down(i); }
+        }
+        let l3: *const AnyObject = msg_send![extended, leftThumbstickButton];
+        let r3: *const AnyObject = msg_send![extended, rightThumbstickButton];
+        if held(l3) { eng.input.set_gamepad_button_down(8); }
+        if held(r3) { eng.input.set_gamepad_button_down(9); }
+        let dpad: *const AnyObject = msg_send![extended, dpad];
+        let (dx, dy) = axis2(dpad);
+        if dy > 0.5 { eng.input.set_gamepad_button_down(12); }
+        if dy < -0.5 { eng.input.set_gamepad_button_down(13); }
+        if dx < -0.5 { eng.input.set_gamepad_button_down(14); }
+        if dx > 0.5 { eng.input.set_gamepad_button_down(15); }
+        return;
+    }
+
+    eng.input.gamepad_kind = bloom_shared::input::GAMEPAD_KIND_REMOTE;
+    let dpad: *const AnyObject = msg_send![micro, dpad];
+    let (x, y) = axis2(dpad);
+    eng.input.set_gamepad_axis(0, x);
+    eng.input.set_gamepad_axis(1, -y);
+    let a: *const AnyObject = msg_send![micro, buttonA];
+    let play: *const AnyObject = msg_send![micro, buttonX];
+    if held(a) { eng.input.set_gamepad_button_down(0); }
+    if held(play) { eng.input.set_gamepad_button_down(7); }
 }
+
 
 fn setup_game_controllers() {
     // Register for GCController connection notifications and set up input handlers.
@@ -1648,84 +1643,7 @@ pub extern "C" fn bloom_begin_drawing() {
     if frame == 0 {
         std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] first bloom_begin_drawing\n").ok();
     }
-    // Poll GCController synchronously on the game thread.
-    // GCController value reading is thread-safe.
-    unsafe {
-        if let Some(gc_cls) = AnyClass::get(c"GCController") {
-            let controllers: Retained<AnyObject> = msg_send![gc_cls, controllers];
-            let count: usize = msg_send![&*controllers, count];
-            {
-                static POLL_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                let n = POLL_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n < 3 || (n % 300 == 0) {
-                    std::io::Write::write_all(&mut std::io::stderr(),
-                        format!("[bloom-tvos] GC poll: {} controllers\n", count).as_bytes()).ok();
-                }
-            }
-            if count > 0 {
-                let controller: Retained<AnyObject> = msg_send![&*controllers, objectAtIndex: 0usize];
-                let eng = engine();
-                eng.input.gamepad_available = true;
-
-                // Micro gamepad (Siri Remote)
-                let micro: *const AnyObject = msg_send![&*controller, microGamepad];
-                let extended_check: *const AnyObject = msg_send![&*controller, extendedGamepad];
-                {
-                    static PROFILE_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !PROFILE_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        std::io::Write::write_all(&mut std::io::stderr(),
-                            format!("[bloom-tvos] micro={} extended={}\n", !micro.is_null(), !extended_check.is_null()).as_bytes()).ok();
-                    }
-                }
-                if !micro.is_null() {
-                    let dpad: Retained<AnyObject> = msg_send![&*micro, dpad];
-                    let x_axis: Retained<AnyObject> = msg_send![&*dpad, xAxis];
-                    let y_axis: Retained<AnyObject> = msg_send![&*dpad, yAxis];
-                    let x_val: f32 = msg_send![&*x_axis, value];
-                    let y_val: f32 = msg_send![&*y_axis, value];
-                    eng.input.set_gamepad_axis(0, x_val);
-                    eng.input.set_gamepad_axis(1, -y_val);
-                    let btn_a: Retained<AnyObject> = msg_send![&*micro, buttonA];
-                    let btn_x: Retained<AnyObject> = msg_send![&*micro, buttonX];
-                    let a_val: f32 = msg_send![&*btn_a, value];
-                    let x_btn_val: f32 = msg_send![&*btn_x, value];
-                    if a_val > 0.01 || x_btn_val > 0.01 || x_val.abs() > 0.01 || y_val.abs() > 0.01 {
-                        static BTN_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                        let n = BTN_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if n < 20 {
-                            std::io::Write::write_all(&mut std::io::stderr(),
-                                format!("[bloom-tvos] micro: x={:.2} y={:.2} a={:.2} x_btn={:.2}\n", x_val, y_val, a_val, x_btn_val).as_bytes()).ok();
-                        }
-                    }
-                    if a_val > 0.5 { eng.input.set_gamepad_button_down(0); }
-                    if x_btn_val > 0.5 { eng.input.set_gamepad_button_down(7); }
-                }
-
-                // Extended gamepad (MFi/PS/Xbox)
-                let extended: *const AnyObject = msg_send![&*controller, extendedGamepad];
-                if !extended.is_null() {
-                    let left_stick: Retained<AnyObject> = msg_send![&*extended, leftThumbstick];
-                    let lx_axis: Retained<AnyObject> = msg_send![&*left_stick, xAxis];
-                    let ly_axis: Retained<AnyObject> = msg_send![&*left_stick, yAxis];
-                    let lx: f32 = msg_send![&*lx_axis, value];
-                    let ly: f32 = msg_send![&*ly_axis, value];
-                    eng.input.set_gamepad_axis(0, lx);
-                    eng.input.set_gamepad_axis(1, -ly);
-                    let btn_a: Retained<AnyObject> = msg_send![&*extended, buttonA];
-                    let a_val: f32 = msg_send![&*btn_a, value];
-                    if lx.abs() > 0.01 || ly.abs() > 0.01 || a_val > 0.01 {
-                        static EXT_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                        let n = EXT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if n < 20 {
-                            std::io::Write::write_all(&mut std::io::stderr(),
-                                format!("[bloom-tvos] ext: lx={:.2} ly={:.2} a={:.2}\n", lx, ly, a_val).as_bytes()).ok();
-                        }
-                    }
-                    if a_val > 0.5 { eng.input.set_gamepad_button_down(0); }
-                }
-            }
-        }
-    }
+    unsafe { poll_controllers(); }
     // The view's display scale and safe area (on a TV: the overscan-safe region), for
     // getDisplayScale() / getSafeAreaInset(), in the pixels getScreenWidth() reports.
     unsafe {
