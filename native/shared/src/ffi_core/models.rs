@@ -220,6 +220,7 @@ macro_rules! __bloom_ffi_models {
                 // Evict cached GPU meshes (keyed by handle bits) before the
                 // handle dies — without this the buffers leak and a slot-
                 // reusing future model would render the stale geometry.
+                eng.renderer.detach_model_virtual_geometry(handle.to_bits());
                 eng.renderer.evict_model_cache(handle.to_bits());
                 // The model's own textures go with it. They are most of a
                 // model's memory, and unloading used to keep every one of
@@ -236,6 +237,186 @@ macro_rules! __bloom_ffi_models {
         #[no_mangle]
         pub extern "C" fn bloom_unload_model(_handle: f64) {
             $crate::ffi::feature_off_warn_once("bloom_unload_model", "models3d");
+        }
+
+        // Virtual geometry for games: request the mode before the window,
+        // enable the page pool after it, attach a cooked .bgeo to a loaded
+        // model, then draw placements. Every call returns 0 when it did
+        // nothing, so a game can fall back to the ordinary draw.
+        //
+        // bloom_request_virtual_geometry  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_request_virtual_geometry() -> f64 {
+            $crate::ffi::guard("bloom_request_virtual_geometry", move || {
+                if $crate::renderer::Renderer::request_virtual_geometry() { 1.0 } else { 0.0 }
+            })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_request_virtual_geometry() -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_request_virtual_geometry", "models3d");
+            0.0
+        }
+
+        // bloom_enable_virtual_geometry  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_enable_virtual_geometry(pool_megabytes: f64) -> f64 {
+            $crate::ffi::guard("bloom_enable_virtual_geometry", move || {
+                match engine().renderer.enable_virtual_models(pool_megabytes.max(0.0) as u32) {
+                    Ok(()) => 1.0,
+                    Err(error) => {
+                        eprintln!("bloom: virtual geometry stays off: {error}");
+                        0.0
+                    }
+                }
+            })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_enable_virtual_geometry(_pool_megabytes: f64) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_enable_virtual_geometry", "models3d");
+            0.0
+        }
+
+        // bloom_model_attach_virtual_geometry  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_attach_virtual_geometry(handle: f64, path_ptr: *const u8) -> f64 {
+            $crate::ffi::guard("bloom_model_attach_virtual_geometry", move || {
+                let path = $crate::string_header::str_from_header(path_ptr);
+                let resolved = bloom_resolve_asset_path(path);
+                let eng = engine();
+                if !eng.renderer.virtual_models_enabled() {
+                    return 0.0;
+                }
+                let bytes = match std::fs::read(std::path::Path::new(resolved.as_ref())) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        eprintln!("bloom: virtual geometry archive '{path}': {error}");
+                        return 0.0;
+                    }
+                };
+                let $crate::engine::EngineState { ref models, ref mut renderer, .. } = *eng;
+                let Some(model) = models.get(handle) else {
+                    return 0.0;
+                };
+                match renderer.attach_model_virtual_geometry(handle.to_bits(), model, bytes) {
+                    Ok(()) => 1.0,
+                    Err(error) => {
+                        eprintln!("bloom: virtual geometry archive '{path}' not attached: {error}");
+                        0.0
+                    }
+                }
+            })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_attach_virtual_geometry(_handle: f64, _path_ptr: *const u8) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_model_attach_virtual_geometry", "models3d");
+            0.0
+        }
+
+        // bloom_draw_model_virtual_transform16  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        #[allow(clippy::too_many_arguments)]
+        pub extern "C" fn bloom_draw_model_virtual_transform16(
+            handle: f64,
+            m0: f64, m1: f64, m2: f64, m3: f64,
+            m4: f64, m5: f64, m6: f64, m7: f64,
+            m8: f64, m9: f64, m10: f64, m11: f64,
+            m12: f64, m13: f64, m14: f64, m15: f64,
+            color_packed_argb: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_draw_model_virtual_transform16", move || {
+                let bits = color_packed_argb as u32;
+                let a = ((bits >> 24) & 0xff) as f32 / 255.0;
+                let r = ((bits >> 16) & 0xff) as f32 / 255.0;
+                let g = ((bits >>  8) & 0xff) as f32 / 255.0;
+                let b = ( bits        & 0xff) as f32 / 255.0;
+                let s = [
+                    m0, m1, m2, m3,
+                    m4, m5, m6, m7,
+                    m8, m9, m10, m11,
+                    m12, m13, m14, m15,
+                ];
+                let mut mat = [[0.0f32; 4]; 4];
+                for col in 0..4 {
+                    for row in 0..4 {
+                        mat[col][row] = s[col * 4 + row] as f32;
+                    }
+                }
+                if engine().renderer.draw_model_virtual(handle.to_bits(), mat, [r, g, b, a]) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        #[allow(clippy::too_many_arguments)]
+        pub extern "C" fn bloom_draw_model_virtual_transform16(
+            _handle: f64,
+            _m0: f64, _m1: f64, _m2: f64, _m3: f64,
+            _m4: f64, _m5: f64, _m6: f64, _m7: f64,
+            _m8: f64, _m9: f64, _m10: f64, _m11: f64,
+            _m12: f64, _m13: f64, _m14: f64, _m15: f64,
+            _color_packed_argb: f64,
+        ) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_draw_model_virtual_transform16", "models3d");
+            0.0
+        }
+
+        // bloom_set_virtual_geometry_error_pixels  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_virtual_geometry_error_pixels(pixels: f64) -> f64 {
+            $crate::ffi::guard("bloom_set_virtual_geometry_error_pixels", move || {
+                let renderer = &mut engine().renderer;
+                renderer.set_virtual_model_error_pixels(pixels as f32);
+                if renderer.virtual_models_enabled() { 1.0 } else { 0.0 }
+            })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_virtual_geometry_error_pixels(_pixels: f64) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_set_virtual_geometry_error_pixels", "models3d");
+            0.0
+        }
+
+        // bloom_set_virtual_geometry_proxy_error  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_virtual_geometry_proxy_error(relative_error: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_virtual_geometry_proxy_error", move || {
+                engine().renderer.set_virtual_model_proxy_error(relative_error as f32);
+            })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_virtual_geometry_proxy_error(_relative_error: f64) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_set_virtual_geometry_proxy_error", "models3d");
+            0.0
+        }
+
+        // bloom_virtual_geometry_stat  [gated: models3d]
+        // 0 resident bytes, 1 pool bytes, 2 resident pages, 3 placements last frame.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_virtual_geometry_stat(which: f64) -> f64 {
+            $crate::ffi::guard("bloom_virtual_geometry_stat", move || {
+                let stats = engine().renderer.virtual_model_stats();
+                stats.get(which as usize).copied().unwrap_or(0.0)
+            })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_virtual_geometry_stat(_which: f64) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_virtual_geometry_stat", "models3d");
+            0.0
         }
 
         // bloom_gen_mesh_cube  [source: linux; gated: models3d]

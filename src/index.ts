@@ -89,6 +89,8 @@ export {
 export {
   loadModel, drawModel, drawModelRotated, drawModelTransform, unloadModel, getModelBounds, genMeshSplineRibbon,
   setModelFoliageWind, setFoliageShadowMotion, setCutoutEdgeFade, setCutoutEnvSpecular,
+  requestVirtualGeometry, enableVirtualGeometry, attachVirtualGeometry, drawModelVirtual,
+  setVirtualGeometryErrorPixels, virtualGeometryStat, setVirtualGeometryProxyError,
   drawCube, drawCubeWires, drawSphere, drawSphereWires,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
   loadShader, compileMaterial, drawMeshWithMaterial,
@@ -159,6 +161,7 @@ export {
   pickScene,
   enableShadows, disableShadows, dumpShadowMap,
   attachModelToNode,
+  attachVirtualModelToNode,
   enablePostFx, disablePostFx,
   setPostFxSelected, setPostFxHovered,
   setOutlineColor, setOutlineThickness,

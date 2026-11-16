@@ -1180,3 +1180,27 @@
 #[no_mangle] pub extern "C" fn bloom_physics_vehicle_get_wheel_angular_velocity(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_request_virtual_geometry() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_enable_virtual_geometry(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_model_attach_virtual_geometry(_p0: f64, _p1: *const u8) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_draw_model_virtual_transform16(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_virtual_geometry_error_pixels(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_virtual_geometry_stat(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_scene_attach_virtual_model(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_virtual_geometry_proxy_error(_p0: f64) -> f64 {
+    0.0
+}

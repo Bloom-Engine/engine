@@ -167,6 +167,7 @@ declare function bloom_postfx_set_outline_color(r: number, g: number, b: number,
 declare function bloom_postfx_set_outline_thickness(thickness: number): number;
 
 // Model attachment
+declare function bloom_scene_attach_virtual_model(node: number, model: number, meshIndex: number): number;
 declare function bloom_scene_attach_model(nodeHandle: number, modelHandle: number, meshIndex: number): void;
 
 // 3D→2D Projection
@@ -769,6 +770,25 @@ export function setOutlineThickness(thickness: number): boolean {
 // ============================================================
 // Model Attachment (GLTF → Scene Node)
 // ============================================================
+
+/**
+ * Put one mesh of a model that has a cooked archive (`attachVirtualGeometry`)
+ * on a scene node, drawn through virtual geometry. The node keeps a reduced
+ * stand-in of the mesh that casts its shadows and feeds GI; move, hide and
+ * destroy the node as usual. Call it once per mesh, as with
+ * `attachModelToNode`. Meshes that cannot be virtual (cut-out, translucent)
+ * are attached the ordinary way by the same call.
+ *
+ * Returns false when the model has no archive: attach it with
+ * `attachModelToNode` instead.
+ */
+export function attachVirtualModelToNode(
+  nodeHandle: SceneNodeHandle,
+  modelHandle: number,
+  meshIndex: number = 0,
+): boolean {
+  return bloom_scene_attach_virtual_model(nodeHandle, modelHandle, meshIndex) !== 0;
+}
 
 /**
  * Attach a loaded GLTF model's mesh to a scene node.

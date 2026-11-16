@@ -86,7 +86,9 @@ pub fn bloom_set_sharpen_strength(strength: f64) -> f64 {
 }
 #[wasm_bindgen]
 pub fn bloom_set_ssgi_probe_spacing(pixels: f64) -> f64 {
-    engine().renderer.set_ssgi_probe_spacing(pixels.max(0.0) as u32);
+    engine()
+        .renderer
+        .set_ssgi_probe_spacing(pixels.max(0.0) as u32);
     1.0
 }
 #[wasm_bindgen]
@@ -120,7 +122,9 @@ pub fn bloom_set_shadow_distance(metres: f64) -> f64 {
 }
 #[wasm_bindgen]
 pub fn bloom_set_ssao_downscale(divisor: f64) -> f64 {
-    engine().renderer.set_ssao_downscale(divisor.max(0.0) as u32);
+    engine()
+        .renderer
+        .set_ssao_downscale(divisor.max(0.0) as u32);
     1.0
 }
 #[wasm_bindgen]
@@ -372,7 +376,9 @@ pub fn bloom_set_cutout_env_specular(keep: f64) -> f64 {
 
 #[wasm_bindgen]
 pub fn bloom_set_cutout_edge_fade(full: f64, none: f64) -> f64 {
-    engine().renderer.set_cutout_edge_fade(full as f32, none as f32);
+    engine()
+        .renderer
+        .set_cutout_edge_fade(full as f32, none as f32);
     1.0
 }
 

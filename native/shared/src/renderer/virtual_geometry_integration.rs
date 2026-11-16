@@ -65,6 +65,14 @@ impl RendererVirtualGeometry {
         })
     }
 
+    pub(crate) fn take_owned_materials(&mut self, mesh: VirtualMeshId) -> Option<Vec<MaterialId>> {
+        self.owned_materials.remove(&mesh)
+    }
+
+    pub(crate) fn pool_telemetry(&self) -> crate::virtual_geometry::GpuVirtualGeometryTelemetry {
+        self.pool.telemetry()
+    }
+
     pub(crate) fn begin_frame(&mut self, device: &wgpu::Device) {
         self.streamer.poll(device);
         self.renderer_frame = self.renderer_frame.wrapping_add(1);

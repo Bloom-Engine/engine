@@ -130,6 +130,10 @@ mod transmitted_shadows;
 mod transparent_gi;
 #[cfg(feature = "models3d")]
 mod virtual_geometry_integration;
+#[cfg(feature = "models3d")]
+mod virtual_model_api;
+#[cfg(feature = "models3d")]
+pub use virtual_model_api::VirtualNodeRole;
 mod volumetric_fog;
 #[cfg(feature = "models3d")]
 pub use virtual_geometry_integration::RendererVirtualGeometryError;
@@ -1431,6 +1435,9 @@ pub struct Renderer {
     /// and owns no pool, transient buffer, visibility target, or pipeline.
     #[cfg(feature = "models3d")]
     virtual_geometry: Option<virtual_geometry_integration::RendererVirtualGeometry>,
+    /// Models with a cooked archive attached and the frame's virtual draws.
+    #[cfg(feature = "models3d")]
+    virtual_models: virtual_model_api::VirtualModelState,
     /// Lazy buffers for workload-gated per-page VSM indirect submission.
     vsm_gpu_casters: vsm_gpu_casters::VsmGpuCasters,
     /// Handles whose cached meshes carry skin weights, recorded at cache
@@ -8648,6 +8655,8 @@ impl Renderer {
             gpu_driven,
             #[cfg(feature = "models3d")]
             virtual_geometry: None,
+            #[cfg(feature = "models3d")]
+            virtual_models: Default::default(),
             vsm_gpu_casters,
             model_skinned: std::collections::HashSet::new(),
             model_blended: std::collections::HashSet::new(),

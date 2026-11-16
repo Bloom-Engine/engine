@@ -15,10 +15,10 @@
 
 use crate::engine;
 use crate::physics_ffi::{
-    jb_body_add_impulse, jb_body_create, jb_body_destroy, jb_body_get_position,
-    jb_body_get_rotation, jb_body_set_angular_damping, jb_body_set_friction,
+    jb_bodies_set_linked_group, jb_body_add_impulse, jb_body_create, jb_body_destroy,
+    jb_body_get_position, jb_body_get_rotation, jb_body_set_angular_damping, jb_body_set_friction,
     jb_body_set_linear_damping, jb_body_set_restitution, jb_constraint_destroy,
-    jb_bodies_set_linked_group, jb_constraint_six_dof, jb_constraint_swing_twist, jb_shape_capsule,
+    jb_constraint_six_dof, jb_constraint_swing_twist, jb_shape_capsule,
 };
 use wasm_bindgen::prelude::*;
 
@@ -286,7 +286,13 @@ pub fn bloom_ragdoll_release(rag: f64) {
 }
 
 #[wasm_bindgen]
-pub fn bloom_ragdoll_configure(rag: f64, max_bodies: f64, radius_scale: f64, swing: f64, twist: f64) {
+pub fn bloom_ragdoll_configure(
+    rag: f64,
+    max_bodies: f64,
+    radius_scale: f64,
+    swing: f64,
+    twist: f64,
+) {
     let Some(r) = engine().ragdolls.get_mut(rag as u32) else {
         return;
     };
@@ -315,5 +321,7 @@ pub fn bloom_ragdoll_set_joint(rag: f64, joint: f64, simulate: f64, swing: f64, 
     }
     let j = joint as usize;
     r.config.joints.retain(|o| o.0 != j);
-    r.config.joints.push((j, simulate != 0.0, swing as f32, twist as f32));
+    r.config
+        .joints
+        .push((j, simulate != 0.0, swing as f32, twist as f32));
 }

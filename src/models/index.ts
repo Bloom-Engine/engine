@@ -18,6 +18,20 @@ declare function bloom_set_model_foliage_wind(handle: number, amount: number): n
 declare function bloom_set_foliage_shadow_motion(on: number): number;
 declare function bloom_set_cutout_edge_fade(full: number, none: number): number;
 declare function bloom_set_cutout_env_specular(keep: number): number;
+declare function bloom_request_virtual_geometry(): number;
+declare function bloom_enable_virtual_geometry(poolMegabytes: number): number;
+declare function bloom_model_attach_virtual_geometry(handle: number, path: number): number;
+declare function bloom_draw_model_virtual_transform16(
+  handle: number,
+  m0: number, m1: number, m2: number, m3: number,
+  m4: number, m5: number, m6: number, m7: number,
+  m8: number, m9: number, m10: number, m11: number,
+  m12: number, m13: number, m14: number, m15: number,
+  colorPackedArgb: number,
+): number;
+declare function bloom_set_virtual_geometry_error_pixels(pixels: number): number;
+declare function bloom_virtual_geometry_stat(which: number): number;
+declare function bloom_set_virtual_geometry_proxy_error(relativeError: number): number;
 declare function bloom_unload_model(handle: number): void;
 declare function bloom_draw_cube(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_cube_wires(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
@@ -234,6 +248,92 @@ export function drawModelTransform(model: Model, m16: number[], tint: Color): vo
     m16[12], m16[13], m16[14], m16[15],
     packed,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Virtual geometry: dense static models drawn as streamed clusters, with the
+// level of detail chosen per cluster on the GPU. See docs/virtualized-geometry.md.
+//
+//   requestVirtualGeometry();                 // before initWindow
+//   initWindow(...);
+//   enableVirtualGeometry(128);               // page pool, MB of GPU memory
+//   const house = loadModel('house.glb');
+//   attachVirtualGeometry(house, 'house.bgeo');   // cooked from that same file
+//   ... each frame: drawModelVirtual(house, matrix, WHITE)
+//
+// Every call returns false when it did nothing (an older device, the web, a
+// missing archive), so a game falls back to `drawModelTransform`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask for the renderer to start in the mode virtual geometry is drawn through.
+ * Call it BEFORE `initWindow`: the mode is fixed when the device is created.
+ */
+export function requestVirtualGeometry(): boolean {
+  return bloom_request_virtual_geometry() !== 0;
+}
+
+/**
+ * Create the page pool: `poolMegabytes` of GPU memory that holds the clusters
+ * currently in view (clamped to the device's largest storage buffer). Call it
+ * after `initWindow`. False means the device or the start-up mode cannot do it.
+ */
+export function enableVirtualGeometry(poolMegabytes: number): boolean {
+  return bloom_enable_virtual_geometry(poolMegabytes) !== 0;
+}
+
+/**
+ * Give a loaded model its cooked archive (`bloom-cook geometry model.glb
+ * model.bgeo --hierarchy-levels 8`). The archive must be cooked from the very
+ * file the model was loaded from; anything else is refused.
+ */
+export function attachVirtualGeometry(model: Model, bgeoPath: string): boolean {
+  return bloom_model_attach_virtual_geometry(model.handle, bgeoPath as any) !== 0;
+}
+
+/**
+ * Draw one placement of a model through virtual geometry. `m16` is a
+ * column-major model matrix as in `drawModelTransform`. The model's cut-out
+ * and translucent parts are drawn by the ordinary renderer in the same call.
+ * Returns false when the model has no archive attached.
+ */
+export function drawModelVirtual(model: Model, m16: number[], tint: Color): boolean {
+  const a = (tint.a & 0xff) << 24;
+  const r = (tint.r & 0xff) << 16;
+  const g = (tint.g & 0xff) <<  8;
+  const b =  tint.b & 0xff;
+  const packed = (a | r | g | b) >>> 0;
+  return bloom_draw_model_virtual_transform16(
+    model.handle,
+    m16[0], m16[1], m16[2], m16[3],
+    m16[4], m16[5], m16[6], m16[7],
+    m16[8], m16[9], m16[10], m16[11],
+    m16[12], m16[13], m16[14], m16[15],
+    packed,
+  ) !== 0;
+}
+
+/**
+ * The on-screen error, in pixels, at which finer clusters are brought in
+ * (default 1). Larger values draw coarser geometry and stream less.
+ */
+export function setVirtualGeometryErrorPixels(pixels: number): boolean {
+  return bloom_set_virtual_geometry_error_pixels(pixels) !== 0;
+}
+
+/**
+ * Virtual clusters are drawn to the camera only; shadows and GI use a reduced
+ * stand-in mesh cut from the same archive. This sets its geometric error as a
+ * share of the model's size (default 0.002; 0 keeps every source triangle).
+ * Call it before `attachVirtualGeometry`.
+ */
+export function setVirtualGeometryProxyError(relativeError: number): boolean {
+  return bloom_set_virtual_geometry_proxy_error(relativeError) !== 0;
+}
+
+/** 0 resident bytes, 1 pool bytes, 2 resident pages, 3 instances last frame. */
+export function virtualGeometryStat(which: number): number {
+  return bloom_virtual_geometry_stat(which);
 }
 
 /**
