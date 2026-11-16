@@ -1082,147 +1082,189 @@ pub(super) fn select_cpu_reference(
             // ranges. Keep those branches on a bounded local stack instead of
             // following the first sibling's child range and silently dropping
             // every other branch.
-            let mut stack = vec![(group_first, group_count, 1.0e30f32.to_bits(), 0u32)];
-            while let Some((group_first, group_count, group_priority_bits, depth)) = stack.pop() {
-                if depth >= pool.config().max_hierarchy_levels {
-                    result.counters.depth_limit_fallbacks += 1;
-                    cpu_select_group(
-                        pool,
-                        config,
-                        mesh_id,
-                        instance_index as u32,
-                        *instance,
-                        group_first,
-                        group_count,
-                        scale,
-                        view,
-                        group_priority_bits,
-                        &mut result,
-                    )?;
-                    continue;
-                }
-                let range = group_first as usize..(group_first + group_count) as usize;
-                let mut common_outside_mask = (1u32 << view.frustum_planes.len()) - 1;
-                let mut intersecting_error = 0.0f32;
-                let mut group_error = 0.0f32;
-                let mut has_intersecting_cluster = false;
-                for cluster in &archive.clusters[range.clone()] {
-                    let sphere = cpu_world_sphere(cluster, *instance, scale);
-                    let outside_mask =
-                        cpu_cluster_frustum_outside_mask(cluster, *instance, sphere, view);
-                    let error = cpu_projected_error(cluster, sphere, scale, view);
-                    common_outside_mask &= outside_mask;
-                    group_error = group_error.max(error);
-                    if outside_mask == 0 {
-                        has_intersecting_cluster = true;
-                        intersecting_error = intersecting_error.max(error);
-                    }
-                }
-                if common_outside_mask != 0 {
-                    result.counters.frustum_culled_groups += 1;
-                    continue;
-                }
-                let maximum_error = if has_intersecting_cluster {
-                    intersecting_error
-                } else {
-                    group_error
-                };
-                result.counters.visible_groups += 1;
-                let mut child_groups = Vec::<(u32, u32)>::new();
-                let mut terminal_clusters = false;
-                for cluster in &archive.clusters[range] {
-                    if cluster.first_child == bloom_geometry_format::NO_RELATION
-                        || cluster.child_count == 0
-                    {
-                        terminal_clusters = true;
-                        continue;
-                    }
-                    let relation = (cluster.first_child, cluster.child_count);
-                    if child_groups.last().copied() != Some(relation) {
-                        child_groups.push(relation);
-                    }
-                }
-                let mixed_replacement = terminal_clusters && !child_groups.is_empty();
-                let wants_refinement = maximum_error > view.target_error_pixels
-                    && !child_groups.is_empty()
-                    && !mixed_replacement;
-                if mixed_replacement {
-                    result.counters.invalid_records += 1;
-                }
-                if !wants_refinement {
-                    cpu_select_group(
-                        pool,
-                        config,
-                        mesh_id,
-                        instance_index as u32,
-                        *instance,
-                        group_first,
-                        group_count,
-                        scale,
-                        view,
-                        group_priority_bits,
-                        &mut result,
-                    )?;
-                    continue;
-                }
-                let children_resident = child_groups.iter().try_fold(
-                    true,
-                    |resident, &(child_first, child_count)| {
-                        Ok::<_, VirtualGeometryTraversalError>(
-                            resident
-                                && cpu_group_is_resident(pool, mesh_id, child_first, child_count)?,
-                        )
-                    },
-                )?;
-                if !children_resident {
-                    result.counters.fallback_groups += 1;
-                    for &(child_first, child_count) in &child_groups {
-                        cpu_emit_missing_requests(
+            //
+            // The GPU hands a refined group's children to the next level's
+            // queue, where each is walked by an invocation of its own with
+            // an empty stack; only below the last queued level do children
+            // share one invocation's stack. `invocations` models that: an
+            // entry is one invocation's first group, the level it spills to,
+            // and whether it may spill at all.
+            let queue_enabled =
+                pool.config().max_clusters_per_group <= TRAVERSAL_QUEUE_MAX_GROUP_CLUSTERS;
+            let mut invocations = std::collections::VecDeque::from([(
+                group_first,
+                group_count,
+                1.0e30f32.to_bits(),
+                0u32,
+                0u32,
+                queue_enabled,
+            )]);
+            while let Some((first, count, priority_bits, first_depth, spill_level, spill)) =
+                invocations.pop_front()
+            {
+                let mut stack = vec![(first, count, priority_bits, first_depth)];
+                while let Some((group_first, group_count, group_priority_bits, depth)) = stack.pop()
+                {
+                    if depth >= pool.config().max_hierarchy_levels {
+                        result.counters.depth_limit_fallbacks += 1;
+                        cpu_select_group(
                             pool,
                             config,
                             mesh_id,
-                            child_first,
-                            child_count,
-                            maximum_error.max(0.0).to_bits(),
+                            instance_index as u32,
+                            *instance,
+                            group_first,
+                            group_count,
+                            scale,
+                            view,
+                            group_priority_bits,
                             &mut result,
                         )?;
+                        continue;
                     }
-                    cpu_select_group(
-                        pool,
-                        config,
-                        mesh_id,
-                        instance_index as u32,
-                        *instance,
-                        group_first,
-                        group_count,
-                        scale,
-                        view,
-                        group_priority_bits,
-                        &mut result,
+                    let range = group_first as usize..(group_first + group_count) as usize;
+                    let mut common_outside_mask = (1u32 << view.frustum_planes.len()) - 1;
+                    let mut intersecting_error = 0.0f32;
+                    let mut group_error = 0.0f32;
+                    let mut has_intersecting_cluster = false;
+                    for cluster in &archive.clusters[range.clone()] {
+                        let sphere = cpu_world_sphere(cluster, *instance, scale);
+                        let outside_mask =
+                            cpu_cluster_frustum_outside_mask(cluster, *instance, sphere, view);
+                        let error = cpu_projected_error(cluster, sphere, scale, view);
+                        common_outside_mask &= outside_mask;
+                        group_error = group_error.max(error);
+                        if outside_mask == 0 {
+                            has_intersecting_cluster = true;
+                            intersecting_error = intersecting_error.max(error);
+                        }
+                    }
+                    if common_outside_mask != 0 {
+                        result.counters.frustum_culled_groups += 1;
+                        continue;
+                    }
+                    let maximum_error = if has_intersecting_cluster {
+                        intersecting_error
+                    } else {
+                        group_error
+                    };
+                    result.counters.visible_groups += 1;
+                    let mut child_groups = Vec::<(u32, u32)>::new();
+                    let mut terminal_clusters = false;
+                    for cluster in &archive.clusters[range] {
+                        if cluster.first_child == bloom_geometry_format::NO_RELATION
+                            || cluster.child_count == 0
+                        {
+                            terminal_clusters = true;
+                            continue;
+                        }
+                        let relation = (cluster.first_child, cluster.child_count);
+                        if child_groups.last().copied() != Some(relation) {
+                            child_groups.push(relation);
+                        }
+                    }
+                    let mixed_replacement = terminal_clusters && !child_groups.is_empty();
+                    let wants_refinement = maximum_error > view.target_error_pixels
+                        && !child_groups.is_empty()
+                        && !mixed_replacement;
+                    if mixed_replacement {
+                        result.counters.invalid_records += 1;
+                    }
+                    if !wants_refinement {
+                        cpu_select_group(
+                            pool,
+                            config,
+                            mesh_id,
+                            instance_index as u32,
+                            *instance,
+                            group_first,
+                            group_count,
+                            scale,
+                            view,
+                            group_priority_bits,
+                            &mut result,
+                        )?;
+                        continue;
+                    }
+                    let children_resident = child_groups.iter().try_fold(
+                        true,
+                        |resident, &(child_first, child_count)| {
+                            Ok::<_, VirtualGeometryTraversalError>(
+                                resident
+                                    && cpu_group_is_resident(
+                                        pool,
+                                        mesh_id,
+                                        child_first,
+                                        child_count,
+                                    )?,
+                            )
+                        },
                     )?;
-                    continue;
-                }
-                if stack.len() + child_groups.len() > TRAVERSAL_GROUP_STACK_CAPACITY {
-                    result.counters.depth_limit_fallbacks += 1;
-                    cpu_select_group(
-                        pool,
-                        config,
-                        mesh_id,
-                        instance_index as u32,
-                        *instance,
-                        group_first,
-                        group_count,
-                        scale,
-                        view,
-                        group_priority_bits,
-                        &mut result,
-                    )?;
-                    continue;
-                }
-                result.counters.refined_groups += 1;
-                let child_priority_bits = maximum_error.max(0.0).to_bits();
-                for &(child_first, child_count) in child_groups.iter().rev() {
-                    stack.push((child_first, child_count, child_priority_bits, depth + 1));
+                    if !children_resident {
+                        result.counters.fallback_groups += 1;
+                        for &(child_first, child_count) in &child_groups {
+                            cpu_emit_missing_requests(
+                                pool,
+                                config,
+                                mesh_id,
+                                child_first,
+                                child_count,
+                                maximum_error.max(0.0).to_bits(),
+                                &mut result,
+                            )?;
+                        }
+                        cpu_select_group(
+                            pool,
+                            config,
+                            mesh_id,
+                            instance_index as u32,
+                            *instance,
+                            group_first,
+                            group_count,
+                            scale,
+                            view,
+                            group_priority_bits,
+                            &mut result,
+                        )?;
+                        continue;
+                    }
+                    if spill && depth + 1 < pool.config().max_hierarchy_levels {
+                        result.counters.refined_groups += 1;
+                        let child_priority_bits = maximum_error.max(0.0).to_bits();
+                        for &(child_first, child_count) in &child_groups {
+                            invocations.push_back((
+                                child_first,
+                                child_count,
+                                child_priority_bits,
+                                depth + 1,
+                                spill_level + 1,
+                                spill_level + 1 < TRAVERSAL_QUEUE_LEVELS,
+                            ));
+                        }
+                        continue;
+                    }
+                    if stack.len() + child_groups.len() > TRAVERSAL_GROUP_STACK_CAPACITY {
+                        result.counters.depth_limit_fallbacks += 1;
+                        cpu_select_group(
+                            pool,
+                            config,
+                            mesh_id,
+                            instance_index as u32,
+                            *instance,
+                            group_first,
+                            group_count,
+                            scale,
+                            view,
+                            group_priority_bits,
+                            &mut result,
+                        )?;
+                        continue;
+                    }
+                    result.counters.refined_groups += 1;
+                    let child_priority_bits = maximum_error.max(0.0).to_bits();
+                    for &(child_first, child_count) in child_groups.iter().rev() {
+                        stack.push((child_first, child_count, child_priority_bits, depth + 1));
+                    }
                 }
             }
         }

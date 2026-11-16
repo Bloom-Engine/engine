@@ -304,8 +304,11 @@ which is what every invocation did before the queue existed. The queue lives
 behind the traversal counters in their buffer (the layout already uses every
 storage binding a stage may have) and holds 65,536 groups a level. A full
 level is not a failure: a group that cannot queue all its children walks them
-itself. The selection is the same set of clusters either way; the CPU
-reference and its parity tests are unchanged. Before this, one large mesh
+itself. The selection differs from the single-stack walk in one case, and for
+the better: a group with more child groups than the 32-entry stack holds
+could not refine at all and was drawn in its children's place; queued, each
+child is an invocation of its own. The CPU reference models the hand-off and
+a parity test covers that case. Before this, one large mesh
 was walked by a single invocation: an 80,000-triangle model with one root
 group cost 13.9 ms of selection on an M1 Max and 8.2 ms after. What remains
 is the size of the groups themselves: each group is still judged and emitted
