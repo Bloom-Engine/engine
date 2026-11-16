@@ -38,6 +38,11 @@ pub const GPU_VIRTUAL_MESH_MATERIALS_BOUND: u32 = 1 << 1;
 /// the same child replacement. The selector can retain its single-range fast
 /// path without trusting that property for genuinely branched hierarchy data.
 pub(super) const GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE: u32 = 1 << 27;
+/// Set on the first cluster of a group whose clusters all carry the same
+/// bounds and error (every simplified parent group does: it takes its
+/// children's union bounds and one measured error). Traversal then judges
+/// the group from that one cluster instead of reading all of them.
+pub(super) const GPU_VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS: u32 = 1 << 26;
 
 /// Explicit translation from one archive material slot to the renderer's
 /// generation-safe global material ID. `None` is glTF's default material.
@@ -1559,6 +1564,7 @@ fn encode_cluster_entries(
     archive: &bloom_geometry_format::GeometryArchive,
 ) -> Result<Vec<GpuVirtualClusterEntry>, VirtualGeometryGpuError> {
     let uniform_child_ranges = uniform_child_range_flags(archive);
+    let uniform_group_bounds = super::group_bounds::uniform_group_bounds_flags(archive);
     archive
         .clusters
         .iter()
@@ -1610,7 +1616,9 @@ fn encode_cluster_entries(
                     0,
                     cluster.flags
                         | u32::from(uniform_child_ranges[cluster_index])
-                            * GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE,
+                            * GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE
+                        | u32::from(uniform_group_bounds[cluster_index])
+                            * GPU_VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS,
                 ],
                 page_lod_counts: [
                     cluster.page_index,

@@ -7,6 +7,7 @@ mod asset;
 mod decode;
 mod draw_emission;
 mod gpu_pool;
+mod group_bounds;
 mod hiz;
 mod proxy;
 mod residency;

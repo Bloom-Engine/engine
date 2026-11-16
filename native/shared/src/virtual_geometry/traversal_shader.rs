@@ -7,7 +7,16 @@ const ALL_SOURCE_MESHES: u32 = 0xffffffffu;
 // GPU local storage. Overflow retains the complete resident parent, so this is
 // a quality fallback rather than a coverage failure.
 const TRAVERSAL_GROUP_STACK_CAPACITY: u32 = 32u;
+// Breadth-first hand-off. A group's children go to the shared queue of the
+// next level and are each walked by their own invocation in the next
+// dispatch, so one large mesh is no longer walked by a single invocation.
+// PASS_LEVEL is rewritten per pipeline; the last level walks depth-first.
+const TRAVERSAL_QUEUE_LEVELS: u32 = 12u;
+const PASS_LEVEL: u32 = 0u;
+const QUEUE_COUNT_MASK: u32 = 0xfffffu;
+const QUEUE_DEPTH_SHIFT: u32 = 20u;
 const VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE: u32 = 0x08000000u;
+const VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS: u32 = 0x04000000u;
 const INSTANCE_CONE_CULL_SAFE: u32 = 1u;
 const INSTANCE_PREVIOUS_HIZ_ELIGIBLE: u32 = 4u;
 
@@ -93,6 +102,12 @@ struct TraversalCounters {
     occlusion_uncertain_groups: atomic<u32>,
     page_use_count: atomic<u32>,
     page_use_overflow: atomic<u32>,
+    // Groups queued for each level this frame, then the queued groups:
+    // (instance, first cluster, count | depth << 20, priority bits). Level l
+    // owns the slice [l * capacity, (l + 1) * capacity); capacity is
+    // params.limits.z. A count may exceed the capacity; readers clamp.
+    queue_counts: array<atomic<u32>, 12>,
+    queue: array<vec4<u32>>,
 };
 struct TraversalParams {
     planes: array<vec4<f32>, 6>,
@@ -506,7 +521,8 @@ fn select_group(
                 cluster.page_lod_counts.y,
                 cluster.page_lod_counts.w,
                 cluster.identity.z,
-                (cluster.identity.w & ~VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE)
+                (cluster.identity.w
+                    & ~(VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE | VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS))
                     | (mesh.vertex_encoding << 28u)
             );
         } else {
@@ -562,7 +578,50 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (root_index != root_group_first) {
         return;
     }
+    traverse_groups(
+        mesh,
+        instance_index,
+        instance,
+        root_group_first,
+        root_group_count,
+        bitcast<u32>(1.0e30),
+        0u,
+        0u,
+        params.limits.z != 0u
+    );
+}
 
+// Queue every child group of one refined group for `level`, all or none.
+// Returns false when the level is full; the caller then walks them itself.
+fn queue_reserve(level: u32, group_count: u32) -> u32 {
+    let capacity = params.limits.z;
+    let first = atomicAdd(&counters.queue_counts[level], group_count);
+    if (first + group_count > capacity || first + group_count < first) {
+        // The reservation cannot be returned (others may have reserved after
+        // it): blank the part of it that exists so no reader walks garbage.
+        for (var slot = first; slot < min(first + group_count, capacity); slot++) {
+            counters.queue[level * capacity + slot] = vec4<u32>(0u);
+        }
+        return NO_RELATION;
+    }
+    return level * capacity + first;
+}
+
+// Walk one group and everything below it. With `spill`, child groups are
+// handed to the queue of `spill_level` instead of this invocation's stack.
+fn traverse_groups(
+    mesh: GpuVirtualMeshEntry,
+    instance_index: u32,
+    instance: GpuVirtualInstance,
+    first_group: u32,
+    first_group_count: u32,
+    first_priority_bits: u32,
+    first_depth: u32,
+    spill_level: u32,
+    spill: bool,
+) {
+    let root_group_first = first_group;
+    let root_group_count = first_group_count;
     let scale = scale_bound(instance.model);
     // Hierarchies branch whenever one coarse group replaces several lower
     // atomic ranges. A bounded depth-first stack follows every branch in this
@@ -573,8 +632,8 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
     group_stack[0] = vec4<u32>(
         root_group_first,
         root_group_count,
-        bitcast<u32>(1.0e30),
-        0u
+        first_priority_bits,
+        first_depth
     );
     loop {
         if (stack_count == 0u) {
@@ -613,7 +672,15 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
         var group_error = 0.0;
         var intersecting_min = vec3<f32>(1.0e30);
         var intersecting_max = vec3<f32>(-1.0e30);
-        for (var offset = 0u; offset < group_count; offset++) {
+        // A group whose clusters share bounds and error is judged from its
+        // first cluster: the others would only repeat the same numbers.
+        var judged_count = group_count;
+        if (valid_cluster(mesh, group_first)
+            && (clusters.records[mesh.cluster_table_base + group_first].identity.w
+                & VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS) != 0u) {
+            judged_count = 1u;
+        }
+        for (var offset = 0u; offset < judged_count; offset++) {
             let local_cluster = group_first + offset;
             if (!valid_cluster(mesh, local_cluster)) {
                 atomicAdd(&counters.invalid_records, 1u);
@@ -776,6 +843,44 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
             );
             continue;
         }
+        var queue_slot = NO_RELATION;
+        if (spill && depth + 1u < params.limits.x) {
+            queue_slot = queue_reserve(spill_level, child_group_count);
+        }
+        if (queue_slot != NO_RELATION) {
+            atomicAdd(&counters.refined_groups, 1u);
+            let packed_depth = (depth + 1u) << QUEUE_DEPTH_SHIFT;
+            if (uniform_child_range) {
+                counters.queue[queue_slot] = vec4<u32>(
+                    instance_index,
+                    first_cluster.relations.z,
+                    first_cluster.relations.w | packed_depth,
+                    refinement_priority_bits
+                );
+            } else {
+                previous_child_first = NO_RELATION;
+                previous_child_count = 0u;
+                for (var offset = 0u; offset < group_count; offset++) {
+                    let cluster = clusters.records[mesh.cluster_table_base + group_first + offset];
+                    let child_first = cluster.relations.z;
+                    let child_count = cluster.relations.w;
+                    if (child_first != NO_RELATION && child_count != 0u
+                        && (child_first != previous_child_first
+                            || child_count != previous_child_count)) {
+                        counters.queue[queue_slot] = vec4<u32>(
+                            instance_index,
+                            child_first,
+                            child_count | packed_depth,
+                            refinement_priority_bits
+                        );
+                        queue_slot += 1u;
+                        previous_child_first = child_first;
+                        previous_child_count = child_count;
+                    }
+                }
+            }
+            continue;
+        }
         if (stack_count + child_group_count > TRAVERSAL_GROUP_STACK_CAPACITY) {
             atomicAdd(&counters.depth_limit_fallbacks, 1u);
             select_group(
@@ -821,5 +926,47 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
+}
+
+// One invocation per group queued for PASS_LEVEL. Its children go to the
+// next level's queue, or, on the last level, are walked here depth-first.
+@compute @workgroup_size(64)
+fn select_queued_groups(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let capacity = params.limits.z;
+    let queued = min(atomicLoad(&counters.queue_counts[PASS_LEVEL]), capacity);
+    if (gid.x >= queued) {
+        return;
+    }
+    let item = counters.queue[PASS_LEVEL * capacity + gid.x];
+    let group_count = item.z & QUEUE_COUNT_MASK;
+    if (group_count == 0u) {
+        return;
+    }
+    let instance_index = item.x;
+    if (instance_index >= params.dispatch.x || instance_index >= arrayLength(&instances.records)) {
+        atomicAdd(&counters.invalid_records, 1u);
+        return;
+    }
+    let instance = instances.records[instance_index];
+    let descriptor_index = instance.instance_info.x & 0xfffffu;
+    if (descriptor_index == 0u || descriptor_index - 1u >= arrayLength(&meshes.records)) {
+        atomicAdd(&counters.invalid_records, 1u);
+        return;
+    }
+    let mesh = meshes.records[descriptor_index - 1u];
+    if (mesh.mesh_id != instance.instance_info.x) {
+        return;
+    }
+    traverse_groups(
+        mesh,
+        instance_index,
+        instance,
+        item.y,
+        group_count,
+        item.w,
+        item.z >> QUEUE_DEPTH_SHIFT,
+        PASS_LEVEL + 1u,
+        PASS_LEVEL + 1u < TRAVERSAL_QUEUE_LEVELS
+    );
 }
 "#;
