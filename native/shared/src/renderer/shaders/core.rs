@@ -1077,7 +1077,10 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         let exposure = mix(0.35, 1.0, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
         let wet = wetness * exposure;
         let porosity = clamp((roughness - 0.25) / 0.5, 0.0, 1.0) * (1.0 - metallic);
-        base_color = base_color * mix(1.0, 0.58, wet * porosity);
+        let darkening = mix(1.0, 0.58, wet * porosity);
+        base_color = base_color * darkening;
+        // The albedo the screen-space passes read is the wet colour too.
+        ssr_base_color = ssr_base_color * darkening;
         roughness = mix(roughness, min(roughness, 0.10), wet * 0.85);
     }
     // What the lights see of either workflow: a diffuse colour and an F0

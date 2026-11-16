@@ -12706,6 +12706,10 @@ impl Renderer {
         self.lighting_uniforms = LightingUniforms::defaults();
         self.lighting_uniforms.camera_pos[3] = preserved_env_intensity;
         self.lighting_uniforms.frame_misc = preserved_frame_misc;
+        // The weather is a setting, not per-frame state: it must be in the
+        // block for every path that draws with it, including the direct 2D
+        // one, which never runs the material system's begin-frame.
+        self.lighting_uniforms.weather = self.weather_params;
         self.clear_additional_lights();
     }
 

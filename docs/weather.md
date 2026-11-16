@@ -14,8 +14,10 @@ setWeather(cloudCover, wetness);
 
 - **Cloud cover**, 0 a clear day to 1 a closed overcast. It moves the cloud
   field's threshold (`cloud_density_weather` in `shaders/common/clouds.wgsl`),
-  so the sky that is drawn, the shadow on the ground and any material that
-  samples the deck all close together.
+  so the sky that is drawn and the shadow on the ground close together. A
+  game's own material closes with them if it samples the deck through the
+  `_weather` forms and passes `frame.weather.x`; the older `cloud_shadow_at`
+  and `cloud_cover_view` keep the fair-weather deck whatever the weather.
   - The sky draws a closing deck as a ceiling and not as sunlit puffs: grey,
     with the darker bellies where the same field is thickest, and closed down
     to and below the horizon.

@@ -90,7 +90,9 @@ fn cloud_density_weather(deck_xz: vec2<f32>, wind_xy: vec2<f32>, t: f32, cp: vec
     // to closed; the edge narrows as it closes so an overcast is a ceiling and
     // not a haze.
     let c = clamp(cover, 0.0, 1.0);
-    let lo = mix(0.86, -0.12, c);
+    // At full cover the whole edge lies below zero, the least the noise can
+    // be, so a closed deck has no hole anywhere.
+    let lo = mix(0.86, -0.26, c);
     let width = mix(0.42, 0.20, c);
     return smoothstep(lo, lo + width, f);
 }
