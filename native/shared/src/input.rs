@@ -11,6 +11,9 @@ pub const GAMEPAD_KIND_PLAYSTATION: u8 = 2;
 pub const GAMEPAD_KIND_NINTENDO: u8 = 3;
 /// A pad the platform names but that is none of the above.
 pub const GAMEPAD_KIND_OTHER: u8 = 4;
+/// The Apple TV's own remote and nothing else: one touch surface on the left stick's axes, its
+/// click as A, play/pause as Start. No second stick, no triggers.
+pub const GAMEPAD_KIND_REMOTE: u8 = 5;
 
 /// The family of a pad from the name its platform reports (GameController's
 /// `productCategory` or `vendorName`, a HID product string).

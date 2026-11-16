@@ -35,6 +35,22 @@ impl Renderer {
         }
     }
 
+    /// How far SSR rays reach. The default (8 m in 8 even steps) suits rooms;
+    /// an open scene with a wet road wants a few hundred metres, more steps
+    /// and `curve` around 2 so near reflections keep their short steps.
+    pub fn set_ssr_range(&mut self, max_distance: f32, steps: f32, curve: f32) {
+        let range = [
+            max_distance.clamp(1.0, 2000.0),
+            steps.round().clamp(4.0, 64.0),
+            curve.clamp(1.0, 4.0),
+        ];
+        if self.ssr_range != range {
+            self.ssr_range = range;
+            self.ssr_history_idx = 0;
+            self.ssr_history_valid = false;
+        }
+    }
+
     fn create_ssr_bind_group(
         &self,
         label: &str,
@@ -154,12 +170,23 @@ impl Renderer {
                 // Thickness tolerance grows proportionally with
                 // step_size so the relative-error reject heuristic
                 // still works with the larger strides.
-                params: [self.ssr_strength, 8.0, 8.0, self.taa_frame_index as f32],
+                params: [
+                    self.ssr_strength,
+                    self.ssr_range[0],
+                    self.ssr_range[1],
+                    self.taa_frame_index as f32,
+                ],
                 inv_view_rot,
                 // Env max LOD 6.0 matches the material path's roughness×6
                 // mip ramp; intensity rides lighting camera_pos.w exactly
                 // like sample_env does.
-                params2: [6.0, self.lighting_uniforms.camera_pos[3], 0.0, 0.0],
+                // z = step curve (set_ssr_range); 1 keeps the even march.
+                params2: [
+                    6.0,
+                    self.lighting_uniforms.camera_pos[3],
+                    self.ssr_range[2],
+                    0.0,
+                ],
             };
             self.queue
                 .write_buffer(&self.ssr_uniform_buffer, 0, bytemuck::bytes_of(&sp));

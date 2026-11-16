@@ -960,7 +960,20 @@ pub extern "C" fn bloom_begin_drawing() {
                     }
                     _ => {}
                 }
-                app.sendEvent(&event);
+                // A plain key press has no responder that handles it, so
+                // AppKit would answer every one with the system alert
+                // sound. Only forward key presses that carry Command
+                // (menu shortcuts such as Cmd+Q); the game already has the
+                // key from the match above.
+                let forward = if event_type == NSEventType::KeyDown {
+                    let flags: usize = unsafe { msg_send![&*event, modifierFlags] };
+                    (flags & (1 << 20)) != 0
+                } else {
+                    true
+                };
+                if forward {
+                    app.sendEvent(&event);
+                }
             }
             None => break,
         }

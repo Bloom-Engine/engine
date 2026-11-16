@@ -1105,6 +1105,41 @@ macro_rules! __bloom_ffi_models {
             $crate::ffi::feature_off_warn_once("bloom_anim_update", "models3d");
         }
 
+        // bloom_anim_update_matrix  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_update_matrix(
+            handle: f64, dt: f64,
+            m0: f64, m1: f64, m2: f64, m3: f64, m4: f64, m5: f64, m6: f64, m7: f64,
+            m8: f64, m9: f64, m10: f64, m11: f64, m12: f64, m13: f64, m14: f64, m15: f64,
+        ) {
+            $crate::ffi::guard("bloom_anim_update_matrix", move || {
+                let model = [
+                    [m0 as f32, m1 as f32, m2 as f32, m3 as f32],
+                    [m4 as f32, m5 as f32, m6 as f32, m7 as f32],
+                    [m8 as f32, m9 as f32, m10 as f32, m11 as f32],
+                    [m12 as f32, m13 as f32, m14 as f32, m15 as f32],
+                ];
+                let eng = engine();
+                eng.models.advance_and_update(handle, dt as f32);
+                if let Some(anim) = eng.models.get_animation(handle) {
+                    if !anim.joint_matrices.is_empty() {
+                        eng.renderer.set_joint_matrices_transformed(
+                            handle.to_bits(), &anim.joint_matrices, model);
+                    }
+                }
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_update_matrix(
+            _h: f64, _d: f64,
+            _m0: f64, _m1: f64, _m2: f64, _m3: f64, _m4: f64, _m5: f64, _m6: f64, _m7: f64,
+            _m8: f64, _m9: f64, _m10: f64, _m11: f64, _m12: f64, _m13: f64, _m14: f64, _m15: f64,
+        ) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_update_matrix", "models3d");
+        }
+
         // bloom_anim_finished  [gated: models3d]
         #[cfg(feature = "models3d")]
         #[no_mangle]

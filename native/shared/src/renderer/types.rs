@@ -1227,7 +1227,8 @@ pub(super) struct SsrParams {
     /// EN-021 — view→world rotation (transpose of the view 3×3) for the
     /// env-miss fallback's direction lookup.
     pub(super) inv_view_rot: [[f32; 4]; 4],
-    /// EN-021 — x = env max LOD, y = env intensity, zw unused.
+    /// EN-021 — x = env max LOD, y = env intensity, z = step curve
+    /// (1 = even steps), w unused.
     pub(super) params2: [f32; 4],
 }
 

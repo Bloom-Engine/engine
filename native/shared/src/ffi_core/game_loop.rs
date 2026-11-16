@@ -478,6 +478,18 @@ macro_rules! __bloom_ffi_game_loop {
             })
         }
 
+        // bloom_is_low_tier_gpu  [SH-069]
+        #[no_mangle]
+        pub extern "C" fn bloom_is_low_tier_gpu() -> f64 {
+            $crate::ffi::guard("bloom_is_low_tier_gpu", move || {
+                if $crate::renderer::low_tier::low_tier() {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+        }
+
         // bloom_get_profiler_frame_gpu_us  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 {

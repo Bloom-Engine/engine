@@ -9,7 +9,7 @@ export {
   attachToHwnd,
   beginDrawing, endDrawing, takeScreenshot, clearBackground, setEnvClearFromHdr,
   setTargetFPS, getDeltaTime, getFPS, getTime,
-  getScreenWidth, getScreenHeight,
+  getScreenWidth, getScreenHeight, getDisplayScale,
   isKeyPressed, isKeyDown, isKeyReleased, isKeyRepeated,
   getMouseX, getMouseY, isMouseButtonPressed, isMouseButtonDown, isMouseButtonReleased,
   getMousePosition, getTouchPosition,

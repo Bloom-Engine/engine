@@ -13,7 +13,14 @@ macro_rules! __bloom_ffi_assets {
         #[no_mangle]
         pub extern "C" fn bloom_take_screenshot(path_ptr: *const u8) {
             $crate::ffi::guard("bloom_take_screenshot", move || {
-                let path = $crate::string_header::str_from_header(path_ptr).to_string();
+                // Through the platform's resolver, as writeFile does: on Android the
+                // process's working directory is `/` (read-only), so a relative capture
+                // path must land under the app's files directory. Desktop resolvers
+                // return the path unchanged.
+                let path = bloom_resolve_asset_path(
+                    $crate::string_header::str_from_header(path_ptr),
+                )
+                .into_owned();
                 eprintln!("bloom: screenshot requested -> '{}'", path);
                 let eng = engine();
                 eng.renderer.screenshot_requested = true;

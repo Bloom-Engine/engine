@@ -44,6 +44,14 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         n = normalize(tbn * nm_sample);
     }
 
+    // Geometric specular anti-aliasing (Tokuyoshi & Kaplanyan 2019): how fast the shading
+    // normal turns across the pixel widens the roughness. Without it a 4K normal map at a phone's
+    // render scale makes each pixel's highlight flip on and off; TAA then averages dark armour
+    // with white sparkles into a pale, see-through figure (Pixel 4a, SH-069). Taken here, before
+    // the cutout discard, so the derivatives are in uniform control flow.
+    let dn_x = dpdx(n);
+    let dn_y = dpdy(n);
+    let spec_aa_kernel = min(0.5 * (dot(dn_x, dn_x) + dot(dn_y, dn_y)), 0.18);
     let base_tex = textureSampleBias(base_color_tex, base_color_samp, base_uv, lod_bias);
     let base_color = srgb_to_linear_v(base_tex.rgb) * in.color.rgb;
     let base_alpha = base_tex.a * in.color.a;
@@ -81,7 +89,9 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         clamp(1.0 - mr_tex_sample.a * material.spec_gloss.a, 0.045, 1.0),
         has_spec_gloss,
     );
-    let roughness = max(roughness_raw, select(0.15, 0.045, has_spec_gloss) * (1.0 - metallic));
+    let roughness_floor = max(roughness_raw, select(0.15, 0.045, has_spec_gloss) * (1.0 - metallic));
+    let alpha_aa = roughness_floor * roughness_floor;
+    let roughness = sqrt(sqrt(clamp(alpha_aa * alpha_aa + spec_aa_kernel, 0.0, 1.0)));
     // The lights' view of either workflow (see shade_pbr_f0).
     let authored_specular = srgb_to_linear_v(mr_tex_sample.rgb) * material.spec_gloss.rgb;
     let light_diffuse = select(base_color * (1.0 - metallic), base_color, has_spec_gloss);
@@ -171,7 +181,10 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         pow(n_dot_v + occlusion, exp2(-16.0 * roughness - 1.0)) - 1.0 + occlusion,
         0.0, 1.0,
     );
-    let ibl_spec = prefiltered_env * (env_brdf + ms) * spec_occ * (1.0 - ssr_own);
+    // Cut-out foliage keeps only the share of the sky's reflection the game asks for
+    // (set_cutout_env_specular), as the full shader does; without it every crown is pale mint.
+    let foliage_spec_occ = select(1.0, 1.0 - lighting.frame_misc.w, alpha_cutoff > 0.0);
+    let ibl_spec = prefiltered_env * (env_brdf + ms) * spec_occ * (1.0 - ssr_own) * foliage_spec_occ;
     let indirect_shadow = mix(0.35, 1.0, shadow_factor);
 
     let hdr_raw = lit + (ibl_diffuse + ibl_spec) * indirect_shadow + emissive;

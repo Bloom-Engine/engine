@@ -17,6 +17,8 @@
 use std::borrow::Cow;
 
 const MOBILE_SHADE_MAIN_SCENE: &str = include_str!("shaders/scene_mobile.wgsl");
+/// The low-tier shading (low_tier.rs): one texture read a pixel, for the phones that need it.
+const LOW_TIER_SHADE_MAIN_SCENE: &str = include_str!("shaders/scene_lowtier.wgsl");
 const SHADE_MAIN_SCENE: &str =
     "fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {";
 const AFTER_SHADE_MAIN_SCENE: &str = "@fragment\nfn fs_main_scene(";
@@ -43,6 +45,9 @@ pub(super) fn mobile_shading_enabled() -> bool {
 /// `source` with the mobile `shade_main_scene` in place of the full one, when
 /// mobile shading is on.
 pub(super) fn scene_shader(source: &'static str) -> Cow<'static, str> {
+    if super::low_tier::low_tier() {
+        return with_shading(source, LOW_TIER_SHADE_MAIN_SCENE).into();
+    }
     if !mobile_shading_enabled() {
         return source.into();
     }
@@ -50,6 +55,11 @@ pub(super) fn scene_shader(source: &'static str) -> Cow<'static, str> {
 }
 
 fn with_mobile_shading(source: &str) -> String {
+    with_shading(source, MOBILE_SHADE_MAIN_SCENE)
+}
+
+/// `source` with `shading` in place of its `shade_main_scene` and the tent-only shadow filter.
+fn with_shading(source: &str, shading: &str) -> String {
     let start = source
         .find(SHADE_MAIN_SCENE)
         .expect("scene shader missing shade_main_scene");
@@ -60,7 +70,7 @@ fn with_mobile_shading(source: &str) -> String {
     let source = format!(
         "{}{}{}",
         &source[..start],
-        MOBILE_SHADE_MAIN_SCENE,
+        shading,
         &source[end..]
     );
     // The sun shadow takes the 4-tap tent only. The 16-tap Poisson disc
@@ -115,6 +125,37 @@ mod tests {
             "pl.color.w * atten2",
         ] {
             assert_eq!(mobile.matches(marker).count(), 1, "{marker}");
+        }
+    }
+
+    #[test]
+    fn low_tier_scene_shader_validates_and_takes_every_variant() {
+        let low = with_shading(SCENE_SHADER, LOW_TIER_SHADE_MAIN_SCENE);
+        for (label, source) in [
+            ("plain", low.clone()),
+            ("clustered", super::super::froxel::clustered_scene_shader(&low)),
+            ("gpu-driven", super::super::gpu_driven::make_gpu_scene_shader(&low)),
+        ] {
+            let module = wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|error| panic!("low-tier {label} WGSL failed: {error:?}"));
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("low-tier {label} WGSL invalid: {error:?}"));
+        }
+        // one texture read for the surface: the normal and MR maps are not sampled
+        assert!(!low.contains("textureSampleBias(normal_tex, normal_samp, normal_uv"));
+        assert!(!low.contains("textureSample(mr_tex, mr_samp, mr_uv)"));
+        for marker in [
+            "//PREPASS_STRIP_BEGIN",
+            "//PREPASS_STRIP_END",
+            "// BEGIN-POINT-LIGHT-LOOP",
+            "// END-POINT-LIGHT-LOOP",
+            "pl.color.w * atten2",
+        ] {
+            assert_eq!(low.matches(marker).count(), 1, "{marker}");
         }
     }
 

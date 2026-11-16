@@ -90,6 +90,7 @@ mod material_api;
 pub mod material_indirection;
 mod material_instancing;
 #[cfg(feature = "models3d")]
+pub mod low_tier;
 mod mobile_shading;
 mod model_draw;
 mod model_material;
@@ -931,6 +932,10 @@ pub struct Renderer {
     /// making diffuse surfaces look wet and applies on top of prefiltered IBL.
     pub ssr_strength: f32,
     pub ssr_enabled: bool,
+    /// SSR march: reach in metres, step count, and how the steps are spread
+    /// (1 = even; above 1 = short steps near the surface, long ones far out,
+    /// with a bisection to place the hit). 8 / 8 / 1 is the indoor default.
+    pub ssr_range: [f32; 3],
 
     /// SSR temporal ping-pong, matching ssr_rt. One GGX ray per pixel converges
     /// over 4–8 velocity-reprojected, neighborhood-clamped frames; compose reads
@@ -8396,6 +8401,7 @@ impl Renderer {
             ssr_uniform_buffer,
             ssr_strength: 0.5,
             ssr_enabled: true,
+            ssr_range: [8.0, 8.0, 1.0],
             ssr_history_textures,
             ssr_history_views,
             ssr_history_idx: 0,
@@ -9436,7 +9442,14 @@ impl Renderer {
         if (s - self.render_scale).abs() > 1e-4 {
             self.render_scale = s;
             self.taa_frame_index = 0;
-            let (w, h) = (self.surface_config.width, self.surface_config.height);
+            // resize() takes the WINDOW's size and applies output_scale itself. Handing it the
+            // already scaled surface made every render-scale change below an output scale of 1
+            // shrink the surface once more (0.5 output: 1080p, then 540p, then 270p).
+            let (w, h) = if self.native_width > 0 && self.native_height > 0 {
+                (self.native_width, self.native_height)
+            } else {
+                (self.surface_config.width, self.surface_config.height)
+            };
             self.resize(w, h, self.logical_width, self.logical_height);
         }
     }

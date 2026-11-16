@@ -243,6 +243,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_anim_set_root_motion(_p0: f64, _p1: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_anim_update_matrix(_h: f64, _d: f64, _m0: f64, _m1: f64, _m2: f64, _m3: f64, _m4: f64, _m5: f64, _m6: f64, _m7: f64, _m8: f64, _m9: f64, _m10: f64, _m11: f64, _m12: f64, _m13: f64, _m14: f64, _m15: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_anim_update(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_anim_finished(_p0: f64) -> f64 {
@@ -558,6 +560,12 @@
 #[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_ssr_strength(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_ssr_range(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_motion_blur_enabled(_p0: f64) -> f64 {
     0.0
 }
@@ -570,6 +578,9 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_is_low_tier_gpu() -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_write_quality_telemetry(_p0: i64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
