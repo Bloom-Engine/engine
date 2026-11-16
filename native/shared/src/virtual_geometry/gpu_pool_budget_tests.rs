@@ -102,3 +102,28 @@ fn gpu_pool_enforces_frame_upload_and_eviction_limits_without_partial_pages() {
         })
         .unwrap());
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn load_time_registration_does_not_share_one_frames_upload_allowance() {
+    let Some((device, queue)) = try_device() else {
+        eprintln!("no GPU adapter — skipping virtual-geometry load allowance oracle");
+        return;
+    };
+    // One root page per mesh and an allowance of one page a frame: the
+    // second registration in the same frame is refused, as streaming would be.
+    let mut config = gpu_config(4);
+    config.max_upload_pages_per_frame = 1;
+    let mut pool = GpuVirtualGeometryPool::new(&device, config).unwrap();
+    pool.register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    assert!(matches!(
+        pool.register_mesh(&queue, hierarchy_asset(branching_hierarchy_archive())),
+        Err(VirtualGeometryGpuError::UploadBudgetExceeded { .. })
+    ));
+    // A load-time caller starts a fresh allowance for each mesh.
+    pool.begin_load_upload();
+    pool.register_mesh(&queue, hierarchy_asset(branching_hierarchy_archive()))
+        .unwrap();
+    assert_eq!(pool.telemetry().active_meshes, 2);
+}

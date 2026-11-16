@@ -391,6 +391,16 @@ impl GpuVirtualGeometryPool {
         self.counters.frame_evictions = 0;
     }
 
+    /// Start a fresh upload allowance without advancing the frame. The
+    /// per-frame allowance bounds what streaming may upload while a frame is
+    /// being drawn; a caller that registers meshes at load time, outside any
+    /// frame, calls this before each one so that a level's worth of archives
+    /// does not have to fit one frame's streaming allowance.
+    pub fn begin_load_upload(&mut self) {
+        self.counters.frame_upload_pages = 0;
+        self.counters.frame_upload_bytes = 0;
+    }
+
     /// Register an immutable archive and upload every coarse-root page before
     /// returning its ID. The operation is planned completely before mutation.
     pub fn register_mesh(

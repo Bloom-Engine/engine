@@ -188,9 +188,15 @@ impl Renderer {
         let max_error = bounds_diagonal(&asset) * self.virtual_models.proxy_relative_error;
         let (roles, proxy_triangles) = build_roles(model, &route, &asset, max_error)?;
         let queue = self.queue.clone();
-        let mesh = self
+        let pool = self
             .virtual_geometry_pool_mut()
-            .ok_or_else(|| "virtual geometry is not enabled".to_string())?
+            .ok_or_else(|| "virtual geometry is not enabled".to_string())?;
+        // Attaching is a load-time call: it must not draw on (or be refused
+        // by) the allowance that bounds streaming uploads within a frame.
+        // Without this a game could attach only as many models at start-up as
+        // one frame's allowance held (9 of 42 in The Deep's city).
+        pool.begin_load_upload();
+        let mesh = pool
             .register_mesh(&queue, Arc::clone(&asset))
             .map_err(|error| error.to_string())?;
         if let Err(error) = self.bind_model_virtual_materials(mesh, model) {
