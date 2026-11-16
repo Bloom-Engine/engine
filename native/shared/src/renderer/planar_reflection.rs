@@ -327,6 +327,121 @@ pub fn oblique_proj(proj: [[f32; 4]; 4], plane_eye_space: [f32; 4]) -> [[f32; 4]
     out
 }
 
+/// How far (in NDC, both axes) a surface may read its probe away from its own
+/// screen position. The water shader offsets its lookup by its ripple normal,
+/// `screen_uv + n.xz * 0.08`: at most 0.08 in UV, 0.16 in NDC. A little more,
+/// so a surface that ripples harder does not read past the drawn region.
+pub const PROBE_READ_MARGIN_NDC: f32 = 0.25;
+
+/// Clip a convex polygon against one plane (`p · x + d >= 0` is kept).
+fn clip_polygon(poly: &[[f32; 3]], plane: [f32; 4]) -> Vec<[f32; 3]> {
+    let side = |v: [f32; 3]| plane[0] * v[0] + plane[1] * v[1] + plane[2] * v[2] + plane[3];
+    let mut out = Vec::with_capacity(poly.len() + 2);
+    for i in 0..poly.len() {
+        let a = poly[i];
+        let b = poly[(i + 1) % poly.len()];
+        let (da, db) = (side(a), side(b));
+        if da >= 0.0 {
+            out.push(a);
+        }
+        if (da >= 0.0) != (db >= 0.0) {
+            let t = da / (da - db);
+            out.push([
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ]);
+        }
+    }
+    out
+}
+
+/// The NDC rectangle `[x0, x1, y0, y1]` a horizontal surface with world bounds
+/// `wmin..wmax` covers on screen, clipped to the camera frustum, or `None` when
+/// none of it is in view. The bounds' top and bottom faces are both projected,
+/// so a surface displaced vertically (waves) stays inside the rectangle.
+pub fn surface_screen_rect(
+    vp: &[[f32; 4]; 4],
+    planes: &[[f32; 4]; 6],
+    wmin: [f32; 3],
+    wmax: [f32; 3],
+) -> Option<[f32; 4]> {
+    let mut rect = [f32::MAX, f32::MIN, f32::MAX, f32::MIN];
+    let mut any = false;
+    for y in [wmin[1], wmax[1]] {
+        let mut poly = vec![
+            [wmin[0], y, wmin[2]],
+            [wmax[0], y, wmin[2]],
+            [wmax[0], y, wmax[2]],
+            [wmin[0], y, wmax[2]],
+        ];
+        for p in planes.iter() {
+            poly = clip_polygon(&poly, *p);
+            if poly.is_empty() {
+                break;
+            }
+        }
+        for v in &poly {
+            let c = mat4_mul_vec4(vp, &[v[0], v[1], v[2], 1.0]);
+            if c[3] <= 1e-6 {
+                // On the eye plane after clipping: cannot bound it, so
+                // claim the whole screen rather than guess.
+                return Some([-1.0, 1.0, -1.0, 1.0]);
+            }
+            let (x, y) = (c[0] / c[3], c[1] / c[3]);
+            rect = [rect[0].min(x), rect[1].max(x), rect[2].min(y), rect[3].max(y)];
+            any = true;
+        }
+    }
+    any.then_some(rect)
+}
+
+/// Grow a screen rectangle by `margin` on every side, clamped to the screen.
+pub fn grow_screen_rect(r: [f32; 4], margin: f32) -> [f32; 4] {
+    [
+        (r[0] - margin).max(-1.0),
+        (r[1] + margin).min(1.0),
+        (r[2] - margin).max(-1.0),
+        (r[3] + margin).min(1.0),
+    ]
+}
+
+/// Frustum planes for the part of `vp`'s view inside the NDC rectangle
+/// `[x0, x1, y0, y1]`: the same six planes `extract_frustum_planes` returns,
+/// with the four side planes moved in. A full rectangle gives exactly the
+/// plain frustum.
+pub fn cropped_frustum_planes(vp: &[[f32; 4]; 4], r: [f32; 4]) -> [[f32; 4]; 6] {
+    let row = |i: usize| [vp[0][i], vp[1][i], vp[2][i], vp[3][i]];
+    let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+    let comb = |a: [f32; 4], sa: f32, b: [f32; 4], sb: f32| {
+        [
+            a[0] * sa + b[0] * sb,
+            a[1] * sa + b[1] * sb,
+            a[2] * sa + b[2] * sb,
+            a[3] * sa + b[3] * sb,
+        ]
+    };
+    [
+        comb(r0, 1.0, r3, -r[0]), // x >= x0 * w
+        comb(r3, r[1], r0, -1.0), // x <= x1 * w
+        comb(r1, 1.0, r3, -r[2]), // y >= y0 * w
+        comb(r3, r[3], r1, -1.0), // y <= y1 * w
+        r2,
+        comb(r3, 1.0, r2, -1.0),
+    ]
+}
+
+/// The scissor rectangle `(x, y, w, h)` in texels of a `res`-square probe for
+/// an NDC rectangle (NDC y up, texel y down). Never empty.
+pub fn screen_rect_scissor(r: [f32; 4], res: u32) -> (u32, u32, u32, u32) {
+    let f = res as f32;
+    let x0 = (((r[0] + 1.0) * 0.5 * f).floor().max(0.0) as u32).min(res - 1);
+    let x1 = (((r[1] + 1.0) * 0.5 * f).ceil() as u32).clamp(x0 + 1, res);
+    let y0 = (((1.0 - r[3]) * 0.5 * f).floor().max(0.0) as u32).min(res - 1);
+    let y1 = (((1.0 - r[2]) * 0.5 * f).ceil() as u32).clamp(y0 + 1, res);
+    (x0, y0, x1 - x0, y1 - y0)
+}
+
 fn normalise(v: [f32; 3]) -> [f32; 3] {
     let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     if len_sq < 1e-10 {
@@ -388,6 +503,81 @@ mod tests {
         assert!((helper_out[0] - mat_out[0]).abs() < 1e-5);
         assert!((helper_out[1] - mat_out[1]).abs() < 1e-5);
         assert!((helper_out[2] - mat_out[2]).abs() < 1e-5);
+    }
+
+    fn test_vp() -> [[f32; 4]; 4] {
+        use crate::renderer::util::{mat4_look_at, mat4_perspective};
+        let view = mat4_look_at([0.0, 3.0, 10.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        mat4_multiply(mat4_perspective(1.2, 16.0 / 9.0, 0.1, 500.0), view)
+    }
+
+    fn ndc(vp: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 2] {
+        let c = mat4_mul_vec4(vp, &[p[0], p[1], p[2], 1.0]);
+        [c[0] / c[3], c[1] / c[3]]
+    }
+
+    /// A surface wholly in view: the rectangle is the bounds of its projected
+    /// corners. One wholly behind the camera: no rectangle.
+    #[test]
+    fn surface_rect_bounds_the_visible_surface() {
+        let vp = test_vp();
+        let planes = crate::scene::extract_frustum_planes(&vp);
+        let (wmin, wmax) = ([-1.0, 0.0, -1.0], [1.0, 0.0, 1.0]);
+        let r = surface_screen_rect(&vp, &planes, wmin, wmax).expect("in view");
+        for x in [wmin[0], wmax[0]] {
+            for z in [wmin[2], wmax[2]] {
+                let p = ndc(&vp, [x, 0.0, z]);
+                assert!(p[0] >= r[0] - 1e-4 && p[0] <= r[1] + 1e-4);
+                assert!(p[1] >= r[2] - 1e-4 && p[1] <= r[3] + 1e-4);
+            }
+        }
+        assert!(r[1] - r[0] < 1.0, "a 2 m patch 10 m away is not half the screen: {r:?}");
+        assert!(surface_screen_rect(&vp, &planes, [-1.0, 0.0, 20.0], [1.0, 0.0, 22.0]).is_none());
+    }
+
+    /// A surface far larger than the view (a river through the whole arena) is
+    /// clipped to the frustum, not projected from corners behind the eye.
+    #[test]
+    fn surface_rect_clips_a_huge_surface_to_the_screen() {
+        let vp = test_vp();
+        let planes = crate::scene::extract_frustum_planes(&vp);
+        let r = surface_screen_rect(&vp, &planes, [-500.0, 0.0, -500.0], [500.0, 0.0, 500.0])
+            .expect("in view");
+        for v in r {
+            assert!((-1.0001..=1.0001).contains(&v), "{r:?}");
+        }
+        assert!(r[1] - r[0] > 1.9, "the ground plane spans the screen width: {r:?}");
+        assert!(r[2] < -0.99, "and reaches the bottom edge: {r:?}");
+    }
+
+    /// The full rectangle crops nothing; a crop rejects what projects outside
+    /// it and keeps what projects inside.
+    #[test]
+    fn cropped_planes_cull_by_screen_rect() {
+        let vp = test_vp();
+        let full = cropped_frustum_planes(&vp, [-1.0, 1.0, -1.0, 1.0]);
+        let plain = crate::scene::extract_frustum_planes(&vp);
+        for (a, b) in full.iter().zip(plain.iter()) {
+            for k in 0..4 {
+                assert!((a[k] - b[k]).abs() < 1e-5);
+            }
+        }
+        let left_half = cropped_frustum_planes(&vp, [-1.0, 0.0, -1.0, 1.0]);
+        let left = ([-3.0, -0.2, -0.2], [-2.6, 0.2, 0.2]);
+        let right = ([2.6, -0.2, -0.2], [3.0, 0.2, 0.2]);
+        assert!(!crate::scene::aabb_outside_frustum(&left_half, left.0, left.1));
+        assert!(crate::scene::aabb_outside_frustum(&left_half, right.0, right.1));
+        assert!(!crate::scene::aabb_outside_frustum(&plain, right.0, right.1));
+    }
+
+    #[test]
+    fn scissor_covers_the_rect_and_is_never_empty() {
+        assert_eq!(screen_rect_scissor([-1.0, 1.0, -1.0, 1.0], 512), (0, 0, 512, 512));
+        // Lower-left quarter: NDC y down = texel y up.
+        assert_eq!(screen_rect_scissor([-1.0, 0.0, -1.0, 0.0], 512), (0, 256, 256, 256));
+        let (_, _, w, h) = screen_rect_scissor([0.3, 0.3, 0.3, 0.3], 512);
+        assert!(w >= 1 && h >= 1);
+        assert_eq!(grow_screen_rect([-0.9, 0.0, 0.5, 0.95], 0.25), [-1.0, 0.25, 0.25, 1.0]);
     }
 
     /// Reflection is its own inverse — applying it twice returns

@@ -336,10 +336,23 @@ impl Renderer {
         // camera half the time, that was most frames. A probe skipped this way
         // is simply not sampled; the frame the surface comes back into view
         // renders it before the main pass reads it.
-        let probe_seen = {
+        //
+        // The same walk finds WHERE on screen the probe is read. A surface reads
+        // its probe at its own screen position (plus a ripple offset), and a
+        // point on the mirror plane lands on the same screen position in the
+        // mirrored view as in the real one. So only the screen rectangle of the
+        // visible surface, grown by PROBE_READ_MARGIN_NDC, is ever sampled: the
+        // probe culls its draws to that part of the mirrored frustum and
+        // scissors to it. A river seen as a band across the bottom of the
+        // screen no longer redraws the whole mirrored forest above the band.
+        let full_rect = [-1.0_f32, 1.0, -1.0, 1.0];
+        let (probe_seen, probe_rect) = {
             let main_planes = crate::scene::extract_frustum_planes(&self.current_vp_matrix);
             let ms = &self.material_system;
             let mut seen = vec![false; probe_count];
+            // None = nothing yet; Some(full_rect) once any draw is unbounded.
+            let mut rect: Vec<Option<[f32; 4]>> = vec![None; probe_count];
+            let crop = !self.dbg_skip("probe_crop");
             for cmd in ms.commands.iter().chain(ms.translucent_commands.iter()) {
                 let link = (cmd.material as usize)
                     .checked_sub(1)
@@ -348,29 +361,57 @@ impl Renderer {
                     Some(p) if p >= 1 && (p as usize) <= probe_count => p as usize - 1,
                     _ => continue,
                 };
-                if seen[slot] {
+                if rect[slot] == Some(full_rect) {
                     continue;
                 }
-                // Instanced or unknown bounds: assume visible.
-                let visible = match (cmd.instance, self.model_gpu_cache.get(&cmd.mesh_handle)) {
+                // Instanced or unknown bounds: visible, anywhere on screen.
+                let on_screen = match (cmd.instance, self.model_gpu_cache.get(&cmd.mesh_handle)) {
                     (None, Some(Some(meshes))) if cmd.mesh_idx < meshes.len() => {
                         let m = &meshes[cmd.mesh_idx];
                         let (wmin, wmax) = transform_aabb(&cmd.model, m.local_min, m.local_max);
-                        !(wmin[0] <= wmax[0]
-                            && crate::scene::aabb_outside_frustum(&main_planes, wmin, wmax))
+                        if wmin[0] > wmax[0] {
+                            Some(full_rect)
+                        } else if crate::scene::aabb_outside_frustum(&main_planes, wmin, wmax) {
+                            None
+                        } else if !crop {
+                            Some(full_rect)
+                        } else {
+                            // Bounds that pass the box test but whose faces all
+                            // clip away still count: be generous, not exact.
+                            Some(
+                                planar_reflection::surface_screen_rect(
+                                    &self.current_vp_matrix,
+                                    &main_planes,
+                                    wmin,
+                                    wmax,
+                                )
+                                .map(|r| {
+                                    planar_reflection::grow_screen_rect(
+                                        r,
+                                        planar_reflection::PROBE_READ_MARGIN_NDC,
+                                    )
+                                })
+                                .unwrap_or(full_rect),
+                            )
+                        }
                     }
-                    _ => true,
+                    _ => Some(full_rect),
                 };
-                if visible {
+                if let Some(r) = on_screen {
                     seen[slot] = true;
+                    rect[slot] = Some(match rect[slot] {
+                        None => r,
+                        Some(a) => [a[0].min(r[0]), a[1].max(r[1]), a[2].min(r[2]), a[3].max(r[3])],
+                    });
                 }
             }
-            seen
+            (seen, rect)
         };
         for i in 0..probe_count {
             if !probe_seen[i] {
                 continue;
             }
+            let read_rect = probe_rect[i].unwrap_or(full_rect);
             let (
                 plane_y,
                 normal,
@@ -580,7 +621,13 @@ impl Renderer {
             // append after the cached models in the same slot space —
             // creation order decides who survives the cap, so games
             // should create hero geometry before filler (grass).
-            let mirror_planes = crate::scene::extract_frustum_planes(&mirror_vp);
+            // Cropped to the screen rectangle the surface reads (see probe_rect).
+            // Horizontal planes only: surface_screen_rect bounds a surface by
+            // the top and bottom faces of its box, exact for a level surface.
+            let read_rect = if normal[1].abs() > 0.999 { read_rect } else { full_rect };
+            let mirror_planes = planar_reflection::cropped_frustum_planes(&mirror_vp, read_rect);
+            let (sc_x, sc_y, sc_w, sc_h) =
+                planar_reflection::screen_rect_scissor(read_rect, probe_res);
             // Projected-size cull. The probe is small (512 px in the shooter) and
             // the water shows it rippled, yet every draw the mirrored frustum can
             // see used to be drawn at full detail: on an integrated GPU the forest
@@ -743,6 +790,8 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
+                // Outside the read rectangle the clear stays: nothing samples it.
+                pass.set_scissor_rect(sc_x, sc_y, sc_w, sc_h);
                 mat_sys.dispatch_with_view(
                     &mut pass,
                     view_bg,
@@ -812,6 +861,7 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
+                pass.set_scissor_rect(sc_x, sc_y, sc_w, sc_h);
                 if let (Some(rp), Some(rmbg), Some(rlbg)) =
                     (refl_pipeline, refl_model_bg, refl_light_bg)
                 {
