@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import struct
 from pathlib import Path
@@ -24,6 +25,10 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _float32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
 def build_stress_scene(
@@ -54,14 +59,30 @@ def build_stress_scene(
     position_bytes = vertex_count * 12
     index_bytes = index_count * 4
 
+    minimum_height = math.inf
+    maximum_height = -math.inf
     with temporary_binary.open("wb") as binary:
         for z in range(quads_z + 1):
             position_z = tile_size * z / quads_z
             for x in range(quads_x + 1):
                 position_x = tile_size * x / quads_x
-                # A shallow deterministic wave prevents the hierarchy stress
-                # from degenerating into a single perfectly planar polygon.
-                height = ((x * 17 + z * 29) % 31) * (tile_size / 3100.0)
+                # Relief at several scales, so each coarser level of the
+                # cooked hierarchy loses a little more shape than the one
+                # below it and a view needs detail gradually with distance.
+                # Per-vertex hash noise alone (source v1) gave every level
+                # above the second the same error, the noise's amplitude:
+                # a view then needed either no streamed detail or all of it.
+                # The waves repeat with the tile, so plates meet their
+                # neighbours.
+                u = 2.0 * math.pi * x / quads_x
+                v = 2.0 * math.pi * z / quads_z
+                height = tile_size * (
+                    0.06 * math.sin(4.0 * u) * math.cos(4.0 * v)
+                    + 0.02 * math.sin(16.0 * u + 1.3) * math.cos(16.0 * v)
+                    + 0.006 * math.sin(64.0 * u) * math.cos(64.0 * v + 0.7)
+                ) + ((x * 17 + z * 29) % 31) * (tile_size / 31000.0)
+                minimum_height = min(minimum_height, height)
+                maximum_height = max(maximum_height, height)
                 binary.write(struct.pack("<3f", position_x, height, position_z))
         for z in range(quads_z):
             row = quads_x + 1
@@ -119,8 +140,8 @@ def build_stress_scene(
                 "componentType": 5126,
                 "count": vertex_count,
                 "type": "VEC3",
-                "min": [0.0, 0.0, 0.0],
-                "max": [tile_size, tile_size * 0.01, tile_size],
+                "min": [0.0, _float32(minimum_height), 0.0],
+                "max": [tile_size, _float32(maximum_height), tile_size],
             },
             {
                 "bufferView": 1,
@@ -140,7 +161,7 @@ def build_stress_scene(
     os.replace(temporary_gltf, output)
 
     return {
-        "schema": "bloom-virtual-geometry-stress-source-v1",
+        "schema": "bloom-virtual-geometry-stress-source-v2",
         "gltf": str(output),
         "binary": str(binary_path),
         "mesh_count": mesh_count,

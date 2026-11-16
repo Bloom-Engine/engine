@@ -1,4 +1,5 @@
 //! Independent positional error bound for cooked hierarchy simplification.
+//! Measured from the source mesh to each simplified level.
 
 use crate::meshlet::StaticVertex;
 
@@ -37,18 +38,19 @@ struct TriangleBvh {
     root: usize,
 }
 
-/// Maximum one-sided distance from every source vertex to the simplified
-/// triangle surface. The hierarchy accumulates this independently measured
-/// positional bound instead of treating the simplifier's quadric metric as a
-/// Hausdorff-style guarantee.
-pub fn maximum_vertex_deviation(
+/// Maximum distance from any of `points` to the triangle surface given by
+/// `vertices` and `indices`. The hierarchy passes every source (level 0)
+/// vertex a parent group replaces, so the recorded error of each level is
+/// measured against the source mesh itself, not accumulated level by level.
+pub fn maximum_point_deviation(
+    points: &[[f32; 3]],
     vertices: &[StaticVertex],
-    simplified_indices: &[u32],
+    indices: &[u32],
 ) -> Result<f32, String> {
-    let bvh = TriangleBvh::new(vertices, simplified_indices)?;
-    Ok(vertices
+    let bvh = TriangleBvh::new(vertices, indices)?;
+    Ok(points
         .iter()
-        .map(|vertex| bvh.nearest_squared(vertex.position).sqrt())
+        .map(|point| bvh.nearest_squared(*point).sqrt())
         .fold(0.0, f32::max))
 }
 
@@ -300,14 +302,18 @@ mod tests {
     }
 
     #[test]
-    fn bvh_measures_one_sided_vertex_deviation() {
+    fn bvh_measures_separate_points_against_a_surface() {
         let vertices = [
             vertex([0.0, 0.0, 0.0]),
             vertex([1.0, 0.0, 0.0]),
             vertex([0.0, 1.0, 0.0]),
-            vertex([0.25, 0.25, 0.5]),
         ];
-        let error = maximum_vertex_deviation(&vertices, &[0, 1, 2]).unwrap();
-        assert!((error - 0.5).abs() <= 1.0e-6);
+        let points = [[0.25, 0.25, -0.75], [0.1, 0.1, 0.0], [2.0, 0.0, 0.0]];
+        let error = maximum_point_deviation(&points, &vertices, &[0, 1, 2]).unwrap();
+        assert!((error - 1.0).abs() <= 1.0e-6);
+        assert_eq!(
+            maximum_point_deviation(&[], &vertices, &[0, 1, 2]).unwrap(),
+            0.0
+        );
     }
 }

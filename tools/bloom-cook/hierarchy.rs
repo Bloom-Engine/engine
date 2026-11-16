@@ -6,7 +6,7 @@
 //! Parents keep the full child-group bounds and accumulated absolute error for
 //! conservative culling and future projected-pixel selection.
 
-use crate::geometric_error::maximum_vertex_deviation;
+use crate::geometric_error::maximum_point_deviation;
 use crate::meshlet::{
     build_leaf_meshlets, validate_primitive, Meshlet, MeshletBounds, MeshletLimits,
     StaticPrimitive, StaticVertex, FLAG_COARSE_ROOT, NO_RELATION,
@@ -164,6 +164,19 @@ pub fn build_meshlet_hierarchy(
         .collect();
     let mut roots = Vec::<usize>::new();
     let mut maximum_level = 0;
+    // The source (level 0) vertex positions each current group stands for,
+    // keyed by the group's first node. A parent's error is measured from
+    // these to its simplified surface.
+    let mut sources = (0..leaf_count)
+        .map(|index| {
+            let positions = nodes[index]
+                .vertices
+                .iter()
+                .map(|vertex| vertex.position)
+                .collect::<Vec<_>>();
+            (index, positions)
+        })
+        .collect::<BTreeMap<usize, Vec<[f32; 3]>>>();
 
     for level in 1..=maximum_levels {
         if current.is_empty() {
@@ -172,13 +185,21 @@ pub fn build_meshlet_hierarchy(
         let mut next = Vec::<ClusterGroup>::new();
         let partitions = partition_atomic_groups(&current, &nodes)?;
         for child_group in partitions {
+            let child_end = child_group.end()?;
+            let member_keys = sources
+                .range(child_group.start..child_end)
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>();
+            let mut source_points = Vec::new();
+            for key in member_keys {
+                source_points.extend(sources.remove(&key).unwrap_or_default());
+            }
             if child_group.count == 1 {
                 roots.push(child_group.start);
                 continue;
             }
-            let child_end = child_group.end()?;
             let children = &nodes[child_group.start..child_end];
-            let Some(mut parents) = simplify_group(children, limits, level)? else {
+            let Some(mut parents) = simplify_group(children, &source_points, limits, level)? else {
                 roots.extend(child_group.start..child_end);
                 continue;
             };
@@ -209,6 +230,7 @@ pub fn build_meshlet_hierarchy(
             }
             let count = parents.len();
             nodes.extend(parents);
+            sources.insert(parent_start, source_points);
             next.push(ClusterGroup {
                 start: parent_start,
                 count,
@@ -520,6 +542,7 @@ fn validate_same_primitive(meshlets: &[Meshlet]) -> Result<(), String> {
 
 fn simplify_group(
     children: &[Meshlet],
+    source_points: &[[f32; 3]],
     limits: MeshletLimits,
     level: u32,
 ) -> Result<Option<Vec<Meshlet>>, String> {
@@ -543,18 +566,34 @@ fn simplify_group(
         SimplifyOptions::LockBorder | SimplifyOptions::ErrorAbsolute,
         Some(&mut added_error),
     );
+    // A level that removes less than a seventh of its triangles is a stall
+    // (locked seams and borders leave the simplifier nothing to collapse).
+    // Stopping here keeps such near-copies out of the archive: they cost
+    // payload and traversal depth and are never the better choice.
+    let stalled = simplified.len() as u64 * 7 > combined.indices.len() as u64 * 6;
     if simplified.is_empty()
         || !simplified.len().is_multiple_of(3)
         || simplified.len() >= combined.indices.len()
+        || stalled
         || !added_error.is_finite()
         || added_error < 0.0
     {
         return Ok(None);
     }
-    // meshoptimizer's quadric result is an ordering/error-limit metric, not a
-    // strict one-sided source-vertex distance bound. Measure that positional
-    // bound independently so projected LOD thresholds cannot understate it.
-    added_error = added_error.max(maximum_vertex_deviation(&combined.vertices, &simplified)?);
+    // The level-of-detail error is a measured positional bound: the largest
+    // distance from any source (level 0) vertex this group replaces to the
+    // simplified surface. Two things it is not. It is not meshoptimizer's own
+    // result, which also carries the attribute terms scaled by weights chosen
+    // to order collapses (UV at 10): on a textured model that read as up to a
+    // metre for halving an 11 m house whose surface had moved by centimetres,
+    // so no coarser level was ever selected. And it is not a sum of per-level
+    // deviations, which overstates the error more with every level. The
+    // attributes still steer the simplifier, and seams stay locked, which is
+    // what keeps textures in place (see docs/virtualized-geometry.md).
+    let measured_error = maximum_point_deviation(source_points, &combined.vertices, &simplified)?;
+    if !measured_error.is_finite() {
+        return Ok(None);
+    }
 
     let first = &children[0];
     let primitive = StaticPrimitive {
@@ -570,11 +609,13 @@ fn simplify_group(
     if parents.is_empty() {
         return Ok(None);
     }
+    // Never below a child's error: refinement must be monotonic. The small
+    // factor keeps the bound on the safe side of float rounding.
     let error = children
         .iter()
         .map(|child| child.geometric_error)
         .fold(0.0, f32::max)
-        + added_error;
+        .max(measured_error * 1.0001 + f32::EPSILON);
     let bounds = hierarchy_bounds(children);
     for parent in &mut parents {
         parent.lod_level = level;

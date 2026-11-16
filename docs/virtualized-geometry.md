@@ -245,12 +245,39 @@ refinable boundary or a gap in the lower ranges ends the partition. This keeps
 multi-level traversal from following only the first sibling's children and
 silently dropping the others.
 
-The simplifier's quadric result is retained as an ordering metric, but it is
-not treated as a strict positional bound. Geometry recipe v2 independently
-measures the maximum one-sided distance from every source-group vertex to the
-simplified parent triangle surface and uses the larger result. Each parent
-group stores that measured edge error plus the maximum error accumulated by
-its children. An automated hierarchy oracle independently walks every LOD0
+The simplifier's quadric result orders collapses and nothing else. Since
+geometry recipe v4 the error stored on a parent group is measured: the largest
+distance from any source (level 0) vertex the group replaces to the group's
+simplified triangle surface, and never less than its children's error.
+
+Recipes v2 and v3 took the larger of the simplifier's result and a per-level
+positional deviation, and summed that up the levels. Two things were wrong
+with it on textured models. The simplifier's result includes the attribute
+terms at the weights that order collapses (UV at 10), so it was dominated by
+texture coordinates: halving an 11.6 m house whose surface had moved by 3 to
+12 cm was recorded as up to 1 m, and its coarsest level as 6.3 m, so the
+runtime had no reason to select anything but the leaves at any distance a
+player sees it from. And a sum of per-level maxima
+grows with every level whether or not the surface moves again. Measured
+against the source, that house's levels read 0.03 to 0.12 m, 0.10 to 0.27 m
+and 0.30 m. Textures stay in place because attribute seams and group borders
+remain locked: rendered with the allowed error raised to 64 pixels the house
+loses thin parts first and shows no texture fault
+(`docs/evidence/issue-131-measured-source-error-v4.md`).
+
+A level that removes less than a seventh of its triangles is treated as a
+stall: its children become roots instead. Locked seams leave the simplifier
+little to collapse on a mesh of many UV islands, and the near-copies it then
+produced cost payload and traversal depth for nothing (the same house: five
+levels of 19,800 down to 16,800 triangles, all with one error).
+
+Collapsing across seams (meshoptimizer's `Permissive`) would take that house
+from a floor of about 21,000 triangles to under 700, but a triangle that
+spans two UV islands samples unrelated texels: garbage patches were visible
+at an allowed error of 4 pixels. It needs a measured texture term before it
+can be used, and is not enabled.
+
+An automated hierarchy oracle independently walks every LOD0
 descendant, measures it against each parent surface, and verifies both the
 stored object-space bound and the projected one-pixel threshold. Parent
 AABB/sphere bounds conservatively cover the complete replaced child group;
