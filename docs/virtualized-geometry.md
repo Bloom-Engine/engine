@@ -308,9 +308,13 @@ itself. The selection is the same set of clusters either way; the CPU
 reference and its parity tests are unchanged. Before this, one large mesh
 was walked by a single invocation: an 80,000-triangle model with one root
 group cost 13.9 ms of selection on an M1 Max and 8.2 ms after. What remains
-is the size of the groups themselves: each group is still judged and emitted
-by one invocation, cluster by cluster, and the cooker's top groups hold
-hundreds of clusters.
+is the size of the groups themselves: the cooker's upper groups hold hundreds
+of clusters. Judging such a group no longer reads them all: every simplified
+parent group carries one set of bounds and one error, the pool marks a group
+whose clusters agree bit for bit when the mesh is registered
+(`GPU_VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS`), and traversal then decides from
+the first cluster (the same model: 8.2 ms to 3.6 ms). A group that is
+selected is still emitted by one invocation, cluster by cluster.
 
 Selected-cluster records address instances by their dense dispatch index, not
 the caller's stable instance ID. This keeps vertex pulling exact when stable IDs
