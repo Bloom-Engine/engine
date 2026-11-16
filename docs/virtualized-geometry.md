@@ -295,6 +295,23 @@ complete child group to be resident. Otherwise the selector keeps the resident
 ancestor and writes bounded page requests. Camera cuts and instance motion
 consume no prior selection state.
 
+Selection runs breadth-first across dispatches. The first dispatch has one
+invocation per instance and root group; a group that refines hands its child
+groups to a shared queue for the next level instead of walking them itself,
+and the next dispatch has one invocation per queued group. Twelve levels are
+queued; the last walks whatever lies below it depth-first on a bounded stack,
+which is what every invocation did before the queue existed. The queue lives
+behind the traversal counters in their buffer (the layout already uses every
+storage binding a stage may have) and holds 65,536 groups a level. A full
+level is not a failure: a group that cannot queue all its children walks them
+itself. The selection is the same set of clusters either way; the CPU
+reference and its parity tests are unchanged. Before this, one large mesh
+was walked by a single invocation: an 80,000-triangle model with one root
+group cost 13.9 ms of selection on an M1 Max and 8.2 ms after. What remains
+is the size of the groups themselves: each group is still judged and emitted
+by one invocation, cluster by cluster, and the cooker's top groups hold
+hundreds of clusters.
+
 Selected-cluster records address instances by their dense dispatch index, not
 the caller's stable instance ID. This keeps vertex pulling exact when stable IDs
 are sparse. Page requests retain the stable ID for asynchronous feedback.
