@@ -317,7 +317,8 @@ struct AerialParams {
     inv_vp: mat4x4<f32>,
     // xyz = sun direction (unit), w = sun intensity scale
     sun: vec4<f32>,
-    // x = rayleigh density mult, y = mie density mult, zw unused
+    // x = rayleigh density mult, y = mie density mult, z = strength of the
+    // result (1 = physical), w unused
     knobs: vec4<f32>,
 };
 
@@ -448,7 +449,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Mean transmittance — scene_compose applies it as a single
     // scalar attenuation. Per-channel transmittance would be tighter
     // physics but pushes us off the existing fog composite shape.
-    let mean_t = (transmittance.x + transmittance.y + transmittance.z) / 3.0;
+    let strength = u.knobs.z;
+    in_scatter = in_scatter * strength;
+    let mean_t = mix(1.0, (transmittance.x + transmittance.y + transmittance.z) / 3.0, clamp(strength, 0.0, 1.0));
 
     textureStore(
         aerial_out,

@@ -79,6 +79,7 @@ declare function bloom_set_monitor(index: number): number;
 declare function bloom_get_physical_height(): number;
 declare function bloom_set_auto_resolution(targetHz: number, enabled: number): number;
 declare function bloom_set_manual_exposure(value: number): number;
+declare function bloom_set_aerial_perspective(strength: number): number;
 declare function bloom_set_env_intensity(intensity: number): number;
 declare function bloom_set_ssgi_enabled(on: number): number;
 declare function bloom_set_path_tracing(mode: number): number;
@@ -758,6 +759,13 @@ export function setAutoResolution(targetHz: number, enabled: boolean = true): bo
 /** Manual exposure multiplier (ignored when auto-exposure is on). 1.0 = default. */
 export function setManualExposure(value: number): boolean {
   return bloom_set_manual_exposure(value) !== 0;
+}
+
+/** How much of the procedural sky's aerial perspective (distance haze) is laid over the scene: 1.0 is the
+ * physical amount for the sky's brightness (the default), 0 none. Lower it for a scene looked down on from the
+ * air, where every pixel is kilometres away and the full veil washes the ground out. */
+export function setAerialPerspective(strength: number): boolean {
+  return bloom_set_aerial_perspective(strength) !== 0;
 }
 
 /** Env-map intensity multiplier for IBL + sky pass. 1.0 = reference, 0.2–0.5 typical for bright outdoor HDRs. */

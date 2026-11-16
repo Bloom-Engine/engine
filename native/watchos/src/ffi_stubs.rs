@@ -455,6 +455,9 @@
 #[no_mangle] pub extern "C" fn bloom_set_auto_resolution(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_aerial_perspective(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_env_intensity(_p0: f64) -> f64 {
     0.0
 }

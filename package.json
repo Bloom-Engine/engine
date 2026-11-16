@@ -2205,6 +2205,13 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_aerial_perspective",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_env_intensity",
           "params": [
             "f64"

@@ -207,6 +207,11 @@ pub fn bloom_set_auto_resolution(target_hz: f64, enabled: f64) -> f64 {
     1.0
 }
 #[wasm_bindgen]
+pub fn bloom_set_aerial_perspective(strength: f64) -> f64 {
+    engine().renderer.set_aerial_perspective_strength(strength as f32);
+    1.0
+}
+#[wasm_bindgen]
 pub fn bloom_set_env_intensity(intensity: f64) -> f64 {
     engine().renderer.set_env_intensity(intensity as f32);
     1.0

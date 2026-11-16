@@ -469,8 +469,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 vec3<f32>(in.uv.x, in.uv.y, depth_slice),
                 0.0,
             );
-            let in_scatter = aerial.rgb;
-            let mean_t = aerial.a;
+            // The first slice holds the scatter out to ITS centre, and sampling
+            // clamps to it: without this ramp everything nearer than that centre
+            // (half a kilometre with 32 slices over 32 km) wore the whole first
+            // slice's haze, a veil over the foreground.
+            let first_km = 0.5 * max_km / f32(textureDimensions(aerial_tex).z);
+            let near = clamp(dist_km / first_km, 0.0, 1.0);
+            let in_scatter = aerial.rgb * near;
+            let mean_t = mix(1.0, aerial.a, near);
             color = color * mean_t + in_scatter;
         }
     }

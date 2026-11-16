@@ -87,6 +87,7 @@ const RENDERER_STATUS_FUNCTIONS = new Set([
   'bloom_set_cas_strength',
   'bloom_set_auto_resolution',
   'bloom_set_manual_exposure',
+  'bloom_set_aerial_perspective',
   'bloom_set_env_intensity',
   'bloom_set_ssgi_enabled',
   'bloom_set_path_tracing',
