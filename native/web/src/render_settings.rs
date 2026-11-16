@@ -405,6 +405,20 @@ pub fn bloom_set_ssr_enabled(on: f64) -> f64 {
 }
 
 #[wasm_bindgen]
+pub fn bloom_set_ssr_range(max_distance: f64, steps: f64, curve: f64) -> f64 {
+    engine()
+        .renderer
+        .set_ssr_range(max_distance as f32, steps as f32, curve as f32);
+    1.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_ssr_strength(strength: f64) -> f64 {
+    engine().renderer.set_ssr_strength(strength as f32);
+    1.0
+}
+
+#[wasm_bindgen]
 pub fn bloom_set_motion_blur_enabled(on: f64) -> f64 {
     engine().renderer.set_motion_blur_enabled(on != 0.0);
     1.0

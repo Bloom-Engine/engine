@@ -110,11 +110,14 @@ declare function bloom_set_ssao_radius(worldRadius: number): number;
 declare function bloom_set_wind(dirX: number, dirZ: number, amplitude: number, frequency: number): number;
 declare function bloom_set_cloud_shadows(strength: number, deckHeight: number, featureScale: number, driftSpeed: number): number;
 declare function bloom_set_ssr_enabled(on: number): number;
+declare function bloom_set_ssr_strength(strength: number): number;
+declare function bloom_set_ssr_range(maxDistance: number, steps: number, curve: number): number;
 declare function bloom_set_motion_blur_enabled(on: number): number;
 declare function bloom_set_sss_enabled(on: number): number;
 declare function bloom_set_profiler_enabled(on: number): void;
 declare function bloom_get_profiler_frame_cpu_us(): number;
 declare function bloom_get_profiler_frame_gpu_us(): number;
+declare function bloom_is_low_tier_gpu(): number;
 declare function bloom_write_quality_telemetry(
   path: string,
   warmupFrames: number,
@@ -1121,6 +1124,25 @@ export function setSsrEnabled(on: boolean): boolean {
   return bloom_set_ssr_enabled(on ? 1 : 0) !== 0;
 }
 
+/**
+ * How far screen-space reflections reach. The default (8 m in 8 even steps)
+ * suits rooms. An open scene with a wet road wants a few hundred metres:
+ * raise `steps` (4 to 64) and set `curve` around 2 so the steps start short
+ * beside the surface and grow with distance (1 = even steps).
+ */
+export function setSsrRange(maxDistance: number, steps: number = 8, curve: number = 1): boolean {
+  return bloom_set_ssr_range(maxDistance, steps, curve) !== 0;
+}
+
+/**
+ * How much of a smooth surface's reflection comes from the traced screen
+ * (the rest stays with the prefiltered environment). 0.5 is the default;
+ * 1 gives wet roads and polished floors a full mirror image.
+ */
+export function setSsrStrength(strength: number): boolean {
+  return bloom_set_ssr_strength(strength) !== 0;
+}
+
 /** Toggle per-object motion blur. Default off. */
 export function setMotionBlurEnabled(on: boolean): boolean {
   return bloom_set_motion_blur_enabled(on ? 1 : 0) !== 0;
@@ -1147,6 +1169,17 @@ export function getProfilerFrameCpuUs(): number {
 }
 
 /** Average total GPU frame time over the rolling window, in microseconds. 0 if GPU timing unavailable. */
+/**
+ * Whether this run uses the engine's low tier (SH-069): an Android phone whose GPU is in the
+ * budget class (an Adreno below 640, an older Mali, PowerVR; a Pixel 4a is the reference). The
+ * engine then shades the scene with one texture read a pixel; a game can use the same answer
+ * for its own content budget. Never true elsewhere unless BLOOM_LOW_TIER=1 is set. Known
+ * after initWindow.
+ */
+export function isLowTierGpu(): boolean {
+  return bloom_is_low_tier_gpu() !== 0;
+}
+
 export function getProfilerFrameGpuUs(): number {
   return bloom_get_profiler_frame_gpu_us();
 }
@@ -1422,6 +1455,8 @@ export const GAMEPAD_KIND_XBOX = 1;
 export const GAMEPAD_KIND_PLAYSTATION = 2;
 export const GAMEPAD_KIND_NINTENDO = 3;
 export const GAMEPAD_KIND_OTHER = 4;
+/** tvOS with only the Apple TV remote: touch surface on the left stick's axes, click = A, play/pause = Start. */
+export const GAMEPAD_KIND_REMOTE = 5;
 
 /**
  * The connected pad's family, for drawing the right button glyphs: one of the

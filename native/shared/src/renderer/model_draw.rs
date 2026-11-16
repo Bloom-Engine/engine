@@ -203,6 +203,44 @@ impl Renderer {
         self.pending_skin_groups.push(scaled);
     }
 
+    /// `set_joint_matrices_scaled` for a character carried by something that
+    /// pitches and rolls (a driver in a car, a rider): every joint matrix is
+    /// placed by one full column-major model matrix instead of scale, position
+    /// and a turn about Y.
+    pub fn set_joint_matrices_transformed(
+        &mut self,
+        key: u64,
+        matrices: &[[[f32; 4]; 4]],
+        model: [[f32; 4]; 4],
+    ) {
+        let mut placed = Vec::with_capacity(matrices.len());
+        for matrix in matrices {
+            let mut out = [[0.0f32; 4]; 4];
+            for col in 0..4 {
+                for row in 0..4 {
+                    out[col][row] = model[0][row] * matrix[col][0]
+                        + model[1][row] * matrix[col][1]
+                        + model[2][row] * matrix[col][2]
+                        + model[3][row] * matrix[col][3];
+                }
+            }
+            placed.push(out);
+        }
+        let previous = match self.skin_prev_palettes.get(&key) {
+            Some((epoch, palette))
+                if epoch.wrapping_add(1) == self.skin_motion_epoch
+                    && palette.len() == placed.len() =>
+            {
+                palette.clone()
+            }
+            _ => placed.clone(),
+        };
+        self.pending_skin_groups_prev.push(previous);
+        self.skin_prev_palettes
+            .insert(key, (self.skin_motion_epoch, placed.clone()));
+        self.pending_skin_groups.push(placed);
+    }
+
     /// Pair an ordinary cached instance with the same submission slot from the
     /// prior frame. A missing/mismatched slot is a spawn and therefore seeds
     /// with the current transform (zero object velocity).

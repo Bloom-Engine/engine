@@ -898,6 +898,24 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_ssr_range  [source: macos]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_ssr_range(max_distance: f64, steps: f64, curve: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssr_range", move || {
+                engine()
+                    .renderer
+                    .set_ssr_range(max_distance as f32, steps as f32, curve as f32);
+            })
+        }
+
+        // bloom_set_ssr_strength  [source: macos]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_ssr_strength(strength: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssr_strength", move || {
+                engine().renderer.set_ssr_strength(strength as f32);
+            })
+        }
+
         // bloom_set_motion_blur_enabled  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_motion_blur_enabled(on: f64) -> f64 {

@@ -52,8 +52,15 @@ fn main() {
     // attachment). `velocity` stays — Android keeps TAA on, which reprojects
     // via motion vectors. wasm is NOT included: no Adreno-specific GMEM data
     // for WebGPU/browser GPUs, so this stays narrower than `fold_scene_inputs`.
+    //
+    // SH-069 (2026-11-15): OFF by default now; `BLOOM_LEAN_MRT=1` at build time turns it back on.
+    // A pass after the main pass still reads the material/albedo targets this drops, and every
+    // cached model (the player above all) came out half see-through under TAA on a Pixel 4a. It
+    // bought ~4 % of a frame there (9.9 vs 9.5 fps in a fight), and its own measurement in July
+    // found no gain at all; a see-through player is not worth it.
     println!("cargo:rustc-check-cfg=cfg(lean_mrt)");
-    if target_os == "android" {
+    println!("cargo:rerun-if-env-changed=BLOOM_LEAN_MRT");
+    if target_os == "android" && std::env::var_os("BLOOM_LEAN_MRT").is_some() {
         println!("cargo:rustc-cfg=lean_mrt");
     }
 

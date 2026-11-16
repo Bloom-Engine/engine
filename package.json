@@ -1529,6 +1529,15 @@
           "returns": "void"
         },
         {
+          "name": "bloom_anim_update_matrix",
+          "params": [
+            "f64", "f64",
+            "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64",
+            "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_anim_finished",
           "params": [
             "f64"
@@ -2444,6 +2453,22 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_ssr_strength",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_ssr_range",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_motion_blur_enabled",
           "params": [
             "f64"
@@ -2471,6 +2496,11 @@
         },
         {
           "name": "bloom_get_profiler_frame_gpu_us",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_is_low_tier_gpu",
           "params": [],
           "returns": "f64"
         },
