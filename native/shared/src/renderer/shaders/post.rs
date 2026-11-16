@@ -927,7 +927,11 @@ fn fs_main(in: VsOut) -> TaaOut {
     let history_in_bounds =
         prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
         prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
-    if (history_in_bounds) {
+    // A current weight of 1 means there is no history to use (a reset, a camera
+    // cut, the first frames). Do not read it at all: its stale confidence used
+    // to feed the reconstruction-detail term below, so the frame after a cut
+    // still carried the previous camera's image at one 8-bit level.
+    if (history_in_bounds && current_weight < 0.999) {
         var h_sample = sample_history_reprojected(prev_uv, camera_moving, object_moving);
         if (native_camera_motion_px > 0.05) {
             h_sample = sample_history_catmull_rom(prev_uv);
