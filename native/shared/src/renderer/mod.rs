@@ -11796,7 +11796,12 @@ impl Renderer {
                 self.sun_direction[2],
                 self.sun_intensity,
             ],
-            knobs: [self.rayleigh_density, self.mie_density, self.aerial_strength, 0.0],
+            knobs: [
+                self.rayleigh_density,
+                self.mie_density,
+                self.aerial_strength,
+                0.0,
+            ],
         };
         self.queue.write_buffer(
             &self.aerial_perspective_uniform_buffer,

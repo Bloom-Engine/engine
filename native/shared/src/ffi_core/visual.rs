@@ -583,7 +583,9 @@ macro_rules! __bloom_ffi_visual {
         #[no_mangle]
         pub extern "C" fn bloom_set_aerial_perspective(strength: f64) -> f64 {
             $crate::ffi::guard_applied("bloom_set_aerial_perspective", move || {
-                engine().renderer.set_aerial_perspective_strength(strength as f32);
+                engine()
+                    .renderer
+                    .set_aerial_perspective_strength(strength as f32);
             })
         }
 
