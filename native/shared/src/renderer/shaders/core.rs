@@ -859,6 +859,19 @@ fn fs_depth_prepass(in: VertexOutputScene) {
     }
 }
 
+// What the environment contributes under the weather's cloud cover. The
+// environment map is the clear sky (or whatever panorama the game loaded); a
+// closed deck replaces it with its own light, which is neutral and dimmer:
+// the blue fill of an open sky and the blue in a wet street's reflection both
+// go grey as the cover closes.
+fn weather_sky_light(env: vec3<f32>) -> vec3<f32> {
+    let closed = smoothstep(0.45, 0.95, lighting.weather.x);
+    if (closed <= 0.0) { return env; }
+    let luminance = dot(env, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let overcast = vec3<f32>(0.96, 0.98, 1.04) * luminance * 0.8;
+    return mix(env, overcast, closed);
+}
+
 fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     var n = normalize(in.normal);
     let base_uv = material_uv(
@@ -1254,8 +1267,8 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // specular chain, so specular can use every mip for GGX prefilter.
     let mips = f32(textureNumLevels(env_tex));
     let irr_uv = seamless_equirect_uv(dir_to_equirect_uv(n));
-    let irradiance = textureSampleLevel(env_diffuse_tex, env_samp, irr_uv, 0.0).rgb
-                   * lighting.camera_pos.w;
+    let irradiance = weather_sky_light(textureSampleLevel(env_diffuse_tex, env_samp, irr_uv, 0.0).rgb
+                   * lighting.camera_pos.w);
 
     // For diffuse IBL, the Schlick-with-roughness approximation
     // (Lazarov 2013) handles the average kS factor at grazing angles.
@@ -1271,7 +1284,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // most-blurred mip, and roughness = 0 samples mip 0 (mirror).
     let r = reflect(-v, n);
     let max_spec_mip = max(mips - 1.0, 0.0);
-    let prefiltered_env = env_sample_lod(r, roughness * max_spec_mip);
+    let prefiltered_env = weather_sky_light(env_sample_lod(r, roughness * max_spec_mip));
 
     // BRDF LUT lookup — (NdotV, roughness) → (scale, bias) such that
     // single-scatter specular = env * (F0 * scale + bias).

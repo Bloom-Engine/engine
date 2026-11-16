@@ -28,6 +28,11 @@ setWeather(cloudCover, wetness);
   surfaces darken (water in the pores), a film lowers roughness, and what
   faces the sky takes the most. It is one global number: set it to 0 while
   the camera is indoors.
+- **The sky's light follows the cover** in the built-in scene shader
+  (`weather_sky_light`): as the deck closes, diffuse and reflected
+  environment light lose their colour and a fifth of their strength, so an
+  overcast has no blue fill and a wet street does not reflect a blue sky. It
+  is a tint of the environment map the game has, not a re-rendered sky.
 - A negative cover means "no weather set" and leaves every existing scene as
   it was; that is the default.
 
@@ -39,9 +44,6 @@ the `_weather` forms take the cover.
 
 ## What is not in yet
 
-- **The sky's light does not follow the cover.** Ambient and reflected light
-  still come from the clear sky: surfaces under an overcast keep a blue fill,
-  and wet ground reflects blue. This is the next piece.
 - **Rain, lightning, spray.** No precipitation is drawn. A game has to bring
   its own (The Deep has a streak shader for its storm).
 - **Shelter.** Wetness does not know what is under a roof.
