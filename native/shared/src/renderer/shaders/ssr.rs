@@ -186,7 +186,8 @@ struct SsrParams {
     /// into a world direction for the equirect lookup.
     inv_view_rot: mat4x4<f32>,
     /// EN-021 — x = env max LOD (matches the material path's
-    /// roughness×6 mip ramp), y = env intensity, z = step curve, w unused.
+    /// roughness×6 mip ramp), y = env intensity, z = step curve,
+    /// w = weather cloud cover (negative = unset).
     params2: vec4<f32>,
 };
 
@@ -237,8 +238,14 @@ fn env_fallback(r_view: vec3<f32>, roughness: f32) -> vec3<f32> {
     let phi   = atan2(d.z, d.x);
     let uu    = phi / (2.0 * PI);
     let uv    = vec2<f32>(uu - floor(uu), theta / PI);
-    return textureSampleLevel(env_tex, env_samp, uv, roughness * u.params2.x).rgb
-         * u.params2.y;
+    let env = textureSampleLevel(env_tex, env_samp, uv, roughness * u.params2.x).rgb
+            * u.params2.y;
+    // Under the weather's closed sky the environment is the deck's grey, as
+    // in the scene shader's weather_sky_light: a miss must not bring the
+    // clear sky's blue back into a wet street.
+    let closed = smoothstep(0.45, 0.95, u.params2.w);
+    let luminance = dot(env, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return mix(env, vec3<f32>(0.96, 0.98, 1.04) * luminance * 0.8, closed);
 }
 
 /// Match the scene material path's continuous HDR specular compression.

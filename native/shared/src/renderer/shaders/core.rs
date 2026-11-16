@@ -306,6 +306,19 @@ fn bayer4(x: u32, y: u32) -> f32 {
     return (f32(i) + 0.5) / 16.0;
 }
 
+// What the environment contributes under the weather's cloud cover. The
+// environment map is the clear sky (or whatever panorama the game loaded); a
+// closed deck replaces it with its own light, which is neutral and dimmer:
+// the blue fill of an open sky and the blue in a wet street's reflection both
+// go grey as the cover closes.
+fn weather_sky_light(env: vec3<f32>) -> vec3<f32> {
+    let closed = smoothstep(0.45, 0.95, lighting.weather.x);
+    if (closed <= 0.0) { return env; }
+    let luminance = dot(env, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let overcast = vec3<f32>(0.96, 0.98, 1.04) * luminance * 0.8;
+    return mix(env, overcast, closed);
+}
+
 // Stable 4x4 Bayer threshold anchored to the source texture. Bloom's scene
 // targets are single-sample, so hardware alpha-to-coverage is unavailable;
 // this is its deterministic spatial equivalent for subpixel MASK coverage.
@@ -857,19 +870,6 @@ fn fs_depth_prepass(in: VertexOutputScene) {
         if (cutout_edge_on(in.world_pos, in.clip_position.xy)) { survives = false; }
         if (!survives) { discard; }
     }
-}
-
-// What the environment contributes under the weather's cloud cover. The
-// environment map is the clear sky (or whatever panorama the game loaded); a
-// closed deck replaces it with its own light, which is neutral and dimmer:
-// the blue fill of an open sky and the blue in a wet street's reflection both
-// go grey as the cover closes.
-fn weather_sky_light(env: vec3<f32>) -> vec3<f32> {
-    let closed = smoothstep(0.45, 0.95, lighting.weather.x);
-    if (closed <= 0.0) { return env; }
-    let luminance = dot(env, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let overcast = vec3<f32>(0.96, 0.98, 1.04) * luminance * 0.8;
-    return mix(env, overcast, closed);
 }
 
 fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
