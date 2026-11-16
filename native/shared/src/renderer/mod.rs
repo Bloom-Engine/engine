@@ -1594,6 +1594,7 @@ pub struct Renderer {
     sun_direction: [f32; 3],
     sun_intensity: f32,
     rayleigh_density: f32,
+    aerial_strength: f32,
     mie_density: f32,
     ground_albedo: f32,
     sky_view_dirty: bool,
@@ -8735,6 +8736,7 @@ impl Renderer {
             sun_direction: [0.0, 1.0, 0.0],
             sun_intensity: 1.0,
             rayleigh_density: 1.0,
+            aerial_strength: 1.0,
             mie_density: 1.0,
             ground_albedo: 0.1,
             sky_view_dirty: true,
@@ -10976,6 +10978,15 @@ impl Renderer {
         self.sun_shaft_color_user_override = true;
     }
 
+    /// How much of the procedural sky's aerial perspective the composite applies
+    /// to scene pixels: 1.0 is the physical amount for the sky's brightness, 0.0
+    /// none. The veil is right for a horizon seen from the ground and far too
+    /// thick for a scene looked down on from a few hundred metres, where every
+    /// pixel is one to five kilometres away.
+    pub fn set_aerial_perspective_strength(&mut self, strength: f32) {
+        self.aerial_strength = strength.max(0.0);
+    }
+
     pub fn set_env_intensity(&mut self, intensity: f32) {
         self.lighting_uniforms.camera_pos[3] = intensity;
     }
@@ -11785,7 +11796,7 @@ impl Renderer {
                 self.sun_direction[2],
                 self.sun_intensity,
             ],
-            knobs: [self.rayleigh_density, self.mie_density, 0.0, 0.0],
+            knobs: [self.rayleigh_density, self.mie_density, self.aerial_strength, 0.0],
         };
         self.queue.write_buffer(
             &self.aerial_perspective_uniform_buffer,
