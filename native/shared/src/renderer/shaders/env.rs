@@ -781,7 +781,15 @@ struct SkyOut {
 @fragment
 fn sky_fs(in: VsOut) -> SkyOut {
     let dir = normalize(u.forward.xyz + in.ndc.x * u.right.xyz + in.ndc.y * u.up.xyz);
-    let uv = dir_to_sky_uv(dir);
+    // Below the horizon the sky-view LUT holds the ray that ends on the planet:
+    // a short, unlit path, so nearly black. A scene whose ground stops short of
+    // the true horizon (every scene, seen from a few hundred metres up: the
+    // horizon dips 2 degrees at 600 m when the ground mesh ends 16 km out) showed
+    // that as a dark band between its last geometry and the sky. Re-sample the
+    // horizon ring there instead, as the HDRI sky above does: the ground beyond
+    // the mesh is haze.
+    let sky_dir = normalize(vec3<f32>(dir.x, max(dir.y, 0.012), dir.z));
+    let uv = dir_to_sky_uv(sky_dir);
     var radiance = textureSampleLevel(sky_view_lut, lut_samp, uv, 0.0).rgb;
 
     // Sun disk: if view direction is within sun_angular_radius of sun
