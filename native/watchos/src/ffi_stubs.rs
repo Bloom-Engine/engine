@@ -1198,3 +1198,9 @@
 #[no_mangle] pub extern "C" fn bloom_virtual_geometry_stat(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_scene_attach_virtual_model(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_virtual_geometry_proxy_error(_p0: f64) -> f64 {
+    0.0
+}

@@ -132,6 +132,8 @@ mod transparent_gi;
 mod virtual_geometry_integration;
 #[cfg(feature = "models3d")]
 mod virtual_model_api;
+#[cfg(feature = "models3d")]
+pub use virtual_model_api::VirtualNodeRole;
 mod volumetric_fog;
 #[cfg(feature = "models3d")]
 pub use virtual_geometry_integration::RendererVirtualGeometryError;

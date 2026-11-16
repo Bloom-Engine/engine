@@ -140,6 +140,14 @@ pub(crate) struct NodeUniforms {
 // Scene Node
 // ============================================================
 
+/// Which virtual model placement a scene node submits: the model's handle
+/// and the source glTF mesh the instance is filtered to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VirtualNodeLink {
+    pub model_handle_bits: u64,
+    pub source_mesh_index: u32,
+}
+
 pub struct SceneNode {
     // Geometry (CPU-side, updated by systems)
     pub vertices: Vec<Vertex3D>,
@@ -179,6 +187,13 @@ pub struct SceneNode {
     /// trace can't see. Keep `visible = true` on such nodes — the GI
     /// feeds all filter on `visible`.
     pub gi_only: bool,
+    /// A `gi_only` node that also casts sun shadows. Set for the stand-in
+    /// mesh of a virtual-geometry model, whose camera pixels come from the
+    /// virtual path while shadows and GI still need ordinary triangles.
+    pub shadow_proxy: bool,
+    /// Present on the one node of a virtual model placement that submits
+    /// that placement's virtual instance each frame.
+    pub virtual_link: Option<VirtualNodeLink>,
     pub parent: f64,
     // Editor user data — an arbitrary i64 attached to the node. The editor
     // uses this to store the entity id directly on the scene node so picking
@@ -352,6 +367,8 @@ impl SceneNode {
             receive_shadow: true,
             render_layer: 0,
             gi_only: false,
+            shadow_proxy: false,
+            virtual_link: None,
             parent: 0.0,
             user_data: 0,
             bounds_min: [0.0; 3],
@@ -717,6 +734,16 @@ impl SceneGraph {
         let double_sided = mesh.double_sided;
         let layered_pbr = mesh.layered_pbr;
 
+        // An ordinary attach over a node that stood in for a virtual model
+        // makes it an ordinary drawn node again.
+        if let Some(node) = self.nodes.get_mut(node_handle) {
+            if node.shadow_proxy {
+                node.shadow_proxy = false;
+                node.gi_only = false;
+                node.virtual_link = None;
+                self.shadow_version = self.shadow_version.wrapping_add(1);
+            }
+        }
         self.update_shared_model_geometry(node_handle, mesh, source_transform);
         self.set_cast_shadow(node_handle, source_cast_shadow);
         if let Some(tex_idx) = base_color_tex {
@@ -746,6 +773,27 @@ impl SceneGraph {
         self.set_material_alpha_coverage_mips(node_handle, alpha_coverage_mips);
         self.set_material_transmission(node_handle, transmission);
         self.set_material_layered_pbr(node_handle, layered_pbr);
+    }
+
+    /// Attach the stand-in mesh of a virtual model placement: it feeds GI
+    /// and casts sun shadows but is never drawn to the camera, where the
+    /// virtual path owns the model's pixels. `link` is set on the node that
+    /// submits the placement's virtual instance.
+    pub fn attach_virtual_proxy(
+        &mut self,
+        node_handle: f64,
+        mesh: Arc<MeshData>,
+        source_transform: [[f32; 4]; 4],
+        source_cast_shadow: bool,
+        link: Option<VirtualNodeLink>,
+    ) {
+        self.attach_model_mesh(node_handle, mesh, source_transform, source_cast_shadow);
+        if let Some(node) = self.nodes.get_mut(node_handle) {
+            node.gi_only = true;
+            node.shadow_proxy = true;
+            node.virtual_link = link;
+            self.shadow_version = self.shadow_version.wrapping_add(1);
+        }
     }
 
     /// Position + Y-rotation + uniform-scale convenience setter. Exists

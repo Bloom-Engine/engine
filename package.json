@@ -1108,6 +1108,22 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_scene_attach_virtual_model",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_virtual_geometry_proxy_error",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_unload_model",
           "params": [
             "f64"

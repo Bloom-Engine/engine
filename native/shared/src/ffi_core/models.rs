@@ -387,6 +387,21 @@ macro_rules! __bloom_ffi_models {
             0.0
         }
 
+        // bloom_set_virtual_geometry_proxy_error  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_virtual_geometry_proxy_error(relative_error: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_virtual_geometry_proxy_error", move || {
+                engine().renderer.set_virtual_model_proxy_error(relative_error as f32);
+            })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_virtual_geometry_proxy_error(_relative_error: f64) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_set_virtual_geometry_proxy_error", "models3d");
+            0.0
+        }
+
         // bloom_virtual_geometry_stat  [gated: models3d]
         // 0 resident bytes, 1 pool bytes, 2 resident pages, 3 placements last frame.
         #[cfg(feature = "models3d")]

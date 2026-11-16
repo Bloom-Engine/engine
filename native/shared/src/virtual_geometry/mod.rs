@@ -8,6 +8,7 @@ mod decode;
 mod draw_emission;
 mod gpu_pool;
 mod hiz;
+mod proxy;
 mod residency;
 pub(crate) mod shading;
 #[cfg(not(target_arch = "wasm32"))]
@@ -36,6 +37,7 @@ pub use gpu_pool::{
 };
 pub use hiz::GpuVirtualHiZTelemetry;
 pub(crate) use hiz::VirtualGeometryHiZFrame;
+pub use proxy::{bounds_diagonal, build_proxy, ProxyPrimitive, ProxyVertex};
 pub use residency::{
     ClusterGroup, PageTransition, ResidencyError, ResidencyTelemetry, ResolvedClusterGroup,
     VirtualGeometryResidency,

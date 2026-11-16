@@ -213,7 +213,7 @@ impl EngineState {
             self.renderer.prepare_scene_graph(&mut self.scene, true);
             self.profiler.end("scene_prepare");
             #[cfg(feature = "models3d")]
-            self.renderer.flush_virtual_model_draws();
+            self.renderer.flush_virtual_model_draws(&self.scene);
 
             // Phase 6 — drain hot-reload events and rebuild any
             // material whose .wgsl file changed on disk. Cheap when

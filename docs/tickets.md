@@ -2694,3 +2694,34 @@ materials drawn by the engine's own scene shader.
 **Checked** on Metal with the shooter's Plaza captures (before and after, same views). Not
 checked: the shadow pass still draws edge-on cards (their shadow is thin and correct); the
 visibility-buffer and GPU-driven variants were compiled, not looked at; no other backend ran.
+
+## EN-072 — Virtual geometry for games: API, shadows and GI through a stand-in mesh ✅ *(2026-11-16, branch feat/virtual-geometry-api)*
+
+Asked for by The Deep (Jonah), whose full-size Nineveh wants dense models without hand-made
+levels of detail. The producer chain of #131 existed in Rust only; a game could not reach it.
+
+- **API** (`src/models`, `src/scene`; every platform, the web and the watch report "not done"):
+  `requestVirtualGeometry()` before `initWindow`, `enableVirtualGeometry(poolMb)`,
+  `attachVirtualGeometry(model, bgeoPath)`, `attachVirtualModelToNode(node, model, mesh)`,
+  `drawModelVirtual(model, matrix, tint)`, `setVirtualGeometryErrorPixels`,
+  `setVirtualGeometryProxyError`, `virtualGeometryStat`. `renderer/virtual_model_api.rs` keeps
+  the model/archive split, the frame's instances and last frame's transforms.
+- **Shadows and GI.** Virtual clusters reach the camera only, so a virtual model cast no shadow
+  and was missing from the ray scene, the cards and the distance field. Each model now also has a
+  stand-in mesh cut from its own hierarchy at a set error (`virtual_geometry/proxy.rs`), held by
+  its scene nodes as `gi_only` + `shadow_proxy`: in every GI input and the sun-shadow pass, in no
+  camera pass. Details and limits in `docs/virtualized-geometry.md`.
+- **Fix: shading mode aborted on a frame with no visibility-eligible draw.** The depth prepass
+  pipelines write the packed visibility target, but the pass only had that attachment once an
+  eligible draw had created it; a scene of immediate-mode shapes died on the pass/pipeline
+  mismatch. The target is now created whenever those pipelines exist.
+- **Fix: the pool's default group limit refused real models.** `max_clusters_per_group` 256
+  rejected an 80,000-triangle house whose root group has 443 clusters; the game-facing enable
+  uses 4,096.
+
+**Checked** on Metal (M1 Max) with one Nineveh house (80,000 triangles, cooked from the game's
+ASTC GLB): ordinary against virtual at 3200x1800 differ by a mean of 0.12/255, shadows from the
+stand-in included. **Found and not fixed here:** hierarchy selection costs 14 ms for that single
+house (one GPU thread walks its one large root group), and the cooker stops simplifying at 21,000
+triangles because it will not collapse across UV seams. Both are the next two changes. Not run:
+any other backend, iOS, tvOS.

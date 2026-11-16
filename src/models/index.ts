@@ -31,6 +31,7 @@ declare function bloom_draw_model_virtual_transform16(
 ): number;
 declare function bloom_set_virtual_geometry_error_pixels(pixels: number): number;
 declare function bloom_virtual_geometry_stat(which: number): number;
+declare function bloom_set_virtual_geometry_proxy_error(relativeError: number): number;
 declare function bloom_unload_model(handle: number): void;
 declare function bloom_draw_cube(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_cube_wires(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
@@ -320,7 +321,17 @@ export function setVirtualGeometryErrorPixels(pixels: number): boolean {
   return bloom_set_virtual_geometry_error_pixels(pixels) !== 0;
 }
 
-/** 0 resident bytes, 1 pool bytes, 2 resident pages, 3 placements last frame. */
+/**
+ * Virtual clusters are drawn to the camera only; shadows and GI use a reduced
+ * stand-in mesh cut from the same archive. This sets its geometric error as a
+ * share of the model's size (default 0.002; 0 keeps every source triangle).
+ * Call it before `attachVirtualGeometry`.
+ */
+export function setVirtualGeometryProxyError(relativeError: number): boolean {
+  return bloom_set_virtual_geometry_proxy_error(relativeError) !== 0;
+}
+
+/** 0 resident bytes, 1 pool bytes, 2 resident pages, 3 instances last frame. */
 export function virtualGeometryStat(which: number): number {
   return bloom_virtual_geometry_stat(which);
 }

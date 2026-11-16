@@ -18,6 +18,8 @@ const VIRTUAL_GEOMETRY_DECODE_PROBE_WGSL: &str =
 mod gpu_pool_budget_tests;
 #[path = "hiz_tests.rs"]
 mod hiz_tests;
+#[path = "proxy_tests.rs"]
+mod proxy_tests;
 #[path = "source_routing_tests.rs"]
 mod source_routing_tests;
 #[cfg(not(target_arch = "wasm32"))]

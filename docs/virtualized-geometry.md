@@ -11,6 +11,72 @@ triangle fixed-residency Metal stress gate. Ordinary glTF rendering remains
 the default; this does not yet claim complete Nanite-equivalent store-backed
 streaming or cross-backend qualification.
 
+## Using it from a game
+
+```ts
+requestVirtualGeometry();                       // BEFORE initWindow
+initWindow(1600, 900, "game");
+if (enableVirtualGeometry(128)) {               // page pool, MB of GPU memory
+  const house = loadModel("house.glb");
+  if (attachVirtualGeometry(house, "house.bgeo")) {
+    const node = createSceneNode();
+    attachVirtualModelToNode(node, house.handle, 0);   // once per mesh
+    setSceneNodeTransform(node, matrix);
+  }
+}
+```
+
+- `requestVirtualGeometry()` asks for the visibility-shading start-up mode
+  (what `BLOOM_VISIBILITY_BUFFER=shade` does from the environment). The mode
+  is fixed when the device is created, so the call only counts before
+  `initWindow`.
+- `enableVirtualGeometry(mb)` creates the page pool and the producer chain.
+  It returns false on a device or start-up mode that cannot run it; every
+  later call then returns false too and the game draws the model as usual.
+- `attachVirtualGeometry(model, path)` registers a cooked archive for a
+  loaded model. The archive must be cooked from the very file the model was
+  loaded from (the source hash is checked). Cook with a hierarchy:
+  `bloom-cook geometry house.glb house.bgeo --hierarchy-levels 8`.
+- `attachVirtualModelToNode(node, model, mesh)` is the retained form and the
+  one to use: the node can be moved, hidden and destroyed like any other.
+  `drawModelVirtual(model, matrix, tint)` is the immediate form; it draws the
+  clusters but casts no shadow and feeds no GI.
+- `setVirtualGeometryErrorPixels(px)` sets the on-screen error at which finer
+  clusters are brought in (default 1). `virtualGeometryStat(i)` reads resident
+  bytes, pool bytes, resident pages and instances.
+
+### Shadows and GI: the stand-in mesh
+
+Virtual clusters are rasterized for the camera only. Shadow maps, the ray
+scene, mesh cards and the distance field consume ordinary triangles, so a
+virtual model also keeps a **stand-in mesh**: one consistent cut through its
+own hierarchy at a chosen geometric error, decoded on the CPU when the
+archive is attached (`virtual_geometry/proxy.rs`). A node made by
+`attachVirtualModelToNode` holds that mesh with `gi_only` and the new
+`shadow_proxy` flag: it is in every GI input and in the sun-shadow pass, and
+in no camera pass. `setVirtualGeometryProxyError(f)` sets the cut's error as
+a share of the model's bounds diagonal (default 0.002, 2 cm on a 10 m house;
+0 keeps every source triangle). Call it before attaching.
+
+The stand-in is ordinary geometry and costs ordinary memory: at the default
+error a mesh that simplifies well keeps a small share of its triangles, one
+that does not keeps most of them. Local-light shadow passes do not draw it
+yet.
+
+### Known limits of this first game-facing version
+
+- Hierarchy selection walks each root group on one GPU thread. A single
+  dense mesh whose hierarchy ends in one large root group is walked almost
+  serially: an 80,000-triangle house measured 14 ms of selection on an M1
+  Max at 3200x1800, 3.7 ms when cooked with three levels. The evidence
+  timings in this document were taken at 640x360 on scenes of many small
+  meshes, where the roots spread the work.
+- The cooker does not collapse across attribute seams, so a mesh with many
+  UV islands stops simplifying early (the same house: 80,000 triangles to
+  21,000 and no further).
+- Skinned, cut-out and translucent primitives stay with the ordinary
+  renderer, as described below.
+
 ## Cook and inspect
 
 ```shell

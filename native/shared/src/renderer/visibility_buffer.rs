@@ -123,8 +123,7 @@ fn parse_runtime_mode(value: Option<&str>) -> RuntimeMode {
     }
 }
 
-static SHADING_REQUESTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static SHADING_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Ask for the shading mode from code, as `BLOOM_VISIBILITY_BUFFER=shade`
 /// does from the environment. The mode is read once, when the device is

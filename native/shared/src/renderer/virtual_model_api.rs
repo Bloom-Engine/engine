@@ -8,12 +8,13 @@
 //! instance list (with last frame's transforms for the velocity buffer).
 
 use super::Renderer;
-use crate::models::{ModelData, ModelVirtualGeometryRoute};
+use crate::models::{MeshData, ModelData, ModelVirtualGeometryRoute};
+use crate::scene::{SceneGraph, VirtualNodeLink};
 use crate::virtual_geometry::{
-    GpuVirtualGeometryConfig, GpuVirtualInstance, GpuVirtualTraversalConfig, VirtualGeometryAsset,
-    VirtualMeshId,
+    bounds_diagonal, build_proxy, GpuVirtualGeometryConfig, GpuVirtualInstance,
+    GpuVirtualTraversalConfig, VirtualGeometryAsset, VirtualMeshId,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Distinguishes a model's compact compatibility cache from the complete
@@ -23,11 +24,40 @@ const COMPATIBILITY_HANDLE_SALT: u64 = 0x5647_434f_4d50_4154;
 /// Projected error, in pixels, below which a coarser cluster stands in.
 const DEFAULT_TARGET_ERROR_PIXELS: f32 = 1.0;
 
+/// Geometric error of the shadow/GI stand-in mesh, as a share of the
+/// model's bounds diagonal: 2 cm on a 10 m house.
+const DEFAULT_PROXY_RELATIVE_ERROR: f32 = 0.002;
+
+/// What one mesh of a virtual model is to a scene node.
+pub enum VirtualNodeRole {
+    /// Not virtual (cut-out, translucent, skinned): attach it as usual.
+    Compatibility,
+    /// Virtual: attach this stand-in mesh. `link` is present on the first
+    /// mesh of each placement, whose node submits the virtual instance.
+    Virtual {
+        proxy: Arc<MeshData>,
+        link: Option<VirtualNodeLink>,
+    },
+}
+
+#[derive(Clone)]
+enum MeshRole {
+    Compatibility,
+    Virtual {
+        proxy: Arc<MeshData>,
+        submits: bool,
+        source_mesh_index: u32,
+    },
+}
+
 struct VirtualModelBinding {
     mesh: VirtualMeshId,
     route: ModelVirtualGeometryRoute,
     compatibility_handle: u64,
     draws_compatibility: bool,
+    /// One per model mesh, in the model's own mesh order.
+    roles: Vec<MeshRole>,
+    proxy_triangles: u64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -42,7 +72,9 @@ pub(crate) struct VirtualModelState {
     placements: Vec<PlacementKey>,
     previous_placements: Vec<PlacementKey>,
     target_error_pixels: f32,
+    proxy_relative_error: f32,
     submitted_last_frame: bool,
+    submitted_instances: usize,
     warned_submit: bool,
 }
 
@@ -54,7 +86,9 @@ impl Default for VirtualModelState {
             placements: Vec::new(),
             previous_placements: Vec::new(),
             target_error_pixels: DEFAULT_TARGET_ERROR_PIXELS,
+            proxy_relative_error: DEFAULT_PROXY_RELATIVE_ERROR,
             submitted_last_frame: false,
+            submitted_instances: 0,
             warned_submit: false,
         }
     }
@@ -110,6 +144,14 @@ impl Renderer {
         self.virtual_models.target_error_pixels = pixels.clamp(0.1, 64.0);
     }
 
+    /// Geometric error of the stand-in mesh that casts a virtual model's
+    /// shadows and feeds GI, as a share of the model's bounds diagonal
+    /// (default 0.002; 0 keeps every source triangle). Applies to archives
+    /// attached afterwards.
+    pub fn set_virtual_model_proxy_error(&mut self, relative_error: f32) {
+        self.virtual_models.proxy_relative_error = relative_error.clamp(0.0, 0.25);
+    }
+
     /// Give a loaded model its cooked archive. The archive must have been
     /// cooked from the very file the model was loaded from; a mismatch is
     /// rejected. Idempotent for a model that already has one.
@@ -132,8 +174,12 @@ impl Renderer {
             .route_virtual_geometry(&asset)
             .map_err(|error| error.to_string())?;
         if route.virtual_placements.is_empty() {
-            return Err("the archive holds no virtual-eligible geometry for this model".to_string());
+            return Err(
+                "the archive holds no virtual-eligible geometry for this model".to_string(),
+            );
         }
+        let max_error = bounds_diagonal(&asset) * self.virtual_models.proxy_relative_error;
+        let (roles, proxy_triangles) = build_roles(model, &route, &asset, max_error)?;
         let queue = self.queue.clone();
         let mesh = self
             .virtual_geometry_pool_mut()
@@ -162,6 +208,8 @@ impl Renderer {
                 route,
                 compatibility_handle,
                 draws_compatibility,
+                roles,
+                proxy_triangles,
             },
         );
         Ok(())
@@ -250,13 +298,75 @@ impl Renderer {
         true
     }
 
-    /// Hand the frame's placements to the producer chain. Called once by the
-    /// engine before the frame is rendered.
-    pub(crate) fn flush_virtual_model_draws(&mut self) {
+    /// What mesh `mesh_index` of a virtual model should be on a scene node.
+    /// `None` when the model has no archive attached or no such mesh.
+    pub fn virtual_node_role(
+        &self,
+        handle_bits: u64,
+        mesh_index: usize,
+    ) -> Option<VirtualNodeRole> {
+        let binding = self.virtual_models.bindings.get(&handle_bits)?;
+        Some(match binding.roles.get(mesh_index)? {
+            MeshRole::Compatibility => VirtualNodeRole::Compatibility,
+            MeshRole::Virtual {
+                proxy,
+                submits,
+                source_mesh_index,
+            } => VirtualNodeRole::Virtual {
+                proxy: Arc::clone(proxy),
+                link: submits.then_some(VirtualNodeLink {
+                    model_handle_bits: handle_bits,
+                    source_mesh_index: *source_mesh_index,
+                }),
+            },
+        })
+    }
+
+    /// Triangles in a virtual model's stand-in mesh (0 without an archive).
+    pub fn virtual_model_proxy_triangles(&self, handle_bits: u64) -> u64 {
+        self.virtual_models
+            .bindings
+            .get(&handle_bits)
+            .map_or(0, |binding| binding.proxy_triangles)
+    }
+
+    /// Hand the frame's placements to the producer chain: the immediate
+    /// `draw_model_virtual` calls and every visible scene node that carries a
+    /// virtual placement. Called once by the engine before the frame is
+    /// rendered.
+    pub(crate) fn flush_virtual_model_draws(&mut self, scene: &SceneGraph) {
         if self.virtual_geometry.is_none() {
             return;
         }
-        let instances = std::mem::take(&mut self.virtual_models.instances);
+        let mut instances = std::mem::take(&mut self.virtual_models.instances);
+        if !self.virtual_models.bindings.is_empty() {
+            for (_, node) in scene.nodes.iter() {
+                let Some(link) = node.virtual_link else {
+                    continue;
+                };
+                if !node.visible {
+                    continue;
+                }
+                let Some(binding) = self.virtual_models.bindings.get(&link.model_handle_bits)
+                else {
+                    continue;
+                };
+                let Ok(instance_id) = u32::try_from(instances.len()) else {
+                    break;
+                };
+                if let Ok(instance) = GpuVirtualInstance::with_source_mesh_render_state(
+                    binding.mesh,
+                    link.source_mesh_index,
+                    instance_id,
+                    node.world_transform(),
+                    node.previous_world_transform(),
+                    [1.0; 4],
+                ) {
+                    instances.push(instance);
+                }
+            }
+        }
+        self.virtual_models.submitted_instances = instances.len();
         let had_draws = !instances.is_empty();
         // An empty submission after a frame that drew something clears the
         // retained batch; a renderer that never draws virtually submits none.
@@ -270,7 +380,6 @@ impl Renderer {
             }
         }
         self.virtual_models.submitted_last_frame = had_draws;
-        let mut instances = instances;
         instances.clear();
         self.virtual_models.instances = instances;
         std::mem::swap(
@@ -281,7 +390,7 @@ impl Renderer {
     }
 
     /// Resident and capacity bytes of the page pool, pages resident, and the
-    /// instances submitted this frame: for a game's debug read-out.
+    /// instances submitted last frame: for a game's debug read-out.
     pub fn virtual_model_stats(&self) -> [f64; 4] {
         let Some(state) = self.virtual_geometry.as_ref() else {
             return [0.0; 4];
@@ -291,7 +400,74 @@ impl Renderer {
             telemetry.resident_slot_bytes as f64,
             telemetry.total_gpu_bytes as f64,
             telemetry.resident_pages as f64,
-            self.virtual_models.previous_placements.len() as f64,
+            self.virtual_models.submitted_instances as f64,
         ]
     }
+}
+
+/// Per-model-mesh roles and the stand-in meshes they share. Every primitive
+/// of the archive's cut becomes one `MeshData` that keeps the source mesh's
+/// material and textures.
+fn build_roles(
+    model: &ModelData,
+    route: &ModelVirtualGeometryRoute,
+    asset: &VirtualGeometryAsset,
+    max_error: f32,
+) -> Result<(Vec<MeshRole>, u64), String> {
+    let proxies = build_proxy(asset, max_error)?;
+    let compatibility = route
+        .compatibility_model_mesh_indices()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut shared = HashMap::<(u32, u32), Arc<MeshData>>::new();
+    let mut submitted = BTreeSet::<(u32, u32)>::new();
+    let mut roles = Vec::with_capacity(model.meshes.len());
+    let mut proxy_triangles = 0u64;
+    for (index, source_mesh) in model.meshes.iter().enumerate() {
+        if compatibility.contains(&index) {
+            roles.push(MeshRole::Compatibility);
+            continue;
+        }
+        let source = model
+            .mesh_source(index)
+            .ok_or_else(|| format!("model mesh {index} has no source primitive"))?;
+        let key = (source.mesh_index, source.primitive_index);
+        let proxy = match shared.get(&key) {
+            Some(proxy) => Arc::clone(proxy),
+            None => {
+                let primitive = proxies.get(&key).ok_or_else(|| {
+                    format!(
+                        "archive has no clusters for glTF mesh {} primitive {}",
+                        key.0, key.1
+                    )
+                })?;
+                proxy_triangles += primitive.indices.len() as u64 / 3;
+                let mut mesh = MeshData::clone(source_mesh);
+                mesh.vertices = primitive
+                    .vertices
+                    .iter()
+                    .map(|vertex| crate::renderer::Vertex3D {
+                        position: vertex.position,
+                        normal: vertex.normal,
+                        color: vertex.color,
+                        uv: vertex.uv,
+                        joints: [0.0; 4],
+                        weights: [0.0; 4],
+                        tangent: vertex.tangent,
+                    })
+                    .collect();
+                mesh.indices = primitive.indices.clone();
+                mesh.secondary_tex_coords = None;
+                let proxy = Arc::new(mesh);
+                shared.insert(key, Arc::clone(&proxy));
+                proxy
+            }
+        };
+        roles.push(MeshRole::Virtual {
+            proxy,
+            submits: submitted.insert((source.mesh_index, source.placement_index)),
+            source_mesh_index: source.mesh_index,
+        });
+    }
+    Ok((roles, proxy_triangles))
 }

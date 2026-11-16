@@ -276,7 +276,7 @@ impl Renderer {
                 // the material-command path below — including them would
                 // double-render every caster.
                 if !node.visible
-                    || node.gi_only
+                    || (node.gi_only && !node.shadow_proxy)
                     || !node.cast_shadow
                     || node.material.alpha_mode == MaterialAlphaMode::Blend
                     || (self.imported_refraction_enabled && node.material.transmission.is_active())

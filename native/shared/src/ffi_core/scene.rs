@@ -765,6 +765,66 @@ macro_rules! __bloom_ffi_scene {
             })
         }
 
+        // bloom_scene_attach_virtual_model  [gated: models3d]
+        //
+        // Put mesh `mesh_index` of a model with a cooked archive on a node.
+        // 1: the mesh is virtual (the node holds its shadow/GI stand-in and,
+        // for the first mesh of a placement, submits the virtual instance);
+        // 2: the mesh is not virtual and was attached as usual; 0: the model
+        // has no archive, so nothing was attached.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_attach_virtual_model(
+            node_handle: f64,
+            model_handle: f64,
+            mesh_index: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_scene_attach_virtual_model", move || {
+                let eng = engine();
+                let mi = mesh_index as usize;
+                let Some(model_data) = eng.models.models.get(model_handle) else {
+                    return 0.0;
+                };
+                if mi >= model_data.meshes.len() {
+                    return 0.0;
+                }
+                let source_transform = model_data.mesh_transform(mi);
+                let source_cast_shadow = model_data.mesh_cast_shadow(mi);
+                match eng.renderer.virtual_node_role(model_handle.to_bits(), mi) {
+                    Some($crate::renderer::VirtualNodeRole::Virtual { proxy, link }) => {
+                        eng.scene.attach_virtual_proxy(
+                            node_handle,
+                            proxy,
+                            source_transform,
+                            source_cast_shadow,
+                            link,
+                        );
+                        1.0
+                    }
+                    Some($crate::renderer::VirtualNodeRole::Compatibility) => {
+                        eng.scene.attach_model_mesh(
+                            node_handle,
+                            std::sync::Arc::clone(&model_data.meshes[mi]),
+                            source_transform,
+                            source_cast_shadow,
+                        );
+                        2.0
+                    }
+                    None => 0.0,
+                }
+            })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_attach_virtual_model(
+            _node_handle: f64,
+            _model_handle: f64,
+            _mesh_index: f64,
+        ) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_scene_attach_virtual_model", "models3d");
+            0.0
+        }
+
         // bloom_scene_attach_model  [source: linux; gated: models3d]
         #[cfg(feature = "models3d")]
         #[no_mangle]
