@@ -864,3 +864,96 @@ fn retired_mesh_ids_and_slots_are_reused_only_after_gpu_completion() {
     ));
     assert_eq!(new.descriptor_index(), old.descriptor_index());
 }
+
+/// One root over a middle group of 33 clusters, each with a leaf of its own:
+/// more child groups than one invocation's stack holds.
+#[cfg(not(target_arch = "wasm32"))]
+fn wide_hierarchy_archive() -> GeometryArchive {
+    const MIDDLE: u32 = 33;
+    let mut clusters = vec![cluster(0, 2, NO_RELATION, 1, MIDDLE, true)];
+    for index in 0..MIDDLE {
+        clusters.push(cluster(1 + index / 11, 1, 0, 1 + MIDDLE + index, 1, false));
+    }
+    for index in 0..MIDDLE {
+        clusters.push(cluster(4 + index / 11, 0, 1 + index, NO_RELATION, 0, false));
+    }
+    GeometryArchive {
+        format_version: VERSION,
+        vertex_encoding: VertexEncoding::Float32,
+        source_sha256: [5; 32],
+        payload_sha256: [6; 32],
+        page_budget_bytes: MIN_PAGE_BYTES,
+        file_payload_offset: 0,
+        clusters,
+        pages: vec![
+            page(0, 0, 1),
+            page(100, 1, 11),
+            page(200, 12, 11),
+            page(300, 23, 11),
+            page(400, 34, 11),
+            page(500, 45, 11),
+            page(600, 56, 11),
+        ],
+        compatibility: Vec::new(),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_hierarchy_selector_refines_more_child_groups_than_one_stack_holds() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no eight-storage-buffer GPU adapter — skipping wide hierarchy oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(
+        &device,
+        GpuVirtualGeometryConfig {
+            max_cluster_records: 128,
+            max_clusters_per_group: 64,
+            ..gpu_config(7)
+        },
+    )
+    .unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(wide_hierarchy_archive()))
+        .unwrap();
+    bind_test_materials(&mut pool, &queue, mesh);
+    pool.begin_frame(2);
+    pool.make_group_resident(&queue, mesh, 1).unwrap();
+    for leaf in 34..67 {
+        pool.make_group_resident(&queue, mesh, leaf).unwrap();
+    }
+    let selector = GpuVirtualHierarchySelector::new(
+        &device,
+        &pool,
+        GpuVirtualTraversalConfig {
+            max_instances: 4,
+            max_selected_clusters: 128,
+            max_page_requests: 64,
+        },
+    )
+    .unwrap();
+    let (selected, requests, counters) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &[GpuVirtualInstance::identity(mesh, 7)],
+        traversal_view(0.5),
+    );
+
+    // Walked on one bounded stack, the middle group could not refine: its 33
+    // child groups do not fit 32 entries, and it was drawn in their place.
+    // Handed to the queue, each child is an invocation of its own.
+    assert_eq!(
+        selected
+            .iter()
+            .map(|record| record.cluster_table_index)
+            .collect::<Vec<_>>(),
+        (34..67).collect::<Vec<_>>()
+    );
+    assert!(requests.is_empty());
+    assert_eq!(counters.refined_groups, 2);
+    assert_eq!(counters.depth_limit_fallbacks, 0);
+    assert_eq!(counters.invalid_records, 0);
+}
