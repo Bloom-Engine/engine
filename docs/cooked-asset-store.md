@@ -155,7 +155,7 @@ files contain no comments or placeholders.
   ],
   "kind": "geometry",
   "logical_id": "quality/damaged-helmet",
-  "recipe": { "name": "bloom-geometry", "version": 3 },
+  "recipe": { "name": "bloom-geometry", "version": 4 },
   "schema": "bloom-asset-manifest-v1",
   "settings": {
     "hierarchy_levels": 8,
