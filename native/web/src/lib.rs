@@ -941,6 +941,39 @@ pub fn bloom_load_model(_path: f64) -> f64 {
     0.0
 }
 
+// Virtual geometry needs the visibility-shading path, which the web
+// renderer does not start: every call reports that nothing was done.
+#[wasm_bindgen]
+pub fn bloom_request_virtual_geometry() -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_enable_virtual_geometry(_p0: f64) -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_model_attach_virtual_geometry(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_draw_model_virtual_transform16(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64) -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_virtual_geometry_error_pixels(_p0: f64) -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_virtual_geometry_stat(_p0: f64) -> f64 {
+    0.0
+}
+
 #[wasm_bindgen]
 pub fn bloom_load_model_bytes(data: &[u8]) -> f64 {
     let eng = engine();

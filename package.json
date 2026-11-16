@@ -1050,6 +1050,64 @@
           "returns": "void"
         },
         {
+          "name": "bloom_request_virtual_geometry",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_enable_virtual_geometry",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_model_attach_virtual_geometry",
+          "params": [
+            "f64",
+            "string"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_draw_model_virtual_transform16",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_virtual_geometry_error_pixels",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_virtual_geometry_stat",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_unload_model",
           "params": [
             "f64"

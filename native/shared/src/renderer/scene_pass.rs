@@ -98,11 +98,19 @@ impl Renderer {
         let render_extent = self.render_extent();
         #[cfg(feature = "models3d")]
         let virtual_visibility_requested = self.virtual_visibility_frame_requested();
+        // In shading mode the depth prepass pipelines write the packed
+        // visibility target, so the pass must have it even in a frame with no
+        // eligible draw (a scene of immediate-mode shapes only used to abort
+        // on the pass/pipeline attachment mismatch).
+        #[cfg(all(feature = "models3d", not(target_arch = "wasm32")))]
+        let prepass_writes_visibility = self.scene_depth_visibility_pipeline.is_some();
+        #[cfg(all(feature = "models3d", target_arch = "wasm32"))]
+        let prepass_writes_visibility = false;
         #[cfg(feature = "models3d")]
         let visibility_creations = self.gpu_driven.prepare_visibility_shading(
             &self.device,
             render_extent,
-            virtual_visibility_requested,
+            virtual_visibility_requested || prepass_writes_visibility,
         );
         #[cfg(not(feature = "models3d"))]
         let visibility_creations = self

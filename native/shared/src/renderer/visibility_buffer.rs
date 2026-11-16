@@ -123,11 +123,30 @@ fn parse_runtime_mode(value: Option<&str>) -> RuntimeMode {
     }
 }
 
+static SHADING_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Ask for the shading mode from code, as `BLOOM_VISIBILITY_BUFFER=shade`
+/// does from the environment. The mode is read once, when the device is
+/// negotiated, so this only counts before the window is created; the return
+/// value says whether the renderer will (or did) start in shading mode.
+pub fn request_shading() -> bool {
+    SHADING_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    requested_mode_if_read().map_or(!cfg!(target_arch = "wasm32"), RuntimeMode::shades)
+}
+
+static MODE: std::sync::OnceLock<RuntimeMode> = std::sync::OnceLock::new();
+
+fn requested_mode_if_read() -> Option<RuntimeMode> {
+    MODE.get().copied()
+}
+
 pub(crate) fn requested_mode() -> RuntimeMode {
-    static MODE: std::sync::OnceLock<RuntimeMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| {
         if cfg!(target_arch = "wasm32") {
             RuntimeMode::Off
+        } else if SHADING_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+            RuntimeMode::Shade
         } else {
             parse_runtime_mode(std::env::var("BLOOM_VISIBILITY_BUFFER").ok().as_deref())
         }
