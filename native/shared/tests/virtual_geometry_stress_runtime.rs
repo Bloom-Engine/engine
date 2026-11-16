@@ -324,6 +324,9 @@ fn virtual_geometry_renders_ten_million_source_triangles_with_fixed_residency() 
         .as_f64()
         .expect("stress GPU frame p95");
     let wall_frame_mean_ms = measurement_wall_ms / f64::from(measured_frames);
+    eprintln!(
+        "virtual stress timings: wall {wall_frame_mean_ms:.3} ms, gpu {gpu_frame_mean_ms:.3} ms (p95 {gpu_frame_p95_ms:.3}), selector {selector_gpu_mean_ms:.3} ms, emission {draw_emission_gpu_mean_ms:.3} ms"
+    );
     assert!(wall_frame_mean_ms <= MAXIMUM_WALL_FRAME_MEAN_MS);
     assert!(gpu_frame_mean_ms <= MAXIMUM_GPU_FRAME_MEAN_MS);
     assert!(gpu_frame_p95_ms <= MAXIMUM_GPU_FRAME_P95_MS);
@@ -577,6 +580,17 @@ fn measured_camera(frame: u32, frames: u32) -> [f32; 3] {
     ]
 }
 
+/// One pixel, the renderer's default. `BLOOM_VIRTUAL_STRESS_TARGET_ERROR`
+/// overrides it for qualification experiments.
+const TARGET_ERROR_PIXELS: f32 = 1.0;
+
+fn stress_target_error_pixels() -> f32 {
+    std::env::var("BLOOM_VIRTUAL_STRESS_TARGET_ERROR")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(TARGET_ERROR_PIXELS)
+}
+
 fn render_frame(
     engine: &mut EngineState,
     instances: &[bloom_shared::virtual_geometry::GpuVirtualInstance],
@@ -604,7 +618,7 @@ fn render_frame(
         .set_directional_light(0.4, 0.8, -0.2, 255.0, 244.0, 220.0, 1.5);
     engine
         .renderer
-        .submit_virtual_geometry_current_view(instances, 1.0)
+        .submit_virtual_geometry_current_view(instances, stress_target_error_pixels())
         .expect("submit 10M virtual stress frame");
     engine.renderer.screenshot_requested = screenshot;
     engine.end_frame();

@@ -66,6 +66,29 @@ Rendered through the virtual path at allowed errors of 1, 4, 16 and 64
 pixels, the v4 house keeps its texture in place at every setting; at 64 it
 loses thin parts (pergola slats) first.
 
+## The 10M stress gate needed a new source
+
+The gate's plates (source v1) had per-vertex hash noise as their only relief.
+Measured against the source, every level above the second then carries the
+same error, the noise's amplitude (0.086 to 0.094 for levels 3 to 7): at the
+gate's camera a one-pixel target is met by the pinned roots alone and nothing
+streams, while a target low enough to refine at all asks for five levels at
+once (at 0.3 px the selector took 5.3 ms against its 3 ms budget; at 0.5 px
+there were no page reads). Source v2 adds waves at three scales, so each
+coarser level loses a little more shape and a view needs detail gradually.
+The target stays at one pixel.
+
+| Gate, Metal, M1 Max | v3 cook, source v1 (`main`) | v4 cook, source v2 |
+|---|---:|---:|
+| Resident pages / I/O requests | 955 / 370 | 406 / 252 |
+| Selected clusters, 100 instances | 10,220 | 4,900 |
+| Selector GPU, 1 / 10 / 100 instances | 1.52 / 1.39 / 2.34 ms | 0.40 / 0.47 / 0.79 ms |
+| GPU frame mean / p95 | 4.81 / 6.99 ms | 2.11 / 4.56 ms |
+
+The v4 column was measured with the breadth-first selection and the
+uniform-group shortcut in place; the two columns are different scenes and do
+not compare the cooks.
+
 ## Tried and not adopted: collapsing across attribute seams
 
 With meshoptimizer's `Permissive` option the house simplifies to 476
@@ -80,6 +103,8 @@ on the surface, bounded by the triangle's size) before it can be enabled.
 - `cargo test --release` for `bloom-cook`: 53 tests pass, including the
   hierarchy oracle and a new test for measuring separate points against a
   surface; strict Clippy and `cargo fmt --check` clean.
+- `ci-check.sh --hardware --component virtual-geometry-stress` on Metal
+  passes; `tools/quality/test_prepare_virtual_geometry_stress.py` passes.
 - Not re-run for this checkpoint: the Bistro runtime corpus (its asset is not
   on the machine this was written on). Its thresholds were tuned against v3
   archives and should be re-qualified with v4 cooks.
