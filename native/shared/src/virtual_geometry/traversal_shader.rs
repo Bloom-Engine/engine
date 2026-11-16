@@ -16,6 +16,7 @@ const PASS_LEVEL: u32 = 0u;
 const QUEUE_COUNT_MASK: u32 = 0xfffffu;
 const QUEUE_DEPTH_SHIFT: u32 = 20u;
 const VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE: u32 = 0x08000000u;
+const VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS: u32 = 0x04000000u;
 const INSTANCE_CONE_CULL_SAFE: u32 = 1u;
 const INSTANCE_PREVIOUS_HIZ_ELIGIBLE: u32 = 4u;
 
@@ -520,7 +521,8 @@ fn select_group(
                 cluster.page_lod_counts.y,
                 cluster.page_lod_counts.w,
                 cluster.identity.z,
-                (cluster.identity.w & ~VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE)
+                (cluster.identity.w
+                    & ~(VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE | VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS))
                     | (mesh.vertex_encoding << 28u)
             );
         } else {
@@ -670,7 +672,15 @@ fn traverse_groups(
         var group_error = 0.0;
         var intersecting_min = vec3<f32>(1.0e30);
         var intersecting_max = vec3<f32>(-1.0e30);
-        for (var offset = 0u; offset < group_count; offset++) {
+        // A group whose clusters share bounds and error is judged from its
+        // first cluster: the others would only repeat the same numbers.
+        var judged_count = group_count;
+        if (valid_cluster(mesh, group_first)
+            && (clusters.records[mesh.cluster_table_base + group_first].identity.w
+                & VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS) != 0u) {
+            judged_count = 1u;
+        }
+        for (var offset = 0u; offset < judged_count; offset++) {
             let local_cluster = group_first + offset;
             if (!valid_cluster(mesh, local_cluster)) {
                 atomicAdd(&counters.invalid_records, 1u);

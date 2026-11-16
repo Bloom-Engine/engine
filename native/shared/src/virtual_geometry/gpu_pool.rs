@@ -38,6 +38,11 @@ pub const GPU_VIRTUAL_MESH_MATERIALS_BOUND: u32 = 1 << 1;
 /// the same child replacement. The selector can retain its single-range fast
 /// path without trusting that property for genuinely branched hierarchy data.
 pub(super) const GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE: u32 = 1 << 27;
+/// Set on the first cluster of a group whose clusters all carry the same
+/// bounds and error (every simplified parent group does: it takes its
+/// children's union bounds and one measured error). Traversal then judges
+/// the group from that one cluster instead of reading all of them.
+pub(super) const GPU_VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS: u32 = 1 << 26;
 
 /// Explicit translation from one archive material slot to the renderer's
 /// generation-safe global material ID. `None` is glTF's default material.
@@ -1559,6 +1564,7 @@ fn encode_cluster_entries(
     archive: &bloom_geometry_format::GeometryArchive,
 ) -> Result<Vec<GpuVirtualClusterEntry>, VirtualGeometryGpuError> {
     let uniform_child_ranges = uniform_child_range_flags(archive);
+    let uniform_group_bounds = uniform_group_bounds_flags(archive);
     archive
         .clusters
         .iter()
@@ -1610,7 +1616,9 @@ fn encode_cluster_entries(
                     0,
                     cluster.flags
                         | u32::from(uniform_child_ranges[cluster_index])
-                            * GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE,
+                            * GPU_VIRTUAL_CLUSTER_UNIFORM_CHILD_RANGE
+                        | u32::from(uniform_group_bounds[cluster_index])
+                            * GPU_VIRTUAL_CLUSTER_UNIFORM_GROUP_BOUNDS,
                 ],
                 page_lod_counts: [
                     cluster.page_index,
@@ -1628,6 +1636,48 @@ fn encode_cluster_entries(
             })
         })
         .collect()
+}
+
+/// For each cluster: whether it starts a group (a parent range or a child
+/// range some cluster names) of more than one cluster whose bounds, bounding
+/// sphere and error are bit-identical.
+fn uniform_group_bounds_flags(archive: &bloom_geometry_format::GeometryArchive) -> Vec<bool> {
+    let clusters = &archive.clusters;
+    let mut groups = BTreeSet::<(u32, u32)>::new();
+    for cluster in clusters {
+        if cluster.first_child != bloom_geometry_format::NO_RELATION && cluster.child_count > 1 {
+            groups.insert((cluster.first_child, cluster.child_count));
+        }
+        if cluster.parent != bloom_geometry_format::NO_RELATION && cluster.parent_count > 1 {
+            groups.insert((cluster.parent, cluster.parent_count));
+        }
+    }
+    let key = |cluster: &bloom_geometry_format::ClusterRecord| {
+        let mut bits = [0u32; 11];
+        for axis in 0..3 {
+            bits[axis] = cluster.aabb_min[axis].to_bits();
+            bits[3 + axis] = cluster.aabb_max[axis].to_bits();
+            bits[6 + axis] = cluster.sphere_center[axis].to_bits();
+        }
+        bits[9] = cluster.sphere_radius.to_bits();
+        bits[10] = cluster.geometric_error.to_bits();
+        bits
+    };
+    let mut flags = vec![false; clusters.len()];
+    for (first, count) in groups {
+        let first = first as usize;
+        let Some(group) = first
+            .checked_add(count as usize)
+            .and_then(|end| clusters.get(first..end))
+        else {
+            continue;
+        };
+        let reference = key(&group[0]);
+        if group.iter().all(|cluster| key(cluster) == reference) {
+            flags[first] = true;
+        }
+    }
+    flags
 }
 
 fn uniform_child_range_flags(archive: &bloom_geometry_format::GeometryArchive) -> Vec<bool> {
