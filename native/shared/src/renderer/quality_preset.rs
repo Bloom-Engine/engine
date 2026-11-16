@@ -225,7 +225,7 @@ impl Renderer {
     }
 
     fn rebuild_render_targets(&mut self) {
-        let (w, h) = (self.native_width, self.native_height);
+        let (w, h) = self.native_size();
         let (lw, lh) = (self.logical_width, self.logical_height);
         if w > 0 && h > 0 {
             self.resize(w, h, lw, lh);
@@ -246,7 +246,9 @@ impl Renderer {
             self.taa_frame_index = 0;
             self.taa_history_valid = false;
             self.taa_history_written = false;
-            let (w, h) = (self.native_width, self.native_height);
+            // native_size(): before the platform's first resize native_width is 0,
+            // and resize(0, 0) would configure a 1 x 1 surface.
+            let (w, h) = self.native_size();
             self.resize(w, h, self.logical_width, self.logical_height);
         }
     }

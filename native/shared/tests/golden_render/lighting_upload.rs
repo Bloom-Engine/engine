@@ -162,8 +162,13 @@ fn static_ultra_scene_has_stable_renderer_owned_memory_for_1000_frames() {
     run_frames(&mut eng, POOL_WARMUP_FRAMES);
     wait_for_gpu(&eng.renderer.device);
     let before = live_gpu_objects(&eng.renderer.device);
+    // wgpu-hal 29's Vulkan backend never counts a created texture (only
+    // add_raw_texture does) yet subtracts on every destroy, so `textures` reads
+    // negative there (-76 on a Radeon 760M, the default pick on Windows).
+    // Texture memory and views are counted both ways on every backend and still
+    // catch a leaked texture in the growth check below.
     assert!(
-        before.buffers > 0 && before.textures > 0,
+        before.buffers > 0 && (before.textures > 0 || before.texture_memory > 0),
         "wgpu test counters are disabled; this would be a vacuous memory gate: {before:?}"
     );
     let paths_before: serde_json::Value =

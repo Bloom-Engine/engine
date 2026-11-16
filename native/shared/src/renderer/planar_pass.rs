@@ -329,10 +329,52 @@ impl Renderer {
         // Iterate probes by index — we mutate `material_system`'s
         // commands view while iterating, so collect the work first.
         let probe_count = self.planar_probes.len();
+        // Render a probe only on frames where something that samples it is in
+        // view. A probe redraws the scene mirrored (5 ms of a 27 ms fight frame
+        // on a Radeon 760M, almost all of it vertex work), and a reflection
+        // nobody sees is pure cost: in an arena whose river is behind the
+        // camera half the time, that was most frames. A probe skipped this way
+        // is simply not sampled; the frame the surface comes back into view
+        // renders it before the main pass reads it.
+        let probe_seen = {
+            let main_planes = crate::scene::extract_frustum_planes(&self.current_vp_matrix);
+            let ms = &self.material_system;
+            let mut seen = vec![false; probe_count];
+            for cmd in ms.commands.iter().chain(ms.translucent_commands.iter()) {
+                let link = (cmd.material as usize)
+                    .checked_sub(1)
+                    .and_then(|m| ms.material_reflection_probe.get(m).copied().flatten());
+                let slot = match link {
+                    Some(p) if p >= 1 && (p as usize) <= probe_count => p as usize - 1,
+                    _ => continue,
+                };
+                if seen[slot] {
+                    continue;
+                }
+                // Instanced or unknown bounds: assume visible.
+                let visible = match (cmd.instance, self.model_gpu_cache.get(&cmd.mesh_handle)) {
+                    (None, Some(Some(meshes))) if cmd.mesh_idx < meshes.len() => {
+                        let m = &meshes[cmd.mesh_idx];
+                        let (wmin, wmax) = transform_aabb(&cmd.model, m.local_min, m.local_max);
+                        !(wmin[0] <= wmax[0]
+                            && crate::scene::aabb_outside_frustum(&main_planes, wmin, wmax))
+                    }
+                    _ => true,
+                };
+                if visible {
+                    seen[slot] = true;
+                }
+            }
+            seen
+        };
         for i in 0..probe_count {
+            if !probe_seen[i] {
+                continue;
+            }
             let (
                 plane_y,
                 normal,
+                probe_res,
                 color_view,
                 depth_view,
                 aux_material_view,
@@ -342,6 +384,7 @@ impl Renderer {
                 Some(p) => (
                     p.plane_y,
                     p.normal,
+                    p.resolution,
                     p.color_view.clone(),
                     p.depth_view.clone(),
                     p.aux_material_view.clone(),
@@ -538,6 +581,29 @@ impl Renderer {
             // creation order decides who survives the cap, so games
             // should create hero geometry before filler (grass).
             let mirror_planes = crate::scene::extract_frustum_planes(&mirror_vp);
+            // Projected-size cull. The probe is small (512 px in the shooter) and
+            // the water shows it rippled, yet every draw the mirrored frustum can
+            // see used to be drawn at full detail: on an integrated GPU the forest
+            // in the reflection cost 5 ms of a 28 ms frame. A draw whose bounding
+            // sphere covers less than PROBE_MIN_PX probe pixels, seen from the
+            // mirrored eye, cannot show; skip it. (Vertical extent; proj[1][1] is
+            // cot(fov_y / 2) in both matrix conventions.)
+            const PROBE_MIN_PX: f32 = 3.0;
+            let px_per_unit_at_1m = proj[1][1] * probe_res as f32 * 0.5;
+            let too_small = |wmin: [f32; 3], wmax: [f32; 3]| -> bool {
+                if wmin[0] > wmax[0] {
+                    return false; // no bounds: keep it
+                }
+                let c = [
+                    (wmin[0] + wmax[0]) * 0.5 - mirror_cam[0],
+                    (wmin[1] + wmax[1]) * 0.5 - mirror_cam[1],
+                    (wmin[2] + wmax[2]) * 0.5 - mirror_cam[2],
+                ];
+                let e = [wmax[0] - wmin[0], wmax[1] - wmin[1], wmax[2] - wmin[2]];
+                let r = 0.5 * (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
+                let d = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+                d > r && 2.0 * r / d * px_per_unit_at_1m < PROBE_MIN_PX
+            };
             let mut reflect_draws: Vec<(u64, usize, u32)> = Vec::new();
             let mut node_slots: Vec<(usize, u32)> = Vec::new();
             if let Some(model_buf) = &self.reflect_model_buf {
@@ -573,6 +639,9 @@ impl Renderer {
                     {
                         continue;
                     }
+                    if too_small(wmin, wmax) {
+                        continue;
+                    }
                     let mirror_mvp = mat4_multiply(mirror_vp, cmd.model);
                     let base = staged.len();
                     staged.resize(base + stride, 0);
@@ -588,6 +657,9 @@ impl Renderer {
                     if wmin[0] <= wmax[0]
                         && crate::scene::aabb_outside_frustum(&mirror_planes, *wmin, *wmax)
                     {
+                        continue;
+                    }
+                    if too_small(*wmin, *wmax) {
                         continue;
                     }
                     let mirror_mvp = mat4_multiply(mirror_vp, *model);

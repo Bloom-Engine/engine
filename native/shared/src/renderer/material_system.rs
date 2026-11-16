@@ -628,12 +628,18 @@ impl MaterialSystem {
             layout: &layouts.per_view,
             entries: &per_view_entries,
         });
-        // The stub_depth texture and cmp_sampler outlive the bind group via
-        // wgpu internal Arc; we don't need to hold them in the struct.
-        std::mem::forget(stub_depth);
-        std::mem::forget(stub_depth_view);
-        std::mem::forget(stub_depth_array_view);
-        std::mem::forget(cmp_sampler);
+        // The stub depth texture, its views and cmp_sampler stay alive for as
+        // long as the bind group does (wgpu holds its own references), so the
+        // handles are simply dropped here. They used to be `mem::forget`-ed:
+        // a forgotten handle never releases its reference, and every handle
+        // holds the device, so no renderer's device (and none of the memory
+        // heaps it had allocated, ~580 MB on a Radeon 760M) was ever freed.
+        // A process that built renderers in turn (the golden suite) ran out
+        // of memory after about 30.
+        drop(stub_depth);
+        drop(stub_depth_view);
+        drop(stub_depth_array_view);
+        drop(cmp_sampler);
 
         // Default MaterialFactors UBO.
         let default_mf = MaterialFactorsUniforms::default();

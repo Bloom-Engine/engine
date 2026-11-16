@@ -383,7 +383,8 @@ fn capture_realtime_diagnostics(eng: &mut EngineState, final_rgba: &[u8]) {
 }
 fn try_engine() -> Option<EngineState> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
+        // WGPU_BACKEND=vulkan|dx12|metal|gl narrows the pick (Windows has two views of one GPU).
+        backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all()),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter =

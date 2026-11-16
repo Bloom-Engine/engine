@@ -247,3 +247,75 @@ fn deferred_frame_writes_render_target_override() {
         px
     );
 }
+
+/// The output scale applies once, to the window's size. Changing the render
+/// scale (dynamic resolution does it all the time) or the temporal upscaler
+/// rebuilds from the window, never from the already scaled surface: that once
+/// applied the output scale again per change, and a 4K window at 0.75 ended at
+/// 1215 x 683 after four render-scale steps.
+#[test]
+fn output_scale_does_not_compound_through_render_scale_changes() {
+    let Some(mut r) = try_renderer() else {
+        eprintln!("no GPU adapter — skipping");
+        return;
+    };
+    r.set_output_scale(0.5);
+    assert_eq!((r.physical_width(), r.physical_height()), (128, 128));
+    for s in [0.75, 0.5, 1.0, 0.6, 0.85] {
+        r.set_render_scale(s);
+        assert_eq!(
+            (r.physical_width(), r.physical_height()),
+            (128, 128),
+            "surface shrank after set_render_scale({s})"
+        );
+        assert_eq!(r.render_target_extent(), r.render_extent());
+    }
+    r.set_temporal_upscale(false);
+    r.set_temporal_upscale(true);
+    assert_eq!((r.physical_width(), r.physical_height()), (128, 128));
+    r.set_output_scale(1.0);
+    assert_eq!((r.physical_width(), r.physical_height()), (256, 256));
+}
+
+/// Dropping a renderer releases every GPU object it made. The material system
+/// once `mem::forget`-ed a stub depth texture, two views and a sampler; each
+/// handle holds the device, so no renderer's device or memory heaps were ever
+/// freed (about 580 MB per renderer on a Radeon 760M, and the golden suite ran
+/// out of memory after ~30 renderers).
+#[test]
+fn dropping_a_renderer_releases_its_textures() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all()),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let Ok(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        eprintln!("no GPU adapter — skipping");
+        return;
+    };
+    if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+        eprintln!("software adapter — skipping");
+        return;
+    }
+    let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: adapter.limits(),
+        ..Default::default()
+    })) else {
+        return;
+    };
+    let keep = device.clone();
+    let mut r = Renderer::new_headless(device, queue, 256, 256);
+    r.begin_frame();
+    r.end_frame();
+    let live = keep.get_internal_counters().hal;
+    assert!(live.texture_memory.read() > 0, "wgpu counters are off: the check would be vacuous");
+    drop(r);
+    let _ = keep.poll(wgpu::PollType::wait_indefinitely());
+    let after = keep.get_internal_counters().hal;
+    assert_eq!(
+        (after.texture_memory.read(), after.texture_views.read()),
+        (0, 0),
+        "textures outlived their renderer"
+    );
+}
