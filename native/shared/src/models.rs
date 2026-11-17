@@ -548,7 +548,10 @@ pub use crate::anim_mixer::AnimMixer;
 #[path = "models_gltf.rs"]
 mod gltf_load;
 #[cfg(feature = "models3d")]
-pub use gltf_load::{load_gltf_animation, load_gltf_staged, load_gltf_staged_from_source_path};
+pub use gltf_load::{
+    load_gltf_animation, load_gltf_staged, load_gltf_staged_from_source_path,
+    require_source_geometry_hash,
+};
 
 pub struct ModelAnimation {
     /// EN-055 — the parsed clip data (skeleton, keyframe tracks, rest

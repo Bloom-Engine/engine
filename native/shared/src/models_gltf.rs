@@ -24,6 +24,7 @@ use material_import::{
 };
 #[path = "models_gltf_bake.rs"]
 mod bake;
+pub use bake::require_source_geometry_hash;
 #[path = "models_gltf_texture_io.rs"]
 mod texture_io;
 #[path = "models_gltf_texture_semantics.rs"]

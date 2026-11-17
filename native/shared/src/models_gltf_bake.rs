@@ -5,11 +5,33 @@ use super::transform::{
 use super::{walk_scene_collect_instances, MeshData, ModelPrimitiveSource, Vertex3D};
 use std::sync::Arc;
 
+static SOURCE_HASH_REQUIRED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Make every glTF load carry the hash of its source (`ModelData::source_geometry_sha256`), whatever the render
+/// mode. A tool that writes archives keyed by that hash (bloom-cook) calls this before loading; at runtime the hash
+/// is otherwise made only in the visibility-shading mode, the one that draws virtual geometry.
+pub fn require_source_geometry_hash() {
+    SOURCE_HASH_REQUIRED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The SHA-256 of a model's whole source (its JSON and every buffer, textures included), which only a virtual
+/// geometry route uses: `ModelData::route_virtual_geometry` compares it with a cooked `.bgeo` archive. It is
+/// computed only when the renderer runs in the visibility-shading mode that virtual geometry needs. Hashing every
+/// model at load cost most of the loading time of a large scene (a city of 44 photoreal set pieces with 4K
+/// textures: about 5 of 10 s on an M-series Mac, more on an iPad) in games that never draw virtual geometry.
+/// Tests, and tools that call `models::require_source_geometry_hash()` (the cooker), always hash.
 pub(super) fn complete_geometry_source_hash(
     source_bytes: &[u8],
     gltf: &gltf::Gltf,
     buffers: &[Vec<u8>],
 ) -> Option<[u8; 32]> {
+    if !cfg!(test)
+        && !SOURCE_HASH_REQUIRED.load(std::sync::atomic::Ordering::Relaxed)
+        && !crate::renderer::visibility_buffer::source_hash_wanted()
+    {
+        return None;
+    }
     let descriptors = gltf.buffers().collect::<Vec<_>>();
     if descriptors.len() != buffers.len()
         || descriptors
