@@ -5,6 +5,16 @@ use super::transform::{
 use super::{walk_scene_collect_instances, MeshData, ModelPrimitiveSource, Vertex3D};
 use std::sync::Arc;
 
+static SOURCE_HASH_REQUIRED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Make every glTF load carry the hash of its source (`ModelData::source_geometry_sha256`), whatever the render
+/// mode. A tool that writes archives keyed by that hash (bloom-cook) calls this before loading; at runtime the hash
+/// is otherwise made only in the visibility-shading mode, the one that draws virtual geometry.
+pub fn require_source_geometry_hash() {
+    SOURCE_HASH_REQUIRED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The SHA-256 of a model's whole source (its JSON and every buffer, textures included), which only a virtual
 /// geometry route uses: `ModelData::route_virtual_geometry` compares it with a cooked `.bgeo` archive. It is
 /// computed only when the renderer runs in the visibility-shading mode that virtual geometry needs. Hashing every
@@ -17,7 +27,7 @@ pub(super) fn complete_geometry_source_hash(
     buffers: &[Vec<u8>],
 ) -> Option<[u8; 32]> {
     if !cfg!(test)
-        && !crate::models::source_geometry_hash_required()
+        && !SOURCE_HASH_REQUIRED.load(std::sync::atomic::Ordering::Relaxed)
         && !crate::renderer::visibility_buffer::source_hash_wanted()
     {
         return None;
