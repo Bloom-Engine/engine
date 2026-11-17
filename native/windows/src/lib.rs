@@ -5,6 +5,8 @@ use bloom_shared::string_header::{alloc_perry_string, str_from_header};
 
 use std::sync::OnceLock;
 
+mod install_paths;
+
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 
 /// True when the engine renders into a host-provided child window (a Perry UI
@@ -35,10 +37,11 @@ fn configured_backends() -> wgpu::Backends {
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
 }
-/// Asset-path hook for define_core_ffi! — identity on desktop, where game
-/// asset paths are valid relative to the working directory.
+/// Asset-path hook for define_core_ffi!: identity in a checkout or a writable
+/// folder; in a read-only install (MSIX, Program Files) the files the game
+/// writes go to %LOCALAPPDATA%\<exe name>. See `install_paths`.
 fn bloom_resolve_asset_path(path: &str) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Borrowed(path)
+    install_paths::resolve(path)
 }
 
 // The full shared (non-physics) FFI surface. See bloom_shared::ffi_core
@@ -182,13 +185,14 @@ mod crash_report {
         let rel = addr.wrapping_sub(base);
         eprintln!("bloom: FATAL unhandled exception {code:#010x} at {addr:#x} (main.exe+{rel:#x})");
 
-        let _ = std::fs::create_dir_all("tools/.testout/dumps");
+        let dumps = crate::install_paths::resolve("tools/.testout/dumps").into_owned();
+        let _ = std::fs::create_dir_all(&dumps);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let path = format!(
-            "tools/.testout/dumps/crash_main_{}_{stamp:x}.dmp",
+            "{dumps}/crash_main_{}_{stamp:x}.dmp",
             GetCurrentProcessId()
         );
         let write_dump = LoadLibraryW(w!("dbghelp.dll"))
@@ -642,6 +646,7 @@ pub extern "C" fn bloom_init_window(
     fullscreen: f64,
 ) {
     let title = str_from_header(title_ptr);
+    install_paths::init();
 
     #[cfg(windows)]
     {
