@@ -2010,6 +2010,13 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_max_texture_size",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_texture_streaming",
           "params": [
             "f64"

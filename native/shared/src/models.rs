@@ -541,6 +541,55 @@ pub struct SkeletonData {
 
 pub use crate::anim_mixer::AnimMixer;
 
+/// The largest edge, in pixels, a model texture decoded from PNG / JPEG / DDS
+/// keeps: a larger one is downscaled by a power of two at load (the same as
+/// dropping its top mip levels). 0 = no cap, the default. Read at decode, so
+/// it applies to models loaded after it is set. KTX2 block-compressed
+/// textures are not touched (they arrive with their own mips and budget).
+/// A 4096 px RGBA texture with mips is 85 MB; at 2048 it is 21 MB.
+static MAX_MODEL_TEXTURE_SIZE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_max_model_texture_size(px: u32) {
+    MAX_MODEL_TEXTURE_SIZE.store(px, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn max_model_texture_size() -> u32 {
+    MAX_MODEL_TEXTURE_SIZE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The size an image of `w` x `h` is decoded to under a `cap` (0 = none):
+/// halved until its larger edge fits, never below 1 px.
+pub fn capped_texture_size(w: u32, h: u32, cap: u32) -> (u32, u32) {
+    let (mut w, mut h) = (w, h);
+    if cap == 0 {
+        return (w, h);
+    }
+    while w.max(h) > cap && (w > 1 || h > 1) {
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+    }
+    (w, h)
+}
+
+#[cfg(test)]
+mod texture_cap_tests {
+    use super::capped_texture_size;
+
+    #[test]
+    fn halves_until_the_larger_edge_fits() {
+        assert_eq!(capped_texture_size(4096, 4096, 2048), (2048, 2048));
+        assert_eq!(capped_texture_size(4096, 2048, 1024), (1024, 512));
+        assert_eq!(capped_texture_size(3000, 1000, 2048), (1500, 500));
+        assert_eq!(capped_texture_size(4096, 1, 1024), (1024, 1));
+    }
+
+    #[test]
+    fn no_cap_or_a_small_image_is_left_alone() {
+        assert_eq!(capped_texture_size(4096, 4096, 0), (4096, 4096));
+        assert_eq!(capped_texture_size(512, 256, 2048), (512, 256));
+    }
+}
+
 // glTF/GLB parsing lives in models_gltf.rs, models3d-gated so builds
 // without the feature drop the gltf/image_dds deps (EN-014, re-fixed by
 // EN-063). Everything else in this file compiles in every configuration.
