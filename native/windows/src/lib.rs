@@ -662,6 +662,61 @@ pub extern "C" fn bloom_init_window(
     }
 }
 
+/// How much an adapter is wanted, compared field by field (higher wins): asked
+/// for by name, the kind of device (discrete > integrated > virtual/other >
+/// CPU rasteriser), ray query when it will be used, DX12 over other backends.
+type AdapterRank = (bool, u8, bool, bool);
+
+fn adapter_rank(
+    named: bool,
+    device_type: wgpu::DeviceType,
+    rt_used: bool,
+    backend: wgpu::Backend,
+) -> AdapterRank {
+    let kind = match device_type {
+        wgpu::DeviceType::DiscreteGpu => 3,
+        wgpu::DeviceType::IntegratedGpu => 2,
+        wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => 1,
+        wgpu::DeviceType::Cpu => 0,
+    };
+    (named, kind, rt_used, backend == wgpu::Backend::Dx12)
+}
+
+#[cfg(test)]
+mod adapter_rank_tests {
+    use super::adapter_rank;
+    use wgpu::{Backend, DeviceType};
+
+    #[test]
+    fn a_gpu_without_ray_query_beats_warp_with_it() {
+        let gpu = adapter_rank(false, DeviceType::DiscreteGpu, false, Backend::Dx12);
+        let warp = adapter_rank(false, DeviceType::Cpu, false, Backend::Dx12);
+        assert!(gpu > warp);
+        let igpu = adapter_rank(false, DeviceType::IntegratedGpu, false, Backend::Dx12);
+        let warp_rt = adapter_rank(false, DeviceType::Cpu, true, Backend::Dx12);
+        assert!(igpu > warp_rt);
+    }
+
+    #[test]
+    fn discrete_beats_integrated_even_when_only_the_igpu_traces_rays() {
+        let dgpu = adapter_rank(false, DeviceType::DiscreteGpu, false, Backend::Dx12);
+        let igpu = adapter_rank(false, DeviceType::IntegratedGpu, true, Backend::Dx12);
+        assert!(dgpu > igpu);
+    }
+
+    #[test]
+    fn ray_query_then_dx12_break_ties_and_a_name_beats_everything() {
+        let rt = adapter_rank(false, DeviceType::DiscreteGpu, true, Backend::Vulkan);
+        let no_rt = adapter_rank(false, DeviceType::DiscreteGpu, false, Backend::Dx12);
+        assert!(rt > no_rt);
+        let dx = adapter_rank(false, DeviceType::IntegratedGpu, false, Backend::Dx12);
+        let vk = adapter_rank(false, DeviceType::IntegratedGpu, false, Backend::Vulkan);
+        assert!(dx > vk);
+        let named = adapter_rank(true, DeviceType::IntegratedGpu, false, Backend::Vulkan);
+        assert!(named > adapter_rank(false, DeviceType::DiscreteGpu, true, Backend::Dx12));
+    }
+}
+
 /// Build the wgpu surface + engine on an existing HWND (top-level window or
 /// host-provided child). Shared by `bloom_init_window` (Bloom owns the window)
 /// and `bloom_attach_hwnd` (a Perry UI `BloomView` child window). `logical_*`
@@ -718,26 +773,37 @@ unsafe fn init_engine_for_hwnd(
             .expect("Failed to create surface")
     };
 
-    // Pick the adapter that can actually trace rays.
+    // Pick the GPU.
     //
-    // We used to take whatever `request_adapter` handed back, which on
-    // Windows means DX12 — and wgpu's DX12 backend only reports
-    // EXPERIMENTAL_RAY_QUERY when the driver advertises D3D12 raytracing
-    // tier 1.1. The same GPU under Vulkan can expose VK_KHR_ray_query
-    // when DX12 does not. The result was silent: Lumen's hardware trace
-    // was never selected, the software SDF path ran instead, and nobody
-    // saw a reason why. So enumerate the candidates, say out loud what
-    // each one offers, and prefer one that supports ray query.
+    // The kind of adapter comes first: a discrete GPU, then an integrated
+    // one, then anything else, and a CPU rasteriser (Microsoft Basic Render
+    // Driver / WARP, which DX12 always lists and which reports ray query)
+    // only when there is nothing else. Until 2026-11 the first adapter with
+    // ray query won outright, which sent any GPU without it (GTX 10-series,
+    // older Radeons, most Intel iGPUs) to WARP at a few frames per second,
+    // and could put a hybrid laptop on its integrated GPU because DXGI lists
+    // the one driving the panel first.
     //
-    // BLOOM_FORCE_SW_GI keeps its meaning: it also stops us from picking
-    // a backend *for* ray tracing, so the software path can be tested on
-    // hardware that would otherwise take the fast route.
-    let want_rt = !std::env::var("BLOOM_FORCE_SW_GI")
+    // Within the best kind, ray query is preferred only when something will
+    // use it (BLOOM_HW_GI, BLOOM_PT or --pt; see want_hw below: the feature
+    // is opt-in), then DX12 over Vulkan, then the enumeration order.
+    // BLOOM_FORCE_SW_GI keeps its meaning and stops the ray-query preference.
+    // BLOOM_ADAPTER=<part of a name> picks a GPU by name when it exists.
+    let rt_requested = (std::env::var("BLOOM_HW_GI")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || std::env::var("BLOOM_PT").is_ok()
+        || std::env::args().any(|a| a == "--pt"))
+        && !std::env::var("BLOOM_FORCE_SW_GI")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    let by_name = std::env::var("BLOOM_ADAPTER")
+        .ok()
+        .map(|n| n.to_ascii_lowercase())
+        .filter(|n| !n.is_empty());
 
     let candidates = pollster_block_on(instance.enumerate_adapters(backends));
-    let mut rt_adapter: Option<wgpu::Adapter> = None;
+    let mut best: Option<(AdapterRank, wgpu::Adapter)> = None;
     for cand in candidates {
         let info = cand.get_info();
         let surf_ok = cand.is_surface_supported(&surface);
@@ -745,16 +811,23 @@ unsafe fn init_engine_for_hwnd(
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
         eprintln!(
-            "bloom: candidate '{}' ({:?}), ray_query={}, surface={}",
-            info.name, info.backend, has_rt, surf_ok,
+            "bloom: candidate '{}' ({:?}, {:?}), ray_query={}, surface={}",
+            info.name, info.backend, info.device_type, has_rt, surf_ok,
         );
-        if want_rt && has_rt && surf_ok && rt_adapter.is_none() {
-            rt_adapter = Some(cand);
+        if !surf_ok {
+            continue;
+        }
+        let named = by_name
+            .as_ref()
+            .is_some_and(|n| info.name.to_ascii_lowercase().contains(n.as_str()));
+        let rank = adapter_rank(named, info.device_type, has_rt && rt_requested, info.backend);
+        if best.as_ref().is_none_or(|(b, _)| rank > *b) {
+            best = Some((rank, cand));
         }
     }
 
-    let adapter = match rt_adapter {
-        Some(a) => a,
+    let adapter = match best {
+        Some((_, a)) => a,
         None => pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
             power_preference: wgpu::PowerPreference::HighPerformance,
