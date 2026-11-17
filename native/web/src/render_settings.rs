@@ -110,6 +110,11 @@ pub fn bloom_set_shadow_cascade_stagger(on: f64) -> f64 {
     1.0
 }
 #[wasm_bindgen]
+pub fn bloom_set_max_texture_size(px: f64) -> f64 {
+    bloom_shared::models::set_max_model_texture_size(if px > 0.0 { px as u32 } else { 0 });
+    1.0
+}
+#[wasm_bindgen]
 pub fn bloom_set_texture_streaming(_budget_mb: f64) -> f64 {
     // Not on the web: models arrive as bytes with no file to read levels
     // from later. 0 tells the game nothing was turned on.

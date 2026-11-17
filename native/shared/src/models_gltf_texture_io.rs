@@ -60,6 +60,28 @@ pub(super) fn swap_extension(uri: &str, new_ext: &str) -> String {
 /// Lumberyard Bistro that ship BC-compressed textures), falling back
 /// to the `image` crate for PNG/JPEG/etc. Returns None on failure.
 pub(super) fn decode_texture_bytes(bytes: &[u8], uri: &str) -> Option<(Vec<u8>, u32, u32)> {
+    decode_texture_bytes_uncapped(bytes, uri).map(|(rgba, w, h)| cap_rgba(rgba, w, h))
+}
+
+/// Downscale decoded texels to `crate::models::max_model_texture_size()`
+/// (see there). Triangle filtering widens with the ratio, so a 4:1 step
+/// averages the texels it drops instead of skipping them.
+fn cap_rgba(rgba: Vec<u8>, w: u32, h: u32) -> (Vec<u8>, u32, u32) {
+    let (tw, th) = crate::models::capped_texture_size(w, h, crate::models::max_model_texture_size());
+    if (tw, th) == (w, h) {
+        return (rgba, w, h);
+    }
+    if rgba.len() != (w as usize) * (h as usize) * 4 {
+        return (rgba, w, h);
+    }
+    let Some(img) = image::RgbaImage::from_raw(w, h, rgba) else {
+        return (Vec::new(), 0, 0);
+    };
+    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
+    (small.into_raw(), tw, th)
+}
+
+fn decode_texture_bytes_uncapped(bytes: &[u8], uri: &str) -> Option<(Vec<u8>, u32, u32)> {
     #[cfg(feature = "image-extras")]
     if crate::compressed_texture::is_ktx2(bytes) {
         let image = CompressedImage::from_ktx2(bytes)?;
