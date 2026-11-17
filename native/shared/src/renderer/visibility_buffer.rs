@@ -142,8 +142,11 @@ static MODE: std::sync::OnceLock<RuntimeMode> = std::sync::OnceLock::new();
 pub(crate) fn source_hash_wanted() -> bool {
     match requested_mode_if_read() {
         Some(mode) => mode.shades(),
-        None => SHADING_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
-            || parse_runtime_mode(std::env::var("BLOOM_VISIBILITY_BUFFER").ok().as_deref()).shades(),
+        None => {
+            SHADING_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
+                || parse_runtime_mode(std::env::var("BLOOM_VISIBILITY_BUFFER").ok().as_deref())
+                    .shades()
+        }
     }
 }
 
