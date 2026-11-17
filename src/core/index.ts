@@ -41,6 +41,7 @@ declare function bloom_set_sharpen_strength(strength: number): number;
 declare function bloom_set_ssgi_probe_spacing(pixels: number): number;
 declare function bloom_set_shadow_distance(metres: number): number;
 declare function bloom_set_shadow_cascade_stagger(on: number): number;
+declare function bloom_set_max_texture_size(px: number): number;
 declare function bloom_set_texture_streaming(budgetMb: number): number;
 declare function bloom_set_shadow_filter_4tap(on: number): number;
 declare function bloom_set_shadow_map_size(texels: number): number;
@@ -851,6 +852,19 @@ export function setShadowFilter4Tap(on: boolean): boolean {
  */
 export function setShadowCascadeStagger(on: boolean): boolean {
   return bloom_set_shadow_cascade_stagger(on ? 1 : 0) !== 0;
+}
+
+/**
+ * The largest edge, in pixels, a model texture keeps (0 = no cap, the
+ * default). A PNG / JPEG / DDS texture in a glTF model that is larger is
+ * downscaled by a power of two when it is decoded, which is the same as
+ * dropping its top mip levels: 4096 px RGBA with mips is 85 MB, 2048 is 21 MB,
+ * 1024 is 5 MB. Call it BEFORE loading models; it applies to models loaded
+ * afterwards. KTX2 block-compressed textures are left alone. For machines
+ * with little video memory, or integrated GPUs sharing system memory.
+ */
+export function setMaxTextureSize(px: number): boolean {
+  return bloom_set_max_texture_size(px) !== 0;
 }
 
 /**

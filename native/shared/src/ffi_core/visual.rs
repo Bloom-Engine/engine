@@ -369,6 +369,14 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_max_texture_size
+        #[no_mangle]
+        pub extern "C" fn bloom_set_max_texture_size(px: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_max_texture_size", move || {
+                $crate::models::set_max_model_texture_size(if px > 0.0 { px as u32 } else { 0 });
+            })
+        }
+
         // bloom_set_texture_streaming
         #[no_mangle]
         pub extern "C" fn bloom_set_texture_streaming(budget_mb: f64) -> f64 {
