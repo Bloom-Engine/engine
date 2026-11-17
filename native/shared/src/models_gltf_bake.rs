@@ -5,11 +5,20 @@ use super::transform::{
 use super::{walk_scene_collect_instances, MeshData, ModelPrimitiveSource, Vertex3D};
 use std::sync::Arc;
 
+/// The SHA-256 of a model's whole source (its JSON and every buffer, textures included), which only a virtual
+/// geometry route uses: `ModelData::route_virtual_geometry` compares it with a cooked `.bgeo` archive. It is
+/// computed only when the renderer runs in the visibility-shading mode that virtual geometry needs. Hashing every
+/// model at load cost most of the loading time of a large scene (a city of 44 photoreal set pieces with 4K
+/// textures: about 5 of 10 s on an M-series Mac, more on an iPad) in games that never draw virtual geometry.
+/// Tests always hash.
 pub(super) fn complete_geometry_source_hash(
     source_bytes: &[u8],
     gltf: &gltf::Gltf,
     buffers: &[Vec<u8>],
 ) -> Option<[u8; 32]> {
+    if !cfg!(test) && !crate::renderer::visibility_buffer::source_hash_wanted() {
+        return None;
+    }
     let descriptors = gltf.buffers().collect::<Vec<_>>();
     if descriptors.len() != buffers.len()
         || descriptors
