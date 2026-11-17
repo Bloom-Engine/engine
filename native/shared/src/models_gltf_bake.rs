@@ -10,13 +10,16 @@ use std::sync::Arc;
 /// computed only when the renderer runs in the visibility-shading mode that virtual geometry needs. Hashing every
 /// model at load cost most of the loading time of a large scene (a city of 44 photoreal set pieces with 4K
 /// textures: about 5 of 10 s on an M-series Mac, more on an iPad) in games that never draw virtual geometry.
-/// Tests always hash.
+/// Tests, and tools that call `models::require_source_geometry_hash()` (the cooker), always hash.
 pub(super) fn complete_geometry_source_hash(
     source_bytes: &[u8],
     gltf: &gltf::Gltf,
     buffers: &[Vec<u8>],
 ) -> Option<[u8; 32]> {
-    if !cfg!(test) && !crate::renderer::visibility_buffer::source_hash_wanted() {
+    if !cfg!(test)
+        && !crate::models::source_geometry_hash_required()
+        && !crate::renderer::visibility_buffer::source_hash_wanted()
+    {
         return None;
     }
     let descriptors = gltf.buffers().collect::<Vec<_>>();

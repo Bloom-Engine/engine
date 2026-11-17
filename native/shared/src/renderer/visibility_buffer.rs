@@ -139,6 +139,7 @@ static MODE: std::sync::OnceLock<RuntimeMode> = std::sync::OnceLock::new();
 /// Whether models must carry the hash of their source, which a virtual geometry route checks against its archive.
 /// Only the visibility-shading mode draws virtual geometry. Before the device is negotiated the mode is not settled
 /// yet, so a model loaded that early is hashed whenever shading has been asked for.
+#[cfg(feature = "models3d")]
 pub(crate) fn source_hash_wanted() -> bool {
     match requested_mode_if_read() {
         Some(mode) => mode.shades(),

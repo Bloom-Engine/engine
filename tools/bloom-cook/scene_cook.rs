@@ -28,6 +28,7 @@ pub(crate) struct SceneSanitation {
 pub(crate) fn prepare_scene(input: &Path, logical_id: &str) -> Result<PreparedScene, String> {
     let source =
         std::fs::read(input).map_err(|error| format!("read {}: {error}", input.display()))?;
+    runtime::require_source_geometry_hash(); // the archive is keyed by the source's hash
     let staged = runtime::load_gltf_staged_from_source_path(&source, input)
         .ok_or_else(|| format!("stage source scene {}", input.display()))?;
     let animation = runtime::load_gltf_animation(&source)

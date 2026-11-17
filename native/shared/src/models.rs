@@ -550,6 +550,21 @@ mod gltf_load;
 #[cfg(feature = "models3d")]
 pub use gltf_load::{load_gltf_animation, load_gltf_staged, load_gltf_staged_from_source_path};
 
+static SOURCE_HASH_REQUIRED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Make every glTF load carry the hash of its source (`ModelData::source_geometry_sha256`), whatever the render
+/// mode. A tool that writes archives keyed by that hash (bloom-cook) calls this before loading; at runtime the hash
+/// is otherwise made only in the visibility-shading mode, the one that draws virtual geometry.
+pub fn require_source_geometry_hash() {
+    SOURCE_HASH_REQUIRED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(feature = "models3d")]
+pub(crate) fn source_geometry_hash_required() -> bool {
+    SOURCE_HASH_REQUIRED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct ModelAnimation {
     /// EN-055 — the parsed clip data (skeleton, keyframe tracks, rest
     /// rotations) is IMMUTABLE after load and shared between instances via
