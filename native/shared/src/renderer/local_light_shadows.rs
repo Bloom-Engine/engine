@@ -522,10 +522,15 @@ pub(crate) struct PassInputs<'a> {
     pub queue: &'a wgpu::Queue,
     pub nodes: &'a [ShadowDrawEntry],
     pub vbs: &'a [&'a wgpu::Buffer],
+    /// Per `vbs` entry, its depth-only twin stream if it has one.
+    pub depth_vbs: &'a [Option<&'a wgpu::Buffer>],
     pub ibs: &'a [&'a wgpu::Buffer],
     pub cutout_bgs: &'a [&'a wgpu::BindGroup],
     pub pipeline: &'a wgpu::RenderPipeline,
     pub pipeline_cutout: &'a wgpu::RenderPipeline,
+    /// `pipeline` / `pipeline_cutout` reading the depth twin stream.
+    pub pipeline_compact: &'a wgpu::RenderPipeline,
+    pub pipeline_cutout_compact: &'a wgpu::RenderPipeline,
     pub pipeline_skinned: &'a wgpu::RenderPipeline,
     pub joint_bind_group: &'a wgpu::BindGroup,
     pub camera_pos: [f32; 3],
@@ -890,21 +895,26 @@ impl LocalLightShadows {
                 } else {
                     0
                 };
+                // 3 / 4: kinds 0 / 1 drawn from the depth twin stream.
+                let twin = if kind == 2 { None } else { inputs.depth_vbs[entry.vb_idx] };
+                let kind = if twin.is_some() { kind + 3 } else { kind };
                 if kind != current_kind {
                     pass.set_pipeline(match kind {
                         1 => inputs.pipeline_cutout,
                         2 => inputs.pipeline_skinned,
+                        3 => inputs.pipeline_compact,
+                        4 => inputs.pipeline_cutout_compact,
                         _ => inputs.pipeline,
                     });
                     current_kind = kind;
                 }
                 pass.set_bind_group(0, &gpu.draw_bind_group, &[(base + slot * stride) as u32]);
-                if kind == 1 {
+                if kind == 1 || kind == 4 {
                     pass.set_bind_group(1, inputs.cutout_bgs[entry.cutout_idx as usize], &[]);
                 } else if kind == 2 {
                     pass.set_bind_group(1, inputs.joint_bind_group, &[]);
                 }
-                pass.set_vertex_buffer(0, inputs.vbs[entry.vb_idx].slice(..));
+                pass.set_vertex_buffer(0, twin.unwrap_or(inputs.vbs[entry.vb_idx]).slice(..));
                 pass.set_index_buffer(
                     inputs.ibs[entry.ib_idx].slice(..),
                     wgpu::IndexFormat::Uint32,

@@ -6,6 +6,56 @@
 use super::super::{material_indirection::GpuCompletionTracker, Vertex3D};
 use super::GeometrySlice;
 
+/// The depth-only twin of an arena vertex: what a pass that only writes depth
+/// reads (position, and uv + vertex alpha for an alpha-tested cutout).
+///
+/// WHY A TWIN STREAM. `Vertex3D` is 96 bytes, and a depth pass that reads only
+/// its position still pulls whole 96-byte vertices through the cache. On an
+/// integrated GPU, whose vertex fetch shares system memory with everything
+/// else, the forest's ~1.1M vertices cost ~4 ms per pass that draws them, and a
+/// frame draws them into every shadow cascade and lamp shadow face as well as
+/// the camera. This stream is a quarter of that, at the same vertex index:
+/// vertex i of the arena is twin i here, so a draw's `base_vertex` and index
+/// range are unchanged and only the bound buffer and pipeline differ.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct DepthVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) uv: [f32; 2],
+    pub(crate) alpha: f32,
+}
+
+/// Bytes of the arena's `Vertex3D` stream per byte of its depth twin.
+const DEPTH_RATIO: u64 =
+    (std::mem::size_of::<Vertex3D>() / std::mem::size_of::<DepthVertex>()) as u64;
+const _: () = assert!(
+    std::mem::size_of::<Vertex3D>() % std::mem::size_of::<DepthVertex>() == 0,
+    "the depth twin must divide the vertex stride exactly",
+);
+
+impl DepthVertex {
+    pub(crate) fn desc() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+            0 => Float32x3,
+            1 => Float32x2,
+            2 => Float32,
+        ];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<DepthVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRS,
+        }
+    }
+
+    fn of(v: &Vertex3D) -> Self {
+        Self {
+            position: v.position,
+            uv: v.uv,
+            alpha: v.color[3],
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct FreeRange {
     offset: u64,
@@ -19,6 +69,8 @@ struct RetiredGeometry {
 
 pub(super) struct GeometryArena {
     pub(super) vertex: wgpu::Buffer,
+    /// `vertex`'s depth-only twin (see `DepthVertex`), byte offset / DEPTH_RATIO.
+    pub(super) depth: wgpu::Buffer,
     pub(super) index: wgpu::Buffer,
     vertex_capacity: u64,
     index_capacity: u64,
@@ -48,6 +100,7 @@ impl GeometryArena {
             ),
             full_warned: false,
             vertex: create_vertex_arena(device, Self::INITIAL_CAPACITY),
+            depth: create_depth_arena(device, Self::INITIAL_CAPACITY / DEPTH_RATIO),
             index: create_index_arena(device, Self::INITIAL_CAPACITY),
             vertex_capacity: Self::INITIAL_CAPACITY,
             index_capacity: Self::INITIAL_CAPACITY,
@@ -120,6 +173,12 @@ impl GeometryArena {
         );
         if vertex_size > 0 {
             queue.write_buffer(&self.vertex, vertex_offset, bytemuck::cast_slice(vertices));
+            let depth: Vec<DepthVertex> = vertices.iter().map(DepthVertex::of).collect();
+            queue.write_buffer(
+                &self.depth,
+                vertex_offset / DEPTH_RATIO,
+                bytemuck::cast_slice(&depth),
+            );
         }
         if index_size > 0 {
             queue.write_buffer(&self.index, index_offset, bytemuck::cast_slice(indices));
@@ -199,10 +258,19 @@ impl GeometryArena {
         });
         if new_vertex_capacity != self.vertex_capacity {
             let next = create_vertex_arena(device, new_vertex_capacity);
+            let next_depth = create_depth_arena(device, new_vertex_capacity / DEPTH_RATIO);
             if copy_vertex_end > 0 {
                 encoder.copy_buffer_to_buffer(&self.vertex, 0, &next, 0, copy_vertex_end);
+                encoder.copy_buffer_to_buffer(
+                    &self.depth,
+                    0,
+                    &next_depth,
+                    0,
+                    copy_vertex_end / DEPTH_RATIO,
+                );
             }
             self.vertex = next;
+            self.depth = next_depth;
             self.vertex_capacity = new_vertex_capacity;
         }
         if new_index_capacity != self.index_capacity {
@@ -224,6 +292,17 @@ fn create_vertex_arena(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
         size,
         usage: wgpu::BufferUsages::VERTEX
             | wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_depth_arena(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu_driven_shared_depth_vertices"),
+        size: size.max(4),
+        usage: wgpu::BufferUsages::VERTEX
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,

@@ -105,6 +105,19 @@ fn vs_shadow(in: ShadowVertexInput) -> @builtin(position) vec4<f32> {
     let world_pos = shadow_u.model * vec4<f32>(p, 1.0);
     return shadow_u.light_vp * world_pos;
 }
+
+// The same caster read from the arena's depth-only twin stream
+// (gpu_driven::DepthVertex, 24 bytes instead of 96). Same maths as vs_shadow.
+struct ShadowDepthVertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+@vertex
+fn vs_shadow_compact(in: ShadowDepthVertexInput) -> @builtin(position) vec4<f32> {
+    let p = foliage_wind_local(in.position, shadow_u.model, shadow_u.wind, shadow_u.misc.z, 0.0);
+    let world_pos = shadow_u.model * vec4<f32>(p, 1.0);
+    return shadow_u.light_vp * world_pos;
+}
 "#
 );
 
@@ -198,6 +211,25 @@ fn vs_shadow_cutout(in: ShadowVertexInput) -> VsOut {
     o.pos = shadow_u.light_vp * world_pos;
     o.uv = in.uv;
     o.alpha = in.color.a;
+    return o;
+}
+
+// vs_shadow_cutout reading the arena's depth-only twin stream
+// (gpu_driven::DepthVertex): position, uv, vertex alpha.
+struct ShadowDepthVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) alpha: f32,
+};
+
+@vertex
+fn vs_shadow_cutout_compact(in: ShadowDepthVertexInput) -> VsOut {
+    var o: VsOut;
+    let p = foliage_wind_local(in.position, shadow_u.model, shadow_u.wind, shadow_u.misc.z, 1.0);
+    let world_pos = shadow_u.model * vec4<f32>(p, 1.0);
+    o.pos = shadow_u.light_vp * world_pos;
+    o.uv = in.uv;
+    o.alpha = in.alpha;
     return o;
 }
 
@@ -341,6 +373,11 @@ pub struct ShadowMap {
     /// Alpha-tested variant for cutout foliage casters. Opaque casters keep
     /// using `pipeline` (byte-identical to before this was added).
     pub pipeline_cutout: LazyRenderPipeline,
+    /// `pipeline` and `pipeline_cutout` for casters drawn from the shared
+    /// arena's depth-only twin stream (`GpuDriven::depth_twin`): a quarter of
+    /// the vertex bytes for the same triangles and the same depths.
+    pub pipeline_compact: LazyRenderPipeline,
+    pub pipeline_cutout_compact: LazyRenderPipeline,
     /// Skinning-aware variant for the immediate-mode batch (animated
     /// characters). Binds the joint-matrix buffer at group 1 and skins
     /// per-vertex so player/enemies cast a real posed shadow.
@@ -780,6 +817,70 @@ impl ShadowMap {
             },
         );
 
+        // The two above, reading the arena's depth-only twin stream. Same
+        // modules, state and bias; only the vertex entry point and layout differ.
+        let depth_layout = crate::renderer::gpu_driven::DepthVertex::desc();
+        let shadow_depth_state = || wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: Default::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 1,
+                slope_scale: 1.0,
+                clamp: 0.0,
+            },
+        };
+        let shadow_primitive = || wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            ..Default::default()
+        };
+        let pipeline_compact = LazyRenderPipeline::new(
+            device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("shadow_pipeline_compact"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_shadow_compact"),
+                    buffers: &[depth_layout.clone()],
+                    compilation_options: Default::default(),
+                },
+                fragment: None,
+                primitive: shadow_primitive(),
+                depth_stencil: Some(shadow_depth_state()),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
+        let pipeline_cutout_compact = LazyRenderPipeline::new(
+            device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("shadow_pipeline_cutout_compact"),
+                layout: Some(&cutout_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &cutout_shader,
+                    entry_point: Some("vs_shadow_cutout_compact"),
+                    buffers: &[depth_layout],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &cutout_shader,
+                    entry_point: Some("fs_shadow_cutout"),
+                    targets: &[],
+                    compilation_options: Default::default(),
+                }),
+                primitive: shadow_primitive(),
+                depth_stencil: Some(shadow_depth_state()),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
+
         // Skinned (animated-character) shadow pipeline. Group 0 = the shared
         // shadow uniforms (light_vp + model, dynamic offset); group 1 = the
         // joint-matrix buffer. Depth-only, same bias as the opaque path.
@@ -842,6 +943,8 @@ impl ShadowMap {
             bind_group,
             pipeline,
             pipeline_cutout,
+            pipeline_compact,
+            pipeline_cutout_compact,
             pipeline_skinned,
             cutout_tex_layout,
             uniform_buffer,
