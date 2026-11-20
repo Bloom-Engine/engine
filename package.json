@@ -686,6 +686,28 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_unload_sound",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_unload_music",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_music_lowpass",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_load_texture",
           "params": [
             "string"
@@ -1617,6 +1639,23 @@
             "f64"
           ],
           "returns": "f64"
+        },
+        {
+          "name": "bloom_anim_seek",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_restart",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
         },
         {
           "name": "bloom_model_find_joint",

@@ -749,6 +749,16 @@ pub fn bloom_anim_time(handle: f64, which: f64) -> f64 {
 }
 
 #[wasm_bindgen]
+pub fn bloom_anim_seek(handle: f64, which: f64, t: f64) {
+    engine().models.anim_seek(handle, which as u32, t as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_restart(handle: f64, fade: f64) {
+    engine().models.anim_restart(handle, fade as f32);
+}
+
+#[wasm_bindgen]
 pub fn bloom_anim_root_delta(handle: f64, axis: f64) -> f64 {
     let d = engine().models.anim_root_delta(handle);
     let i = axis as usize;

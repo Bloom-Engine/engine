@@ -280,5 +280,32 @@ macro_rules! __bloom_ffi_audio_ffi {
                 engine().audio.music_length(handle)
             })
         }
+
+        // ---- freeing and filtering --------------------------------------
+
+        // bloom_unload_sound — frees the samples; safe while it plays (a
+        // one-shot finishes, a looping voice fades out).
+        #[no_mangle]
+        pub extern "C" fn bloom_unload_sound(handle: f64) {
+            $crate::ffi::guard("bloom_unload_sound", move || {
+                engine().audio.unload_sound(handle);
+            })
+        }
+
+        // bloom_unload_music — stops the track if it plays, then frees it.
+        #[no_mangle]
+        pub extern "C" fn bloom_unload_music(handle: f64) {
+            $crate::ffi::guard("bloom_unload_music", move || {
+                engine().audio.unload_music(handle);
+            })
+        }
+
+        // bloom_set_music_lowpass — cutoff Hz (0 = off), 12 dB/oct, glided.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_music_lowpass(handle: f64, cutoff: f64) {
+            $crate::ffi::guard("bloom_set_music_lowpass", move || {
+                engine().audio.set_music_lowpass(handle, cutoff as f32);
+            })
+        }
     };
 }

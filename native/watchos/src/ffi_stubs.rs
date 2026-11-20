@@ -84,6 +84,12 @@
 }
 #[no_mangle] pub extern "C" fn bloom_play_music_from(_p0: f64, _p1: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_unload_sound(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_unload_music(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_music_lowpass(_p0: f64, _p1: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_get_music_length(_p0: f64) -> f64 {
     0.0
 }
@@ -238,6 +244,10 @@
 #[no_mangle] pub extern "C" fn bloom_update_model_animation(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_anim_play(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_seek(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_restart(_p0: f64, _p1: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_anim_set_layer(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
 }

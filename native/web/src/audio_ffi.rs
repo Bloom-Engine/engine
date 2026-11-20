@@ -213,3 +213,18 @@ pub fn bloom_is_music_playing(handle: f64) -> f64 {
         0.0
     }
 }
+
+#[wasm_bindgen]
+pub fn bloom_unload_sound(handle: f64) {
+    engine().audio.unload_sound(handle);
+}
+
+#[wasm_bindgen]
+pub fn bloom_unload_music(handle: f64) {
+    engine().audio.unload_music(handle);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_music_lowpass(handle: f64, cutoff: f64) {
+    engine().audio.set_music_lowpass(handle, cutoff as f32);
+}

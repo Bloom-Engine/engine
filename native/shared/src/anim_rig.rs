@@ -403,6 +403,34 @@ impl crate::models::ModelManager {
         }
     }
 
+    /// Set a mixer clock (the selector of [`Self::anim_time`]): 0 base clip
+    /// time, 1 layer clip time, 2 base clip phase 0..1. Shown by the next
+    /// `advance_and_update`, which then adds its own dt.
+    pub fn anim_seek(&mut self, handle: f64, which: u32, t: f32) {
+        if let Some(ma) = self.animations.get_mut(handle) {
+            let dur = |c: i64| {
+                if c < 0 {
+                    0.0
+                } else {
+                    ma.animations
+                        .get(c as usize)
+                        .map(|a| a.duration)
+                        .unwrap_or(0.0)
+                }
+            };
+            let base = dur(ma.mixer.cur_clip as i64);
+            let layer = dur(ma.mixer.layer_clip as i64);
+            ma.mixer.seek(which, t, base, layer);
+        }
+    }
+
+    /// Play the base clip again from 0, crossfading over `fade` seconds.
+    pub fn anim_restart(&mut self, handle: f64, fade: f32) {
+        if let Some(ma) = self.animations.get_mut(handle) {
+            ma.mixer.restart(fade);
+        }
+    }
+
     /// Mixer clocks, in seconds: 0 base clip time, 1 layer clip time,
     /// 2 base clip time as a 0..1 phase.
     pub fn anim_time(&self, handle: f64, which: u32) -> f32 {

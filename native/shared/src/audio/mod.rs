@@ -27,6 +27,7 @@
 //!   per-music atomics ([`MusicShared`]), never shared mutable state.
 
 mod decode;
+mod filter;
 mod render;
 mod spsc;
 pub mod stream;
@@ -72,6 +73,8 @@ struct MusicEntry {
     shared: Arc<MusicShared>,
     volume: f32,
     looping: bool,
+    /// Low-pass cutoff in Hz, 0 = off. Kept so the next play starts filtered.
+    lowpass: f32,
 }
 
 /// Control half of the audio system. All methods are main-thread.
@@ -420,10 +423,21 @@ impl AudioMixer {
             .unwrap_or(1.0)
     }
 
+    /// Free a sound's samples. Safe while it plays: voices hold their own
+    /// `Arc` of the data, so a one-shot plays to its end and the memory goes
+    /// when it does; a looping voice of it fades out over a block (with the
+    /// handle gone nothing else could stop it by sound). The handle is dead
+    /// afterwards (generational: it never aliases a later load).
     pub fn unload_sound(&mut self, handle: f64) {
-        // Voices already playing hold their own Arc and finish gracefully.
+        if self.sounds.get(handle).is_none() {
+            return;
+        }
         self.sounds.free(handle);
         self.sound_volumes.retain(|e| e.0 != handle);
+        self.routes.remove(&handle.to_bits());
+        self.send(Cmd::ReleaseSound {
+            sound_id: handle.to_bits(),
+        });
     }
 
     // ------------------------------------------------------------ music
@@ -480,7 +494,38 @@ impl AudioMixer {
             }),
             volume: 1.0,
             looping: true,
+            lowpass: 0.0,
         })
+    }
+
+    /// Free a music track (its decoded PCM, or its compressed bytes and any
+    /// decode worker). A track that is playing stops first. The handle is
+    /// dead afterwards.
+    pub fn unload_music(&mut self, handle: f64) {
+        if self.music.get(handle).is_none() {
+            return;
+        }
+        self.stop_music(handle);
+        self.music.free(handle);
+    }
+
+    /// Low-pass a track at `cutoff` Hz (0 = off): two stages, 12 dB/octave,
+    /// 3 dB down at the cutoff. Applies to the playback running now (the
+    /// cutoff glides there over ~20 ms, so riding it per frame never clicks)
+    /// and to every later play, which starts filtered.
+    pub fn set_music_lowpass(&mut self, handle: f64, cutoff: f32) {
+        let cutoff = if cutoff.is_finite() {
+            cutoff.max(0.0)
+        } else {
+            0.0
+        };
+        if let Some(m) = self.music.get_mut(handle) {
+            m.lowpass = cutoff;
+        }
+        self.send(Cmd::SetMusicLowpass {
+            music_id: handle.to_bits(),
+            cutoff,
+        });
     }
 
     pub fn play_music(&mut self, handle: f64) {
@@ -530,6 +575,7 @@ impl AudioMixer {
             volume: m.volume,
             looping: m.looping,
             start,
+            lowpass: m.lowpass,
         };
         self.send(cmd);
     }
@@ -954,6 +1000,52 @@ mod tests {
         let mut out = [0.0f32; 32];
         a.mix_output(&mut out); // voice still holds its Arc
         assert!(out.iter().any(|&s| s != 0.0));
+    }
+
+    #[test]
+    fn unload_frees_the_handle_and_fades_a_looping_voice() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(tone(64));
+        let data = a.sounds.get(h).unwrap().clone();
+        a.play_sound_ex(h, true, 1.0, 1.0, 0.0);
+        let mut out = [0.0f32; 64];
+        a.mix_output(&mut out);
+        assert!(peak(&out) > 0.0);
+        a.unload_sound(h);
+        assert!(a.sounds.get(h).is_none(), "handle still live");
+        a.play_sound(h); // a dead handle plays nothing and must not panic
+        a.unload_sound(h); // nor does a second unload
+                           // the looping voice fades over one block, then it is gone and so is
+                           // its reference to the samples
+        for _ in 0..3 {
+            a.mix_output(&mut out);
+        }
+        assert_eq!(
+            peak(&out),
+            0.0,
+            "looping voice of an unloaded sound kept playing"
+        );
+        assert_eq!(Arc::strong_count(&data), 1, "samples not released");
+    }
+
+    #[test]
+    fn unload_music_stops_and_frees_it() {
+        let mut a = AudioMixer::new();
+        let h = a.load_music(tone(4096));
+        a.play_music(h);
+        let mut out = [0.0f32; 64];
+        a.mix_output(&mut out);
+        assert!(peak(&out) > 0.0);
+        a.unload_music(h);
+        assert!(!a.is_music_playing(h));
+        a.mix_output(&mut out);
+        assert_eq!(peak(&out), 0.0, "unloaded track still playing");
+        a.play_music(h); // dead handle: nothing
+        a.set_music_lowpass(h, 500.0);
+        a.unload_music(h);
+        a.mix_output(&mut out);
+        assert_eq!(peak(&out), 0.0);
+        assert_eq!(a.music_length(h), 0.0);
     }
 
     // ---- EN-062: spatial voices ----------------------------------------
