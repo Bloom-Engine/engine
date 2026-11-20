@@ -91,7 +91,7 @@ export {
   setModelFoliageWind, setFoliageShadowMotion, setCutoutEdgeFade, setCutoutEnvSpecular,
   requestVirtualGeometry, enableVirtualGeometry, attachVirtualGeometry, drawModelVirtual,
   setVirtualGeometryErrorPixels, virtualGeometryStat, setVirtualGeometryProxyError,
-  drawCube, drawCubeWires, drawSphere, drawSphereWires,
+  drawCube, drawCubeWires, drawSphere, drawSphereWires, setDrawShadowCasting,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
   loadShader, compileMaterial, drawMeshWithMaterial,
   compileRefractiveMaterial, compileTransparentMaterial, compileAdditiveMaterial,

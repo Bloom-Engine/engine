@@ -159,6 +159,16 @@ impl Renderer {
         }
 
         let pass_count = self.post_passes.len();
+        let post_frame = super::post_pass::PostFrameUniforms::new(
+            self.lighting_uniforms.wind[3],
+            self.lighting_uniforms.frame_misc[0],
+            self.post_frame_index,
+            self.surface_config.width,
+            self.surface_config.height,
+        );
+        if pass_count > 0 {
+            self.post_frame_index = self.post_frame_index.wrapping_add(1);
+        }
         for index in 0..pass_count {
             let input_view = if index % 2 == 0 {
                 self.composite_ldr_rt_a_view.as_ref().unwrap_or(output_view)
@@ -198,11 +208,17 @@ impl Renderer {
                             binding: 3,
                             resource: wgpu::BindingResource::Sampler(&self.post_pass_depth_sampler),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.post_passes[index].frame_buffer.as_entire_binding(),
+                        },
                     ],
                 });
                 self.post_passes[index].bind_group_cache[input_slot] = Some(bind_group);
             }
             let post_pass = &self.post_passes[index];
+            self.queue
+                .write_buffer(&post_pass.frame_buffer, 0, bytemuck::bytes_of(&post_frame));
             let timestamp_writes = profiler.pass_timestamp_writes("post_pass");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom_post_pass"),

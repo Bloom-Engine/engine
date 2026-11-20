@@ -372,7 +372,7 @@ impl Renderer {
                             self.indices_3d.len() as u32
                         };
                         let count = next_start - call.index_start;
-                        if count == 0 {
+                        if count == 0 || !call.cast_shadow {
                             continue;
                         }
                         shadow_nodes.push(ShadowDrawEntry {
@@ -418,6 +418,9 @@ impl Renderer {
             // changes every frame → nonce signature) with the joint-union
             // AABB computed at submit time.
             for cmd in self.model_draw_commands.iter() {
+                if !cmd.cast_shadow {
+                    continue;
+                }
                 if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
                     if cmd.mesh_idx < meshes.len() {
                         let mesh = &meshes[cmd.mesh_idx];

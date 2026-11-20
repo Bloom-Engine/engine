@@ -369,6 +369,14 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_draw_shadow_casting
+        #[no_mangle]
+        pub extern "C" fn bloom_set_draw_shadow_casting(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_draw_shadow_casting", move || {
+                engine().renderer.set_immediate_cast_shadows(on != 0.0);
+            })
+        }
+
         // bloom_set_texture_streaming
         #[no_mangle]
         pub extern "C" fn bloom_set_texture_streaming(budget_mb: f64) -> f64 {

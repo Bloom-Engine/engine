@@ -452,6 +452,8 @@ struct CachedModelDraw {
     /// matrix × rest AABB — see `draw_model_cached_skinned`). `None` for
     /// static draws, whose bounds derive from mesh AABB × model matrix.
     bounds_override: Option<([f32; 3], [f32; 3])>,
+    /// Drawn while `setDrawShadowCasting(false)` was in effect: no shadow.
+    cast_shadow: bool,
 }
 
 /// Uniform-pool stride for cached-model per-draw uniforms (256 = safe
@@ -1413,6 +1415,8 @@ pub struct Renderer {
     pub vertices_3d: Vec<Vertex3D>,
     pub indices_3d: Vec<u32>,
     draw_calls_3d: Vec<DrawCall3D>,
+    /// Immediate draws cast shadows (`setDrawShadowCasting`); on each frame.
+    pub(crate) immediate_cast_shadows: bool,
     immediate_motion: immediate_motion::History,
     current_texture_3d: u32,
 
@@ -1830,6 +1834,8 @@ pub struct Renderer {
     /// on, ping-ponging between A and B. The 2D overlay still renders
     /// on top of the swapchain after the last pass.
     pub post_passes: Vec<post_pass::PostPassPipeline>,
+    /// `post_frame.frame_index` of the post stack's next frame.
+    post_frame_index: u32,
     /// LDR intermediate "slot A" the composite pass redirects into
     /// when at least one post-pass is installed. Allocated lazily on
     /// first `add_post_pass` call and resized in `resize`. Format
@@ -8649,6 +8655,7 @@ impl Renderer {
             vertices_3d: Vec::with_capacity(16384),
             indices_3d: Vec::with_capacity(32768),
             draw_calls_3d: Vec::new(),
+            immediate_cast_shadows: true,
             immediate_motion: Default::default(),
             current_texture_3d: 0,
             persistent_vb_2d,
@@ -8855,6 +8862,7 @@ impl Renderer {
             planar_probe_view_bgs: Vec::new(),
             material_hot_reload,
             post_passes: Vec::new(),
+            post_frame_index: 0,
             composite_ldr_rt_a: None,
             composite_ldr_rt_a_view: None,
             composite_ldr_rt_b: None,
@@ -12665,6 +12673,7 @@ impl Renderer {
         self.vertices_3d.clear();
         self.indices_3d.clear();
         self.draw_calls_3d.clear();
+        self.immediate_cast_shadows = true;
         self.immediate_motion.begin_frame();
         #[cfg(feature = "models3d")]
         if let Some(virtual_geometry) = self.virtual_geometry.as_mut() {
@@ -14547,8 +14556,9 @@ impl Renderer {
     // 3D texture tracking
 
     fn ensure_draw_state_3d(&mut self, texture_idx: u32) {
-        let needs_new = self.draw_calls_3d.is_empty()
-            || self.draw_calls_3d.last().unwrap().texture_idx != texture_idx;
+        let needs_new = self.draw_calls_3d.last().is_none_or(|call| {
+            call.texture_idx != texture_idx || call.cast_shadow != self.immediate_cast_shadows
+        });
         if needs_new {
             self.push_draw_call_3d(texture_idx, false);
         }
@@ -14569,6 +14579,7 @@ impl Renderer {
             has_skinned: false,
             content_hash: FNV_OFFSET,
             bounded,
+            cast_shadow: self.immediate_cast_shadows,
         });
     }
 

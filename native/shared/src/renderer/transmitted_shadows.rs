@@ -1148,6 +1148,9 @@ impl Renderer {
             });
         }
         for command in &self.model_draw_commands {
+            if !command.cast_shadow {
+                continue;
+            }
             let Some(Some(meshes)) = self.model_gpu_cache.get(&command.cache_handle) else {
                 continue;
             };

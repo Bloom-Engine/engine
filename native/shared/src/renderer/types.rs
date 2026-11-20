@@ -525,6 +525,9 @@ pub(super) struct DrawCall3D {
     /// True when bounds/hash were maintained inline (model draws).
     /// False → primitive-only segment, scanned on demand.
     pub(super) bounded: bool,
+    /// Drawn while `setDrawShadowCasting(false)` was in effect: the shadow
+    /// pass skips the segment.
+    pub(super) cast_shadow: bool,
 }
 
 pub(super) const FNV_OFFSET: u64 = 0xcbf29ce484222325;

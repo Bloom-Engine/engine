@@ -10,7 +10,24 @@ impl Renderer {
     // 3D drawing
     // ============================================================
 
+    /// Whether the immediate 3D draws that follow (primitives and models
+    /// drawn with `drawModel*`) cast shadows. A change starts a new draw
+    /// segment so the shadow pass can skip it; reset to on every frame.
+    pub fn set_immediate_cast_shadows(&mut self, on: bool) {
+        self.immediate_cast_shadows = on;
+    }
+
     fn add_line_3d(&mut self, start: [f32; 3], end: [f32; 3], color: [f32; 4], thickness: f32) {
+        // Wires, grids and rays join the current segment; split it when
+        // the shadow-casting state changed since it began.
+        if self
+            .draw_calls_3d
+            .last()
+            .is_some_and(|call| call.cast_shadow != self.immediate_cast_shadows)
+            || (!self.immediate_cast_shadows && self.draw_calls_3d.is_empty())
+        {
+            self.ensure_draw_state_3d(self.current_texture_3d);
+        }
         let dx = end[0] - start[0];
         let dy = end[1] - start[1];
         let dz = end[2] - start[2];

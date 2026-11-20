@@ -327,6 +327,7 @@ impl Renderer {
                 skinned: false,
                 joint_offset: 0.0,
                 bounds_override: None,
+                cast_shadow: self.immediate_cast_shadows,
             });
         }
     }
@@ -546,6 +547,7 @@ impl Renderer {
                 skinned: false,
                 joint_offset: 0.0,
                 bounds_override: None,
+                cast_shadow: self.immediate_cast_shadows,
             });
         }
         true
@@ -626,6 +628,7 @@ impl Renderer {
                 skinned: false,
                 joint_offset: 0.0,
                 bounds_override: None,
+                cast_shadow: self.immediate_cast_shadows,
             });
         }
     }
@@ -691,6 +694,7 @@ impl Renderer {
                 skinned: false,
                 joint_offset: 0.0,
                 bounds_override: None,
+                cast_shadow: self.immediate_cast_shadows,
             });
         }
     }
@@ -829,6 +833,7 @@ impl Renderer {
                 skinned: true,
                 joint_offset,
                 bounds_override,
+                cast_shadow: self.immediate_cast_shadows,
             });
 
             // PT-6 — register the mesh for the dynamic TLAS path: a

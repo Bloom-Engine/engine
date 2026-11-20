@@ -1044,7 +1044,25 @@ export function setSsaoRadius(worldRadius: number): boolean {
 /// EN-017 — install a game-supplied fullscreen WGSL post-pass.
 /// Runs after composite + tonemapping, before the 2D overlay, so
 /// the HUD stays crisp. The fragment shader sees scene_color_tex
-/// (LDR, post-tonemap) and scene_depth_tex at @group(0).
+/// (LDR, post-tonemap) and scene_depth_tex at @group(0), and the
+/// frame clock `post_frame` (binding 4):
+///   post_frame.time            seconds (the clock of material shaders' frame.time)
+///   post_frame.delta_time      seconds since the previous frame
+///   post_frame.frame_index     frames the post stack has drawn (u32, never reset)
+///   post_frame.resolution      output size in pixels (vec2<f32>)
+///   post_frame.inv_resolution  one pixel in uv (vec2<f32>)
+///
+/// Example — heat haze over the lower half of the picture:
+///   setPostPass(`
+///     @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+///       let t = post_frame.time;
+///       let rise = smoothstep(0.35, 0.95, uv.y);           // strongest near the ground
+///       let wob = vec2<f32>(sin(uv.y * 90.0 - t * 5.0) + sin(uv.y * 37.0 + uv.x * 23.0 - t * 3.1),
+///                           cos(uv.x * 70.0 + t * 4.0)) * 0.5;
+///       let d = wob * rise * 2.0 * post_frame.inv_resolution;   // about two pixels
+///       return vec4<f32>(textureSample(scene_color_tex, scene_color_samp, uv + d).rgb, 1.0);
+///     }
+///   `);
 ///
 /// Example — underwater tint:
 ///   setPostPass(`
