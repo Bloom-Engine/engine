@@ -41,6 +41,7 @@ declare function bloom_draw_cylinder(x: number, y: number, z: number, rt: number
 declare function bloom_draw_cylinder_ex(x: number, y: number, z: number, rt: number, rb: number, h: number, slices: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_plane(x: number, y: number, z: number, w: number, d: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_grid(slices: number, spacing: number): void;
+declare function bloom_set_draw_shadow_casting(on: number): number;
 declare function bloom_draw_ray(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_gen_mesh_cube(w: number, h: number, d: number): number;
 declare function bloom_gen_mesh_heightmap(imageHandle: number, sizeX: number, sizeY: number, sizeZ: number): number;
@@ -388,6 +389,24 @@ export function getModelBounds(model: Model): BoundingBox {
       z: bloom_get_model_bounds_max_z(model.handle),
     },
   };
+}
+
+/**
+ * Whether the 3D draws that follow cast shadows: the primitives
+ * (`drawCube`, `drawSphere`, `drawCylinder`, `drawPlane`, the wires,
+ * `drawGrid`, `drawRay`) and models drawn with `drawModel*`. They are still
+ * drawn and still receive shadows; only their shadow is left out. The
+ * setting holds until it is changed and is reset to on at the start of
+ * every frame. Scene nodes use `setSceneNodeCastShadow` instead.
+ *
+ *   setDrawShadowCasting(false);
+ *   for (const d of drops) drawSphere(d.pos, 0.01, BLOOD);   // no shadows
+ *   setDrawShadowCasting(true);
+ *
+ * Returns false when the renderer did not apply it.
+ */
+export function setDrawShadowCasting(on: boolean): boolean {
+  return bloom_set_draw_shadow_casting(on ? 1 : 0) !== 0;
 }
 
 export interface DrawCubeOpts {

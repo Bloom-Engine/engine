@@ -25,6 +25,41 @@ pub struct PostPassPipeline {
     /// index parity, but retaining both identities keeps the cache complete
     /// if stack editing grows beyond append/clear.
     pub bind_group_cache: [Option<wgpu::BindGroup>; 2],
+    /// `post_frame` (binding 4): this pass's copy of the frame clock,
+    /// written before the pass is drawn.
+    pub frame_buffer: wgpu::Buffer,
+}
+
+/// The `post_frame` uniform every post-pass shader can read (binding 4).
+/// `time` and `delta_time` are the clock material shaders see in
+/// `frame.time` / `frame.delta_time`; `frame_index` counts the frames the
+/// post stack has drawn (never reset, unlike the TAA counter);
+/// `resolution` is the output size in pixels and `inv_resolution` one
+/// pixel in uv.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PostFrameUniforms {
+    pub time: f32,
+    pub delta_time: f32,
+    pub frame_index: u32,
+    pub _pad0: u32,
+    pub resolution: [f32; 2],
+    pub inv_resolution: [f32; 2],
+}
+
+impl PostFrameUniforms {
+    pub fn new(time: f32, delta_time: f32, frame_index: u32, width: u32, height: u32) -> Self {
+        let w = width.max(1) as f32;
+        let h = height.max(1) as f32;
+        Self {
+            time,
+            delta_time,
+            frame_index,
+            _pad0: 0,
+            resolution: [w, h],
+            inv_resolution: [1.0 / w, 1.0 / h],
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -43,6 +78,17 @@ pub const POST_PASS_PRELUDE: &str = r#"
 @group(0) @binding(1) var scene_color_samp: sampler;
 @group(0) @binding(2) var scene_depth_tex:  texture_depth_2d;
 @group(0) @binding(3) var scene_depth_samp: sampler;
+
+// The frame clock, for animated effects (heat haze, grain, pulses).
+struct PostFrame {
+    time:           f32,        // seconds, the clock of material shaders' frame.time
+    delta_time:     f32,        // seconds since the previous frame
+    frame_index:    u32,        // frames the post stack has drawn; never reset
+    _pad0:          u32,
+    resolution:     vec2<f32>,  // output size in pixels
+    inv_resolution: vec2<f32>,  // one pixel in uv
+};
+@group(0) @binding(4) var<uniform> post_frame: PostFrame;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -105,6 +151,19 @@ pub fn create_post_pass_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
+            // 4: the frame clock (`post_frame`).
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<PostFrameUniforms>() as u64,
+                    ),
+                },
                 count: None,
             },
         ],
@@ -177,10 +236,18 @@ pub fn compile_post_pass(
         cache: None,
     });
 
+    let frame_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("post_pass_frame"),
+        size: std::mem::size_of::<PostFrameUniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     Ok(PostPassPipeline {
         pipeline,
         bind_group_layout,
         bind_group_cache: [None, None],
+        frame_buffer,
     })
 }
 
@@ -258,6 +325,42 @@ mod tests {
         assert!(
             result.is_ok(),
             "underwater tint should compile: {:?}",
+            result.err()
+        );
+    }
+
+    /// The heat-haze example from the API docs reads the frame clock.
+    #[test]
+    fn heat_haze_with_frame_clock_compiles() {
+        let wgsl = r#"
+            @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+              let t = post_frame.time;
+              let rise = smoothstep(0.35, 0.95, uv.y);
+              let wob = vec2<f32>(sin(uv.y * 90.0 - t * 5.0) + sin(uv.y * 37.0 + uv.x * 23.0 - t * 3.1),
+                                  cos(uv.x * 70.0 + t * 4.0)) * 0.5;
+              let d = wob * rise * 2.0 * post_frame.inv_resolution;
+              return vec4<f32>(textureSample(scene_color_tex, scene_color_samp, uv + d).rgb, 1.0);
+            }
+        "#;
+        let module = wgpu::naga::front::wgsl::parse_str(&format!("{POST_PASS_PRELUDE}\n{wgsl}"))
+            .unwrap_or_else(|error| panic!("heat haze failed to parse: {error:?}"));
+        // The WGSL struct and the Rust upload agree on size.
+        let (_, ty) = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("PostFrame"))
+            .expect("prelude declares PostFrame");
+        assert_eq!(
+            ty.inner.size(module.to_ctx()) as usize,
+            std::mem::size_of::<PostFrameUniforms>()
+        );
+        let Some((device, _queue)) = try_create_device() else {
+            return;
+        };
+        let result = compile_post_pass(&device, wgsl, wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert!(
+            result.is_ok(),
+            "heat haze should compile: {:?}",
             result.err()
         );
     }

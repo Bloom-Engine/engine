@@ -797,6 +797,16 @@ export function attachVirtualModelToNode(
  * copy-on-write storage and do not modify the model payload.
  * This is the native equivalent of R3F's useGLTF + Clone.
  *
+ * The mesh keeps its placement in the glTF scene: the node draws it at
+ * `nodeTransform × meshPlacement`, where the placement is the transform of
+ * the glTF node(s) that hold the mesh. Attaching every mesh of a model to
+ * one node therefore rebuilds the model as authored. A file that lays out
+ * separate pieces side by side (a kit, a row of variants) puts each piece
+ * that far from the node's origin, along the node's own axes, so a piece
+ * meant to be placed alone should sit at its glTF node's origin (or its
+ * placement be undone in the node's matrix). The node's bounds, culling,
+ * shadow and GI all use the same combined transform.
+ *
  * @param nodeHandle — scene node to receive the geometry
  * @param modelHandle — loaded model handle (from loadModel())
  * @param meshIndex — which mesh in the model (0 for single-mesh models)
