@@ -27,6 +27,9 @@
 #[no_mangle] pub extern "C" fn bloom_set_env_clear_from_hdr(_p0: i64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_get_device_gravity(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_menu_button_exits(_p0: f64) -> f64 {
     0.0
 }

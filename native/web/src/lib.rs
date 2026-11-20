@@ -295,6 +295,10 @@ pub fn bloom_get_fps() -> f64 {
     engine().get_fps()
 }
 
+/// Device gravity (iOS accelerometer): none in a browser.
+#[wasm_bindgen]
+pub fn bloom_get_device_gravity(_axis: f64) -> f64 { 0.0 }
+
 /// tvOS's Menu-leaves-the-app switch: nothing to do in a browser.
 #[wasm_bindgen]
 pub fn bloom_set_menu_button_exits(on: f64) -> f64 {

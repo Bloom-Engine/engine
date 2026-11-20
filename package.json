@@ -253,6 +253,13 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_get_device_gravity",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_menu_button_exits",
           "params": [
             "f64"
@@ -4938,7 +4945,8 @@
             "CoreAudio",
             "AudioToolbox",
             "AVFoundation",
-            "GameController"
+            "GameController",
+            "CoreMotion"
           ],
           "libs": [
             "c++"

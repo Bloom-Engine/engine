@@ -56,6 +56,23 @@ pub fn menu_exits() -> bool {
     MENU_EXITS.load(Ordering::Relaxed)
 }
 
+/// Gravity in the device's own axes, in g (iOS accelerometer; zero where there is none).
+/// x: toward the right edge of a portrait screen, y: toward its top, z: out of the screen.
+static GRAVITY: [std::sync::atomic::AtomicU32; 3] = [
+    std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0),
+];
+
+pub fn set_device_gravity(x: f32, y: f32, z: f32) {
+    GRAVITY[0].store(x.to_bits(), Ordering::Relaxed);
+    GRAVITY[1].store(y.to_bits(), Ordering::Relaxed);
+    GRAVITY[2].store(z.to_bits(), Ordering::Relaxed);
+}
+
+pub fn device_gravity(axis: usize) -> f32 {
+    if axis > 2 { return 0.0; }
+    f32::from_bits(GRAVITY[axis].load(Ordering::Relaxed))
+}
+
 pub fn set_safe_area_insets(top: f64, right: f64, bottom: f64, left: f64) {
     for (slot, v) in INSETS.iter().zip([top, right, bottom, left]) {
         slot.store(

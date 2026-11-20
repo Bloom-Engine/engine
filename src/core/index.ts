@@ -155,6 +155,7 @@ declare function bloom_get_fps(): number;
 declare function bloom_get_screen_width(): number;
 declare function bloom_get_display_scale(): number;
 declare function bloom_set_menu_button_exits(on: number): number;
+declare function bloom_get_device_gravity(axis: number): number;
 declare function bloom_get_safe_area_inset(edge: number): number;
 declare function bloom_get_screen_height(): number;
 declare function bloom_is_key_pressed(key: number): number;
@@ -1361,6 +1362,12 @@ export function getDisplayScale(): number { return bloom_get_display_scale(); }
  * reaching the game as Escape. Apple requires it at the app's top level, so turn it on while the
  * title screen shows and off everywhere Menu means "back" or "pause". No effect elsewhere.
  */
+/**
+ * iOS: gravity along one of the device's own axes, in g (0 = x, toward the right edge of a portrait screen;
+ * 1 = y, toward its top; 2 = z, out of the screen). All zero where there is no accelerometer.
+ */
+export function getDeviceGravity(axis: number): number { return bloom_get_device_gravity(axis); }
+
 export function setMenuButtonExits(on: boolean): void { bloom_set_menu_button_exits(on ? 1 : 0); }
 
 /** Edges for `getSafeAreaInset`. */

@@ -839,8 +839,11 @@ fn sky_fs(in: VsOut) -> SkyOut {
             // the thinner cloud between them is where the light comes through.
             let core = cloud_cover_view_weather(
                 cam, dir, sun_dir, u.wind.xy, u.intensity.y, u.cloud, cover - 0.38).x;
+            // Lit from above by what is left of the day: at dusk and at night the
+            // ceiling is dark (it read as a grey day sky over a night city).
+            let daylight = mix(0.12, 1.0, smoothstep(-0.25, 0.1, sun_dir.y));
             let ceiling = mix(vec3<f32>(1.30, 1.34, 1.42), vec3<f32>(0.46, 0.49, 0.56), core)
-                * mix(0.9, 1.2, lit);
+                * mix(0.9, 1.2, lit) * daylight;
             cloud_col = mix(cloud_col, ceiling, closed);
         }
         radiance = mix(radiance, cloud_col, cc.x);

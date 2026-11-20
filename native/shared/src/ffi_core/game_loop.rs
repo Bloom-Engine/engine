@@ -58,6 +58,14 @@ macro_rules! __bloom_ffi_game_loop {
             })
         }
 
+        // bloom_get_device_gravity  [source: ios]
+        #[no_mangle]
+        pub extern "C" fn bloom_get_device_gravity(axis: f64) -> f64 {
+            $crate::ffi::guard("bloom_get_device_gravity", move || {
+                $crate::display::device_gravity(axis as usize) as f64
+            })
+        }
+
         // bloom_set_menu_button_exits  [source: tvos]
         #[no_mangle]
         pub extern "C" fn bloom_set_menu_button_exits(on: f64) -> f64 {

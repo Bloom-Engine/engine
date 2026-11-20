@@ -449,6 +449,7 @@ unsafe extern "C" fn scene_will_connect(
     // Store references
     UI_VIEW = Some(view.clone());
     UI_WINDOW = Some(window);
+    create_haptics();
 
     // Create wgpu surface
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -617,6 +618,7 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
     // Store references
     UI_VIEW = Some(view.clone());
     UI_WINDOW = Some(window);
+    create_haptics();
 
     // Create wgpu surface and engine
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -993,6 +995,75 @@ fn poll_game_controllers() {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CMAcceleration { x: f64, y: f64, z: f64 }
+unsafe impl Encode for CMAcceleration {
+    const ENCODING: Encoding = Encoding::Struct("?", &[Encoding::Double, Encoding::Double, Encoding::Double]);
+}
+
+static mut MOTION_MANAGER: Option<Retained<AnyObject>> = None;
+static MOTION_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Read the accelerometer (pull mode) into the shared gravity value: getDeviceGravity().
+fn poll_device_gravity() {
+    unsafe {
+        if !MOTION_TRIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(cls) = AnyClass::get(c"CMMotionManager") {
+                let m: Allocated<AnyObject> = msg_send![cls, alloc];
+                let m: Retained<AnyObject> = msg_send![m, init];
+                let ok: Bool = msg_send![&*m, isAccelerometerAvailable];
+                if ok.as_bool() {
+                    let _: () = msg_send![&*m, setAccelerometerUpdateInterval: 1.0f64 / 60.0];
+                    let _: () = msg_send![&*m, startAccelerometerUpdates];
+                    MOTION_MANAGER = Some(m);
+                }
+            }
+        }
+        #[allow(static_mut_refs)]
+        if let Some(m) = MOTION_MANAGER.as_ref() {
+            let data: *const AnyObject = msg_send![&**m, accelerometerData];
+            if !data.is_null() {
+                let a: CMAcceleration = msg_send![data, acceleration];
+                bloom_shared::display::set_device_gravity(a.x as f32, a.y as f32, a.z as f32);
+            }
+        }
+    }
+}
+
+// ---- EN-031 on a phone: `gamepadRumble` plays a UIKit impact tap (light / medium / heavy by strength) ----
+// The generators are made on the main thread (with the window) and fired there too, via
+// performSelectorOnMainThread, since UIKit feedback must happen on the main thread. A device without a
+// Taptic Engine (iPad, Apple TV) simply does nothing.
+static mut HAPTICS: [Option<Retained<AnyObject>>; 3] = [None, None, None];
+
+unsafe fn create_haptics() {
+    if let Some(cls) = AnyClass::get(c"UIImpactFeedbackGenerator") {
+        for style in 0..3usize {
+            let g: Allocated<AnyObject> = msg_send![cls, alloc];
+            let g: Retained<AnyObject> = msg_send![g, initWithStyle: style as isize];
+            let _: () = msg_send![&*g, prepare];
+            HAPTICS[style] = Some(g);
+        }
+    }
+}
+
+fn poll_haptics() {
+    unsafe {
+        let inp = &mut engine().input;
+        if inp.rumble[2] <= 0.0 { return; }
+        let strength = inp.rumble[0].max(inp.rumble[1]);
+        inp.rumble = [0.0, 0.0, 0.0];
+        if strength < 0.05 { return; }
+        let style = if strength > 0.66 { 2 } else if strength > 0.33 { 1 } else { 0 };
+        #[allow(static_mut_refs)]
+        if let Some(g) = HAPTICS[style].as_ref() {
+            let nil: *const AnyObject = std::ptr::null();
+            let _: () = msg_send![&**g, performSelectorOnMainThread: sel!(impactOccurred), withObject: nil, waitUntilDone: Bool::NO];
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
     // No run loop pumping needed — UIApplicationMain handles the main run loop
@@ -1000,6 +1071,8 @@ pub extern "C" fn bloom_begin_drawing() {
 
     // Poll a connected controller before either begin_frame path below.
     poll_game_controllers();
+    poll_device_gravity();
+    poll_haptics();
 
     // Update drawable size to match actual view bounds (handles orientation changes)
     unsafe {
