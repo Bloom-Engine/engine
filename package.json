@@ -686,6 +686,28 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_unload_sound",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_unload_music",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_music_lowpass",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_load_texture",
           "params": [
             "string"

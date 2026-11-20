@@ -84,6 +84,12 @@
 }
 #[no_mangle] pub extern "C" fn bloom_play_music_from(_p0: f64, _p1: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_unload_sound(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_unload_music(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_music_lowpass(_p0: f64, _p1: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_get_music_length(_p0: f64) -> f64 {
     0.0
 }

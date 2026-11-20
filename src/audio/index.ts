@@ -363,3 +363,32 @@ export function getMusicTimeLength(music: Music): number {
 export function playMusicFrom(music: Music, seconds: number): void {
   bloom_play_music_from(music.handle, seconds);
 }
+
+// ---- freeing and filtering --------------------------------------------------
+
+declare function bloom_unload_sound(handle: number): void;
+declare function bloom_unload_music(handle: number): void;
+declare function bloom_set_music_lowpass(handle: number, cutoff: number): void;
+
+/// Free a sound's samples. Safe while it plays: a one-shot already sounding
+/// plays to its end (the memory goes when it does), a looping voice of it
+/// fades out over a block. The handle is dead afterwards; using it is a no-op.
+export function unloadSound(sound: Sound): void {
+  bloom_unload_sound(sound.handle);
+}
+
+/// Free a music track (its PCM, or its compressed bytes and decode worker).
+/// A track that is playing stops first. The handle is dead afterwards.
+export function unloadMusic(music: Music): void {
+  bloom_unload_music(music.handle);
+}
+
+/// Low-pass a music track at `cutoffHz` (0 = off): 12 dB/octave, 3 dB down at
+/// the cutoff. It applies to the playback running now, gliding there over
+/// about 20 ms so it can be ridden per frame without clicks, and to every
+/// later play of the track, which then starts filtered. The music-stream
+/// counterpart of setSoundLowpass / voiceSetLowpass: a line heard from under
+/// water, a radio in the next room.
+export function setMusicLowpass(music: Music, cutoffHz: number): void {
+  bloom_set_music_lowpass(music.handle, cutoffHz);
+}

@@ -46,6 +46,7 @@
 //! asset at its *authored* rate — previously a 44.1 kHz file on a 48 kHz
 //! device played ~9% fast and sharp. Music streams are untouched.
 
+use super::filter::{glide, lowpass_coeff, Lowpass};
 use super::spsc::Consumer;
 #[cfg(not(target_arch = "wasm32"))]
 use super::stream::{StreamConsumer, StreamMsg};
@@ -97,6 +98,8 @@ pub enum Cmd {
         /// Interleaved samples into the track to start at (a seek). A streamed
         /// track's worker already skipped them; this only seeds the position.
         start: usize,
+        /// Low-pass cutoff in Hz (<= 0 = off), applied from the first sample.
+        lowpass: f32,
     },
     StopMusic {
         music_id: u64,
@@ -174,6 +177,16 @@ pub enum Cmd {
     SetMusicLooping {
         music_id: u64,
         looping: bool,
+    },
+    /// Low-pass a music stream (Hz, <= 0 = off); the cutoff glides there.
+    SetMusicLowpass {
+        music_id: u64,
+        cutoff: f32,
+    },
+    /// The sound was unloaded: its looping voices fade out (nothing could
+    /// stop them by sound any more), one-shots play to their end.
+    ReleaseSound {
+        sound_id: u64,
     },
 }
 
@@ -255,8 +268,6 @@ const SOUND_SPEED: f32 = 343.0;
 /// A radial speed past this is a teleport (voice re-targeted), not motion:
 /// reset doppler instead of bending pitch through the jump.
 const DOPPLER_TELEPORT: f32 = 150.0;
-/// Cutoffs above this bypass the one-pole entirely (inaudible + not free).
-const LP_ENGAGE_HZ: f32 = 16_000.0;
 
 struct Voice {
     sound_id: u64,
@@ -291,8 +302,8 @@ struct Voice {
     send: f32,
     /// Low-pass cutoff, Hz. <= 0 = bypass.
     lowpass: f32,
-    /// One-pole filter memory, per output channel.
-    lp_z: [f32; 2],
+    /// One-pole filter; its coefficient glides across each block.
+    lp: Lowpass,
 }
 
 impl Voice {
@@ -347,6 +358,10 @@ struct MusicVoice {
     /// target, so per-frame fades (crossfades, ducking) never zipper.
     gain: f32,
     seeded: bool,
+    /// Low-pass cutoff in Hz (<= 0 = off) and the two-stage filter that
+    /// glides toward it.
+    lowpass: f32,
+    lp: Lowpass,
 }
 
 /// EN-029 — a Schroeder reverb: parallel comb filters (the density) into
@@ -553,7 +568,7 @@ impl AudioRenderer {
                     bus,
                     send,
                     lowpass,
-                    lp_z: [0.0; 2],
+                    lp: Lowpass::default(),
                 });
             }
             Cmd::StopSound { sound_id } => {
@@ -573,6 +588,7 @@ impl AudioRenderer {
                 volume,
                 looping,
                 start,
+                lowpass,
             } => {
                 // Restart semantics (matches the old mixer), from `start`.
                 self.music.retain(|m| m.music_id != music_id);
@@ -608,6 +624,12 @@ impl AudioRenderer {
                     consumed: start,
                     gain: 0.0,
                     seeded: false,
+                    lowpass,
+                    lp: Lowpass {
+                        // set before play: filtered from the first sample
+                        a: lowpass_coeff(lowpass, self.sample_rate, 2),
+                        ..Lowpass::default()
+                    },
                 });
             }
             Cmd::StopMusic { music_id } => {
@@ -712,6 +734,20 @@ impl AudioRenderer {
                 for m in &mut self.music {
                     if m.music_id == music_id {
                         m.looping = looping;
+                    }
+                }
+            }
+            Cmd::SetMusicLowpass { music_id, cutoff } => {
+                for m in &mut self.music {
+                    if m.music_id == music_id {
+                        m.lowpass = cutoff.max(0.0);
+                    }
+                }
+            }
+            Cmd::ReleaseSound { sound_id } => {
+                for v in &mut self.voices {
+                    if v.sound_id == sound_id && v.looping {
+                        v.stopping = true;
                     }
                 }
             }
@@ -894,9 +930,14 @@ impl AudioRenderer {
             } else {
                 (sg_l * v.volume * master * bg, sg_r * v.volume * master * bg)
             };
+            // Manual, air and rear cues fold into one cutoff (6 dB/oct).
+            // Muffling reads as geometry/distance in a way that turning the
+            // volume down never does.
+            let lp_target = lowpass_coeff(cutoff, sample_rate, 1);
             if !v.seeded {
                 v.g_l = t_l;
                 v.g_r = t_r;
+                v.lp.a = lp_target;
                 v.seeded = true;
             }
 
@@ -908,6 +949,7 @@ impl AudioRenderer {
                 }
                 v.g_l = t_l;
                 v.g_r = t_r;
+                v.lp.a = lp_target;
                 v.frame_pos += step * out_frames as f64;
                 if v.frame_pos >= frames as f64 {
                     if v.looping {
@@ -923,14 +965,9 @@ impl AudioRenderer {
             let dg_l = (t_l - v.g_l) * inv;
             let dg_r = (t_r - v.g_r) * inv;
 
-            // One-pole low-pass coefficient: occlusion, air and rear cues all
-            // fold into one cutoff. Muffling reads as geometry/distance in a
-            // way that turning the volume down never does.
-            let lp_a = if cutoff < LP_ENGAGE_HZ.min(sample_rate * 0.45) {
-                Some((-2.0 * std::f32::consts::PI * cutoff / sample_rate).exp())
-            } else {
-                None
-            };
+            // The coefficient glides across the block (a = 0 is the exact
+            // identity), so the filter switching in or out never clicks.
+            let lp_ramp = v.lp.begin(lp_target, out_frames);
             let send = v.send;
 
             let mut ended = false;
@@ -954,11 +991,10 @@ impl AudioRenderer {
                 let mut sl = s0l + (s1l - s0l) * frac;
                 let mut sr = s0r + (s1r - s0r) * frac;
 
-                if let Some(a) = lp_a {
-                    v.lp_z[0] = sl * (1.0 - a) + v.lp_z[0] * a;
-                    v.lp_z[1] = sr * (1.0 - a) + v.lp_z[1] * a;
-                    sl = v.lp_z[0];
-                    sr = v.lp_z[1];
+                if let Some((a0, da)) = lp_ramp {
+                    let a = a0 + da * f as f32;
+                    sl = v.lp.tick(0, sl, a, 1);
+                    sr = v.lp.tick(1, sr, a, 1);
                 }
 
                 let i = f * 2;
@@ -1026,13 +1062,26 @@ impl AudioRenderer {
             let g0 = m.gain;
             let dg = (target - g0) / music_frames;
             m.gain = target;
+            // Low-pass (two stages): the coefficient glides toward the
+            // cutoff's over a few blocks and ramps per sample inside this one.
+            let lp_end = glide(m.lp.a, lowpass_coeff(m.lowpass, sample_rate, 2), block_dt);
+            let lp_ramp = m.lp.begin(lp_end, music_frames as usize);
+            let lp = &mut m.lp;
+            // Sample `x` of output slot `i` (interleaved), filtered if on.
+            let mut filt = |i: usize, x: f32| -> f32 {
+                match lp_ramp {
+                    Some((a0, da)) => lp.tick(i & 1, x, a0 + da * (i / 2) as f32, 2),
+                    None => x,
+                }
+            };
             let mut i = 0;
             let mut finished = false;
             match &mut m.samples {
                 MusicSamples::Full { data, position } => {
                     while i < output.len() && *position < data.samples.len() {
                         if data.channels == 1 {
-                            let sample = data.samples[*position] * (g0 + dg * (i / 2) as f32);
+                            let sample =
+                                filt(i, data.samples[*position]) * (g0 + dg * (i / 2) as f32);
                             output[i] += sample;
                             if i + 1 < output.len() {
                                 output[i + 1] += sample;
@@ -1040,7 +1089,8 @@ impl AudioRenderer {
                             *position += 1;
                             i += 2;
                         } else {
-                            output[i] += data.samples[*position] * (g0 + dg * (i / 2) as f32);
+                            output[i] +=
+                                filt(i, data.samples[*position]) * (g0 + dg * (i / 2) as f32);
                             *position += 1;
                             i += 1;
                         }
@@ -1089,7 +1139,7 @@ impl AudioRenderer {
                             }
                         }
                         if mono {
-                            let sample = current[*offset] * (g0 + dg * (i / 2) as f32);
+                            let sample = filt(i, current[*offset]) * (g0 + dg * (i / 2) as f32);
                             output[i] += sample;
                             if i + 1 < output.len() {
                                 output[i + 1] += sample;
@@ -1098,7 +1148,7 @@ impl AudioRenderer {
                             m.consumed += 1;
                             i += 2;
                         } else {
-                            output[i] += current[*offset] * (g0 + dg * (i / 2) as f32);
+                            output[i] += filt(i, current[*offset]) * (g0 + dg * (i / 2) as f32);
                             *offset += 1;
                             m.consumed += 1;
                             i += 1;
