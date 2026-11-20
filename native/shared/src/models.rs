@@ -1618,10 +1618,12 @@ fn sample_local_pose(
     let mut r: Vec<[f32; 4]> = skeleton.joints.iter().map(|j| j.rest_rotation).collect();
     let mut s: Vec<[f32; 3]> = skeleton.joints.iter().map(|j| j.rest_scale).collect();
 
-    let time = if anim.duration > 0.0 {
-        time.rem_euclid(anim.duration)
+    // A one-shot parked at its end (t == duration) keeps its LAST frame;
+    // rem_euclid wrapped it to the first, so finished clips snapped back.
+    let time = if anim.duration <= 0.0 || time == anim.duration {
+        time.clamp(0.0, anim.duration.max(0.0))
     } else {
-        0.0
+        time.rem_euclid(anim.duration)
     };
 
     for channel in &anim.channels {

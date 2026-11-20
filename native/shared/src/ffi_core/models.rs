@@ -1432,6 +1432,36 @@ macro_rules! __bloom_ffi_models {
         #[no_mangle]
         pub extern "C" fn bloom_anim_time(_handle: f64, _which: f64) -> f64 { 0.0 }
 
+        // bloom_anim_seek  [gated: models3d]
+        // which: 0 base clip seconds, 1 layer seconds, 2 base phase 0..1.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_seek(handle: f64, which: f64, t: f64) {
+            $crate::ffi::guard("bloom_anim_seek", move || {
+                engine().models.anim_seek(handle, which as u32, t as f32);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_seek(_handle: f64, _which: f64, _t: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_seek", "models3d");
+        }
+
+        // bloom_anim_restart  [gated: models3d]
+        // The base clip again from 0, crossfading over `fade` seconds.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_restart(handle: f64, fade: f64) {
+            $crate::ffi::guard("bloom_anim_restart", move || {
+                engine().models.anim_restart(handle, fade as f32);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_restart(_handle: f64, _fade: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_restart", "models3d");
+        }
+
         // bloom_model_find_joint  [gated: models3d]
         // Load-time only (it parses a string) — cache the index, per
         // perry-quirks #5.

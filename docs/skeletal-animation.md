@@ -176,7 +176,17 @@ if (animFinished(anim)) { /* non-looping clip ended */ }
 const dx = animRootDelta(anim, 0);                    // root-motion delta, axis 0/1/2
 ```
 
-See `src/models/index.ts` for the full surface (`animPlay`, `animSetLayer`, `animSetRootMotion`, `animUpdate`, `animFinished`, `animClipDuration`, `animRootDelta`).
+Because `animPlay` of the clip already playing is a no-op, playing it *again* and starting part way in are separate calls:
+
+```typescript
+animRestart(anim, 0.1);            // the current clip again from 0, crossfading from where it is (0 = cut)
+animPlay(anim, CLIP_LIFT, 0.15);   // a clip from part way in: play it, then set its clock
+animSeek(anim, 1.3);               // seconds; animSeekPhase (0..1) and animSeekLayer (the masked layer) too
+```
+
+A seek wraps on a loop and clamps on a one-shot (which then counts as finished at its end); a crossfade in flight carries on, and root motion does not count the jump. A one-shot that has finished holds its last frame.
+
+See `src/models/index.ts` for the full surface (`animPlay`, `animRestart`, `animSeek`, `animSetLayer`, `animSetRootMotion`, `animUpdate`, `animFinished`, `animClipDuration`, `animRootDelta`).
 
 On top of the mixer sits a small procedural rig (EN-064), set per instance and applied by `animUpdate` after the masked layer. Positions and axes are model space, like `jointWorld`:
 
@@ -428,7 +438,7 @@ See `scripts/export_mixamo_glb.py` for full documentation.
   - `loadModel(path)` -- returns `Model` with handle
   - `loadModelAnimation(path)` -- returns numeric animation handle
   - `instantiateAnimation(src)` -- EN-055: cheap per-entity instance of a parsed animation
-  - `animPlay` / `animSetLayer` / `animSetRootMotion` / `animUpdate` / `animFinished` / `animClipDuration` / `animRootDelta` -- the mixer API (EN-028)
+  - `animPlay` / `animRestart` / `animSeek` / `animSetLayer` / `animSetRootMotion` / `animUpdate` / `animFinished` / `animClipDuration` / `animRootDelta` -- the mixer API (EN-028)
   - `updateModelAnimation(handle, animIndex, time, scale, px, py, pz, rotY)` -- legacy raw-time update
   - `drawModel(model, position, scale, tint)` -- renders
   - `findJoint(handle, name)` / `jointWorld(handle, joint)` -- joint queries (EN-033)

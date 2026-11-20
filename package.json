@@ -1619,6 +1619,23 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_anim_seek",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_restart",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_model_find_joint",
           "params": [
             "f64",

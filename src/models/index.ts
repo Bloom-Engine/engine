@@ -1031,12 +1031,15 @@ declare function bloom_anim_set_joint_rotation(handle: number, slot: number, joi
 declare function bloom_anim_set_ik(handle: number, slot: number, endJoint: number, tx: number, ty: number, tz: number, weight: number, keepRot: number): void;
 declare function bloom_anim_set_ik_pole(handle: number, slot: number, px: number, py: number, pz: number, on: number): void;
 declare function bloom_anim_time(handle: number, which: number): number;
+declare function bloom_anim_seek(handle: number, which: number, t: number): void;
+declare function bloom_anim_restart(handle: number, fade: number): void;
 declare function bloom_model_find_joint(handle: number, name: number): number;
 declare function bloom_model_joint_world(handle: number, joint: number, comp: number): number;
 
 /// Transition the base track to `clip` over `fade` seconds. Safe to call every
 /// frame with the clip you *want* — re-requesting the clip already playing is
-/// a no-op, so callers don't have to track edges.
+/// a no-op, so callers don't have to track edges. To play the current clip
+/// again use `animRestart`; to start it part way in, `animSeek` after this.
 export function animPlay(handle: number, clip: number, fade: number = 0.15, speed: number = 1.0, looping: boolean = true): void {
   bloom_anim_play(handle, clip, fade, speed, looping ? 1 : 0);
 }
@@ -1130,6 +1133,30 @@ export function animTime(handle: number): number { return bloom_anim_time(handle
 export function animLayerTime(handle: number): number { return bloom_anim_time(handle, 1); }
 /// Base clip position as a 0..1 phase: footsteps, the end of a roll.
 export function animPhase(handle: number): number { return bloom_anim_time(handle, 2); }
+
+/// Play the base clip again from its start, crossfading from the pose it is
+/// in now over `fade` seconds (0 = cut). `animPlay` of the clip already
+/// playing is a no-op by contract (so it can be called every frame); this is
+/// the explicit "again": a second blow, a one-shot that has finished.
+export function animRestart(handle: number, fade: number = 0.0): void {
+  bloom_anim_restart(handle, fade);
+}
+
+/// Set the base clip's clock to `seconds` (wrapped on a loop, clamped on a
+/// one-shot, which counts as finished at its end). Call after `animPlay` to
+/// start a clip part way in; the next `animUpdate` shows it, plus its dt.
+/// A crossfade in flight carries on, and root motion does not count the jump.
+export function animSeek(handle: number, seconds: number): void {
+  bloom_anim_seek(handle, 0, seconds);
+}
+/// `animSeek` by a 0..1 phase of the base clip.
+export function animSeekPhase(handle: number, phase: number): void {
+  bloom_anim_seek(handle, 2, phase);
+}
+/// `animSeek` for the masked layer's clip (no effect while no layer is set).
+export function animSeekLayer(handle: number, seconds: number): void {
+  bloom_anim_seek(handle, 1, seconds);
+}
 
 // ---- EN-033: bone sockets ---------------------------------------------------
 

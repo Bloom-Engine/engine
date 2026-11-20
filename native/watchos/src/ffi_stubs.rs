@@ -239,6 +239,10 @@
 }
 #[no_mangle] pub extern "C" fn bloom_anim_play(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_anim_seek(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_restart(_p0: f64, _p1: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_anim_set_layer(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_anim_set_root_motion(_p0: f64, _p1: f64) {
