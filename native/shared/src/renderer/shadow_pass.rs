@@ -305,8 +305,17 @@ impl Renderer {
                 {
                     continue;
                 }
-                let Some(vb) = &node.gpu_vb else { continue };
-                let Some(ib) = &node.gpu_ib else { continue };
+                // A node drawn at a simpler level of detail casts with that level too: the full
+                // mesh of a distant tree went into every cascade at its close-up triangle count.
+                let lod = node.active_lod_geometry();
+                let (vb, ib, index_count, on_lod) = match lod {
+                    Some((vb, ib, count)) => (vb, ib, count, true),
+                    None => {
+                        let Some(vb) = &node.gpu_vb else { continue };
+                        let Some(ib) = &node.gpu_ib else { continue };
+                        (vb, ib, node.gpu_index_count, false)
+                    }
+                };
                 let vb_idx = shadow_vbs.len();
                 shadow_vbs.push(vb);
                 shadow_ibs.push(ib);
@@ -322,27 +331,28 @@ impl Renderer {
                 };
                 let gpu_shared_draw = node
                     .gpu_geometry
+                    .filter(|_| !on_lod)
                     .map(|slice| (slice.first_index, slice.base_vertex));
                 let world_transform = node.world_transform();
                 shadow_nodes.push(ShadowDrawEntry {
                     vb_idx,
                     ib_idx: vb_idx,
                     index_start: 0,
-                    index_count: node.gpu_index_count,
+                    index_count,
                     base_vertex: 0,
                     transform: world_transform,
                     wmin: node.world_bounds_min,
                     wmax: node.world_bounds_max,
                     cutout_idx,
                     skinned: false,
-                    sig: entry_sig(0, i as u64, node.gpu_index_count as u64, &world_transform),
+                    sig: entry_sig(0, i as u64, index_count as u64, &world_transform),
                     dynamic: false,
                     joint_offset: 0.0,
                     foliage: 0.0,
                     gpu_opaque_shared: gpu_shared_draw.is_some() && cutout_idx < 0,
                     gpu_index_start: gpu_shared_draw.map_or(0, |draw| draw.0),
                     gpu_base_vertex: gpu_shared_draw.map_or(0, |draw| draw.1),
-                    key: caster_id(0, i as u64, node.gpu_index_count as u64, &world_transform),
+                    key: caster_id(0, i as u64, index_count as u64, &world_transform),
                 });
             }
 
@@ -643,12 +653,15 @@ impl Renderer {
                     {
                         continue;
                     }
+                    let cast_count = node
+                        .active_lod_geometry()
+                        .map_or(node.gpu_index_count, |g| g.2);
                     if node.cast_shadow
                         && !prev_caster_ids.is_empty()
                         && !prev_caster_ids.contains(&caster_id(
                             0,
                             i as u64,
-                            node.gpu_index_count as u64,
+                            cast_count as u64,
                             &node.world_transform(),
                         ))
                     {

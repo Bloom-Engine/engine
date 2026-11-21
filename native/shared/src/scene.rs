@@ -317,8 +317,9 @@ pub struct SceneNode {
     /// Reduced-detail geometry variants, ordered coarser and coarser
     /// (descending max_coverage). Selected per frame in prepare() by
     /// projected screen coverage; the base geometry above is "LOD 0".
-    /// Shadows, picking, BLAS, and SDF always use the base geometry —
-    /// LODs only affect the main camera rasterization.
+    /// The camera passes and the sun's shadow casters use the active level
+    /// (a distant tree cast its full close-up mesh into every cascade);
+    /// picking, BLAS and SDF always use the base geometry.
     pub lods: Vec<LodLevel>,
     /// Active LOD this frame: -1 = base geometry, otherwise an index
     /// into `lods`. Driven by prepare(); render() binds accordingly.
@@ -344,6 +345,23 @@ pub struct LodLevel {
 }
 
 impl SceneNode {
+    /// The level of detail drawn this frame: -1 for the base geometry, else an index into `lods`.
+    pub fn active_lod(&self) -> i32 {
+        self.active_lod
+    }
+    /// The active level's own GPU geometry (vertex buffer, index buffer, index count), or
+    /// None when the base geometry is drawn or the level is not uploaded.
+    pub fn active_lod_geometry(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)> {
+        if self.active_lod < 0 {
+            return None;
+        }
+        let lod = self.lods.get(self.active_lod as usize)?;
+        Some((
+            lod.gpu_vb.as_ref()?,
+            lod.gpu_ib.as_ref()?,
+            lod.gpu_index_count,
+        ))
+    }
     /// Whether the depth prepass draws this opaque node, so that the main
     /// pass shades it with the depth-equal pipelines. Not with a fractional
     /// opacity: it blends over what lies behind it, and its prepass depth
