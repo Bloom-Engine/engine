@@ -184,7 +184,7 @@ impl GpuDrivenRenderer {
             label: Some("gpu_driven_counters"),
             size: 16,
             usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::INDIRECT
+                | indirect_usage(device)
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
@@ -1031,9 +1031,28 @@ fn create_indirect_buffer(
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (capacity * std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>()) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+        usage: wgpu::BufferUsages::STORAGE | indirect_usage(device),
         mapped_at_creation: false,
     })
+}
+
+/// `INDIRECT` when the device can execute indirect draws, empty otherwise.
+///
+/// wgpu rejects (and by default panics on) an `INDIRECT` buffer on devices
+/// without `DownlevelFlags::INDIRECT_EXECUTION`, e.g. the A8 Apple TV HD
+/// (Metal tvOS GPU family 1) and the iOS/tvOS simulators. Those devices never
+/// enable the GPU-driven path (it needs `INDIRECT_FIRST_INSTANCE`, which Metal
+/// reports for the same GPU families), so the buffers are only ever bound as
+/// storage there.
+fn indirect_usage(device: &wgpu::Device) -> wgpu::BufferUsages {
+    if device
+        .features()
+        .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+    {
+        wgpu::BufferUsages::INDIRECT
+    } else {
+        wgpu::BufferUsages::empty()
+    }
 }
 
 fn create_cull_layout(device: &wgpu::Device, routed_visibility: bool) -> wgpu::BindGroupLayout {
