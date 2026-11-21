@@ -140,6 +140,7 @@ fn convert_primitive(
         double_sided: material.double_sided,
         transmission: convert_transmission(material.transmission, texture_handles)?,
         layered_pbr: convert_layered(material.layered_pbr, texture_handles)?,
+        morph: None,
     })
 }
 
@@ -297,6 +298,7 @@ fn convert_animation(value: format::AnimationArchive) -> ModelAnimation {
                     .collect(),
                 duration: clip.duration,
                 name: clip.name,
+                morph_tracks: vec![],
             })
             .collect(),
     );

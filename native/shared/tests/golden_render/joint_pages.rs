@@ -136,6 +136,7 @@ fn cache_square(eng: &mut EngineState, handle: u64, joints: usize, half_size: f3
             double_sided: true,
             transmission: Default::default(),
             layered_pbr: Default::default(),
+            morph: None,
         }]
     ));
     assert!(eng.renderer.is_model_skinned(handle));

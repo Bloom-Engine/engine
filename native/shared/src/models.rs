@@ -478,6 +478,8 @@ pub struct MeshData {
     /// Scalar and texture metadata is retained before any renderer
     /// specialization is selected.
     pub layered_pbr: MaterialLayeredPbr,
+    /// Sparse morph-target deltas (`morph_targets.rs`); `None` for most meshes.
+    pub morph: Option<Arc<crate::morph_targets::MorphTargets>>,
 }
 
 #[path = "models_metadata.rs"]
@@ -532,6 +534,7 @@ pub struct AnimationData {
     pub channels: Vec<AnimationChannel>,
     pub duration: f32,
     pub name: String,
+    pub morph_tracks: Vec<crate::anim_morph::MorphTrack>,
 }
 
 pub struct SkeletonData {
@@ -855,6 +858,7 @@ impl ModelManager {
                 double_sided: false,
                 transmission: MaterialTransmission::default(),
                 layered_pbr: MaterialLayeredPbr::default(),
+                morph: None,
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             mesh_cast_shadows: vec![true],
@@ -978,6 +982,7 @@ impl ModelManager {
                 double_sided: false,
                 transmission: MaterialTransmission::default(),
                 layered_pbr: MaterialLayeredPbr::default(),
+                morph: None,
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             mesh_cast_shadows: vec![true],
@@ -1050,6 +1055,7 @@ impl ModelManager {
                 double_sided: false,
                 transmission: MaterialTransmission::default(),
                 layered_pbr: MaterialLayeredPbr::default(),
+                morph: None,
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             mesh_cast_shadows: vec![true],
@@ -1184,6 +1190,7 @@ impl ModelManager {
                 double_sided: false,
                 transmission: MaterialTransmission::default(),
                 layered_pbr: MaterialLayeredPbr::default(),
+                morph: None,
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             mesh_cast_shadows: vec![true],
@@ -1239,6 +1246,11 @@ impl ModelManager {
             let joint_count = skeleton.joints.len();
 
             let pose = sample_local_pose(skeleton, &model_anim.animations[anim_index], time, true);
+            crate::anim_morph::evaluate_single(
+                &model_anim.animations[anim_index],
+                time,
+                &mut model_anim.mixer,
+            );
             model_anim.apply_pose(&pose);
 
             #[cfg(debug_assertions)]
@@ -1563,7 +1575,7 @@ impl ModelManager {
                 let topo = crate::anim_rig::topology(&children, &skel.root_joints);
                 crate::anim_rig::apply_post(&ma.mixer.rig, &topo, &pose.0, &mut pose.1, &pose.2);
             }
-
+            crate::anim_morph::evaluate_mixer(&ma.animations, &mut ma.mixer);
             ma.apply_pose(&pose);
         }
     }
@@ -1946,51 +1958,6 @@ fn compute_joint_transforms(
     }
 }
 
-// ---- Catmull-Rom spline helpers (Q9) ----
-
-fn catmull_rom_point(points: &[f32], n: usize, segment: usize, t: f32) -> [f32; 3] {
-    // Indices: p0 = segment - 1, p1 = segment, p2 = segment + 1, p3 = segment + 2.
-    // Clamp at boundaries.
-    let i0 = if segment > 0 { segment - 1 } else { 0 };
-    let i1 = segment;
-    let i2 = if segment + 1 < n { segment + 1 } else { n - 1 };
-    let i3 = if segment + 2 < n { segment + 2 } else { n - 1 };
-
-    let p0 = [points[i0 * 3], points[i0 * 3 + 1], points[i0 * 3 + 2]];
-    let p1 = [points[i1 * 3], points[i1 * 3 + 1], points[i1 * 3 + 2]];
-    let p2 = [points[i2 * 3], points[i2 * 3 + 1], points[i2 * 3 + 2]];
-    let p3 = [points[i3 * 3], points[i3 * 3 + 1], points[i3 * 3 + 2]];
-
-    let t2 = t * t;
-    let t3 = t2 * t;
-    let mut out = [0.0f32; 3];
-    for k in 0..3 {
-        out[k] = 0.5
-            * ((2.0 * p1[k])
-                + (-p0[k] + p2[k]) * t
-                + (2.0 * p0[k] - 5.0 * p1[k] + 4.0 * p2[k] - p3[k]) * t2
-                + (-p0[k] + 3.0 * p1[k] - 3.0 * p2[k] + p3[k]) * t3);
-    }
-    out
-}
-
-fn update_bounds(bmin: &mut [f32; 3], bmax: &mut [f32; 3], x: f32, y: f32, z: f32) {
-    if x < bmin[0] {
-        bmin[0] = x;
-    }
-    if y < bmin[1] {
-        bmin[1] = y;
-    }
-    if z < bmin[2] {
-        bmin[2] = z;
-    }
-    if x > bmax[0] {
-        bmax[0] = x;
-    }
-    if y > bmax[1] {
-        bmax[1] = y;
-    }
-    if z > bmax[2] {
-        bmax[2] = z;
-    }
-}
+#[path = "models_spline.rs"]
+mod spline;
+use spline::{catmull_rom_point, update_bounds};

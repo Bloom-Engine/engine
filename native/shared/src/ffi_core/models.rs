@@ -692,6 +692,7 @@ macro_rules! __bloom_ffi_models {
                         // PT-7: the anim handle keys the prev-palette
                         // pairing for skinned motion vectors.
                         eng.renderer.set_joint_matrices_scaled(handle.to_bits(), &anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32], rot_sin, rot_cos);
+                        $crate::anim_morph::stage_weights(&mut eng.models, &mut eng.renderer, handle);
                     }
                 }
         })
@@ -1276,6 +1277,7 @@ macro_rules! __bloom_ffi_models {
                         eng.renderer.set_joint_matrices_scaled(
                             handle.to_bits(), &anim.joint_matrices, scale as f32,
                             [px as f32, py as f32, pz as f32], rot_sin, rot_cos);
+                        $crate::anim_morph::stage_weights(&mut eng.models, &mut eng.renderer, handle);
                     }
                 }
         })
@@ -1307,6 +1309,7 @@ macro_rules! __bloom_ffi_models {
                     if !anim.joint_matrices.is_empty() {
                         eng.renderer.set_joint_matrices_transformed(
                             handle.to_bits(), &anim.joint_matrices, model);
+                        $crate::anim_morph::stage_weights(&mut eng.models, &mut eng.renderer, handle);
                     }
                 }
         })
@@ -1476,6 +1479,101 @@ macro_rules! __bloom_ffi_models {
         #[cfg(not(feature = "models3d"))]
         #[no_mangle]
         pub extern "C" fn bloom_model_find_joint(_h: f64, _n: *const u8) -> f64 { -1.0 }
+
+        // ---- Morph targets (docs/morph-targets.md) -----------------------
+        // Slots are model-level, by target name across all meshes; the
+        // weights are per animation instance and staged with its pose by
+        // bloom_anim_update (and the other posing calls).
+
+        // bloom_model_morph_count  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_morph_count(model: f64) -> f64 {
+            $crate::ffi::guard("bloom_model_morph_count", move || {
+                engine().models.model_morph_count(model) as f64
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_morph_count(_m: f64) -> f64 { 0.0 }
+
+        // bloom_model_morph_index  [gated: models3d]
+        // Load-time only (it compares strings): cache the index.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_morph_index(model: f64, name_ptr: *const u8) -> f64 {
+            $crate::ffi::guard("bloom_model_morph_index", move || {
+                let name = $crate::string_header::str_from_header(name_ptr);
+                engine().models.model_morph_index(model, &name) as f64
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_morph_index(_m: f64, _n: *const u8) -> f64 { -1.0 }
+
+        // bloom_anim_set_morph_weight  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_morph_weight(handle: f64, index: f64, weight: f64) {
+            $crate::ffi::guard("bloom_anim_set_morph_weight", move || {
+                if index >= 0.0 {
+                    engine().models.anim_set_morph_weight(handle, index as usize, weight as f32);
+                }
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_morph_weight(_h: f64, _i: f64, _w: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_set_morph_weight", "models3d");
+        }
+
+        // bloom_anim_set_morph_weights  [gated: models3d]
+        // Up to five consecutive slots from `first` in one call (8 scalar
+        // arguments: the most Perry passes safely on ARM64).
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_morph_weights(handle: f64, first: f64, count: f64, w0: f64, w1: f64, w2: f64, w3: f64, w4: f64) {
+            $crate::ffi::guard("bloom_anim_set_morph_weights", move || {
+                if first >= 0.0 {
+                    let all = [w0 as f32, w1 as f32, w2 as f32, w3 as f32, w4 as f32];
+                    let n = (count.max(0.0) as usize).min(5);
+                    engine().models.anim_set_morph_weights(handle, first as usize, &all[..n]);
+                }
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_morph_weights(_h: f64, _f: f64, _c: f64, _w0: f64, _w1: f64, _w2: f64, _w3: f64, _w4: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_set_morph_weights", "models3d");
+        }
+
+        // bloom_anim_clear_morphs  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_clear_morphs(handle: f64) {
+            $crate::ffi::guard("bloom_anim_clear_morphs", move || {
+                engine().models.anim_clear_morphs(handle);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_clear_morphs(_h: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_clear_morphs", "models3d");
+        }
+
+        // bloom_anim_morph_weight  [gated: models3d]
+        // The weight a slot is drawn with: clips plus the game's, clamped.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_morph_weight(handle: f64, index: f64) -> f64 {
+            $crate::ffi::guard("bloom_anim_morph_weight", move || {
+                if index < 0.0 { return 0.0; }
+                engine().models.anim_morph_weight(handle, index as usize) as f64
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_morph_weight(_h: f64, _i: f64) -> f64 { 0.0 }
 
         // bloom_model_joint_world  [gated: models3d]
         // Model-space 4x4 of a joint, column-major, component 0..15.

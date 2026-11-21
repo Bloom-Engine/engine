@@ -24,6 +24,8 @@ use material_import::{
 };
 #[path = "models_gltf_bake.rs"]
 mod bake;
+#[path = "models_gltf_morph.rs"]
+mod morph;
 pub use bake::require_source_geometry_hash;
 #[path = "models_gltf_texture_io.rs"]
 mod texture_io;
@@ -269,8 +271,10 @@ pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
 
     // Parse animations
     let mut animations = Vec::new();
+    let morph_slots = morph::morph_slots(&gltf);
     for anim in gltf.animations() {
         let mut channels = Vec::new();
+        let mut morph_tracks = Vec::new();
         let mut duration: f32 = 0.0;
 
         // Build node-to-joint mapping for channel resolution
@@ -323,6 +327,12 @@ pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             }
         }
         for channel in anim.channels() {
+            let buffers = |b: gltf::Buffer| buffer_data.get(b.index()).map(|d| d.as_slice());
+            if let Some(track) = morph::read_weight_channel(&channel, buffers, &morph_slots) {
+                duration = duration.max(track.times.last().copied().unwrap_or(0.0));
+                morph_tracks.push(track);
+                continue;
+            }
             let target_node = channel.target().node().index();
             let joint_index = match node_to_joint.get(&target_node) {
                 Some(&ji) => {
@@ -420,6 +430,7 @@ pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             channels,
             duration,
             name,
+            morph_tracks,
         });
     }
 
@@ -738,6 +749,7 @@ pub(super) fn load_gltf_with_textures(
         }
     }
 
+    let morph_slots = morph::morph_slots(&gltf);
     for mesh in gltf.meshes() {
         let instances = mesh_instances[mesh.index()].clone();
         // Meshes reachable from no scene node would have no instances;
@@ -976,6 +988,7 @@ pub(super) fn load_gltf_with_textures(
                     Some(iter) => iter.into_u32().collect(),
                     None => (0..positions.len() as u32).collect(),
                 };
+                let morph = morph_slots.read(&reader, &vertices, skin_vertex_scale, mesh.index());
                 let source = Arc::new(MeshData {
                     vertices,
                     secondary_tex_coords,
@@ -995,6 +1008,7 @@ pub(super) fn load_gltf_with_textures(
                     double_sided: mat.double_sided(),
                     transmission,
                     layered_pbr,
+                    morph,
                 });
                 primitive_cache[primitive_index] = Some(Arc::clone(&source));
                 let (instance, transform) = shared_or_owned_instance(&source, instance_transform);
@@ -1217,6 +1231,7 @@ fn load_gltf_staged_impl(
     let mut source_meshes: Vec<Vec<(u32, MeshData)>> =
         (0..gltf.meshes().count()).map(|_| Vec::new()).collect();
 
+    let morph_slots = morph::morph_slots(&gltf);
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
@@ -1411,6 +1426,7 @@ fn load_gltf_staged_impl(
                 Some(iter) => iter.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
             };
+            let morph = morph_slots.read(&reader, &vertices, skin_vertex_scale, mesh.index());
             source_meshes[mesh.index()].push((
                 primitive.index() as u32,
                 MeshData {
@@ -1432,6 +1448,7 @@ fn load_gltf_staged_impl(
                     double_sided: mat.double_sided(),
                     transmission,
                     layered_pbr,
+                    morph,
                 },
             ));
         }
@@ -1532,6 +1549,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
     let mut source_meshes: Vec<Vec<(u32, MeshData)>> =
         (0..gltf.meshes().count()).map(|_| Vec::new()).collect();
 
+    let morph_slots = morph::morph_slots(&gltf);
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
@@ -1621,6 +1639,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 None => (0..positions.len() as u32).collect(),
             };
 
+            let morph = morph_slots.read(&reader, &vertices, 1.0, mesh.index());
             source_meshes[mesh.index()].push((
                 primitive.index() as u32,
                 MeshData {
@@ -1642,6 +1661,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                     double_sided: mat.double_sided(),
                     transmission,
                     layered_pbr,
+                    morph,
                 },
             ));
         }

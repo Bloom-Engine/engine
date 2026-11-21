@@ -260,6 +260,12 @@ impl Renderer {
                                 }
                                 let draw =
                                     self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
+                                let draw = self.morph.morph_vertex(
+                                    draw,
+                                    cmd.skinned,
+                                    cmd.joint_offset,
+                                    cmd.mesh_idx,
+                                );
                                 self.bind_joint_page(
                                     &mut pass,
                                     3,
@@ -688,6 +694,12 @@ impl Renderer {
                                         0,
                                     )
                                 };
+                                let draw = self.morph.morph_vertex(
+                                    draw,
+                                    cmd.skinned,
+                                    cmd.joint_offset,
+                                    cmd.mesh_idx,
+                                );
                                 self.bind_joint_page(
                                     &mut pass,
                                     3,
@@ -932,6 +944,12 @@ impl Renderer {
                     0,
                 )
             };
+            let mesh_draw = self.morph.morph_vertex(
+                mesh_draw,
+                command.skinned,
+                command.joint_offset,
+                command.mesh_idx,
+            );
             draws.push(ImportedRefractiveDrawRef {
                 view_depth: pivot[3],
                 stable_id,

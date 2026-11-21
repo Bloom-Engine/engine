@@ -9,6 +9,7 @@ Bloom Engine supports GPU-accelerated skeletal animation via glTF/GLB models wit
 - [TypeScript API](#typescript-api)
 - [Blender Export Pipeline](#blender-export-pipeline)
 - [Common Pitfalls](#common-pitfalls)
+- [Morph targets](#morph-targets)
 - [Key Engine Files](#key-engine-files)
 - [Debugging](#debugging)
 
@@ -119,7 +120,7 @@ The 3D pipeline uses four bind groups:
 | 0 | Transform | MVP matrix (4x4 uniform) |
 | 1 | Lighting | Ambient + directional light uniforms |
 | 2 | Texture | 2D texture + sampler |
-| 3 | Joints | 1024 x mat4x4 uniform buffer (+ `joints_prev` at binding 1) |
+| 3 | Joints | 1024 x mat4x4 uniform buffer (+ `joints_prev` at binding 1, the morph arena texture at binding 2) |
 
 ### Flush Timing
 
@@ -401,6 +402,17 @@ See `scripts/export_mixamo_glb.py` for full documentation.
 - **Mixamo FBX**: Characters are in centimeters (1 unit = 1cm). Blender's FBX importer converts to meters, adding a 0.01 armature scale.
 - **Bloom Engine**: Expects meter-scale models. Use `scale: 1.0` for properly exported models.
 - **Inverse Bind Matrices**: May contain 100x scale from Blender's cm-to-m conversion. The engine detects this and compensates (see `skin_vertex_scale` in `load_gltf_with_textures`).
+
+---
+
+## Morph targets
+
+Skinned models can carry glTF morph targets (blend shapes); their weights belong to the
+animation instance and are drawn with its pose. `modelMorphIndex(model, "jawOpen")` once at
+load, `animSetMorphWeight(anim, index, w)` before `animUpdate`; glTF `weights` channels in the
+clips are blended by the mixer like joints, and the game's weights add on top. Joint rotation
+slots (`animSetJointRotation`) are 0..31 since the same change (24 before). The whole design,
+the data layout, motion vectors and costs: [`morph-targets.md`](morph-targets.md).
 
 ---
 

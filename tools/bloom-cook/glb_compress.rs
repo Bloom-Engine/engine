@@ -626,6 +626,101 @@ mod tests {
         assert!(!normal.srgb);
     }
 
+    /// `sample_glb` plus two morph targets on its triangle: "jawOpen"
+    /// dense, "smile" a sparse accessor without a buffer view (as Blender
+    /// writes shape keys).
+    fn morph_glb() -> Vec<u8> {
+        let source = sample_glb("OPAQUE");
+        let (mut root, bin, _) = split_glb(&source).unwrap();
+        let mut bin = bin.to_vec();
+        let mut push = |bytes: &[u8]| {
+            bin.resize(bin.len().next_multiple_of(4), 0);
+            let at = bin.len();
+            bin.extend_from_slice(bytes);
+            (at, bytes.len())
+        };
+        let jaw: Vec<u8> = [0f32, -0.25, 0., 0., 0., 0., 0., 0., 0.]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let (jaw_at, jaw_len) = push(&jaw);
+        let (idx_at, idx_len) = push(&1u16.to_le_bytes());
+        let smile: Vec<u8> = [0.125f32, 0., 0.]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let (smile_at, smile_len) = push(&smile);
+        bin.resize(bin.len().next_multiple_of(4), 0);
+        let views = root["bufferViews"].as_array_mut().unwrap();
+        let first = views.len();
+        for (at, len) in [(jaw_at, jaw_len), (idx_at, idx_len), (smile_at, smile_len)] {
+            views.push(serde_json::json!({"buffer": 0, "byteOffset": at, "byteLength": len}));
+        }
+        let accessors = root["accessors"].as_array_mut().unwrap();
+        let jaw_accessor = accessors.len();
+        accessors.push(serde_json::json!({
+            "bufferView": first, "componentType": 5126, "count": 3, "type": "VEC3",
+            "min": [0.0, -0.25, 0.0], "max": [0.0, 0.0, 0.0]
+        }));
+        accessors.push(serde_json::json!({
+            "componentType": 5126, "count": 3, "type": "VEC3",
+            "min": [0.0, 0.0, 0.0], "max": [0.125, 0.0, 0.0],
+            "sparse": {"count": 1,
+                "indices": {"bufferView": first + 1, "componentType": 5123},
+                "values": {"bufferView": first + 2}}
+        }));
+        root["meshes"][0]["extras"] = serde_json::json!({"targetNames": ["jawOpen", "smile"]});
+        root["meshes"][0]["primitives"][0]["targets"] =
+            serde_json::json!([{"POSITION": jaw_accessor}, {"POSITION": jaw_accessor + 1}]);
+        root["buffers"][0]["byteLength"] = serde_json::json!(bin.len());
+        let mut json = serde_json::to_vec(&root).unwrap();
+        json.resize(json.len().next_multiple_of(4), b' ');
+        let total = 28 + json.len() + bin.len();
+        let mut out = Vec::new();
+        for value in [GLB_MAGIC, 2, total as u32, json.len() as u32, CHUNK_JSON] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&json);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(&CHUNK_BIN.to_le_bytes());
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    #[test]
+    fn morph_targets_survive_compression() {
+        let source = morph_glb();
+        let (out, report) = compress_glb(&source, &["--astc".into(), "6x6".into()]).unwrap();
+        assert!(report.starts_with("2 image(s) compressed"), "{report}");
+        let (root, _, _) = split_glb(&out).unwrap();
+        assert_eq!(
+            root["meshes"][0]["primitives"][0]["targets"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(root["meshes"][0]["extras"]["targetNames"][1], "smile");
+        // The engine reads both targets back out of the compressed file.
+        for data in [&source, &out] {
+            let model = bloom_shared::models::load_gltf_staged(data)
+                .expect("morph GLB loads")
+                .model;
+            let morph = model.meshes[0]
+                .morph
+                .as_ref()
+                .expect("morph targets survive");
+            assert_eq!(
+                morph.names.as_slice(),
+                &["jawOpen".to_string(), "smile".into()]
+            );
+            let jaw = morph.position_offset(0, &[1.0, 0.0]);
+            let smile = morph.position_offset(1, &[0.0, 1.0]);
+            assert!((jaw[1] + 0.25).abs() < 1e-3, "{jaw:?}");
+            assert!((smile[0] - 0.125).abs() < 1e-3, "{smile:?}");
+        }
+    }
+
     #[test]
     fn flat_normal_map_keeps_direction_and_zero_variance() {
         let (out, _) = compress_glb(&sample_glb("OPAQUE"), &[]).unwrap();

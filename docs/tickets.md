@@ -2233,7 +2233,7 @@ Shipped, all per-instance state in `AnimMixer::rig`, applied inside
 - `animSetBlend(h, slot 0..2, clip, weight)`: partner clips mixed into the
   base clip by weight, sampled at the base clip's phase. This is also the
   two-clip locomotion blend EN-028 promised and never built.
-- `animSetJointRotation(h, slot 0..23, joint, ax, ay, az, angle)`: a
+- `animSetJointRotation(h, slot 0..31, joint, ax, ay, az, angle)`: a
   model-space axis-angle turn of one joint and its subtree, applied in slot
   order after the masked layer.
 - `animSetIK(h, slot 0..1, endJoint, tx, ty, tz, weight, keepEndRotation)`
@@ -2739,3 +2739,32 @@ yet; no rain, lightning, shelter or water): `docs/weather.md`.
 and `@bloomengine/engine/weather`, a TypeScript module on the material system: weather eased over
 time, wetness that builds with rain and dries, rain streaks slanted by the wind, lightning. Still
 open: shelter (rain and wetness know no roof), splashes, lightning on the clouds, water.
+
+## EN-074 — Morph targets (blend shapes) on skinned characters ✅ *(2026-11-21, branch feat/morph-targets)*
+
+Asked for by The Deep (Jonah: lip sync for every speaking character, `docs/FACES.md` there).
+glTF morph targets were silently dropped by all three loaders, and `weights` channels by the
+animation loader. Now:
+
+- **Loading** (`models_gltf_morph.rs`): POSITION/NORMAL/TANGENT deltas of every primitive,
+  sparse accessors included, scaled and baked like their vertices; stored sparse per vertex
+  (`morph_targets.rs`, half floats, 24 B an entry). Slots are the model's distinct target names
+  over all its meshes, so one `jawOpen` weight drives face, teeth and tongue. `weights` channels
+  become clip tracks the mixer blends like joints.
+- **API**: `modelMorphCount`, `modelMorphIndex`, `animSetMorphWeight`, `animSetMorphWeights`,
+  `animClearMorphs`, `animMorphWeight` (manifest, every platform, web, watchOS stubs). Drawn weight
+  = clamp(clip + set, -1, 1).
+- **GPU** (`renderer/morph_pass.rs`): a compute pass writes a per-instance morphed vertex buffer for
+  instances with non-zero weights; every cached-draw site and the ray scene's skin pass draw from
+  it, so vertex shaders keep their current-position paths. Previous-minus-current displacement goes
+  to a frame-wide texture at `@group(3) @binding(2)`; the scene VS feeds it to the previous palette,
+  so TAA/TSR see a moving mouth. Rest bounds grow by what the targets can move. CPU fallback
+  without compute. 0.59 ms GPU for eight 50k-vertex faces with 12k vertices under 56 targets, all
+  weights moving (M1 Max).
+- Joint rotation slots raised from 24 to 32 (head, neck and look-at on top of grips and fingers).
+- `bloom-cook` refuses to cook a scene with morphs (`.bscene` cannot hold them); `glb-compress`
+  keeps them (tested).
+
+Tests: loader (dense + sparse accessors, shared names, all loaders agree, weight channels), sparse
+storage, mixer blending, golden renders at weights 0 and 1, CPU vs GPU, culling bounds, morph-only
+motion vectors with a no-history control, 32 slots. Design and limits: `docs/morph-targets.md`.

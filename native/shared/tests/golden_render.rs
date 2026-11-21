@@ -38,6 +38,8 @@ mod layered_pbr_parity;
 mod lighting_upload;
 #[path = "golden_render/local_light_shadows.rs"]
 mod local_light_shadows;
+#[path = "golden_render/morph_targets.rs"]
+mod morph_targets;
 #[path = "golden_render/motion_producer_audit.rs"]
 mod motion_producer_audit;
 #[path = "golden_render/quality_presets.rs"]
@@ -703,6 +705,7 @@ fn gltf_blend_is_fractional_and_not_cutout_or_opaque() {
         double_sided: false,
         transmission: Default::default(),
         layered_pbr: Default::default(),
+        morph: None,
     };
     const OPAQUE_HANDLE: u64 = 0xA1FA_0001;
     const BLEND_HANDLE: u64 = 0xA1FA_0002;
@@ -835,6 +838,7 @@ fn mask_coverage_mips_preserve_subpixel_silhouette_area() {
         double_sided: true,
         transmission: Default::default(),
         layered_pbr: Default::default(),
+        morph: None,
     };
     const ORDINARY_HANDLE: u64 = 0xA1FA_C001;
     const COVERAGE_HANDLE: u64 = 0xA1FA_C002;
@@ -973,6 +977,7 @@ fn gltf_transmission_uses_physical_retained_and_cached_paths() {
             double_sided: false,
             transmission,
             layered_pbr: Default::default(),
+            morph: None,
         }]
     ));
     let (_, _, cached) = render(&mut eng, 2, |eng| {
@@ -1090,6 +1095,7 @@ fn physical_texcoord_1_matches_between_retained_cached_shadow_and_reactive_paths
         double_sided: false,
         transmission,
         layered_pbr: Default::default(),
+        morph: None,
     };
     assert!(eng
         .renderer

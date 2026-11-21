@@ -1123,7 +1123,7 @@ export function animSetBlend(handle: number, slot: number, clip: number, weight:
 }
 
 /// Turn one joint, and with it everything below it, by `angle` radians about
-/// a model-space axis, after the clips are sampled. `slot` is 0..23 and slots
+/// a model-space axis, after the clips are sampled. `slot` is 0..31 and slots
 /// apply in order, so list a chain root first (spine, spine1, spine2 for an
 /// aim offset). `joint = -1` frees the slot.
 export function animSetJointRotation(handle: number, slot: number, joint: number, ax: number, ay: number, az: number, angle: number): void {
@@ -1191,6 +1191,72 @@ export function findJoint(handle: number, name: string): number {
 /// position / yaw you passed to `animUpdate` to place it in the world.
 export function jointWorld(handle: number, joint: number, comp: number): number {
   return bloom_model_joint_world(handle, joint, comp);
+}
+
+// ---- Morph targets (blend shapes) -------------------------------------------
+// docs/morph-targets.md. A model's morph SLOTS are its distinct target names
+// over all its meshes (glTF `targetNames`): "jawOpen" on the face, the teeth
+// and the tongue is one slot, and one weight drives all three. Weights belong
+// to an animation instance and are drawn with its next `animUpdate` (set them
+// before it). What is drawn is clamp(clip weights + these, -1, 1): authored
+// `weights` channels in the clips play through the mixer like joints, and the
+// weights set here add on top. Only skinned models morph.
+
+declare function bloom_model_morph_count(model: number): number;
+declare function bloom_model_morph_index(model: number, name: number): number;
+declare function bloom_anim_set_morph_weight(handle: number, index: number, weight: number): void;
+declare function bloom_anim_set_morph_weights(handle: number, first: number, count: number, w0: number, w1: number, w2: number, w3: number, w4: number): void;
+declare function bloom_anim_clear_morphs(handle: number): void;
+declare function bloom_anim_morph_weight(handle: number, index: number): number;
+
+/// Number of morph slots (distinct target names) of a model; 0 without.
+export function modelMorphCount(model: Model): number {
+  return bloom_model_morph_count(model.handle);
+}
+
+/// Slot of the target called `name`, or -1. It compares strings: call it
+/// once at load and keep the index (perry-quirks #5).
+export function modelMorphIndex(model: Model, name: string): number {
+  return bloom_model_morph_index(model.handle, name as any);
+}
+
+/// Set one slot's weight on an animation instance (-1..1, kept until changed
+/// or cleared).
+export function animSetMorphWeight(handle: number, index: number, weight: number): void {
+  bloom_anim_set_morph_weight(handle, index, weight);
+}
+
+/// Set `weights.length` consecutive slots from `first`, five per native
+/// call (a face of 60 shapes is 12 calls).
+export function animSetMorphWeights(handle: number, first: number, weights: number[]): void {
+  const n = weights.length;
+  let i = 0;
+  while (i < n) {
+    let count = n - i;
+    if (count > 5) {
+      count = 5;
+    }
+    let w1 = 0;
+    let w2 = 0;
+    let w3 = 0;
+    let w4 = 0;
+    if (count > 1) { w1 = weights[i + 1]; }
+    if (count > 2) { w2 = weights[i + 2]; }
+    if (count > 3) { w3 = weights[i + 3]; }
+    if (count > 4) { w4 = weights[i + 4]; }
+    bloom_anim_set_morph_weights(handle, first + i, count, weights[i], w1, w2, w3, w4);
+    i = i + count;
+  }
+}
+
+/// Drop every weight set on this instance (the clips' weights stay).
+export function animClearMorphs(handle: number): void {
+  bloom_anim_clear_morphs(handle);
+}
+
+/// The weight a slot is drawn with: clips plus the set weights, clamped.
+export function animMorphWeight(handle: number, index: number): number {
+  return bloom_anim_morph_weight(handle, index);
 }
 
 // Upload a mesh via the scratch buffer (array-free). Perry 0.5.1171 rejects
