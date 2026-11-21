@@ -341,6 +341,12 @@ pub struct LodLevel {
     gpu_secondary_uv_vb: Option<wgpu::Buffer>,
     gpu_ib: Option<wgpu::Buffer>,
     gpu_index_count: u32,
+    /// This level's slice of the shared static-geometry arena, so a node on a
+    /// reduced level stays on the GPU-driven path and in the batched shadow
+    /// casters (deduplicated by geometry key, like the base geometry).
+    gpu_geometry: Option<GeometrySlice>,
+    gpu_geometry_key: Option<SceneGeometryKey>,
+    gpu_geometry_refused: bool,
     dirty: bool,
 }
 
@@ -361,6 +367,16 @@ impl SceneNode {
             lod.gpu_ib.as_ref()?,
             lod.gpu_index_count,
         ))
+    }
+    /// The arena slice and index count of the geometry drawn this frame (the
+    /// active level, or the base geometry), for the GPU-driven and batched
+    /// shadow paths. None when that geometry is not in the arena.
+    pub(crate) fn active_gpu_slice(&self) -> Option<(GeometrySlice, u32)> {
+        if self.active_lod < 0 {
+            return self.gpu_geometry.map(|slice| (slice, self.gpu_index_count));
+        }
+        let lod = self.lods.get(self.active_lod as usize)?;
+        lod.gpu_geometry.map(|slice| (slice, lod.gpu_index_count))
     }
     /// Whether the depth prepass draws this opaque node, so that the main
     /// pass shades it with the depth-equal pipelines. Not with a fractional
@@ -680,6 +696,7 @@ impl SceneGraph {
 
     pub fn destroy_node(&mut self, handle: f64) {
         let mut geometry_key = None;
+        let mut lod_geometry_keys: Vec<SceneGeometryKey> = Vec::new();
         let mut resource_key = None;
         let mut material_key = None;
         if let Some(node) = self.nodes.get(handle) {
@@ -694,10 +711,15 @@ impl SceneGraph {
                 self.free_card_blocks.push(first);
             }
             geometry_key = node.gpu_geometry_key;
+            lod_geometry_keys = node
+                .lods
+                .iter()
+                .filter_map(|lod| lod.gpu_geometry_key)
+                .collect();
             resource_key = node.gpu_resource_key;
             material_key = node.gpu_material_key;
         }
-        if let Some(key) = geometry_key {
+        for key in geometry_key.into_iter().chain(lod_geometry_keys) {
             release_scene_geometry(
                 &mut self.shared_gpu_geometry,
                 &mut self.retired_gpu_geometry,
@@ -1037,7 +1059,14 @@ impl SceneGraph {
         };
         if vertices.is_empty() {
             if lod_index < node.lods.len() {
-                node.lods.remove(lod_index);
+                let removed = node.lods.remove(lod_index);
+                if let Some(key) = removed.gpu_geometry_key {
+                    release_scene_geometry(
+                        &mut self.shared_gpu_geometry,
+                        &mut self.retired_gpu_geometry,
+                        key,
+                    );
+                }
             }
             return;
         }
@@ -1052,6 +1081,9 @@ impl SceneGraph {
                 gpu_secondary_uv_vb: None,
                 gpu_ib: None,
                 gpu_index_count: 0,
+                gpu_geometry: None,
+                gpu_geometry_key: None,
+                gpu_geometry_refused: false,
                 dirty: true,
             });
         }
@@ -1658,6 +1690,12 @@ impl SceneGraph {
                     release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
                 }
                 node.gpu_geometry = None;
+                for lod in &mut node.lods {
+                    if let Some(old_key) = lod.gpu_geometry_key.take() {
+                        release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
+                    }
+                    lod.gpu_geometry = None;
+                }
             }
             if node.indices().is_empty() {
                 if let Some(old_key) = node.gpu_geometry_key.take() {
@@ -1760,9 +1798,12 @@ impl SceneGraph {
                         }
                     }
                     node.active_lod = chosen;
-                } else {
+                } else if node.lods.is_empty() || node.active_lod >= node.lods.len() as i32 {
                     node.active_lod = -1;
                 }
+                // Out of view or occluded, a node keeps the level it was last drawn at: it still
+                // casts into the shadow cascades, and resetting it to the base geometry made
+                // the casters' keys flip with every Hi-Z result, redrawing every cascade each frame.
             } else {
                 // Empty or uninitialized bounds — can't cull, play safe.
                 node.in_view_frustum = true;
@@ -1776,6 +1817,11 @@ impl SceneGraph {
                 || node.material.layered_pbr.has_resolved_tex_coord(1);
             for lod in &mut node.lods {
                 if lod.dirty {
+                    if let Some(old_key) = lod.gpu_geometry_key.take() {
+                        release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
+                    }
+                    lod.gpu_geometry = None;
+                    lod.gpu_geometry_refused = false;
                     if let Some(mesh) = lod.shared.as_ref() {
                         let (vertex, index) = shared_mesh_cache.lod_buffers(device, mesh);
                         lod.gpu_vb = Some(vertex);
@@ -1814,6 +1860,46 @@ impl SceneGraph {
                     });
                 } else if !needs_secondary_uv {
                     lod.gpu_secondary_uv_vb = None;
+                }
+                // The level's slice of the shared arena (see `LodLevel::gpu_geometry`).
+                if gpu_driven.enabled()
+                    && gpu_driven_scene_active
+                    && lod.gpu_geometry.is_none()
+                    && !lod.gpu_geometry_refused
+                {
+                    let (vertices, indices) = match lod.shared.as_ref() {
+                        Some(mesh) => (&mesh.vertices[..], &mesh.indices[..]),
+                        None => (&lod.vertices[..], &lod.indices[..]),
+                    };
+                    if !vertices.is_empty() && !indices.is_empty() {
+                        let key = match lod.shared.as_ref() {
+                            Some(mesh) => shared_mesh_cache.key(mesh),
+                            None => scene_geometry_key(vertices, indices),
+                        };
+                        let slice = if let Some(cached) = shared_gpu_geometry.get_mut(&key) {
+                            cached.references = cached.references.saturating_add(1);
+                            Some(cached.slice)
+                        } else {
+                            let slice = gpu_driven.upload_static(device, queue, vertices, indices);
+                            if let Some(slice) = slice {
+                                shared_gpu_geometry.insert(
+                                    key,
+                                    SharedSceneGeometry {
+                                        slice,
+                                        references: 1,
+                                    },
+                                );
+                            }
+                            slice
+                        };
+                        match slice {
+                            Some(slice) => {
+                                lod.gpu_geometry = Some(slice);
+                                lod.gpu_geometry_key = Some(key);
+                            }
+                            None => lod.gpu_geometry_refused = true,
+                        }
+                    }
                 }
             }
 

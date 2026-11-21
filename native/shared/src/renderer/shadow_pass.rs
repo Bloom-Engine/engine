@@ -308,12 +308,12 @@ impl Renderer {
                 // A node drawn at a simpler level of detail casts with that level too: the full
                 // mesh of a distant tree went into every cascade at its close-up triangle count.
                 let lod = node.active_lod_geometry();
-                let (vb, ib, index_count, on_lod) = match lod {
-                    Some((vb, ib, count)) => (vb, ib, count, true),
+                let (vb, ib, index_count) = match lod {
+                    Some((vb, ib, count)) => (vb, ib, count),
                     None => {
                         let Some(vb) = &node.gpu_vb else { continue };
                         let Some(ib) = &node.gpu_ib else { continue };
-                        (vb, ib, node.gpu_index_count, false)
+                        (vb, ib, node.gpu_index_count)
                     }
                 };
                 let vb_idx = shadow_vbs.len();
@@ -329,10 +329,11 @@ impl Renderer {
                     }
                     None => -1,
                 };
+                // The arena slice of the same geometry (active level or base) batches the caster.
                 let gpu_shared_draw = node
-                    .gpu_geometry
-                    .filter(|_| !on_lod)
-                    .map(|slice| (slice.first_index, slice.base_vertex));
+                    .active_gpu_slice()
+                    .filter(|(_, count)| *count == index_count)
+                    .map(|(slice, _)| (slice.first_index, slice.base_vertex));
                 let world_transform = node.world_transform();
                 shadow_nodes.push(ShadowDrawEntry {
                     vb_idx,

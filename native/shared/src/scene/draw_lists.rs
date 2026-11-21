@@ -458,7 +458,7 @@ impl SceneGraph {
                 compatibility += u32::from(node.in_view_frustum);
                 continue;
             }
-            let Some(slice) = node.gpu_geometry else {
+            let Some((slice, index_count)) = node.active_gpu_slice() else {
                 compatibility += u32::from(node.in_view_frustum);
                 continue;
             };
@@ -496,7 +496,7 @@ impl SceneGraph {
                     0.0,
                 ],
                 draw: [
-                    node.gpu_index_count,
+                    index_count,
                     slice.first_index,
                     slice.base_vertex as u32,
                     node.gpu_material_id.raw(),
