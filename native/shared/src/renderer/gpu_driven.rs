@@ -508,6 +508,7 @@ impl GpuDrivenRenderer {
             frustum_visible_oracle,
             frustum_culled_oracle,
         };
+        draw_stats_log(&self.stats);
         if !self.enabled || self.draw_scratch.is_empty() {
             return;
         }
@@ -993,6 +994,23 @@ impl Renderer {
         self.material_system
             .indirection
             .retire_materials(&self.queue, ids);
+    }
+}
+
+/// `BLOOM_DRAW_STATS=1`: one line every 120 frames with how many retained draws went GPU-driven and how many
+/// took the compatibility path, to see where a scene's draw-call cost comes from.
+fn draw_stats_log(stats: &SubmissionStats) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    static FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if !*ON.get_or_init(|| std::env::var("BLOOM_DRAW_STATS").is_ok_and(|v| v != "0")) {
+        return;
+    }
+    let f = FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if f % 120 == 0 {
+        println!(
+            "bloom draws: gpu-driven records {} (indirect calls {}), compatibility {}, frustum visible {} culled {}",
+            stats.submitted, stats.indirect_calls, stats.compatibility, stats.frustum_visible_oracle, stats.frustum_culled_oracle
+        );
     }
 }
 

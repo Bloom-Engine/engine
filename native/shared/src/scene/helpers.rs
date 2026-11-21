@@ -10,7 +10,6 @@ pub(super) fn scene_node_gpu_driven_ready(
     imported_refraction_enabled: bool,
 ) -> bool {
     node.render_layer == 0
-        && node.active_lod < 0
         // Retained MASK/transparent nodes historically blend in submission
         // order while depth-writing in the same pass. A depth prepass would
         // collapse overlapping translucent layers to the nearest surface,
@@ -22,7 +21,8 @@ pub(super) fn scene_node_gpu_driven_ready(
         && !(imported_refraction_enabled && node.material.transmission.is_active())
         && !node.material.layered_pbr.is_active()
         && (!node.material.opacity.is_finite() || node.material.opacity >= 1.0)
-        && node.gpu_geometry.is_some()
+        // The geometry drawn this frame (base or active level) must be in the arena.
+        && node.active_gpu_slice().is_some()
         && node.gpu_material_id != MaterialId::FALLBACK
         && node.uniform_slot.is_some()
 }
