@@ -1666,6 +1666,59 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_model_morph_count",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_model_morph_index",
+          "params": [
+            "f64",
+            "string"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_anim_set_morph_weight",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_set_morph_weights",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_clear_morphs",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_morph_weight",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_model_joint_world",
           "params": [
             "f64",

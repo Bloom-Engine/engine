@@ -83,6 +83,68 @@ pub(super) fn joint_offset_in_page(joint_offset: f32) -> f32 {
     (joint_offset.max(0.0) as usize % JOINTS_PER_PAGE) as f32
 }
 
+/// The joint bind group layout: this frame's palette (binding 0), the
+/// previous frame's (1), both uniform blocks, and the morph arena (2: per
+/// vertex previous-minus-current morph displacement, `morph_pass.rs`), all
+/// read by vertex shaders only. A shader may use any subset.
+pub(super) fn create_joint_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let palette = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("joint_layout"),
+        entries: &[
+            palette(0),
+            palette(1),
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// A bind group of `create_joint_layout`.
+pub(super) fn joint_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    palette: &wgpu::Buffer,
+    prev_palette: &wgpu::Buffer,
+    morph_arena: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("joint_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: palette.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: prev_palette.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(morph_arena),
+            },
+        ],
+    })
+}
+
 const IDENTITY_JOINT: [[f32; 4]; 4] = [
     [1.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0],
@@ -196,6 +258,9 @@ impl Renderer {
 
     /// Upload the frame's palette, page by page, and reset the staging state.
     pub(super) fn flush_joint_matrices(&mut self) {
+        // Morph jobs of the draws recorded this frame run first: the passes
+        // below draw from their buffers.
+        self.encode_morph_pass();
         // Accumulator = all skinned poses staged by skinned drawModel
         // calls this frame, packed consecutively. Each draw carries the
         // offset of its group, so a flat upload per page is all the GPU needs.
@@ -248,6 +313,7 @@ impl Renderer {
         // Any leftover staged poses are stale (no draw consumed them).
         self.pending_skin_groups.clear();
         self.pending_skin_groups_prev.clear();
+        self.morph.clear_pending();
     }
 
     fn create_joint_page(&self) -> JointPage {
@@ -262,24 +328,37 @@ impl Renderer {
         };
         let buffer = make("joint_page_buffer");
         let prev_buffer = make("joint_page_prev_buffer");
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("joint_page_bg"),
-            layout: &self.joint_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: prev_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let bind_group = joint_bind_group(
+            &self.device,
+            &self.joint_layout,
+            &buffer,
+            &prev_buffer,
+            self.morph.arena_view(),
+        );
         JointPage {
             buffer,
             prev_buffer,
             bind_group,
+        }
+    }
+
+    /// The morph arena was remade (it grew): every joint bind group shows it.
+    pub(super) fn rebuild_joint_bind_groups(&mut self) {
+        self.joint_bind_group = joint_bind_group(
+            &self.device,
+            &self.joint_layout,
+            &self.joint_buffer,
+            &self.joint_prev_buffer,
+            self.morph.arena_view(),
+        );
+        for page in &mut self.joint_extra_pages {
+            page.bind_group = joint_bind_group(
+                &self.device,
+                &self.joint_layout,
+                &page.buffer,
+                &page.prev_buffer,
+                self.morph.arena_view(),
+            );
         }
     }
 

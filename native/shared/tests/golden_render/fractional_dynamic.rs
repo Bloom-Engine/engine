@@ -348,6 +348,7 @@ fn fractional_skinned_motion_tracks_native_and_fresh_recovery() {
             double_sided: false,
             transmission: Default::default(),
             layered_pbr: Default::default(),
+            morph: None,
         }]
     ));
     assert!(eng.renderer.is_model_skinned(HANDLE));
@@ -478,6 +479,7 @@ fn fractional_alpha_tested_motion_tracks_native_and_fresh_recovery() {
             double_sided: true,
             transmission: Default::default(),
             layered_pbr: Default::default(),
+            morph: None,
         }]
     ));
 
@@ -814,6 +816,7 @@ fn fractional_procedural_foliage_tracks_native_at_fixed_time() {
             double_sided: true,
             transmission: Default::default(),
             layered_pbr: Default::default(),
+            morph: None,
         }]
     ));
     eng.renderer.set_wind(1.0, 0.3, 0.55, 1.35);

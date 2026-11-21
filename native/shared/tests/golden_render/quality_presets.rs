@@ -170,6 +170,7 @@ fn install_glossy_detail_fixture(eng: &mut EngineState) {
             double_sided: false,
             transmission: Default::default(),
             layered_pbr: Default::default(),
+            morph: None,
         }]
     ));
 }

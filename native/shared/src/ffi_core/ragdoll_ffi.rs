@@ -298,6 +298,7 @@ macro_rules! __bloom_ffi_ragdoll {
                             s,
                             c,
                         );
+                        $crate::anim_morph::stage_weights(&mut eng.models, &mut eng.renderer, anim);
                     }
                 }
                 age as f64

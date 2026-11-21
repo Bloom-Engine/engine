@@ -227,6 +227,11 @@ impl Renderer {
                 },
                 _ => continue,
             };
+            // A morphed instance skins from its own morphed vertices.
+            let src_vb = self
+                .morph
+                .vertex_buffer(w.joint_offset, w.mesh_idx)
+                .unwrap_or(src_vb);
             bind_groups.push(
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("pt_skin_bg"),

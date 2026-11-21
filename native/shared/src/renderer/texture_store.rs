@@ -613,6 +613,7 @@ impl Renderer {
     /// the buffers leak — and a future model whose handle reuses the slot
     /// would render the stale cached geometry.
     pub fn evict_model_cache(&mut self, handle_bits: u64) {
+        self.morph.forget_model(handle_bits);
         if let Some(Some(meshes)) = self.model_gpu_cache.remove(&handle_bits) {
             let mut seen_slices = std::collections::HashSet::new();
             let shared_slices: Vec<_> = meshes

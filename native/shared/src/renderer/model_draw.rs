@@ -77,6 +77,7 @@ impl Renderer {
         self.skin_unkeyed_previous_count = 0;
         self.skin_unkeyed_slot = 0;
         self.skin_prev_palettes.clear();
+        self.morph.reset_history();
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -150,6 +151,7 @@ impl Renderer {
         }
         self.pending_skin_groups_prev.push(previous);
         self.pending_skin_groups.push(matrices.to_vec());
+        self.morph.note_group();
     }
 
     pub fn set_model_skin_scale(&mut self, scale: f32) {
@@ -201,6 +203,7 @@ impl Renderer {
         self.skin_prev_palettes
             .insert(key, (self.skin_motion_epoch, scaled.clone()));
         self.pending_skin_groups.push(scaled);
+        self.morph.note_group();
     }
 
     /// `set_joint_matrices_scaled` for a character carried by something that
@@ -239,6 +242,7 @@ impl Renderer {
         self.skin_prev_palettes
             .insert(key, (self.skin_motion_epoch, placed.clone()));
         self.pending_skin_groups.push(placed);
+        self.morph.note_group();
     }
 
     /// Pair an ordinary cached instance with the same submission slot from the
@@ -757,6 +761,8 @@ impl Renderer {
             // with another model's pose.
             StagedSkin::Dropped => return,
         };
+        // Morphed meshes of this instance: misc.w = 1 + arena texel (0 = none).
+        let morph_bases = self.morph_draw(handle_bits, joint_offset, mesh_count);
 
         // Model matrix places the rare rigid (weightless) verts; weighted
         // verts get their world placement from the joint matrices.
@@ -819,7 +825,7 @@ impl Renderer {
                         joint_pages::joint_offset_in_page(joint_offset),
                         1.0,
                         0.0,
-                        0.0,
+                        morph_bases.get(mesh_idx).copied().unwrap_or(0.0),
                     ],
                 },
             );
@@ -964,6 +970,8 @@ impl Renderer {
     /// buffer — the player's — rendering as a giant mangled blob glued to
     /// the player's position.
     pub(super) fn take_staged_skin_offset(&mut self) -> StagedSkin {
+        // The morph state staged with this pose (none when nothing is staged).
+        self.morph.pop_group();
         if self.pending_skin_groups.is_empty() {
             return StagedSkin::Nothing;
         }

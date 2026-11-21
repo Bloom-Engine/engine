@@ -446,6 +446,12 @@ impl Renderer {
                     0,
                 )
             };
+            let mesh_draw = self.morph.morph_vertex(
+                mesh_draw,
+                command.skinned,
+                command.joint_offset,
+                command.mesh_idx,
+            );
             out.push(ImportedIridescenceDrawRef {
                 uniforms: &self.model_uniform_bind_groups[command.uniform_slot],
                 material,

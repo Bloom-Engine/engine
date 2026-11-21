@@ -67,6 +67,7 @@ fn layered_pbr_runs_on_opaque_sorted_reactive_and_weighted_paths() {
             double_sided: false,
             transmission: Default::default(),
             layered_pbr: layered,
+            morph: None,
         }]
     ));
     let (_, _, cached_opaque) = render(&mut eng, 2, |eng| {
@@ -164,6 +165,7 @@ fn layered_pbr_runs_on_opaque_sorted_reactive_and_weighted_paths() {
             double_sided: false,
             transmission,
             layered_pbr: layered,
+            morph: None,
         }]
     ));
     let (_, _, cached_refractive) = render(&mut eng, 3, |eng| {
@@ -247,6 +249,7 @@ fn layered_pbr_runs_on_opaque_sorted_reactive_and_weighted_paths() {
             double_sided: false,
             transmission,
             layered_pbr: layered_uv1,
+            morph: None,
         }]
     ));
     let (_, _, cached_refractive_uv1) = render(&mut eng, 3, |eng| {
@@ -472,6 +475,7 @@ fn weighted_transparency_is_order_independent_for_intersecting_imported_blend() 
             double_sided: false,
             transmission: Default::default(),
             layered_pbr: Default::default(),
+            morph: None,
         };
         const RED_HANDLE: u64 = 0x0170_0001;
         const BLUE_HANDLE: u64 = 0x0170_0002;

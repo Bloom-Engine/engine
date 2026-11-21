@@ -102,6 +102,7 @@ fn fs_reactive(in: VsOut) -> ReactiveTranslucentOut {
             double_sided: true,
             transmission: Default::default(),
             layered_pbr: Default::default(),
+            morph: None,
         }]
     ));
 
@@ -351,6 +352,7 @@ fn cached_skinned_motion_sequence_bounds_animation_trails() {
             double_sided: false,
             transmission: Default::default(),
             layered_pbr: Default::default(),
+            morph: None,
         }]
     ));
     assert!(
@@ -466,6 +468,7 @@ fn cached_alpha_tested_card_motion_writes_velocity_and_bounds_trails() {
             double_sided: true,
             transmission: Default::default(),
             layered_pbr: Default::default(),
+            morph: None,
         }]
     ));
 

@@ -301,6 +301,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
             double_sided: true,
             transmission: MaterialTransmission::default(),
             layered_pbr: MaterialLayeredPbr::default(),
+            morph: None,
         })],
         mesh_transforms: vec![bloom_shared::renderer::IDENTITY_MAT4],
         mesh_cast_shadows: vec![true],
@@ -425,6 +426,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         double_sided: true,
         transmission: MaterialTransmission::default(),
         layered_pbr: MaterialLayeredPbr::default(),
+        morph: None,
     });
     let placement = |x: f32, z: f32| {
         [
@@ -589,6 +591,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         double_sided: true,
         transmission: MaterialTransmission::default(),
         layered_pbr: MaterialLayeredPbr::default(),
+        morph: None,
     });
     let skinned_model = ModelData {
         meshes: vec![Arc::clone(&material_model.meshes[0]), skinned_mesh],

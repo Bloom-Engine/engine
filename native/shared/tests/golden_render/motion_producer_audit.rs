@@ -38,6 +38,7 @@ fn untextured_mesh(vertices: Vec<Vertex3D>, alpha_mode: MaterialAlphaMode) -> Me
         double_sided: true,
         transmission: Default::default(),
         layered_pbr: Default::default(),
+        morph: None,
     }
 }
 

@@ -47,6 +47,8 @@ pub struct AnimMixer {
     /// EN-064 — blend partners, joint rotations and IK applied over the
     /// sampled pose. Empty by default, which costs nothing.
     pub rig: crate::anim_rig::AnimRig,
+    /// Morph weights: the clips' and the game's (`anim_morph.rs`).
+    pub morph: crate::anim_morph::MorphState,
 }
 
 impl Default for AnimMixer {
@@ -73,6 +75,7 @@ impl Default for AnimMixer {
             finished: false,
             started: false,
             rig: crate::anim_rig::AnimRig::default(),
+            morph: Default::default(),
         }
     }
 }
@@ -174,6 +177,7 @@ mod tests {
             }],
             duration: 2.0,
             name: "slide".into(),
+            morph_tracks: vec![],
         }
     }
 

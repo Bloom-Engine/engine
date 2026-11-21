@@ -97,6 +97,27 @@ fn bake_owned_mesh_instance(mut instance: MeshData, world: &[[f32; 4]; 4]) -> Me
     if !has_skinning {
         instance.transmission.baked_thickness_scale *= mat4_mean_scale(world);
     }
+    // Morph deltas of the rigid vertices just baked move with them: through
+    // the node's linear part (positions, tangents) and its inverse
+    // transpose (normals). Skinned vertices' deltas stay in bind space.
+    if let Some(morph) = instance.morph.as_ref() {
+        let rigid: Vec<bool> = instance
+            .vertices
+            .iter()
+            .map(|v| !vertex_is_skinned(v))
+            .collect();
+        if rigid.iter().any(|r| *r) {
+            instance.morph = morph
+                .mapped(|v, d| {
+                    rigid[v].then(|| crate::morph_targets::MorphDelta {
+                        position: mat4_transform_direction(world, &d.position),
+                        normal: mat3_transform_vec(&normal_transform, &d.normal),
+                        tangent: mat4_transform_direction(world, &d.tangent),
+                    })
+                })
+                .map(Arc::new);
+        }
+    }
     instance
 }
 
@@ -232,6 +253,7 @@ mod tests {
             double_sided: false,
             transmission: crate::models::MaterialTransmission::default(),
             layered_pbr: crate::models::MaterialLayeredPbr::default(),
+            morph: None,
         }
     }
 

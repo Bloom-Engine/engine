@@ -1181,6 +1181,12 @@ impl Renderer {
                     0,
                 )
             };
+            let geometry = self.morph.morph_vertex(
+                geometry,
+                command.skinned,
+                command.joint_offset,
+                command.mesh_idx,
+            );
             let (bounds_min, bounds_max) = command
                 .bounds_override
                 .unwrap_or_else(|| transform_aabb(&command.model, mesh.local_min, mesh.local_max));

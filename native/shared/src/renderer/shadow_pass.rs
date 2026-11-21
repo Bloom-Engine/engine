@@ -430,6 +430,12 @@ impl Renderer {
                             continue;
                         }
                         let draw = self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
+                        let draw = self.morph.morph_vertex(
+                            draw,
+                            cmd.skinned,
+                            cmd.joint_offset,
+                            cmd.mesh_idx,
+                        );
                         let vb_idx = shadow_vbs.len();
                         shadow_vbs.push(draw.vertex);
                         shadow_ibs.push(draw.index);

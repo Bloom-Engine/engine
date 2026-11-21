@@ -124,6 +124,7 @@ mod tests {
             double_sided: false,
             transmission: crate::models::MaterialTransmission::default(),
             layered_pbr: crate::models::MaterialLayeredPbr::default(),
+            morph: None,
         })
     }
 

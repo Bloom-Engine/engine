@@ -42,6 +42,21 @@ fn convert_scene(
     logical_id: &str,
 ) -> Result<PreparedScene, String> {
     let StagedModel { model, textures } = staged;
+    // A cooked scene has no place for morph targets or weight tracks;
+    // dropping them would silently freeze every face. Characters with
+    // morphs load from their .glb.
+    if model.meshes.iter().any(|mesh| mesh.morph.is_some())
+        || animation.as_ref().is_some_and(|animation| {
+            animation
+                .animations
+                .iter()
+                .any(|clip| !clip.morph_tracks.is_empty())
+        })
+    {
+        return Err(format!(
+            "{logical_id}: the source has morph targets, which cooked scenes cannot hold; load the .glb instead"
+        ));
+    }
     let mut prepared_textures = Vec::with_capacity(textures.len());
     let mut texture_dependencies = Vec::with_capacity(textures.len());
     for (index, texture) in textures.into_iter().enumerate() {

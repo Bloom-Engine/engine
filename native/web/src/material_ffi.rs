@@ -642,6 +642,7 @@ pub fn bloom_anim_update_matrix(
         if !anim.joint_matrices.is_empty() {
             eng.renderer
                 .set_joint_matrices_transformed(handle.to_bits(), &anim.joint_matrices, model);
+            bloom_shared::anim_morph::stage_weights(&mut eng.models, &mut eng.renderer, handle);
         }
     }
 }
@@ -666,6 +667,7 @@ pub fn bloom_anim_update(handle: f64, dt: f64, scale: f64, px: f64, py: f64, pz:
                 rot_y_f.sin(),
                 rot_y_f.cos(),
             );
+            bloom_shared::anim_morph::stage_weights(&mut eng.models, &mut eng.renderer, handle);
         }
     }
 }
@@ -772,6 +774,61 @@ pub fn bloom_anim_root_delta(handle: f64, axis: f64) -> f64 {
 #[wasm_bindgen]
 pub fn bloom_model_find_joint(handle: f64, name: String) -> f64 {
     engine().models.find_joint(handle, &name) as f64
+}
+
+// ---- Morph targets (docs/morph-targets.md) ----
+
+#[wasm_bindgen]
+pub fn bloom_model_morph_count(model: f64) -> f64 {
+    engine().models.model_morph_count(model) as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_model_morph_index(model: f64, name: String) -> f64 {
+    engine().models.model_morph_index(model, &name) as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_set_morph_weight(handle: f64, index: f64, weight: f64) {
+    if index >= 0.0 {
+        engine()
+            .models
+            .anim_set_morph_weight(handle, index as usize, weight as f32);
+    }
+}
+
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_anim_set_morph_weights(
+    handle: f64,
+    first: f64,
+    count: f64,
+    w0: f64,
+    w1: f64,
+    w2: f64,
+    w3: f64,
+    w4: f64,
+) {
+    if first >= 0.0 {
+        let all = [w0 as f32, w1 as f32, w2 as f32, w3 as f32, w4 as f32];
+        let n = (count.max(0.0) as usize).min(5);
+        engine()
+            .models
+            .anim_set_morph_weights(handle, first as usize, &all[..n]);
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_clear_morphs(handle: f64) {
+    engine().models.anim_clear_morphs(handle);
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_morph_weight(handle: f64, index: f64) -> f64 {
+    if index < 0.0 {
+        return 0.0;
+    }
+    engine().models.anim_morph_weight(handle, index as usize) as f64
 }
 
 #[wasm_bindgen]

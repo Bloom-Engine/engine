@@ -127,6 +127,8 @@ mod texture_store;
 pub(crate) mod texture_streaming;
 mod tonemap_lut;
 pub use color_grade::write_neutral as write_color_grade_neutral;
+mod morph_pass;
+pub use morph_pass::MorphFrameStats;
 mod transmitted_shadows;
 mod transparent_gi;
 #[cfg(feature = "models3d")]
@@ -568,6 +570,7 @@ pub struct Renderer {
     joint_bind_group: wgpu::BindGroup,
     /// Palette pages past the first 1024 joints (`joint_pages.rs`).
     joint_extra_pages: Vec<joint_pages::JointPage>,
+    morph: morph_pass::MorphPass,
 
     // False until the material system's per-view bind group has been
     // rebuilt with the LIVE env/BRDF/shadow resources. The group is
@@ -2464,37 +2467,10 @@ impl Renderer {
             ..Default::default()
         });
 
-        // Joint-matrix bind group layout for GPU skinning. Created here (ahead
-        // of its buffer/bind group below) because the shadow map's skinned
-        // caster pipeline needs this layout at construction time.
-        let joint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("joint_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // PT-7 — previous frame's palette (same offsets). Only
-                // the scene VS reads it; the shadow shader ignores the
-                // binding, which wgpu permits.
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
+        // Joint bind group layout (palettes + morph arena, `joint_pages.rs`),
+        // ahead of the shadow map, whose skinned caster pipeline needs it.
+        let joint_layout = joint_pages::create_joint_layout(&device);
+        let morph = morph_pass::MorphPass::new(&device);
 
         // Shadow map needs to be created before the lighting bind
         // group since the bind group binds the shadow depth view.
@@ -2725,20 +2701,13 @@ impl Renderer {
             contents: &joint_data,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let joint_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("joint_bg"),
-            layout: &joint_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: joint_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: joint_prev_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let joint_bind_group = joint_pages::joint_bind_group(
+            &device,
+            &joint_layout,
+            &joint_buffer,
+            &joint_prev_buffer,
+            morph.arena_view(),
+        );
         // Initialize with identity matrices
         {
             let mut identity_data = vec![0u8; 65536];
@@ -8236,6 +8205,7 @@ impl Renderer {
             joint_layout,
             joint_bind_group,
             joint_extra_pages: Vec::new(),
+            morph,
             material_per_view_bg_live: false,
             texture_bind_group_layout,
             texture_bind_groups,
@@ -13057,6 +13027,12 @@ impl Renderer {
                         if cmd.mesh_idx < meshes.len() {
                             let mesh = &meshes[cmd.mesh_idx];
                             let draw = self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
+                            let draw = self.morph.morph_vertex(
+                                draw,
+                                cmd.skinned,
+                                cmd.joint_offset,
+                                cmd.mesh_idx,
+                            );
                             self.bind_joint_page(&mut pass, 3, cmd.joint_offset, &mut joint_page);
                             pass.set_bind_group(
                                 0,
@@ -14550,6 +14526,7 @@ impl Renderer {
             .collect();
 
         self.model_gpu_cache.insert(handle_bits, Some(gpu_meshes));
+        self.register_model_morphs(handle_bits, &meshes);
         true
     }
 

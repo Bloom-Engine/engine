@@ -19,8 +19,9 @@
 //! `models3d` and can be unit-tested without a GLB.
 
 pub const BLEND_SLOTS: usize = 3;
-// (24: a hand closing on what it holds is two joints of four fingers, on top of spine and limb offsets.)
-pub const ROT_SLOTS: usize = 24;
+// (24 for a hand closing on what it holds: two joints of four fingers, on top of spine and limb
+// offsets; 32 since the face work: neck, head and look-at on top of that.)
+pub const ROT_SLOTS: usize = 32;
 pub const IK_SLOTS: usize = 2;
 
 #[derive(Clone, Copy)]
@@ -487,6 +488,28 @@ mod tests {
         let mut scl = vec![[1.0; 3]; n];
         fk(topo, t, r, s, &mut pos, &mut rot, &mut scl);
         (pos[j], rot[j])
+    }
+
+    #[test]
+    fn thirty_two_rotation_slots_and_no_more() {
+        assert_eq!(ROT_SLOTS, 32);
+        let mut m = crate::models::ModelManager::new();
+        let h = m.animations.alloc(crate::models::ModelAnimation {
+            skeleton: None,
+            animations: std::sync::Arc::new(vec![]),
+            ref_rest_rotations: None,
+            joint_matrices: vec![],
+            mixer: Default::default(),
+            joint_world: vec![],
+            mask_weights: vec![],
+            mask_cached_root: -1,
+        });
+        m.anim_set_joint_rotation(h, 31, 7, [0.0, 1.0, 0.0], 0.5);
+        m.anim_set_joint_rotation(h, 32, 9, [0.0, 1.0, 0.0], 0.5);
+        let rig = &m.get_animation(h).unwrap().mixer.rig;
+        assert_eq!(rig.rots[31].joint, 7);
+        assert!(rig.rots[..31].iter().all(|r| r.joint < 0));
+        assert!(rig.has_post());
     }
 
     #[test]

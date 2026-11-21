@@ -222,6 +222,12 @@ impl Renderer {
                     0,
                 )
             };
+            let mesh_draw = self.morph.morph_vertex(
+                mesh_draw,
+                command.skinned,
+                command.joint_offset,
+                command.mesh_idx,
+            );
             draws.push(ImportedTransparentDrawRef {
                 view_depth: pivot[3],
                 stable_id,

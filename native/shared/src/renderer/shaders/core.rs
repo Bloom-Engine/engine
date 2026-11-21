@@ -17,7 +17,9 @@ struct Uniforms3D {
     prev_mvp: mat4x4<f32>,
     model_tint: vec4<f32>,
     // x = joint-buffer offset for this draw, y = 1.0 for skinned cached
-    // draws (vs_main_scene then skins in the VS), zw unused.
+    // draws (vs_main_scene then skins in the VS). Skinned draws: w = 1 +
+    // the first morph-arena texel of a morphed draw (0 = not morphed).
+    // Static draws: z = foliage amount.
     misc: vec4<f32>,
 };
 
@@ -73,6 +75,8 @@ fn material_uv_delta(delta: vec2<f32>, row_0: vec4<f32>, row_1: vec4<f32>) -> ve
 }
 
 struct VertexInputScene {
+    // Morphed draws read their previous-position texel by vertex.
+    @builtin(vertex_index) vertex_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
@@ -128,6 +132,9 @@ struct VertexOutputScene {
 // reconstruct last frame's world position from it, giving skeletal
 // motion a REAL velocity (it was exactly zero before).
 @group(3) @binding(1) var<uniform> joints_prev: JointMatrices;
+// Morph targets: per vertex, last frame's morphed position minus this
+// frame's, for morphed skinned draws (renderer/morph_pass.rs).
+@group(3) @binding(2) var morph_prev_disp: texture_2d<f32>;
 
 const PI: f32 = 3.14159265;
 
@@ -186,6 +193,15 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
         var nrm4: vec4<f32>;
         var tan4: vec4<f32>;
         let pos4l = vec4<f32>(in.position, 1.0);
+        // A morphed vertex was elsewhere last frame: the morph pass wrote
+        // the displacement, so its velocity includes the morph's motion.
+        var prev_pos4l = pos4l;
+        if (u.misc.w > 0.5) {
+            let morph_texel = u32(u.misc.w) - 1u + in.vertex_index;
+            let morph_width = textureDimensions(morph_prev_disp).x;
+            let morph_at = vec2<u32>(morph_texel % morph_width, morph_texel / morph_width);
+            prev_pos4l = vec4<f32>(in.position + textureLoad(morph_prev_disp, morph_at, 0).xyz, 1.0);
+        }
         let nrm4l = vec4<f32>(in.normal, 0.0);
         let tan4l = vec4<f32>(in.tangent.xyz, 0.0);
         if (total_weight > 0.01) {
@@ -200,10 +216,10 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
             // PT-7 — where this vertex WAS: previous palette, same
             // slots. Feeds the velocity MRT so TAA/TSR and the path
             // tracer can reproject skeletal motion.
-            prev_world4 = joints_prev.matrices[j0] * pos4l * in.weights.x
-                        + joints_prev.matrices[j1] * pos4l * in.weights.y
-                        + joints_prev.matrices[j2] * pos4l * in.weights.z
-                        + joints_prev.matrices[j3] * pos4l * in.weights.w;
+            prev_world4 = joints_prev.matrices[j0] * prev_pos4l * in.weights.x
+                        + joints_prev.matrices[j1] * prev_pos4l * in.weights.y
+                        + joints_prev.matrices[j2] * prev_pos4l * in.weights.z
+                        + joints_prev.matrices[j3] * prev_pos4l * in.weights.w;
             nrm4 = joints.matrices[j0] * nrm4l * in.weights.x
                  + joints.matrices[j1] * nrm4l * in.weights.y
                  + joints.matrices[j2] * nrm4l * in.weights.z
@@ -214,7 +230,7 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
                  + joints.matrices[j3] * tan4l * in.weights.w;
         } else {
             world4 = u.model * pos4l;
-            prev_world4 = world4;
+            prev_world4 = u.model * prev_pos4l;
             nrm4 = u.model * nrm4l;
             tan4 = u.model * tan4l;
         }

@@ -346,6 +346,7 @@ mod tests {
             double_sided: false,
             transmission: MaterialTransmission::default(),
             layered_pbr: MaterialLayeredPbr::default(),
+            morph: None,
         })
     }
 

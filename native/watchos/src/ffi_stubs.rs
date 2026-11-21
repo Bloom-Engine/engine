@@ -280,6 +280,21 @@
 #[no_mangle] pub extern "C" fn bloom_model_find_joint(_p0: f64, _p1: i64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_model_morph_count(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_model_morph_index(_p0: f64, _p1: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_morph_weight(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_morph_weights(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_clear_morphs(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_morph_weight(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_model_joint_world(_p0: f64, _p1: f64, _p2: f64) -> f64 {
     0.0
 }
