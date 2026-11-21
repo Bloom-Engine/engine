@@ -35,6 +35,7 @@ pub mod anim_morph;
 pub mod anim_rig;
 pub mod custom_shaders;
 pub mod decals;
+pub mod far_shadow;
 pub mod frame_callbacks;
 pub mod geometry;
 pub mod models;

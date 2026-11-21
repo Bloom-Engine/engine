@@ -103,6 +103,24 @@ impl Renderer {
                 scene_bounds,
             );
 
+            // The static far layer (`crate::far_shadow`): its map is redrawn at
+            // most once per refresh interval. Between redraws receivers keep
+            // sampling it through the projection it was drawn with.
+            let far_cascade = crate::shadows::NUM_CASCADES - 1;
+            let far_on = self.shadow_map.far.is_some();
+            let mut far_due = false;
+            if let Some(far_layer) = self.shadow_map.far {
+                let state = &mut self.shadow_map.far_state;
+                state.frames_since = state.frames_since.saturating_add(1);
+                far_due =
+                    state.rendered_vp.is_none() || state.frames_since >= far_layer.refresh_frames;
+                if !far_due {
+                    if let Some(vp) = state.rendered_vp {
+                        self.shadow_map.light_vps[far_cascade] = vp;
+                    }
+                }
+            }
+
             // Staggered cascades (`set_shadow_cascade_stagger`): on its off
             // frames a cascade beyond the first keeps the projection it was
             // last drawn with, so receivers sample the depth it still holds,
@@ -118,6 +136,9 @@ impl Renderer {
             {
                 if let Some(rendered) = self.shadow_map.rendered_light_vps {
                     for cascade in 1..crate::shadows::NUM_CASCADES {
+                        if far_on && cascade == far_cascade {
+                            continue;
+                        }
                         if (stagger_frame + cascade as u32) % 2 == 1 {
                             self.shadow_map.light_vps[cascade] = rendered[cascade];
                             stagger_skip[cascade] = true;
@@ -732,6 +753,12 @@ impl Renderer {
             for (i, entry) in shadow_nodes.iter().enumerate() {
                 let has_bounds = entry.wmin[0] <= entry.wmax[0];
                 for c in 0..crate::shadows::NUM_CASCADES {
+                    // Moving casters stay out of the far map: they are near the
+                    // camera, in the camera cascades, and drawing them would
+                    // refresh the far map every frame.
+                    if far_on && c == far_cascade && entry.dynamic {
+                        continue;
+                    }
                     if has_bounds
                         && crate::scene::aabb_outside_frustum(
                             &cascade_planes[c],
@@ -876,9 +903,11 @@ impl Renderer {
                     .rendered_light_vps
                     .map(|vps| vps[cascade] != self.shadow_map.light_vps[cascade])
                     .unwrap_or(true);
-                let static_stale = force_all
+                let is_far = far_on && cascade == far_cascade;
+                let static_stale = (force_all
                     || vp_changed
-                    || self.shadow_map.rendered_cascade_sig[cascade] != cascade_sigs[cascade];
+                    || self.shadow_map.rendered_cascade_sig[cascade] != cascade_sigs[cascade])
+                    && (!is_far || far_due);
                 let dyn_now = entries.iter().any(|&ei| shadow_nodes[ei].dynamic);
                 if !static_stale && !dyn_now && !self.shadow_map.had_dynamic[cascade] {
                     // Live texture already holds exactly this content.
@@ -889,12 +918,32 @@ impl Renderer {
                 }
 
                 if static_stale {
+                    // The far map has its own uniform buffer, sized to its casters.
+                    let cap = if is_far { usize::MAX } else { max_static };
                     let static_entries: Vec<usize> = entries
                         .iter()
                         .copied()
                         .filter(|&ei| !shadow_nodes[ei].dynamic)
-                        .take(max_static)
+                        .take(cap)
                         .collect();
+                    if is_far {
+                        self.shadow_map.far_state.uniforms_for(
+                            &self.device,
+                            &self.shadow_map.uniform_layout,
+                            static_entries.len(),
+                        );
+                    }
+                    let (static_buffer, static_bind_group, static_base) =
+                        match (is_far, self.shadow_map.far_state.uniforms.as_ref()) {
+                            (true, Some(far_uniforms)) => {
+                                (&far_uniforms.0, &far_uniforms.1, 0usize)
+                            }
+                            _ => (
+                                &self.shadow_map.uniform_buffer,
+                                &self.shadow_map.uniform_bind_group,
+                                cascade_base,
+                            ),
+                        };
                     let mut uniform_data: Vec<u8> = vec![0u8; stride * static_entries.len().max(1)];
                     for (slot, &ei) in static_entries.iter().enumerate() {
                         let uniforms = crate::shadows::ShadowUniforms {
@@ -920,8 +969,8 @@ impl Renderer {
                     // matrices (the no-near-shadows bug).
                     if !static_entries.is_empty() {
                         self.queue.write_buffer(
-                            &self.shadow_map.uniform_buffer,
-                            cascade_base as u64,
+                            static_buffer,
+                            static_base as u64,
                             &uniform_data[..static_entries.len() * stride],
                         );
                     }
@@ -952,7 +1001,7 @@ impl Renderer {
                         shadow_pass.set_pipeline(&self.shadow_map.pipeline);
                         for (slot, &ei) in static_entries.iter().enumerate() {
                             let entry = &shadow_nodes[ei];
-                            let offset = (cascade_base + slot * stride) as u32;
+                            let offset = (static_base + slot * stride) as u32;
                             let kind: u8 = if entry.skinned {
                                 2
                             } else if entry.cutout_idx >= 0 {
@@ -968,11 +1017,7 @@ impl Renderer {
                                 });
                                 cur_kind = kind;
                             }
-                            shadow_pass.set_bind_group(
-                                0,
-                                &self.shadow_map.uniform_bind_group,
-                                &[offset],
-                            );
+                            shadow_pass.set_bind_group(0, static_bind_group, &[offset]);
                             if kind == 1 {
                                 shadow_pass.set_bind_group(
                                     1,
@@ -1001,6 +1046,13 @@ impl Renderer {
                         }
                     }
                     self.shadow_map.rendered_cascade_sig[cascade] = cascade_sigs[cascade];
+                    if is_far {
+                        let state = &mut self.shadow_map.far_state;
+                        state.rendered_vp = Some(cascade_vp);
+                        state.frames_since = 0;
+                        state.last_casters = static_entries.len();
+                        state.redraws += 1;
+                    }
                 }
 
                 // Refresh the live texture from the static cache, then draw

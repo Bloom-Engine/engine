@@ -72,6 +72,8 @@ const RENDERER_STATUS_FUNCTIONS = new Set([
   'bloom_set_ssao_downscale',
   'bloom_set_shadow_distance',
   'bloom_set_shadow_cascade_stagger',
+  'bloom_set_far_shadow',
+  'bloom_far_shadow_stat',
   'bloom_set_draw_shadow_casting',
   'bloom_set_texture_streaming',
   'bloom_set_shadow_filter_4tap',

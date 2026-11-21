@@ -438,6 +438,11 @@ pub struct ShadowMap {
     /// Shadow cubes of a few local lights for material-path receivers
     /// (`renderer/local_light_shadows.rs`). Inert unless a game turns it on.
     pub(crate) local_lights: crate::renderer::local_light_shadows::LocalLightShadows,
+    /// The static far layer (`crate::far_shadow`): with it set, cascade 2 is a
+    /// fixed map over the game's box and cascades 0 and 1 split `distance`.
+    pub far: Option<crate::far_shadow::FarShadow>,
+    /// What the far map holds and when it was drawn.
+    pub far_state: crate::far_shadow::FarShadowState,
 }
 
 /// Accepted (slack-inflated) ortho fit for one cascade. `ls_x`/`ls_y`
@@ -868,6 +873,8 @@ impl ShadowMap {
             accepted_light_dir: None,
             virtual_map,
             local_lights,
+            far: None,
+            far_state: crate::far_shadow::FarShadowState::default(),
         }
     }
 
@@ -924,15 +931,24 @@ impl ShadowMap {
         // uniform split for stability.
         let lambda = 0.5f32; // blend factor (0 = uniform, 1 = logarithmic)
         let ratio = far / near;
+        // With the far layer the last cascade is the fixed far map; the camera
+        // cascades share the ordinary shadow distance between them.
+        let camera_cascades = if self.far.is_some() {
+            NUM_CASCADES - 1
+        } else {
+            NUM_CASCADES
+        };
         let mut splits = [0.0f32; NUM_CASCADES + 1];
         splits[0] = near;
-        for i in 1..NUM_CASCADES {
-            let p = i as f32 / NUM_CASCADES as f32;
+        for i in 1..camera_cascades {
+            let p = i as f32 / camera_cascades as f32;
             let log_split = near * ratio.powf(p);
             let uniform_split = near + (far - near) * p;
             splits[i] = lambda * log_split + (1.0 - lambda) * uniform_split;
         }
-        splits[NUM_CASCADES] = far;
+        for split in splits.iter_mut().skip(camera_cascades) {
+            *split = far;
+        }
 
         // Store view-space Z split distances for shader cascade selection.
         // cascade_splits[i] = far edge of cascade i.
@@ -964,7 +980,12 @@ impl ShadowMap {
             d[0] * right[1] - d[1] * right[0],
         ];
 
-        for c in 0..NUM_CASCADES {
+        if let Some(far_layer) = self.far {
+            let (vp, fit) = crate::far_shadow::far_vp(&far_layer, d, right, ortho_up, up_hint);
+            self.light_vps[NUM_CASCADES - 1] = vp;
+            self.cascade_splits[NUM_CASCADES - 1] = fit * crate::far_shadow::FAR_RECEIVER_OFFSET;
+        }
+        for c in 0..camera_cascades {
             let c_near = splits[c];
             let c_far = splits[c + 1];
 

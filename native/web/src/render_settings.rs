@@ -105,6 +105,24 @@ pub fn bloom_set_shadow_filter_4tap(on: f64) -> f64 {
     1.0
 }
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_set_far_shadow(cx: f64, cz: f64, half_x: f64, half_z: f64, y_min: f64, y_max: f64, refresh: f64) -> f64 {
+    engine().renderer.set_far_shadow(
+        cx as f32,
+        cz as f32,
+        half_x as f32,
+        half_z as f32,
+        y_min as f32,
+        y_max as f32,
+        refresh.max(1.0) as u32,
+    );
+    1.0
+}
+#[wasm_bindgen]
+pub fn bloom_far_shadow_stat(which: f64) -> f64 {
+    engine().renderer.far_shadow_stat(which as u32)
+}
+#[wasm_bindgen]
 pub fn bloom_set_shadow_cascade_stagger(on: f64) -> f64 {
     engine().renderer.set_shadow_cascade_stagger(on != 0.0);
     1.0

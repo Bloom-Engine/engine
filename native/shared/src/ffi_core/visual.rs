@@ -361,6 +361,36 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_set_far_shadow
+        #[no_mangle]
+        pub extern "C" fn bloom_set_far_shadow(
+            center_x: f64,
+            center_z: f64,
+            half_x: f64,
+            half_z: f64,
+            y_min: f64,
+            y_max: f64,
+            refresh_frames: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_far_shadow", move || {
+                engine().renderer.set_far_shadow(
+                    center_x as f32,
+                    center_z as f32,
+                    half_x as f32,
+                    half_z as f32,
+                    y_min as f32,
+                    y_max as f32,
+                    refresh_frames.max(1.0) as u32,
+                );
+            })
+        }
+
+        // bloom_far_shadow_stat
+        #[no_mangle]
+        pub extern "C" fn bloom_far_shadow_stat(which: f64) -> f64 {
+            engine().renderer.far_shadow_stat(which as u32)
+        }
+
         // bloom_set_shadow_cascade_stagger
         #[no_mangle]
         pub extern "C" fn bloom_set_shadow_cascade_stagger(on: f64) -> f64 {
