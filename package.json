@@ -2095,6 +2095,26 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_far_shadow",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_far_shadow_stat",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_shadow_cascade_stagger",
           "params": [
             "f64"

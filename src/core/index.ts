@@ -41,6 +41,8 @@ declare function bloom_set_sharpen_strength(strength: number): number;
 declare function bloom_set_ssgi_probe_spacing(pixels: number): number;
 declare function bloom_set_shadow_distance(metres: number): number;
 declare function bloom_set_shadow_cascade_stagger(on: number): number;
+declare function bloom_set_far_shadow(cx: number, cz: number, halfX: number, halfZ: number, yMin: number, yMax: number, refreshFrames: number): number;
+declare function bloom_far_shadow_stat(which: number): number;
 declare function bloom_set_texture_streaming(budgetMb: number): number;
 declare function bloom_set_shadow_filter_4tap(on: number): number;
 declare function bloom_set_shadow_map_size(texels: number): number;
@@ -860,6 +862,32 @@ export function setShadowFilter4Tap(on: boolean): boolean {
  */
 export function setShadowCascadeStagger(on: boolean): boolean {
   return bloom_set_shadow_cascade_stagger(on ? 1 : 0) !== 0;
+}
+
+/**
+ * Static far sun shadows: sun shadows to the horizon over a large static world
+ * (a city seen from a hill or from the air) at almost no cost per frame. With
+ * it on, the third shadow cascade stops following the camera and becomes one
+ * fixed map over the rectangle reaching `halfX` and `halfZ` metres either side
+ * of (`centerX`, `centerZ`), holding the casters between `yMin` and `yMax`. It is
+ * drawn from the static casters only (moving characters keep their shadows in
+ * the two camera cascades, which now split `setShadowDistance` between them),
+ * and redrawn at most once every `refreshFrames` frames when the sun or the
+ * static casters changed; between redraws it costs one texture lookup per
+ * pixel beyond the shadow distance. Its sharpness is the cascade map size
+ * (`setShadowMapSize`) over the rectangle as the sun sees it: 4096 texels over
+ * 6 km is 1.5 m a texel. A half-extent `<= 0` turns it off.
+ */
+export function setFarShadow(
+  centerX: number, centerZ: number, halfX: number, halfZ: number,
+  yMin: number = -50, yMax: number = 300, refreshFrames: number = 30,
+): boolean {
+  return bloom_set_far_shadow(centerX, centerZ, halfX, halfZ, yMin, yMax, refreshFrames) !== 0;
+}
+
+/** Far-shadow statistics: 0 redraws so far, 1 casters in the last redraw, 2 frames since it. */
+export function farShadowStat(which: number): number {
+  return bloom_far_shadow_stat(which);
 }
 
 /**

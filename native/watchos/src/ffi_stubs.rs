@@ -405,6 +405,12 @@
 #[no_mangle] pub extern "C" fn bloom_set_shadow_cascade_stagger(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_far_shadow(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_far_shadow_stat(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_draw_shadow_casting(_p0: f64) -> f64 {
     0.0
 }
