@@ -26,6 +26,8 @@ use material_import::{
 mod bake;
 #[path = "models_gltf_morph.rs"]
 mod morph;
+#[path = "models_gltf_parse.rs"]
+mod parse;
 pub use bake::require_source_geometry_hash;
 #[path = "models_gltf_texture_io.rs"]
 mod texture_io;
@@ -140,7 +142,7 @@ fn read_accessor_f32(
 }
 
 pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
-    let gltf = gltf::Gltf::from_slice(data).ok()?;
+    let gltf = parse::parse_gltf(data)?;
 
     // Get buffer data
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
@@ -482,7 +484,7 @@ pub(super) fn load_gltf_with_textures(
     base_dir: Option<&std::path::Path>,
     source_label: Option<&str>,
 ) -> Option<ModelData> {
-    let gltf = gltf::Gltf::from_slice(data).ok()?;
+    let gltf = parse::parse_gltf(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, source_label.unwrap_or("<memory glTF>"));
 
     // Get buffer data
@@ -1064,7 +1066,7 @@ fn load_gltf_staged_impl(
 ) -> Option<crate::staging::StagedModel> {
     use crate::staging::{StagedModel, StagedTexture};
 
-    let gltf = gltf::Gltf::from_slice(data).ok()?;
+    let gltf = parse::parse_gltf(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, source_label);
 
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
@@ -1520,7 +1522,7 @@ fn stage_image_variants(
 }
 
 pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
-    let gltf = gltf::Gltf::from_slice(data).ok()?;
+    let gltf = parse::parse_gltf(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, "<memory glTF>");
 
     // Get buffer data (for .glb, embedded; for .gltf, inline base64)
