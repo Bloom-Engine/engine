@@ -142,7 +142,7 @@ mod tests {
     fn far_vp_covers_the_box() {
         let far = FarShadow {
             center: [100.0, -200.0],
-            half: 3000.0,
+            half: [3000.0, 3000.0],
             y_range: [-20.0, 120.0],
             refresh_frames: 30,
         };
