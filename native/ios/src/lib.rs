@@ -378,6 +378,18 @@ fn register_view_controller_class() {
             b"Q16@0:8\0".as_ptr(),
         );
 
+        // Full-screen game: no status bar. Under the scene lifecycle the view controller
+        // decides this (Info.plist UIStatusBarHidden only covers launch).
+        unsafe extern "C" fn bloom_vc_prefers_status_bar_hidden(_this: *mut c_void, _sel: Sel) -> Bool {
+            Bool::YES
+        }
+        class_addMethod(
+            cls,
+            Sel::register(c"prefersStatusBarHidden"),
+            bloom_vc_prefers_status_bar_hidden as *const c_void,
+            b"B16@0:8\0".as_ptr(),
+        );
+
         objc_registerClassPair(cls);
     }
 }
@@ -385,6 +397,15 @@ fn register_view_controller_class() {
 // ============================================================
 // Scene delegate — creates UIWindow + Metal view + wgpu engine
 // ============================================================
+
+/// sceneWillEnterForeground: / sceneDidBecomeActive: set up the window if
+/// scene:willConnectToSession:connectionOptions: has not: UIKit (iOS 26.5 simulator) never sends
+/// that one to this runtime-registered delegate, while the activation callbacks do arrive.
+unsafe extern "C" fn scene_activates(_this: *mut c_void, _sel: Sel, scene: *const AnyObject) {
+    if !scene.is_null() && ENGINE.get().is_none() {
+        perry_scene_will_connect(scene as *const c_void);
+    }
+}
 
 unsafe extern "C" fn scene_will_connect(
     _this: *mut c_void,
@@ -396,153 +417,8 @@ unsafe extern "C" fn scene_will_connect(
     if scene.is_null() {
         return;
     }
-
-    // Get screen bounds from UIScreen.mainScreen (simpler than scene.screen)
-    let screen_cls = AnyClass::get(c"UIScreen").unwrap();
-    let screen: Retained<AnyObject> = msg_send![screen_cls, mainScreen];
-    let bounds: CGRect = msg_send![&*screen, bounds];
-    let scale: f64 = msg_send![&*screen, scale];
-
-    let pixel_width = (bounds.size.width * scale) as u32;
-    let pixel_height = (bounds.size.height * scale) as u32;
-
-    // Create UIWindow attached to the scene
-    let window_cls = AnyClass::get(c"UIWindow").unwrap();
-    let window: Allocated<AnyObject> = msg_send![window_cls, alloc];
-    let window: Retained<AnyObject> = msg_send![window, initWithWindowScene: scene];
-
-    // Create BloomViewController (with orientation lock support)
-    let vc_cls = AnyClass::get(c"BloomViewController")
-        .unwrap_or_else(|| AnyClass::get(c"UIViewController").unwrap());
-    let vc: Allocated<AnyObject> = msg_send![vc_cls, alloc];
-    let vc: Retained<AnyObject> = msg_send![vc, init];
-
-    // Create BloomMetalView
-    let view_cls = AnyClass::get(c"BloomMetalView").unwrap();
-    let view: Allocated<AnyObject> = msg_send![view_cls, alloc];
-    let view: Retained<AnyObject> = msg_send![view, initWithFrame: bounds];
-
-    // Set background to green (diagnostic — visible if Metal isn't rendering)
-    let color_cls = AnyClass::get(c"UIColor").unwrap();
-    let green: Retained<AnyObject> = msg_send![color_cls, greenColor];
-    let _: () = msg_send![&*view, setBackgroundColor: &*green];
-
-    // Configure CAMetalLayer
-    let layer: Retained<AnyObject> = msg_send![&*view, layer];
-    let drawable_size = CGSize {
-        width: pixel_width as f64,
-        height: pixel_height as f64,
-    };
-    let _: () = msg_send![&*layer, setDrawableSize: drawable_size];
-    let _: () = msg_send![&*layer, setContentsScale: scale];
-    let _: () = msg_send![&*layer, setOpaque: Bool::NO]; // Non-opaque so green shows if Metal fails
-
-    // Enable touches
-    let _: () = msg_send![&*view, setUserInteractionEnabled: Bool::YES];
-    let _: () = msg_send![&*view, setMultipleTouchEnabled: Bool::YES];
-
-    // Set up window hierarchy
-    let _: () = msg_send![&*vc, setView: &*view];
-    let _: () = msg_send![&*window, setRootViewController: &*vc];
-    let _: () = msg_send![&*window, makeKeyAndVisible];
-
-    // Store references
-    UI_VIEW = Some(view.clone());
-    UI_WINDOW = Some(window);
-
-    // Create wgpu surface
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::METAL,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-
-    let view_ptr = Retained::as_ptr(&view) as *mut c_void;
-    let handle = UiKitWindowHandle::new(std::ptr::NonNull::new(view_ptr).unwrap());
-    let raw = RawWindowHandle::UiKit(handle);
-    let surface = instance
-        .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(RawDisplayHandle::UiKit(UiKitDisplayHandle::new())),
-            raw_window_handle: raw,
-        })
-        .expect("Failed to create wgpu surface");
-
-    let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        compatible_surface: Some(&surface),
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .expect("No GPU adapter found");
-
-    let negotiated = request_renderer_device(&adapter);
-    let negotiation_report = negotiated.report.report_json();
-    eprintln!("[bloom-ios] renderer device negotiation = {negotiation_report}");
-    let device = negotiated.device;
-    let queue = negotiated.queue;
-
-    let surface_caps = surface.get_capabilities(&adapter);
-    let format = surface_caps
-        .formats
-        .iter()
-        .find(|f| f.is_srgb())
-        .copied()
-        .unwrap_or(surface_caps.formats[0]);
-
-    let surface_config = wgpu::SurfaceConfiguration {
-        // COPY_SRC (where the surface offers it, as Metal does): bloom_take_screenshot reads
-        // the swapchain back, and without the flag the copy is a validation error that aborts.
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | (surface_caps.usages & wgpu::TextureUsages::COPY_SRC),
-        format,
-        width: pixel_width,
-        height: pixel_height,
-        present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: surface_caps.alpha_modes[0],
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
-    };
-    surface.configure(&device, &surface_config);
-
-    let mut renderer = Renderer::new(
-        device,
-        queue,
-        surface,
-        surface_config,
-        pixel_width,
-        pixel_height,
-    );
-    renderer.set_device_negotiation_report(negotiation_report);
-    let _ = ENGINE.set(EngineState::new(renderer));
-
-    // Write debug info to app container tmp
-    {
-        let ns_cls =
-            AnyClass::get(c"NSTemporaryDirectory").unwrap_or(AnyClass::get(c"NSString").unwrap());
-        // Use NSFileManager to get tmp dir
-        extern "C" {
-            fn NSTemporaryDirectory() -> *const AnyObject;
-        }
-        let tmp_dir: *const AnyObject = NSTemporaryDirectory();
-        if !tmp_dir.is_null() {
-            let utf8: *const u8 = msg_send![&*tmp_dir, UTF8String];
-            if !utf8.is_null() {
-                let cstr_val = std::ffi::CStr::from_ptr(utf8 as *const i8);
-                if let Ok(tmp_path) = cstr_val.to_str() {
-                    let _ = std::fs::write(
-                        format!("{}bloom_debug.txt", tmp_path),
-                        format!(
-                            "scene_will_connect OK\npixels={}x{} scale={}\nwindow_scene={}\n",
-                            pixel_width,
-                            pixel_height,
-                            scale,
-                            !scene.is_null()
-                        ),
-                    );
-                }
-            }
-        }
-    }
-
-    // ENGINE is now set — bloom_init_window polls for this on the game thread
+    // One window/engine setup for both lifecycles (see perry_scene_will_connect).
+    perry_scene_will_connect(scene as *const c_void);
 }
 
 /// Called by the perry runtime's main() before UIApplicationMain to register
@@ -554,10 +430,39 @@ pub unsafe extern "C" fn perry_register_native_classes() {
     register_scene_delegate();
 }
 
+/// Whether the app's Info.plist declares a UIApplicationSceneManifest (scene lifecycle).
+unsafe fn app_declares_scene_manifest() -> bool {
+    let Some(bundle_cls) = AnyClass::get(c"NSBundle") else {
+        return false;
+    };
+    let bundle: *const AnyObject = msg_send![bundle_cls, mainBundle];
+    if bundle.is_null() {
+        return false;
+    }
+    let Some(string_cls) = AnyClass::get(c"NSString") else {
+        return false;
+    };
+    let key: *const AnyObject =
+        msg_send![string_cls, stringWithUTF8String: c"UIApplicationSceneManifest".as_ptr()];
+    let value: *const AnyObject = msg_send![&*bundle, objectForInfoDictionaryKey: key];
+    !value.is_null()
+}
+
 /// Called by the runtime's scene delegate when the UIWindowScene connects.
 /// This runs on the main thread — safe for all UIKit operations.
 #[no_mangle]
 pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
+    // iOS 27 terminates apps linked against its SDK that don't adopt the UIScene lifecycle
+    // (_UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption). An app whose Info.plist
+    // declares a UIApplicationSceneManifest gets its window from PerrySceneDelegate; the app
+    // delegate's sceneless call (scene = null, from didFinishLaunching) must then do nothing, or
+    // ENGINE would be bound to a window that is never shown.
+    if scene.is_null() && app_declares_scene_manifest() {
+        return;
+    }
+    if ENGINE.get().is_some() {
+        return;
+    }
     let screen_cls = AnyClass::get(c"UIScreen").unwrap();
     let screen: Retained<AnyObject> = msg_send![screen_cls, mainScreen];
     let bounds: CGRect = msg_send![&*screen, bounds];
@@ -702,6 +607,10 @@ fn register_scene_delegate() {
         let sel = Sel::register(c"scene:willConnectToSession:connectionOptions:");
         let types = b"v48@0:8@16@24@32\0".as_ptr();
         class_addMethod(cls, sel, scene_will_connect as *const c_void, types);
+
+        for name in [c"sceneWillEnterForeground:", c"sceneDidBecomeActive:"] {
+            class_addMethod(cls, Sel::register(name), scene_activates as *const c_void, b"v24@0:8@16\0".as_ptr());
+        }
 
         // Add UIWindowSceneDelegate protocol
         extern "C" {
