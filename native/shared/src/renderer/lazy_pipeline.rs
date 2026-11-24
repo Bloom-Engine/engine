@@ -114,6 +114,68 @@ fn log_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BLOOM_PIPELINE_LOG").is_some())
 }
 
+// ------------------------------------------------------------ creating, with retries
+
+/// How often a pipeline the driver failed to compile is tried again.
+const COMPILE_ATTEMPTS: u32 = 4;
+
+/// `create` (a pipeline creation) with its errors caught: a pipeline the driver could not compile
+/// (an internal or out-of-memory error) is tried again a few times, and one that still fails, or
+/// that wgpu rejects, ends the app with the pipeline's name and wgpu's message.
+///
+/// The retries are for small devices: on a 2 GB Apple TV HD (A8) under memory pressure the
+/// system can stop Metal's shader compiler service in the middle of a compile, and the pipeline
+/// then fails with an internal error that the next attempt doesn't have. Uncaught, that error went
+/// to wgpu's default handler, which panics without saying which pipeline it was (tvOS 1.0 (13) of
+/// a game aborted at launch on App Review's Apple TV HD in a prewarm thread this way).
+#[cfg(not(target_arch = "wasm32"))]
+fn create_checked<P>(device: &wgpu::Device, label: Option<&str>, create: impl Fn() -> P) -> P {
+    let name = label.unwrap_or("(unlabeled)");
+    for attempt in 1..=COMPILE_ATTEMPTS {
+        // error scopes are per thread, so a prewarm thread only catches its own pipeline's errors
+        let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = create();
+        let rejected = resolved(validation.pop());
+        let failed = resolved(internal.pop()).or(resolved(oom.pop()));
+        if let Some(err) = rejected {
+            panic!("bloom: pipeline {name} is invalid: {err}");
+        }
+        match failed {
+            None => return pipeline,
+            Some(err) if attempt < COMPILE_ATTEMPTS => {
+                eprintln!(
+                    "bloom: pipeline {name} failed to compile (attempt {attempt} of {COMPILE_ATTEMPTS}), trying again: {err}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+            }
+            Some(err) => {
+                panic!("bloom: pipeline {name} failed to compile {COMPILE_ATTEMPTS} times: {err}")
+            }
+        }
+    }
+    unreachable!()
+}
+
+/// The web: wgpu's error scopes resolve asynchronously there, so errors go to the device's handler.
+#[cfg(target_arch = "wasm32")]
+fn create_checked<P>(_device: &wgpu::Device, _label: Option<&str>, create: impl Fn() -> P) -> P {
+    create()
+}
+
+/// The result of an error scope's `pop()`: on native wgpu-core the future is ready at once.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolved(future: impl std::future::Future<Output = Option<wgpu::Error>>) -> Option<wgpu::Error> {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(err) => err,
+        // not ready: nothing to wait on here; report nothing rather than block
+        std::task::Poll::Pending => None,
+    }
+}
+
 // ------------------------------------------------------------ owned descriptors
 
 struct OwnedCompilation {
@@ -204,35 +266,37 @@ impl LazyRenderPipeline {
                             .collect()
                     })
                     .unwrap_or_default();
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: label.as_deref(),
-                    layout: layout.as_ref(),
-                    vertex: wgpu::VertexState {
-                        module: &vs_module,
-                        entry_point: vs_entry.as_deref(),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &vs_constants,
-                            zero_initialize_workgroup_memory: vs_compilation
-                                .zero_initialize_workgroup_memory,
+                create_checked(&device, label.as_deref(), || {
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: label.as_deref(),
+                        layout: layout.as_ref(),
+                        vertex: wgpu::VertexState {
+                            module: &vs_module,
+                            entry_point: vs_entry.as_deref(),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &vs_constants,
+                                zero_initialize_workgroup_memory: vs_compilation
+                                    .zero_initialize_workgroup_memory,
+                            },
+                            buffers: &vertex_buffers,
                         },
-                        buffers: &vertex_buffers,
-                    },
-                    primitive,
-                    depth_stencil,
-                    multisample,
-                    fragment: fragment.as_ref().map(|f| wgpu::FragmentState {
-                        module: &f.module,
-                        entry_point: f.entry_point.as_deref(),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &fs_constants,
-                            zero_initialize_workgroup_memory: f
-                                .compilation
-                                .zero_initialize_workgroup_memory,
-                        },
-                        targets: &f.targets,
-                    }),
-                    multiview_mask,
-                    cache: cache.as_ref(),
+                        primitive,
+                        depth_stencil: depth_stencil.clone(),
+                        multisample,
+                        fragment: fragment.as_ref().map(|f| wgpu::FragmentState {
+                            module: &f.module,
+                            entry_point: f.entry_point.as_deref(),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &fs_constants,
+                                zero_initialize_workgroup_memory: f
+                                    .compilation
+                                    .zero_initialize_workgroup_memory,
+                            },
+                            targets: &f.targets,
+                        }),
+                        multiview_mask,
+                        cache: cache.as_ref(),
+                    })
                 })
             }),
         )
@@ -258,17 +322,19 @@ impl LazyComputePipeline {
                     .iter()
                     .map(|(k, v)| (k.as_str(), *v))
                     .collect();
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: label.as_deref(),
-                    layout: layout.as_ref(),
-                    module: &module,
-                    entry_point: entry_point.as_deref(),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &constants,
-                        zero_initialize_workgroup_memory: compilation
-                            .zero_initialize_workgroup_memory,
-                    },
-                    cache: cache.as_ref(),
+                create_checked(&device, label.as_deref(), || {
+                    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: label.as_deref(),
+                        layout: layout.as_ref(),
+                        module: &module,
+                        entry_point: entry_point.as_deref(),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: &constants,
+                            zero_initialize_workgroup_memory: compilation
+                                .zero_initialize_workgroup_memory,
+                        },
+                        cache: cache.as_ref(),
+                    })
                 })
             }),
         )
@@ -321,10 +387,13 @@ pub fn prewarm(pipelines: Vec<WarmHandle>) {
     if queue.is_empty() {
         return;
     }
+    // Apple TV: one at a time. The Apple TV HD has 2 GB, and each compile in flight adds to
+    // the memory of Metal's compiler service (see `create_checked`).
+    let most = if cfg!(target_os = "tvos") { 1 } else { 8 };
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .clamp(1, 8)
+        .clamp(1, most)
         .min(queue.len());
     let queue = Arc::new(Mutex::new(queue));
     for _ in 0..workers {
@@ -559,5 +628,65 @@ mod tests {
             assert_eq!(**p, 7);
         }
         assert_eq!(n.load(Ordering::SeqCst), 7);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn compute(device: &wgpu::Device, label: &str, entry: &str) -> LazyComputePipeline {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("lazy_pipeline_test"),
+            source: wgpu::ShaderSource::Wgsl("@compute @workgroup_size(1) fn main() {}".into()),
+        });
+        LazyComputePipeline::new(
+            device,
+            &wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_valid_pipeline_builds_through_the_error_scopes() {
+        let Some((device, _queue)) = try_device() else {
+            return;
+        };
+        let p = compute(&device, "ok", "main");
+        let _ = p.get();
+        assert!(p.is_built());
+    }
+
+    /// wgpu's default handler panicked without the pipeline's name (the Apple TV HD review
+    /// crash); a rejected pipeline now names itself.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_invalid_pipeline_panics_with_its_name() {
+        let Some((device, _queue)) = try_device() else {
+            return;
+        };
+        let p = compute(&device, "broken_test_pipeline", "no_such_entry");
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = p.get();
+        }))
+        .expect_err("an invalid pipeline must not build quietly");
+        let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(msg.contains("broken_test_pipeline"), "{msg}");
+        assert!(msg.contains("is invalid"), "{msg}");
     }
 }
