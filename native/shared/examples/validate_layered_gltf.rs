@@ -87,7 +87,7 @@ fn main() -> ExitCode {
         let authored_tangents = model
             .meshes
             .iter()
-            .flat_map(|mesh| &mesh.vertices)
+            .flat_map(|mesh| mesh.vertices.to_vertices())
             .filter(|vertex| {
                 let tangent = vertex.tangent;
                 tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2] > 1e-6
@@ -150,7 +150,7 @@ fn main() -> ExitCode {
             let mut normal_maximum = [f32::NEG_INFINITY; 3];
             let mut position_minimum = [f32::INFINITY; 3];
             let mut position_maximum = [f32::NEG_INFINITY; 3];
-            for vertex in &mesh.vertices {
+            for vertex in &mesh.vertices.to_vertices() {
                 for channel in 0..3 {
                     normal_minimum[channel] = normal_minimum[channel].min(vertex.normal[channel]);
                     normal_maximum[channel] = normal_maximum[channel].max(vertex.normal[channel]);
@@ -166,7 +166,7 @@ fn main() -> ExitCode {
                 (position_minimum[2] + position_maximum[2]) * 0.5,
             ];
             let mut radial_normal_dot = [f32::INFINITY, f32::NEG_INFINITY, 0.0];
-            for vertex in &mesh.vertices {
+            for vertex in &mesh.vertices.to_vertices() {
                 let radial = [
                     vertex.position[0] - center[0],
                     vertex.position[1] - center[1],

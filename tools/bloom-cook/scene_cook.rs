@@ -158,8 +158,9 @@ fn convert_primitive(
 ) -> Option<format::Primitive> {
     let invalid_positions = mesh
         .vertices
+        .positions()
         .iter()
-        .map(|vertex| vertex.position.iter().any(|value| !value.is_finite()))
+        .map(|position| position.iter().any(|value| !value.is_finite()))
         .collect::<Vec<_>>();
     sanitation.non_finite_position_vertices = sanitation
         .non_finite_position_vertices
@@ -190,6 +191,7 @@ fn convert_primitive(
     }
     let vertices = mesh
         .vertices
+        .to_vertices()
         .iter()
         .zip(invalid_positions)
         .map(|(vertex, invalid_position)| {
