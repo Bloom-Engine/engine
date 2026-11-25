@@ -10,8 +10,9 @@
 //! shared 32-byte buffer of zeros, so every vertex sees exactly the zeros its
 //! 96-byte vertex held. Nothing in any shader changes.
 //!
-//! A skinned mesh (any vertex whose weights add up to more than 0.01, the test
-//! the engine's shaders and model cache already use) keeps the 96-byte layout.
+//! Any mesh with a joint or weight that is not exactly +0.0 (a skinned mesh, or
+//! one whose skin data a game shader could read) keeps the 96-byte layout, so
+//! a 64-byte mesh's zeros are exactly what its vertices held.
 //! A pass that can draw both kinds holds a pipeline for each
 //! (`ByLayout`) and picks one per draw from the mesh's `VertexLayout`, which
 //! is stored next to its vertex buffer. The zero stream goes in the slot after
@@ -133,9 +134,13 @@ fn static_layout_enabled() -> bool {
     !STATIC_LAYOUT_OFF.load(Ordering::Relaxed)
 }
 
-/// The skin test of the engine's shaders and model cache.
-pub(crate) fn weights_skin(w: [f32; 4]) -> bool {
-    w[0] + w[1] + w[2] + w[3] > 0.01
+/// True when a vertex's joints and weights are all exactly +0.0: the zero
+/// stream then gives a shader exactly what the vertex holds.
+fn skin_is_zero(joints: [f32; 4], weights: [f32; 4]) -> bool {
+    joints
+        .iter()
+        .chain(weights.iter())
+        .all(|v| v.to_bits() == 0)
 }
 
 /// Which of the two formats a mesh's vertex buffer holds.
@@ -169,10 +174,10 @@ impl VertexLayout {
         }
     }
 
-    /// The format these vertices go to the GPU in: 96 bytes if any vertex is
-    /// skinned, else 64.
+    /// The format these vertices go to the GPU in: 64 bytes when every joint
+    /// and weight is exactly zero, else 96.
     pub fn for_vertices(vertices: &[Vertex3D]) -> Self {
-        if !static_layout_enabled() || vertices.iter().any(|v| weights_skin(v.weights)) {
+        if !static_layout_enabled() || !vertices.iter().all(|v| skin_is_zero(v.joints, v.weights)) {
             VertexLayout::Full96
         } else {
             VertexLayout::Static64
@@ -181,7 +186,9 @@ impl VertexLayout {
 
     /// As `for_vertices`, for a shared model primitive's compact store.
     pub fn for_store(store: &crate::models::VertexStore) -> Self {
-        if !static_layout_enabled() || (0..store.len()).any(|i| weights_skin(store.weight(i))) {
+        if !static_layout_enabled()
+            || !(0..store.len()).all(|i| skin_is_zero(store.joint(i), store.weight(i)))
+        {
             VertexLayout::Full96
         } else {
             VertexLayout::Static64
@@ -440,6 +447,23 @@ mod tests {
         );
         let store = crate::models::VertexStore::from_vertices(&vertices);
         assert_eq!(VertexLayout::for_store(&store), VertexLayout::Full96);
+    }
+
+    #[test]
+    fn any_skin_data_a_shader_could_read_keeps_96_bytes() {
+        let base: Vec<Vertex3D> = (0..3).map(vertex).collect();
+        for (joints, weights) in [
+            ([7.0, 0.0, 0.0, 0.0], [0.0; 4]),   // joints, no weights
+            ([0.0; 4], [0.005, 0.0, 0.0, 0.0]), // under the shaders' skin test
+            ([-0.0, 0.0, 0.0, 0.0], [0.0; 4]),  // negative zero is not +0.0
+        ] {
+            let mut vertices = base.clone();
+            vertices[2].joints = joints;
+            vertices[2].weights = weights;
+            assert_eq!(VertexLayout::for_vertices(&vertices), VertexLayout::Full96);
+            let store = crate::models::VertexStore::from_vertices(&vertices);
+            assert_eq!(VertexLayout::for_store(&store), VertexLayout::Full96);
+        }
     }
 
     #[test]
