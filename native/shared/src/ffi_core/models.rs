@@ -231,7 +231,8 @@ macro_rules! __bloom_ffi_models {
                 let textures = eng.models.exclusive_texture_indices(handle);
                 eng.models.unload_model(handle);
                 for idx in textures {
-                    eng.renderer.unload_texture(idx);
+                    // a texture other models share by content stays for them
+                    eng.renderer.release_model_texture(idx);
                 }
             })
         }
