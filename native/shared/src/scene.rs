@@ -1859,24 +1859,25 @@ impl SceneGraph {
                     && lod.gpu_geometry.is_none()
                     && !lod.gpu_geometry_refused
                 {
-                    let shared_whole;
-                    let (vertices, indices): (&[Vertex3D], &[u32]) = match lod.shared.as_ref() {
-                        Some(mesh) => {
-                            shared_whole = mesh.vertices.to_vertices();
-                            (&shared_whole[..], &mesh.indices[..])
-                        }
-                        None => (&lod.vertices[..], &lod.indices[..]),
+                    let (vertex_count, indices) = match lod.shared.as_ref() {
+                        Some(mesh) => (mesh.vertices.len(), &mesh.indices[..]),
+                        None => (lod.vertices.len(), &lod.indices[..]),
                     };
-                    if !vertices.is_empty() && !indices.is_empty() {
+                    if vertex_count != 0 && !indices.is_empty() {
                         let key = match lod.shared.as_ref() {
                             Some(mesh) => shared_mesh_cache.key(mesh),
-                            None => scene_geometry_key(vertices, indices),
+                            None => scene_geometry_key(&lod.vertices, indices),
                         };
                         let slice = if let Some(cached) = shared_gpu_geometry.get_mut(&key) {
                             cached.references = cached.references.saturating_add(1);
                             Some(cached.slice)
                         } else {
-                            let slice = gpu_driven.upload_static(device, queue, vertices, indices);
+                            // whole vertices only for the upload itself
+                            let vertices = match lod.shared.as_ref() {
+                                Some(mesh) => std::borrow::Cow::Owned(mesh.vertices.to_vertices()),
+                                None => std::borrow::Cow::Borrowed(&lod.vertices[..]),
+                            };
+                            let slice = gpu_driven.upload_static(device, queue, &vertices, indices);
                             if let Some(slice) = slice {
                                 shared_gpu_geometry.insert(
                                     key,
