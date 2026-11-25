@@ -84,7 +84,8 @@ fn fs_reactive(in: VsOut) -> ReactiveTranslucentOut {
                 vertex([0.55, -0.55, 0.0]),
                 vertex([0.55, 0.55, 0.0]),
                 vertex([-0.55, 0.55, 0.0]),
-            ],
+            ]
+            .into(),
             secondary_tex_coords: None,
             indices: vec![0, 1, 2, 0, 2, 3],
             texture_idx: None,
@@ -334,7 +335,7 @@ fn cached_skinned_motion_sequence_bounds_animation_trails() {
     assert!(eng.renderer.cache_model_if_static(
         HANDLE,
         &[MeshData {
-            vertices,
+            vertices: vertices.into(),
             secondary_tex_coords: None,
             indices,
             texture_idx: None,
@@ -450,7 +451,7 @@ fn cached_alpha_tested_card_motion_writes_velocity_and_bounds_trails() {
     assert!(eng.renderer.cache_model_if_static(
         HANDLE,
         &[MeshData {
-            vertices,
+            vertices: vertices.into(),
             secondary_tex_coords: None,
             indices: vec![0, 1, 2, 0, 2, 3],
             texture_idx: Some(texture),

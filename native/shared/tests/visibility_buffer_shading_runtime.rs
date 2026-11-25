@@ -283,7 +283,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     };
     let material_model = ModelData {
         meshes: vec![Arc::new(MeshData {
-            vertices: vertices.clone(),
+            vertices: vertices.clone().into(),
             secondary_tex_coords: None,
             indices: vec![0, 1, 2],
             texture_idx: None,
@@ -408,7 +408,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         vertex.color = [0.95, 0.05, 0.1, 0.65];
     }
     let compatibility_mesh = Arc::new(MeshData {
-        vertices: compatibility_vertices,
+        vertices: compatibility_vertices.into(),
         secondary_tex_coords: None,
         indices: vec![0, 1, 2],
         texture_idx: None,
@@ -573,7 +573,7 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
     let mut skinned_vertices = compatibility_vertices_for_skinning();
     skinned_vertices[2].joints = [1.0, 0.0, 0.0, 0.0];
     let skinned_mesh = Arc::new(MeshData {
-        vertices: skinned_vertices,
+        vertices: skinned_vertices.into(),
         secondary_tex_coords: None,
         indices: vec![0, 1, 2],
         texture_idx: None,

@@ -18,7 +18,7 @@ const GRID: usize = 24;
 
 fn mesh(vertices: Vec<Vertex3D>, indices: Vec<u32>, morph: Option<Arc<MorphTargets>>) -> MeshData {
     MeshData {
-        vertices,
+        vertices: vertices.into(),
         secondary_tex_coords: None,
         indices,
         texture_idx: None,

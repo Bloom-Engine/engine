@@ -53,7 +53,7 @@ fn vertex_is_skinned(vertex: &Vertex3D) -> bool {
 }
 
 fn mesh_is_skinned(mesh: &MeshData) -> bool {
-    mesh.vertices.iter().any(vertex_is_skinned)
+    (0..mesh.vertices.len()).any(|i| mesh.vertices.weight(i).iter().sum::<f32>() > 0.01)
 }
 
 pub(super) fn shared_or_owned_instance(
@@ -80,7 +80,8 @@ pub(super) fn shared_or_owned_instance(
 fn bake_owned_mesh_instance(mut instance: MeshData, world: &[[f32; 4]; 4]) -> MeshData {
     let normal_transform = mat4_inverse_transpose_3x3(world);
     let has_skinning = mesh_is_skinned(&instance);
-    for vertex in &mut instance.vertices {
+    let mut vertices = instance.vertices.to_vertices();
+    for vertex in &mut vertices {
         if vertex_is_skinned(vertex) {
             continue;
         }
@@ -101,11 +102,7 @@ fn bake_owned_mesh_instance(mut instance: MeshData, world: &[[f32; 4]; 4]) -> Me
     // the node's linear part (positions, tangents) and its inverse
     // transpose (normals). Skinned vertices' deltas stay in bind space.
     if let Some(morph) = instance.morph.as_ref() {
-        let rigid: Vec<bool> = instance
-            .vertices
-            .iter()
-            .map(|v| !vertex_is_skinned(v))
-            .collect();
+        let rigid: Vec<bool> = vertices.iter().map(|v| !vertex_is_skinned(v)).collect();
         if rigid.iter().any(|r| *r) {
             instance.morph = morph
                 .mapped(|v, d| {
@@ -118,6 +115,7 @@ fn bake_owned_mesh_instance(mut instance: MeshData, world: &[[f32; 4]; 4]) -> Me
                 .map(Arc::new);
         }
     }
+    instance.vertices = vertices.into();
     instance
 }
 
@@ -206,8 +204,8 @@ pub(super) fn model_bounds(
             .get(index)
             .copied()
             .unwrap_or(crate::renderer::IDENTITY_MAT4);
-        for vertex in &mesh.vertices {
-            let position = mat4_transform_point(&transform, &vertex.position);
+        for vertex in mesh.vertices.positions() {
+            let position = mat4_transform_point(&transform, vertex);
             for axis in 0..3 {
                 minimum[axis] = minimum[axis].min(position[axis]);
                 maximum[axis] = maximum[axis].max(position[axis]);
@@ -235,7 +233,8 @@ mod tests {
                 joints: [0.0; 4],
                 weights: [0.0; 4],
                 tangent: [0.0; 4],
-            }],
+            }]
+            .into(),
             secondary_tex_coords: None,
             indices: vec![0],
             texture_idx: None,

@@ -119,7 +119,8 @@ fn convert_primitive(
                 weights: vertex.weights,
                 tangent: vertex.tangent,
             })
-            .collect(),
+            .collect::<Vec<_>>()
+            .into(),
         secondary_tex_coords: primitive.secondary_tex_coords,
         indices: primitive.indices,
         texture_idx: remap_texture(material.base_color_texture, texture_handles)?,

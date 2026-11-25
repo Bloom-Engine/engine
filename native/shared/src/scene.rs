@@ -451,14 +451,6 @@ impl SceneNode {
         }
     }
 
-    /// Read the node's effective local vertex payload. Imported geometry may
-    /// be backed by an immutable shared model primitive.
-    pub fn vertices(&self) -> &[Vertex3D] {
-        self.shared_model_mesh
-            .as_ref()
-            .map_or(self.vertices.as_slice(), |mesh| mesh.vertices.as_slice())
-    }
-
     /// Read the node's effective local index payload. Imported geometry may
     /// be backed by an immutable shared model primitive.
     pub fn indices(&self) -> &[u32] {
@@ -993,7 +985,7 @@ impl SceneGraph {
             }
             next_node += 1;
             if !node.visible
-                || node.vertices().is_empty()
+                || node.vertex_count() == 0
                 || node.indices().is_empty()
                 || (exclude_physical_transmission && node.material.has_gi_transmission())
             {
@@ -1001,7 +993,7 @@ impl SceneGraph {
             }
             let before = vbuf.len();
             tri_count += crate::scene_gi_soup::append_node_triangles_in(
-                node.vertices(),
+                &node.positions(),
                 node.indices(),
                 &node.world_transform(),
                 min_feature,
@@ -1204,10 +1196,10 @@ impl SceneGraph {
         };
         let mut bmin = [f32::MAX; 3];
         let mut bmax = [f32::MIN; 3];
-        for vertex in &mesh.vertices {
+        for position in mesh.vertices.positions() {
             for axis in 0..3 {
-                bmin[axis] = bmin[axis].min(vertex.position[axis]);
-                bmax[axis] = bmax[axis].max(vertex.position[axis]);
+                bmin[axis] = bmin[axis].min(position[axis]);
+                bmax[axis] = bmax[axis].max(position[axis]);
             }
         }
         if mesh.vertices.is_empty() {
@@ -1867,20 +1859,25 @@ impl SceneGraph {
                     && lod.gpu_geometry.is_none()
                     && !lod.gpu_geometry_refused
                 {
-                    let (vertices, indices) = match lod.shared.as_ref() {
-                        Some(mesh) => (&mesh.vertices[..], &mesh.indices[..]),
-                        None => (&lod.vertices[..], &lod.indices[..]),
+                    let (vertex_count, indices) = match lod.shared.as_ref() {
+                        Some(mesh) => (mesh.vertices.len(), &mesh.indices[..]),
+                        None => (lod.vertices.len(), &lod.indices[..]),
                     };
-                    if !vertices.is_empty() && !indices.is_empty() {
+                    if vertex_count != 0 && !indices.is_empty() {
                         let key = match lod.shared.as_ref() {
                             Some(mesh) => shared_mesh_cache.key(mesh),
-                            None => scene_geometry_key(vertices, indices),
+                            None => scene_geometry_key(&lod.vertices, indices),
                         };
                         let slice = if let Some(cached) = shared_gpu_geometry.get_mut(&key) {
                             cached.references = cached.references.saturating_add(1);
                             Some(cached.slice)
                         } else {
-                            let slice = gpu_driven.upload_static(device, queue, vertices, indices);
+                            // whole vertices only for the upload itself
+                            let vertices = match lod.shared.as_ref() {
+                                Some(mesh) => std::borrow::Cow::Owned(mesh.vertices.to_vertices()),
+                                None => std::borrow::Cow::Borrowed(&lod.vertices[..]),
+                            };
+                            let slice = gpu_driven.upload_static(device, queue, &vertices, indices);
                             if let Some(slice) = slice {
                                 shared_gpu_geometry.insert(
                                     key,
@@ -1905,7 +1902,7 @@ impl SceneGraph {
 
             let geometry_changed = node.geo_dirty;
             if geometry_changed || node.gpu_vb.is_none() {
-                let resource_key = (!node.vertices().is_empty() && !node.indices().is_empty())
+                let resource_key = (node.vertex_count() != 0 && !node.indices().is_empty())
                     .then(|| node_geometry_key(node, shared_mesh_cache));
                 if node.gpu_resource_key != resource_key {
                     if let Some(old_key) = node.gpu_resource_key.take() {
@@ -1971,7 +1968,7 @@ impl SceneGraph {
                     node.gpu_vb = Some(device.create_buffer_init(
                         &wgpu::util::BufferInitDescriptor {
                             label: Some("scene_shared_vb"),
-                            contents: bytemuck::cast_slice(node.vertices()),
+                            contents: bytemuck::cast_slice(&node.vertices()),
                             usage: vb_usage,
                         },
                     ));
@@ -1984,7 +1981,7 @@ impl SceneGraph {
                     ));
                 }
                 node.gpu_index_count = node.indices().len() as u32;
-                node.gpu_vertex_count = node.vertices().len() as u32;
+                node.gpu_vertex_count = node.vertex_count() as u32;
                 node.geo_dirty = false;
 
                 // Ticket 014 V4 — flat normal/albedo + card-slot
@@ -1996,12 +1993,7 @@ impl SceneGraph {
                 // remain hw-rt-gated because only the HW trace reads
                 // those (and the per-mesh SDFs are currently dormant).
                 if !node.indices().is_empty() {
-                    let mut n_sum = [0.0_f32; 3];
-                    for v in node.vertices() {
-                        n_sum[0] += v.normal[0];
-                        n_sum[1] += v.normal[1];
-                        n_sum[2] += v.normal[2];
-                    }
+                    let n_sum = node.normal_sum();
                     let world_transform = node.world_transform();
                     let t = &world_transform;
                     let nx = t[0][0] * n_sum[0] + t[1][0] * n_sum[1] + t[2][0] * n_sum[2];
@@ -2082,8 +2074,7 @@ impl SceneGraph {
                             // pull the position prefix out as a
                             // [[f32; 3]] slice so the hash only sees
                             // geometry-relevant bytes.
-                            let positions: Vec<[f32; 3]> =
-                                node.vertices().iter().map(|v| v.position).collect();
+                            let positions: Vec<[f32; 3]> = node.positions().into_owned();
                             let hash =
                                 crate::sdf_cache::compute_mesh_hash(&positions, node.indices());
                             node.mesh_hash = Some(hash);
@@ -2176,7 +2167,7 @@ impl SceneGraph {
             // Main/depth GPU submission uses one deduplicated arena slice.
             // The legacy buffers above deliberately stay alive for secondary
             // passes, which makes this an additive and reversible fast path.
-            if geometry_changed && (node.vertices().is_empty() || node.indices().is_empty()) {
+            if geometry_changed && (node.vertex_count() == 0 || node.indices().is_empty()) {
                 if let Some(old_key) = node.gpu_geometry_key.take() {
                     release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
                 }
@@ -2188,7 +2179,7 @@ impl SceneGraph {
             if gpu_driven.enabled()
                 && gpu_driven_scene_active
                 && (geometry_changed || (node.gpu_geometry.is_none() && !node.gpu_geometry_refused))
-                && !node.vertices().is_empty()
+                && node.vertex_count() != 0
                 && !node.indices().is_empty()
             {
                 let key = node_geometry_key(node, shared_mesh_cache);
@@ -2204,7 +2195,7 @@ impl SceneGraph {
                         let slice = gpu_driven.upload_static(
                             device,
                             queue,
-                            node.vertices(),
+                            &node.vertices(),
                             node.indices(),
                         );
                         if let Some(slice) = slice {
@@ -2764,6 +2755,7 @@ impl SceneGraph {
 
 mod draw_lists;
 mod helpers;
+mod node_vertices;
 mod shared_mesh;
 use helpers::*;
 pub(crate) use helpers::{aabb_outside_frustum, extract_frustum_planes};

@@ -534,7 +534,7 @@ macro_rules! __bloom_ffi_scene {
         pub extern "C" fn bloom_scene_node_vertex_count(handle: f64) -> f64 {
             $crate::ffi::guard("bloom_scene_node_vertex_count", move || {
                 match engine().scene.nodes.get(handle) {
-                    Some(node) => node.vertices().len() as f64,
+                    Some(node) => node.vertex_count() as f64,
                     None => -1.0,
                 }
             })
@@ -751,7 +751,7 @@ macro_rules! __bloom_ffi_scene {
                 let eng = engine();
                 if let Some(node) = eng.scene.nodes.get(handle) {
                     let current = $crate::geometry::GeometryData {
-                        vertices: node.vertices().to_vec(),
+                        vertices: node.vertices().into_owned(),
                         indices: node.indices().to_vec(),
                     };
                     let result = $crate::geometry::subtract_box(

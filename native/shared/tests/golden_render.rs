@@ -712,13 +712,16 @@ fn gltf_blend_is_fractional_and_not_cutout_or_opaque() {
     assert!(eng.renderer.cache_model_if_static(
         OPAQUE_HANDLE,
         &[cached_mesh(
-            cached_opaque_vertices,
+            cached_opaque_vertices.into(),
             MaterialAlphaMode::Opaque
         )]
     ));
     assert!(eng.renderer.cache_model_if_static(
         BLEND_HANDLE,
-        &[cached_mesh(cached_blend_vertices, MaterialAlphaMode::Blend)]
+        &[cached_mesh(
+            cached_blend_vertices.into(),
+            MaterialAlphaMode::Blend
+        )]
     ));
     let (_, _, cached_opaque) = render(&mut eng, 3, |eng| {
         draw(eng);
@@ -820,7 +823,7 @@ fn mask_coverage_mips_preserve_subpixel_silhouette_area() {
     ];
     let indices = vec![0, 1, 2, 0, 2, 3];
     let mask_mesh = |texture_idx, alpha_coverage_mips| MeshData {
-        vertices: vertices.clone(),
+        vertices: vertices.clone().into(),
         secondary_tex_coords: None,
         indices: indices.clone(),
         texture_idx: Some(texture_idx),
@@ -959,7 +962,7 @@ fn gltf_transmission_uses_physical_retained_and_cached_paths() {
     assert!(eng.renderer.cache_model_if_static(
         TRANSMISSION_HANDLE,
         &[MeshData {
-            vertices: glass_vertices,
+            vertices: glass_vertices.into(),
             secondary_tex_coords: None,
             indices: glass_indices,
             texture_idx: None,
@@ -1077,7 +1080,7 @@ fn physical_texcoord_1_matches_between_retained_cached_shadow_and_reactive_paths
     const UV1_HANDLE: u64 = 0x7A11_5101;
     const FALLBACK_HANDLE: u64 = 0x7A11_5102;
     let mesh = |secondary_tex_coords| MeshData {
-        vertices: glass_vertices.clone(),
+        vertices: glass_vertices.clone().into(),
         secondary_tex_coords,
         indices: glass_indices.clone(),
         texture_idx: None,
