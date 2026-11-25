@@ -640,10 +640,7 @@ macro_rules! __bloom_ffi_models {
             $crate::ffi::guard("bloom_load_model_animation", move || {
                 let path = $crate::string_header::str_from_header(path_ptr);
                 let path: &str = &bloom_resolve_asset_path(path);
-                match std::fs::read(path) {
-                    Ok(data) => engine().models.load_model_animation(&data),
-                    Err(_) => 0.0,
-                }
+                engine().models.load_model_animation_file(std::path::Path::new(path))
         })
         }
         #[cfg(not(feature = "models3d"))]

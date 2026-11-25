@@ -22,6 +22,8 @@ use material_import::{
     apply_transmission_hack, emit_unsupported_material_extension_diagnostics,
     transmission_from_material,
 };
+#[path = "models_gltf_anim_file.rs"]
+mod anim_file;
 #[path = "models_gltf_bake.rs"]
 mod bake;
 #[path = "models_gltf_morph.rs"]
@@ -179,10 +181,21 @@ fn take_buffers(
 
 pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
     let mut gltf = parse::parse_gltf(data)?;
-
-    // Get buffer data
     let buffer_data = take_buffers(&mut gltf, None, false)?;
+    animation_from(&gltf, &buffer_data)
+}
 
+/// A GLB's skeleton and clips read from the file itself: the JSON and only the
+/// byte ranges the skin and the animations use (models_gltf_anim_file.rs).
+/// Anything that does not handle falls back to reading the whole file.
+pub fn load_gltf_animation_file(path: &std::path::Path) -> Option<ModelAnimation> {
+    if let Some(anim) = anim_file::load(path) {
+        return anim;
+    }
+    load_gltf_animation(&std::fs::read(path).ok()?)
+}
+
+fn animation_from(gltf: &gltf::Gltf, buffer_data: &[Vec<u8>]) -> Option<ModelAnimation> {
     // Parse skeleton from the first skin
     let skeleton = if let Some(skin) = gltf.skins().next() {
         let joints_nodes: Vec<_> = skin.joints().collect();
