@@ -6,7 +6,6 @@
 //! dynamic-overlay, dedicated-buffer, overflow, small, and unsupported cases
 //! remain on the compatibility renderer.
 
-use super::Vertex3D;
 use std::ops::Range;
 
 /// Below this per-page count the compatibility loop is lower overhead.
@@ -221,7 +220,9 @@ impl VsmGpuCasters {
                     vertex: wgpu::VertexState {
                         module: &shader,
                         entry_point: Some("vs_shadow"),
-                        buffers: &[Vertex3D::desc()],
+                        // The shared arena, in its vertex format; the shader
+                        // reads only the position, so no zero joints/weights.
+                        buffers: &[super::VertexLayout::arena().primary_desc()],
                         compilation_options: Default::default(),
                     },
                     fragment: None,

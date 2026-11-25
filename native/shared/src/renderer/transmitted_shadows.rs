@@ -581,7 +581,7 @@ fn create_transmitted_shadow_caster_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     secondary_uv: bool,
-) -> wgpu::RenderPipeline {
+) -> MeshPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(if secondary_uv {
             "transmitted_shadow_caster_uv1_shader"
@@ -600,52 +600,55 @@ fn create_transmitted_shadow_caster_pipeline(
     } else {
         &base_layouts[..]
     };
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(if secondary_uv {
-            "transmitted_shadow_caster_uv1_pipeline"
-        } else {
-            "transmitted_shadow_caster_pipeline"
-        }),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: vertex_layouts,
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: TRANSMITTED_SHADOW_COLOR_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            // Nearest-layer depth removes the back surface of closed volumes
-            // while still accepting either orientation of a pane.
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: TRANSMITTED_SHADOW_DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
-            stencil: Default::default(),
-            bias: wgpu::DepthBiasState {
-                constant: 1,
-                slope_scale: 1.0,
-                clamp: 0.0,
+    MeshPipelines::lazy(
+        device,
+        &wgpu::RenderPipelineDescriptor {
+            label: Some(if secondary_uv {
+                "transmitted_shadow_caster_uv1_pipeline"
+            } else {
+                "transmitted_shadow_caster_pipeline"
+            }),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: vertex_layouts,
+                compilation_options: Default::default(),
             },
-        }),
-        multisample: Default::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TRANSMITTED_SHADOW_COLOR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                // Nearest-layer depth removes the back surface of closed volumes
+                // while still accepting either orientation of a pane.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: TRANSMITTED_SHADOW_DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 1,
+                    slope_scale: 1.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        },
+    )
 }
 
 pub(super) struct TransmittedShadowResources {
@@ -657,8 +660,8 @@ pub(super) struct TransmittedShadowResources {
     draw_uniform_bind_group: wgpu::BindGroup,
     blocker_bind_groups: [wgpu::BindGroup; crate::shadows::NUM_CASCADES],
     caster_pipeline_layout: wgpu::PipelineLayout,
-    caster_pipeline: wgpu::RenderPipeline,
-    caster_uv1_pipeline: Option<wgpu::RenderPipeline>,
+    caster_pipeline: MeshPipelines,
+    caster_uv1_pipeline: Option<MeshPipelines>,
     resolve_uniform_buffer: wgpu::Buffer,
     resolve_layout: wgpu::BindGroupLayout,
     resolve_pipeline: wgpu::RenderPipeline,
@@ -1064,6 +1067,7 @@ impl Renderer {
 
         struct Draw<'a> {
             vertex: &'a wgpu::Buffer,
+            layout: VertexLayout,
             secondary_uv: Option<&'a wgpu::Buffer>,
             index: &'a wgpu::Buffer,
             material: &'a wgpu::BindGroup,
@@ -1126,6 +1130,7 @@ impl Renderer {
             };
             draws.push(Draw {
                 vertex,
+                layout: node.gpu_vb_layout,
                 secondary_uv,
                 index: index_buffer,
                 material,
@@ -1204,6 +1209,7 @@ impl Renderer {
             }
             draws.push(Draw {
                 vertex: geometry.vertex,
+                layout: geometry.layout,
                 secondary_uv,
                 index: geometry.index,
                 material,
@@ -1325,16 +1331,17 @@ impl Renderer {
                 let draw = &draws[draw_index];
                 self.bind_joint_page(&mut pass, 3, draw.joint_offset, &mut joint_page);
                 let uses_uv1 = draw.secondary_uv.is_some();
-                if current_uses_uv1 != Some(uses_uv1) {
-                    pass.set_pipeline(if uses_uv1 {
+                if current_uses_uv1 != Some((uses_uv1, draw.layout)) {
+                    let pipelines = if uses_uv1 {
                         resources
                             .caster_uv1_pipeline
                             .as_ref()
                             .expect("UV1 transmitted-shadow pipeline initialized on material use")
                     } else {
                         &resources.caster_pipeline
-                    });
-                    current_uses_uv1 = Some(uses_uv1);
+                    };
+                    pass.set_pipeline(pipelines.get(draw.layout));
+                    current_uses_uv1 = Some((uses_uv1, draw.layout));
                 }
                 let offset = (cascade_base + slot * stride) as u32;
                 pass.set_bind_group(0, &resources.draw_uniform_bind_group, &[offset]);
@@ -1343,6 +1350,12 @@ impl Renderer {
                 if let Some(secondary_uv) = draw.secondary_uv {
                     pass.set_vertex_buffer(1, secondary_uv.slice(..));
                 }
+                bind_skin_zero(
+                    &mut pass,
+                    draw.layout,
+                    vertex_formats::zero_slot(u32::from(uses_uv1)),
+                    self.gpu_driven.skin_zero(),
+                );
                 pass.set_index_buffer(
                     draw.index.slice(draw.index_byte_offset..),
                     wgpu::IndexFormat::Uint32,

@@ -127,9 +127,9 @@ impl Renderer {
                     ],
                     immediate_size: 0,
                 });
-            let pipeline = self
-                .device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            let pipeline = MeshPipelines::lazy(
+                &self.device,
+                &wgpu::RenderPipelineDescriptor {
                     label: Some("reflect_scene_pipeline"),
                     layout: Some(&pl),
                     vertex: wgpu::VertexState {
@@ -163,7 +163,8 @@ impl Renderer {
                     multisample: Default::default(),
                     multiview_mask: None,
                     cache: None,
-                });
+                },
+            );
             let model_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("reflect_model_buf"),
                 size: REFLECT_STRIDE * REFLECT_MAX_DRAWS as u64,
@@ -580,7 +581,9 @@ impl Renderer {
                     staged[base + 64..base + 128].copy_from_slice(bytemuck::bytes_of(&cmd.model));
                     reflect_draws.push((cmd.cache_handle, cmd.mesh_idx, slot as u32));
                 }
-                for (i, (_vb, _ib, _ic, _bg, model, wmin, wmax)) in scene_draws.iter().enumerate() {
+                for (i, (_vb, _ib, _ic, _layout, _bg, model, wmin, wmax)) in
+                    scene_draws.iter().enumerate()
+                {
                     let slot = reflect_draws.len() + node_slots.len();
                     if slot >= REFLECT_MAX_DRAWS {
                         break;
@@ -740,11 +743,12 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
+                let zero = self.gpu_driven.skin_zero();
                 if let (Some(rp), Some(rmbg), Some(rlbg)) =
                     (refl_pipeline, refl_model_bg, refl_light_bg)
                 {
                     if !reflect_draws.is_empty() || !node_slots.is_empty() {
-                        pass.set_pipeline(rp);
+                        let mut current_layout = None;
                         pass.set_bind_group(1, rlbg, &[]);
                         for (handle, midx, slot) in &reflect_draws {
                             if let Some(Some(meshes)) = cache.get(handle) {
@@ -752,9 +756,14 @@ impl Renderer {
                                     let mesh = &meshes[*midx];
                                     let draw =
                                         self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
+                                    if current_layout != Some(draw.layout) {
+                                        pass.set_pipeline(rp.get(draw.layout));
+                                        current_layout = Some(draw.layout);
+                                    }
                                     pass.set_bind_group(0, rmbg, &[*slot * REFLECT_STRIDE as u32]);
                                     pass.set_bind_group(2, &mesh.material_bg, &[]);
                                     pass.set_vertex_buffer(0, draw.vertex.slice(..));
+                                    bind_skin_zero(&mut pass, draw.layout, 1, zero);
                                     pass.set_index_buffer(
                                         draw.index.slice(..),
                                         wgpu::IndexFormat::Uint32,
@@ -767,11 +776,16 @@ impl Renderer {
                         // Vertex3D and node material bind groups share the
                         // scene material layout the pipeline's g2 expects.
                         for (i, slot) in &node_slots {
-                            let (vb, ib, index_count, mat_bg, _model, _wmin, _wmax) =
+                            let (vb, ib, index_count, layout, mat_bg, _model, _wmin, _wmax) =
                                 &scene_draws[*i];
+                            if current_layout != Some(*layout) {
+                                pass.set_pipeline(rp.get(*layout));
+                                current_layout = Some(*layout);
+                            }
                             pass.set_bind_group(0, rmbg, &[*slot * REFLECT_STRIDE as u32]);
                             pass.set_bind_group(2, *mat_bg, &[]);
                             pass.set_vertex_buffer(0, vb.slice(..));
+                            bind_skin_zero(&mut pass, *layout, 1, zero);
                             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                             pass.draw_indexed(0..*index_count, 0, 0..1);
                         }

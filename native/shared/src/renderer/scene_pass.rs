@@ -15,14 +15,14 @@ pub(super) fn create_scene_depth_pipeline(
     visibility_target: bool,
     cull_mode: Option<wgpu::Face>,
     cutout: bool,
-) -> super::lazy_pipeline::LazyRenderPipeline {
+) -> super::vertex_formats::MeshPipelines {
     let targets = [visibility_target.then_some(wgpu::ColorTargetState {
         format: visibility_buffer::VISIBILITY_FORMAT,
         blend: None,
         // Cached-model depth draws do not own packed visibility IDs.
         write_mask: wgpu::ColorWrites::empty(),
     })];
-    super::lazy_pipeline::LazyRenderPipeline::new(
+    super::vertex_formats::MeshPipelines::lazy(
         device,
         &wgpu::RenderPipelineDescriptor {
             label: Some(label),
@@ -224,11 +224,12 @@ impl Renderer {
                 let one_pipeline = self.dbg_skip("prepass_split"); // A/B diag
                 let mut joint_page = 0;
                 for cutout_round in [false, true] {
-                    pass.set_pipeline(match &self.scene_depth_visibility_pipeline {
+                    let depth_pipelines = match &self.scene_depth_visibility_pipeline {
                         Some(visibility) => visibility,
                         None if cutout_round || one_pipeline => &self.scene_depth_pipeline,
                         None => &self.scene_depth_opaque_pipeline,
-                    });
+                    };
+                    let mut current_layout = None;
                     for cmd in &self.model_draw_commands {
                         if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
                             if cmd.mesh_idx < meshes.len() {
@@ -266,6 +267,10 @@ impl Renderer {
                                     cmd.joint_offset,
                                     cmd.mesh_idx,
                                 );
+                                if current_layout != Some(draw.layout) {
+                                    pass.set_pipeline(depth_pipelines.get(draw.layout));
+                                    current_layout = Some(draw.layout);
+                                }
                                 self.bind_joint_page(
                                     &mut pass,
                                     3,
@@ -279,6 +284,12 @@ impl Renderer {
                                 );
                                 pass.set_bind_group(2, &mesh.material_bg, &[]);
                                 pass.set_vertex_buffer(0, draw.vertex.slice(..));
+                                bind_skin_zero(
+                                    &mut pass,
+                                    draw.layout,
+                                    1,
+                                    self.gpu_driven.skin_zero(),
+                                );
                                 pass.set_index_buffer(
                                     draw.index.slice(..),
                                     wgpu::IndexFormat::Uint32,
@@ -292,11 +303,12 @@ impl Renderer {
                 // The opaque retained nodes, so the main pass shades each of
                 // their pixels once (see Scene::render_depth_prepass).
                 if !self.dbg_skip("scene_graph") {
-                    pass.set_pipeline(&self.scene_node_depth_pipeline);
                     scene.render_depth_prepass(
                         &mut pass,
                         self.gpu_driven.submitting(),
                         self.imported_refraction_enabled,
+                        &self.scene_node_depth_pipeline,
+                        self.gpu_driven.skin_zero(),
                     );
                 }
                 #[cfg(feature = "models3d")]
@@ -566,17 +578,14 @@ impl Renderer {
                 // write, Equal test), because the depth prepass above already stored
                 // their exact depth. That is what lets the hardware early-Z reject the
                 // occluded leaf cards instead of shading every one of them.
-                #[cfg(not(target_arch = "wasm32"))]
-                pass.set_pipeline(&self.scene_pipeline_prepassed);
                 // wasm: no prepass priming (see above) — classic Less + write.
-                #[cfg(target_arch = "wasm32")]
-                pass.set_pipeline(&self.scene_pipeline);
                 #[cfg(not(target_arch = "wasm32"))]
                 let base_cached_pipeline = &self.scene_pipeline_prepassed;
                 #[cfg(target_arch = "wasm32")]
                 let base_cached_pipeline = &self.scene_pipeline;
                 let cached_prepassed = cfg!(not(target_arch = "wasm32"));
-                let mut current_cached_pipeline = Some((false, false));
+                // (layered, uv1, vertex format); each picked per draw.
+                let mut current_cached_pipeline = None;
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);
                 pass.set_bind_group(3, &self.joint_bind_group, &[]);
 
@@ -659,24 +668,6 @@ impl Renderer {
                                 let layered_material = mesh.layered_material_bg.as_ref();
                                 let layered_uv1 =
                                     layered_material.is_some() && mesh.layered_uses_uv1;
-                                if current_cached_pipeline
-                                    != Some((layered_material.is_some(), layered_uv1))
-                                {
-                                    if layered_material.is_some() {
-                                        let resources = self
-                                            .scene_layered_pbr_resources
-                                            .as_ref()
-                                            .expect("layered material initialized its pipelines");
-                                        pass.set_pipeline(
-                                            resources
-                                                .opaque_pipeline(layered_uv1, cached_prepassed),
-                                        );
-                                    } else {
-                                        pass.set_pipeline(base_cached_pipeline);
-                                    }
-                                    current_cached_pipeline =
-                                        Some((layered_material.is_some(), layered_uv1));
-                                }
                                 let (draw, vertex_offset, index_offset) = if layered_uv1 {
                                     let Some(secondary_uv) = mesh.layered_uv1_buffer.as_ref()
                                     else {
@@ -700,6 +691,23 @@ impl Renderer {
                                     cmd.joint_offset,
                                     cmd.mesh_idx,
                                 );
+                                let key = (layered_material.is_some(), layered_uv1, draw.layout);
+                                if current_cached_pipeline != Some(key) {
+                                    if layered_material.is_some() {
+                                        let resources = self
+                                            .scene_layered_pbr_resources
+                                            .as_ref()
+                                            .expect("layered material initialized its pipelines");
+                                        pass.set_pipeline(resources.opaque_pipeline(
+                                            layered_uv1,
+                                            cached_prepassed,
+                                            draw.layout,
+                                        ));
+                                    } else {
+                                        pass.set_pipeline(base_cached_pipeline.get(draw.layout));
+                                    }
+                                    current_cached_pipeline = Some(key);
+                                }
                                 self.bind_joint_page(
                                     &mut pass,
                                     3,
@@ -717,6 +725,12 @@ impl Renderer {
                                     &[],
                                 );
                                 pass.set_vertex_buffer(0, draw.vertex.slice(vertex_offset..));
+                                bind_skin_zero(
+                                    &mut pass,
+                                    draw.layout,
+                                    vertex_formats::zero_slot(u32::from(layered_uv1)),
+                                    self.gpu_driven.skin_zero(),
+                                );
                                 pass.set_index_buffer(
                                     draw.index.slice(index_offset..),
                                     wgpu::IndexFormat::Uint32,
@@ -734,14 +748,14 @@ impl Renderer {
                 // (wasm, or a diagnostic skip) they keep the depth-writing one.
                 if !self.dbg_skip("scene_graph") {
                     // SH-055 diag
-                    pass.set_pipeline(&self.scene_pipeline);
                     scene.render_with_material_specializations(
                         &mut pass,
                         self.gpu_driven.submitting(),
                         self.imported_refraction_enabled,
                         &self.scene_pipeline,
                         self.scene_layered_pbr_resources.as_ref(),
-                        scene_nodes_prepassed.then_some(&*self.scene_node_pipeline_prepassed),
+                        scene_nodes_prepassed.then_some(&self.scene_node_pipeline_prepassed),
+                        self.gpu_driven.skin_zero(),
                     );
                 }
                 // Game-compiled opaque materials share this pass (see
@@ -839,7 +853,6 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.scene_pipeline);
             pass.set_bind_group(1, &self.lighting_bind_group, &[]);
             pass.set_bind_group(3, &self.joint_bind_group, &[]);
             scene.render_layer_with_material_specializations(
@@ -848,6 +861,7 @@ impl Renderer {
                 self.imported_refraction_enabled,
                 &self.scene_pipeline,
                 self.scene_layered_pbr_resources.as_ref(),
+                self.gpu_driven.skin_zero(),
             );
         }
         profiler.end("main_hdr_pass");
@@ -998,13 +1012,14 @@ impl Renderer {
                 &mut joint_page,
             );
             let uses_uv1 = draw.secondary_uv.is_some();
-            let pipeline_key = (draw.layered, draw.double_sided, uses_uv1);
+            let layout = draw.mesh.layout;
+            let pipeline_key = (draw.layered, draw.double_sided, uses_uv1, layout);
             if current_pipeline_key != Some(pipeline_key) {
                 let pipeline = if draw.layered {
                     self.scene_layered_refractive_resources
                         .as_ref()
                         .expect("layered refractive material initialized its pipelines")
-                        .pipeline(uses_uv1, draw.double_sided, reactive)
+                        .pipeline(uses_uv1, draw.double_sided, reactive, layout)
                 } else {
                     match (reactive, uses_uv1, draw.double_sided) {
                         (false, false, false) => self.scene_refractive_pipeline.as_ref(),
@@ -1025,6 +1040,7 @@ impl Renderer {
                             .as_ref(),
                     }
                     .expect("selected imported-refraction pipeline must be initialized")
+                    .get(layout)
                 };
                 pass.set_pipeline(pipeline);
                 current_pipeline_key = Some(pipeline_key);
@@ -1035,6 +1051,12 @@ impl Renderer {
             if let Some(secondary_uv) = draw.secondary_uv {
                 pass.set_vertex_buffer(1, secondary_uv.slice(..));
             }
+            bind_skin_zero(
+                pass,
+                layout,
+                vertex_formats::zero_slot(u32::from(uses_uv1)),
+                self.gpu_driven.skin_zero(),
+            );
             pass.set_index_buffer(
                 draw.mesh.index.slice(draw.index_byte_offset..),
                 wgpu::IndexFormat::Uint32,

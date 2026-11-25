@@ -62,10 +62,13 @@ pub struct GeometrySlice {
 }
 
 pub enum MeshGeometry {
+    /// A slice of the arena, in the arena's format (`arena_layout()`).
     Shared(GeometrySlice),
     Dedicated {
         vertex: wgpu::Buffer,
         index: wgpu::Buffer,
+        /// The format `vertex` holds.
+        layout: super::VertexLayout,
     },
 }
 
@@ -122,6 +125,8 @@ pub struct GpuDrivenRenderer {
     main_visibility_compat_pipeline: Option<LazyRenderPipeline>,
     main_visibility_compat_prepassed_pipeline: Option<LazyRenderPipeline>,
     visibility: super::visibility_buffer::VisibilityBufferRuntime,
+    /// Zero joints/weights for 64-byte static draws (`vertex_formats.rs`).
+    skin_zero: wgpu::Buffer,
     pub(super) draw_scratch: Vec<GpuDrawRecord>,
     pub stats: SubmissionStats,
 }
@@ -329,6 +334,7 @@ impl GpuDrivenRenderer {
 
         let renderer = Self {
             arena: GeometryArena::new(device),
+            skin_zero: super::vertex_formats::create_skin_zero_buffer(device),
             enabled,
             count_supported,
             draw_capacity,
@@ -387,6 +393,16 @@ impl GpuDrivenRenderer {
         (&self.arena.vertex, &self.arena.index)
     }
 
+    /// The format of every vertex in the shared arena.
+    pub(crate) fn arena_layout(&self) -> super::VertexLayout {
+        self.arena.layout
+    }
+
+    /// The shared zero joints/weights that static draws bind.
+    pub(crate) fn skin_zero(&self) -> &wgpu::Buffer {
+        &self.skin_zero
+    }
+
     pub fn upload_static(
         &mut self,
         device: &wgpu::Device,
@@ -410,9 +426,10 @@ impl GpuDrivenRenderer {
         match self.arena.upload(device, queue, vertices, indices) {
             Some(slice) => MeshGeometry::Shared(slice),
             None => MeshGeometry::Dedicated {
+                layout: self.arena.layout,
                 vertex: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("cached_static_model_vb"),
-                    contents: bytemuck::cast_slice(vertices),
+                    contents: &self.arena.layout.encode(vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 }),
                 index: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -444,13 +461,19 @@ impl GpuDrivenRenderer {
                 first_index: slice.first_index,
                 index_count,
                 base_vertex: slice.base_vertex,
+                layout: self.arena.layout,
             },
-            MeshGeometry::Dedicated { vertex, index } => MeshDrawRef {
+            MeshGeometry::Dedicated {
+                vertex,
+                index,
+                layout,
+            } => MeshDrawRef {
                 vertex,
                 index,
                 first_index: 0,
                 index_count,
                 base_vertex: 0,
+                layout: *layout,
             },
         }
     }
@@ -472,17 +495,23 @@ impl GpuDrivenRenderer {
                     first_index: 0,
                     index_count,
                     base_vertex: 0,
+                    layout: self.arena.layout,
                 },
                 slice.vertex_offset,
                 slice.index_offset,
             ),
-            MeshGeometry::Dedicated { vertex, index } => (
+            MeshGeometry::Dedicated {
+                vertex,
+                index,
+                layout,
+            } => (
                 MeshDrawRef {
                     vertex,
                     index,
                     first_index: 0,
                     index_count,
                     base_vertex: 0,
+                    layout: *layout,
                 },
                 0,
                 0,
@@ -845,6 +874,7 @@ impl GpuDrivenRenderer {
         pass.set_bind_group(2, global_materials, &[]);
         pass.set_bind_group(3, joints, &[]);
         pass.set_vertex_buffer(0, self.arena.vertex.slice(..));
+        super::bind_skin_zero(pass, self.arena.layout, 1, &self.skin_zero);
         pass.set_index_buffer(self.arena.index.slice(..), wgpu::IndexFormat::Uint32);
         let indirect = match route {
             IndirectRoute::All => &self.indirect_buffer,
@@ -1183,6 +1213,12 @@ fn create_cull_bind_group(
     })
 }
 
+/// The vertex streams of a pipeline drawing the arena: its format, plus the
+/// zero joints/weights at slot 1 when that is the 64-byte one.
+pub(super) fn arena_buffers() -> Vec<wgpu::VertexBufferLayout<'static>> {
+    super::vertex_formats::layout_buffers(super::VertexLayout::arena(), &[Vertex3D::desc()])
+}
+
 fn create_depth_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -1204,7 +1240,7 @@ fn create_depth_pipeline(
             vertex: wgpu::VertexState {
                 module: shader,
                 entry_point: Some("vs_main_scene"),
-                buffers: &[Vertex3D::desc()],
+                buffers: &arena_buffers(),
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -1290,7 +1326,7 @@ fn create_main_pipeline(
             vertex: wgpu::VertexState {
                 module: vertex_shader,
                 entry_point: Some("vs_main_scene"),
-                buffers: &[Vertex3D::desc()],
+                buffers: &arena_buffers(),
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {

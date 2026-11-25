@@ -14,18 +14,18 @@ const IRIDESCENCE_SSR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Un
 pub(crate) struct SceneIridescenceSsrResources {
     _metadata_texture: wgpu::Texture,
     pub(crate) metadata_view: wgpu::TextureView,
-    scalar_metadata_pipeline: wgpu::RenderPipeline,
-    uv1_metadata_pipeline: wgpu::RenderPipeline,
+    scalar_metadata_pipeline: MeshPipelines,
+    uv1_metadata_pipeline: MeshPipelines,
     pub(crate) ssr_layout: wgpu::BindGroupLayout,
     pub(crate) ssr_pipeline: wgpu::RenderPipeline,
 }
 
 impl SceneIridescenceSsrResources {
-    fn metadata_pipeline(&self, secondary_uv: bool) -> &wgpu::RenderPipeline {
+    fn metadata_pipeline(&self, secondary_uv: bool, layout: VertexLayout) -> &wgpu::RenderPipeline {
         if secondary_uv {
-            &self.uv1_metadata_pipeline
+            self.uv1_metadata_pipeline.get(layout)
         } else {
-            &self.scalar_metadata_pipeline
+            self.scalar_metadata_pipeline.get(layout)
         }
     }
 }
@@ -136,50 +136,53 @@ fn create_metadata_pipeline(
     shader: &wgpu::ShaderModule,
     secondary_uv: bool,
     label: &'static str,
-) -> wgpu::RenderPipeline {
+) -> MeshPipelines {
     let mut buffers = vec![Vertex3D::desc()];
     if secondary_uv {
         buffers.push(secondary_uv_desc());
     }
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main_scene"),
-            buffers: &buffers,
-            compilation_options: Default::default(),
+    MeshPipelines::lazy(
+        device,
+        &wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_transparent_scene"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: IRIDESCENCE_SSR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Equal),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_transparent_scene"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: IRIDESCENCE_SSR_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::Equal),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+    )
 }
 
 fn create_layered_ssr_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -534,9 +537,10 @@ impl Renderer {
         for draw in draws {
             self.bind_joint_page(&mut pass, 3, draw.joint_offset, &mut joint_page);
             let uses_uv1 = draw.secondary_uv.is_some();
-            if current_uv1 != Some(uses_uv1) {
-                pass.set_pipeline(resources.metadata_pipeline(uses_uv1));
-                current_uv1 = Some(uses_uv1);
+            let layout = draw.mesh.layout;
+            if current_uv1 != Some((uses_uv1, layout)) {
+                pass.set_pipeline(resources.metadata_pipeline(uses_uv1, layout));
+                current_uv1 = Some((uses_uv1, layout));
             }
             pass.set_bind_group(0, draw.uniforms, &[]);
             pass.set_bind_group(2, draw.material, &[]);
@@ -544,6 +548,12 @@ impl Renderer {
             if let Some(secondary_uv) = draw.secondary_uv {
                 pass.set_vertex_buffer(1, secondary_uv.slice(..));
             }
+            bind_skin_zero(
+                &mut pass,
+                layout,
+                vertex_formats::zero_slot(u32::from(uses_uv1)),
+                self.gpu_driven.skin_zero(),
+            );
             pass.set_index_buffer(
                 draw.mesh.index.slice(draw.index_byte_offset..),
                 wgpu::IndexFormat::Uint32,

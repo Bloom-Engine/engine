@@ -1,6 +1,6 @@
 //! The render pass and atlas copies of one frame's mesh-card captures.
 
-use super::{Renderer, CARD_SLOTS_PER_ROW, CARD_SLOT_SIZE};
+use super::{vertex_formats, Renderer, VertexLayout, CARD_SLOTS_PER_ROW, CARD_SLOT_SIZE};
 
 /// One axis of one mesh: what to draw, the scratch-grid cell it draws into
 /// and the atlas slot that cell is copied to.
@@ -8,6 +8,7 @@ pub(super) struct CardCaptureDraw {
     pub uniform_offset: u32,
     pub texture_bg: wgpu::BindGroup,
     pub vertex_buffer: wgpu::Buffer,
+    pub vertex_layout: VertexLayout,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
     pub cell_x: u32,
@@ -60,8 +61,12 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.card_capture_pipeline);
+            let mut current_layout = None;
             for draw in draws {
+                if current_layout != Some(draw.vertex_layout) {
+                    pass.set_pipeline(self.card_capture_pipeline.get(draw.vertex_layout));
+                    current_layout = Some(draw.vertex_layout);
+                }
                 // The viewport maps the capture's clip space onto its cell;
                 // the scissor keeps geometry outside the card bounds from
                 // spilling into a neighbouring cell.
@@ -77,6 +82,12 @@ impl Renderer {
                 pass.set_bind_group(0, uniform_bg, &[draw.uniform_offset]);
                 pass.set_bind_group(1, &draw.texture_bg, &[]);
                 pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+                vertex_formats::bind_skin_zero(
+                    &mut pass,
+                    draw.vertex_layout,
+                    1,
+                    self.gpu_driven.skin_zero(),
+                );
                 pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..draw.index_count, 0, 0..1);
             }

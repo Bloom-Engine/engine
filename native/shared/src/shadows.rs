@@ -8,6 +8,7 @@
 //! coverage out to the far plane.
 
 use crate::renderer::lazy_pipeline::LazyRenderPipeline;
+use crate::renderer::vertex_formats::MeshPipelines;
 use crate::renderer::IDENTITY_MAT4;
 
 /// Number of shadow cascades.
@@ -337,10 +338,11 @@ pub struct ShadowMap {
     pub sampler: wgpu::Sampler,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
-    pub pipeline: LazyRenderPipeline,
+    /// Per vertex format (vertex_formats.rs), as `pipeline_cutout`.
+    pub pipeline: MeshPipelines,
     /// Alpha-tested variant for cutout foliage casters. Opaque casters keep
     /// using `pipeline` (byte-identical to before this was added).
-    pub pipeline_cutout: LazyRenderPipeline,
+    pub pipeline_cutout: MeshPipelines,
     /// Skinning-aware variant for the immediate-mode batch (animated
     /// characters). Binds the joint-matrix buffer at group 1 and skins
     /// per-vertex so player/enemies cast a real posed shadow.
@@ -666,7 +668,7 @@ impl ShadowMap {
             immediate_size: 0,
         });
 
-        let pipeline = LazyRenderPipeline::new(
+        let pipeline = MeshPipelines::lazy(
             device,
             &wgpu::RenderPipelineDescriptor {
                 label: Some("shadow_pipeline"),
@@ -745,7 +747,7 @@ impl ShadowMap {
             bind_group_layouts: &[Some(&uniform_layout), Some(&cutout_tex_layout)],
             immediate_size: 0,
         });
-        let pipeline_cutout = LazyRenderPipeline::new(
+        let pipeline_cutout = MeshPipelines::lazy(
             device,
             &wgpu::RenderPipelineDescriptor {
                 label: Some("shadow_pipeline_cutout"),

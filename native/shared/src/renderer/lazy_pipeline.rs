@@ -463,13 +463,18 @@ impl super::Renderer {
 
         let mut wanted: Vec<WarmHandle> = vec![self.pipeline_2d.warm_handle()];
         if scene_3d {
+            // each mesh pipeline in both vertex formats (vertex_formats.rs)
+            for pipelines in [
+                &self.scene_depth_pipeline,
+                &self.scene_depth_opaque_pipeline,
+                &self.scene_pipeline_prepassed,
+                &self.scene_node_depth_pipeline,
+                &self.scene_node_pipeline_prepassed,
+                &self.scene_pipeline,
+            ] {
+                wanted.extend(pipelines.warm_handles());
+            }
             wanted.extend([
-                self.scene_depth_pipeline.warm_handle(),
-                self.scene_depth_opaque_pipeline.warm_handle(),
-                self.scene_pipeline_prepassed.warm_handle(),
-                self.scene_node_depth_pipeline.warm_handle(),
-                self.scene_node_pipeline_prepassed.warm_handle(),
-                self.scene_pipeline.warm_handle(),
                 self.scene_compose_pipeline.warm_handle(),
                 self.composite_pipeline.warm_handle(),
             ]);
@@ -477,7 +482,7 @@ impl super::Renderer {
                 wanted.push(froxel.assign_pipeline.warm_handle());
             }
             if self.shadow_map.enabled {
-                wanted.push(self.shadow_map.pipeline.warm_handle());
+                wanted.extend(self.shadow_map.pipeline.warm_handles());
                 wanted.push(self.shadow_map.pipeline_skinned.warm_handle());
             }
             if gpu_driven_draws {
@@ -522,8 +527,8 @@ impl super::Renderer {
                     self.probe_temporal_pipeline.warm_handle(),
                     self.probe_spatial_pipeline.warm_handle(),
                     self.probe_resolve_pipeline.warm_handle(),
-                    self.card_capture_pipeline.warm_handle(),
                 ]);
+                wanted.extend(self.card_capture_pipeline.warm_handles());
                 // hardware ray queries where the device has them, else the SDF tracers
                 match &self.probe_trace_hw_pipeline {
                     Some(hw) => wanted.push(hw.warm_handle()),

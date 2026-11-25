@@ -367,6 +367,7 @@ fn fs_reactive(_in: VsOut) -> ReactiveTranslucentOut {
                         first_index: 0,
                         index_count: icount,
                         base_vertex: 0,
+                        layout: crate::renderer::VertexLayout::Full96,
                     })
                 } else {
                     None
@@ -638,6 +639,7 @@ fn fs_reactive(_in: VsOut) -> ReactiveTranslucentOut {
                         first_index: 0,
                         index_count,
                         base_vertex: 0,
+                        layout: crate::renderer::VertexLayout::Full96,
                     },
                     true,
                     true,
@@ -900,6 +902,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
                         first_index: 0,
                         index_count: icount,
                         base_vertex: 0,
+                        layout: crate::renderer::VertexLayout::Full96,
                     })
                 } else {
                     None

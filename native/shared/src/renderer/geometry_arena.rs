@@ -2,8 +2,11 @@
 //! index buffer for every static mesh, with a free list. It grows by doubling
 //! up to the device's buffer limit; past that an upload is refused and the
 //! caller keeps the mesh on buffers of its own.
+//!
+//! It holds only unskinned meshes, so its vertices are the 64-byte
+//! `StaticVertex3D` (`VertexLayout::arena()`; 96 bytes on OpenGL).
 
-use super::super::{material_indirection::GpuCompletionTracker, Vertex3D};
+use super::super::{material_indirection::GpuCompletionTracker, Vertex3D, VertexLayout};
 use super::GeometrySlice;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -34,6 +37,8 @@ pub(super) struct GeometryArena {
     /// so the storage-binding limit applies as well as the buffer limit.
     max_capacity: u64,
     full_warned: bool,
+    /// The format of every vertex in the arena.
+    pub(super) layout: VertexLayout,
 }
 
 impl GeometryArena {
@@ -41,10 +46,13 @@ impl GeometryArena {
 
     pub(super) fn new(device: &wgpu::Device) -> Self {
         let limits = device.limits();
+        let layout = VertexLayout::arena();
         Self {
+            layout,
             max_capacity: arena_max_capacity(
                 limits.max_buffer_size,
                 limits.max_storage_buffer_binding_size as u64,
+                layout.stride(),
             ),
             full_warned: false,
             vertex: create_vertex_arena(device, Self::INITIAL_CAPACITY),
@@ -69,7 +77,8 @@ impl GeometryArena {
         indices: &[u32],
     ) -> Option<GeometrySlice> {
         self.collect();
-        let vertex_size = std::mem::size_of_val(vertices) as u64;
+        let stride = self.layout.stride();
+        let vertex_size = vertices.len() as u64 * stride;
         let index_size = std::mem::size_of_val(indices) as u64;
         let previous_vertex_end = self.vertex_end;
         let previous_index_end = self.index_end;
@@ -119,7 +128,7 @@ impl GeometryArena {
             previous_index_end,
         );
         if vertex_size > 0 {
-            queue.write_buffer(&self.vertex, vertex_offset, bytemuck::cast_slice(vertices));
+            queue.write_buffer(&self.vertex, vertex_offset, &self.layout.encode(vertices));
         }
         if index_size > 0 {
             queue.write_buffer(&self.index, index_offset, bytemuck::cast_slice(indices));
@@ -130,7 +139,7 @@ impl GeometryArena {
             index_offset,
             index_size,
             first_index: (index_offset / 4) as u32,
-            base_vertex: (vertex_offset / std::mem::size_of::<Vertex3D>() as u64) as i32,
+            base_vertex: (vertex_offset / stride) as i32,
         })
     }
 
@@ -264,10 +273,10 @@ fn grown_capacity(current: u64, required: u64, max: u64) -> u64 {
     }
 }
 
-/// Both limits, rounded down to whole vertices and indices.
-fn arena_max_capacity(max_buffer_size: u64, max_storage_binding_size: u64) -> u64 {
+/// Both limits, rounded down to whole vertices (of `stride` bytes) and indices.
+fn arena_max_capacity(max_buffer_size: u64, max_storage_binding_size: u64, stride: u64) -> u64 {
     let limit = max_buffer_size.min(max_storage_binding_size);
-    let unit = std::mem::size_of::<Vertex3D>() as u64 * 4;
+    let unit = stride * 4;
     limit / unit * unit
 }
 
@@ -360,9 +369,11 @@ mod tests {
         assert_eq!(grown_capacity(32 * mb, 40 * mb, 1024 * mb), 64 * mb);
         // 390 MB would round up to 448 MB; a 400 MB device gets 400 MB.
         assert_eq!(grown_capacity(256 * mb, 390 * mb, 400 * mb), 400 * mb);
-        let unit = std::mem::size_of::<Vertex3D>() as u64 * 4;
-        assert_eq!(arena_max_capacity(1000 * mb, 300 * mb) % unit, 0);
-        assert!(arena_max_capacity(1000 * mb, 300 * mb) <= 300 * mb);
+        for stride in [64, 96] {
+            let unit = stride * 4;
+            assert_eq!(arena_max_capacity(1000 * mb, 300 * mb, stride) % unit, 0);
+            assert!(arena_max_capacity(1000 * mb, 300 * mb, stride) <= 300 * mb);
+        }
     }
 
     #[test]
