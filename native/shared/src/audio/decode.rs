@@ -32,11 +32,11 @@ pub fn parse_wav(data: &[u8]) -> Option<SoundData> {
             let samples = match bits_per_sample {
                 16 => pcm_data
                     .chunks_exact(2)
-                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
                     .collect(),
                 8 => pcm_data
                     .iter()
-                    .map(|&b| (b as f32 - 128.0) / 128.0)
+                    .map(|&b| (i16::from(b) - 128) << 8)
                     .collect(),
                 _ => return None,
             };
@@ -67,7 +67,7 @@ pub fn parse_mp3(data: &[u8]) -> Option<SoundData> {
                     channels = frame.channels as u16;
                 }
                 for &s in &frame.data {
-                    samples.push(s as f32 / 32768.0);
+                    samples.push(s);
                 }
             }
             Err(minimp3::Error::Eof) => break,
@@ -95,7 +95,7 @@ pub fn parse_ogg(data: &[u8]) -> Option<SoundData> {
 
     while let Ok(Some(packet)) = reader.read_dec_packet_itl() {
         for &sample in &packet {
-            samples.push(sample as f32 / 32768.0);
+            samples.push(sample);
         }
     }
 

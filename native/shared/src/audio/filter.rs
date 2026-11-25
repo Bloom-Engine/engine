@@ -102,7 +102,11 @@ mod tests {
         let n = (seconds * SR) as usize;
         SoundData {
             samples: (0..n)
-                .map(|i| 0.5 * (2.0 * std::f32::consts::PI * freq * i as f32 / SR).sin())
+                .map(|i| {
+                    crate::audio::pcm16(
+                        0.5 * (2.0 * std::f32::consts::PI * freq * i as f32 / SR).sin(),
+                    )
+                })
                 .collect(),
             sample_rate: SR as u32,
             channels: 1,

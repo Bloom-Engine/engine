@@ -552,8 +552,8 @@ pub use crate::anim_mixer::AnimMixer;
 mod gltf_load;
 #[cfg(feature = "models3d")]
 pub use gltf_load::{
-    load_gltf_animation, load_gltf_staged, load_gltf_staged_from_source_path,
-    require_source_geometry_hash,
+    load_gltf_animation, load_gltf_animation_file, load_gltf_staged,
+    load_gltf_staged_from_source_path, require_source_geometry_hash,
 };
 
 pub struct ModelAnimation {
@@ -1205,6 +1205,15 @@ impl ModelManager {
     #[cfg(feature = "models3d")]
     pub fn load_model_animation(&mut self, file_data: &[u8]) -> f64 {
         match gltf_load::load_gltf_animation(file_data) {
+            Some(anim) => self.animations.alloc(anim),
+            None => 0.0,
+        }
+    }
+
+    /// As `load_model_animation`, reading only what the clips need from the file.
+    #[cfg(feature = "models3d")]
+    pub fn load_model_animation_file(&mut self, path: &std::path::Path) -> f64 {
+        match gltf_load::load_gltf_animation_file(path) {
             Some(anim) => self.animations.alloc(anim),
             None => 0.0,
         }

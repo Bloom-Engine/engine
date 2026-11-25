@@ -311,10 +311,10 @@ impl Voice {
     #[inline]
     fn frame(&self, idx: usize) -> (f32, f32) {
         if self.data.channels <= 1 {
-            let s = self.data.samples[idx];
+            let s = self.data.sample(idx);
             (s, s)
         } else {
-            (self.data.samples[idx * 2], self.data.samples[idx * 2 + 1])
+            (self.data.sample(idx * 2), self.data.sample(idx * 2 + 1))
         }
     }
 }
@@ -1081,7 +1081,7 @@ impl AudioRenderer {
                     while i < output.len() && *position < data.samples.len() {
                         if data.channels == 1 {
                             let sample =
-                                filt(i, data.samples[*position]) * (g0 + dg * (i / 2) as f32);
+                                filt(i, data.sample(*position)) * (g0 + dg * (i / 2) as f32);
                             output[i] += sample;
                             if i + 1 < output.len() {
                                 output[i + 1] += sample;
@@ -1090,7 +1090,7 @@ impl AudioRenderer {
                             i += 2;
                         } else {
                             output[i] +=
-                                filt(i, data.samples[*position]) * (g0 + dg * (i / 2) as f32);
+                                filt(i, data.sample(*position)) * (g0 + dg * (i / 2) as f32);
                             *position += 1;
                             i += 1;
                         }
@@ -1177,7 +1177,7 @@ mod tests {
 
     fn dummy_sound() -> Arc<SoundData> {
         Arc::new(SoundData {
-            samples: vec![0.0; 16],
+            samples: vec![0; 16],
             sample_rate: 44_100,
             channels: 1,
         })

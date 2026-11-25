@@ -11453,9 +11453,14 @@ impl Renderer {
     /// that takes ~0.1 ms on desktop GPUs.
     pub fn set_sun_direction(&mut self, dx: f32, dy: f32, dz: f32, intensity: f32) {
         let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
-        self.sun_direction = [dx / len, dy / len, dz / len];
-        self.sun_intensity = intensity.max(0.0);
-        self.sky_view_dirty = true;
+        let dir = [dx / len, dy / len, dz / len];
+        let intensity = intensity.max(0.0);
+        // Games set the sun every frame; only a real change rebakes the sky-view LUT.
+        if dir != self.sun_direction || intensity != self.sun_intensity {
+            self.sun_direction = dir;
+            self.sun_intensity = intensity;
+            self.sky_view_dirty = true;
+        }
     }
 
     /// Recompute the sky-view LUT if the sun has moved (or atmosphere
