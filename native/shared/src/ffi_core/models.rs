@@ -18,7 +18,8 @@ macro_rules! __bloom_ffi_models {
                 let path = $crate::string_header::str_from_header(path_ptr);
                 let resolved =bloom_resolve_asset_path(path);
                 let resolved_path = std::path::Path::new(resolved.as_ref());
-                match std::fs::read(resolved_path) {
+                // mapped, not read: only the pages the load touches come in from disk
+                match $crate::file_map::read(resolved_path) {
                     Ok(data) => {
                         let eng = engine();
                         let $crate::engine::EngineState { ref mut models, ref mut renderer, .. } = *eng;

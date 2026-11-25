@@ -16,6 +16,7 @@ pub mod emoji;
 pub mod ffi;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffi_core;
+pub mod file_map;
 pub mod handles;
 pub mod input;
 pub mod locale;

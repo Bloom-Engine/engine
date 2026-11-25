@@ -11,6 +11,37 @@
 //! loader already treats as "nothing" (zero deltas). Anything else is still
 //! rejected, now with a line saying why.
 
+/// A GLB's JSON chunk and binary chunk, both borrowed from `data`; `None`
+/// when `data` is not a GLB (a glTF JSON file, say).
+pub(super) fn split_glb(data: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
+    let word = |at: usize| -> Option<usize> {
+        Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?) as usize)
+    };
+    if data.get(0..4)? != b"glTF" || data.get(16..20)? != b"JSON" {
+        return None;
+    }
+    let json_end = 20usize.checked_add(word(12)?)?;
+    let json = data.get(20..json_end)?;
+    let bin = match data.get(json_end + 4..json_end + 8) {
+        Some(b"BIN\0") => {
+            let start = json_end + 8;
+            Some(data.get(start..start.checked_add(word(json_end)?)?)?)
+        }
+        _ => None,
+    };
+    Some((json, bin))
+}
+
+/// The document, and for a GLB its binary chunk borrowed from `data`, not
+/// copied (the gltf crate copies it: a model's whole file, read again). With
+/// a memory-mapped file the texture levels nobody uploads are then never read.
+pub(super) fn parse_borrowed(data: &[u8]) -> Option<(gltf::Gltf, Option<&[u8]>)> {
+    match split_glb(data) {
+        Some((json, bin)) => Some((parse_gltf(json)?, bin)),
+        None => Some((parse_gltf(data)?, None)),
+    }
+}
+
 pub(super) fn parse_gltf(data: &[u8]) -> Option<gltf::Gltf> {
     match gltf::Gltf::from_slice(data) {
         Ok(document) => Some(document),

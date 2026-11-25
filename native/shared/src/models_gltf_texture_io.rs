@@ -18,10 +18,9 @@ pub(super) fn register_compressed_image(
     if feeds_alpha_mask {
         return None;
     }
-    let image = CompressedImage::from_ktx2(bytes)?;
     // `file_range`: where these bytes are in the file being imported, when
     // known. The renderer may then keep only the small levels resident.
-    renderer.register_compressed_streamed(&image, is_normal, is_srgb, file_range)
+    renderer.register_compressed_streamed(bytes, is_normal, is_srgb, file_range)
 }
 
 /// Staged (no renderer yet) counterpart of [`decode_texture_bytes`]: a KTX2

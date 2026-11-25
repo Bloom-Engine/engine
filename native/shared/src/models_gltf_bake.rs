@@ -24,7 +24,7 @@ pub fn require_source_geometry_hash() {
 pub(super) fn complete_geometry_source_hash(
     source_bytes: &[u8],
     gltf: &gltf::Gltf,
-    buffers: &[Vec<u8>],
+    buffers: &[std::borrow::Cow<[u8]>],
 ) -> Option<[u8; 32]> {
     if !cfg!(test)
         && !SOURCE_HASH_REQUIRED.load(std::sync::atomic::Ordering::Relaxed)
@@ -41,7 +41,7 @@ pub(super) fn complete_geometry_source_hash(
     {
         return None;
     }
-    let slices = buffers.iter().map(Vec::as_slice).collect::<Vec<&[u8]>>();
+    let slices = buffers.iter().map(|b| b.as_ref()).collect::<Vec<&[u8]>>();
     Some(bloom_geometry_format::geometry_source_sha256(
         source_bytes,
         &slices,

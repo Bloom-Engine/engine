@@ -67,13 +67,46 @@ fn fingerprint(file_data: &[u8]) -> u64 {
     h ^ (h >> 32)
 }
 
+/// What tells a changed file from the one loaded before: its size, time of
+/// change and (on Unix) inode and device when the file can be asked, else the
+/// bytes. Hashing the bytes read every page of a mapped file, most of them
+/// texture levels the load would otherwise never touch.
+fn file_identity(source_path: &Path, file_data: &[u8]) -> u64 {
+    let Ok(meta) = std::fs::metadata(source_path) else {
+        return fingerprint(file_data);
+    };
+    if meta.len() != file_data.len() as u64 {
+        return fingerprint(file_data);
+    }
+    let changed = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    #[cfg(unix)]
+    let (ino, dev) = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.ino(), meta.dev())
+    };
+    #[cfg(not(unix))]
+    let (ino, dev) = (0u64, 0u64);
+    let mut id = Vec::with_capacity(32);
+    for v in [meta.len(), changed, ino, dev] {
+        id.extend_from_slice(&v.to_le_bytes());
+    }
+    fingerprint(&id)
+}
+
 impl SourceModelCache {
     /// A model sharing the earlier import of `source_path`, if that file was
     /// loaded before with the same bytes and its meshes are still alive.
     pub fn share(&mut self, source_path: &Path, file_data: &[u8]) -> Option<ModelData> {
         let key = source_path.display().to_string();
         let entry = self.entries.get(&key)?;
-        if entry.byte_len != file_data.len() || entry.fingerprint != fingerprint(file_data) {
+        if entry.byte_len != file_data.len()
+            || entry.fingerprint != file_identity(source_path, file_data)
+        {
             return None;
         }
         let meshes: Option<Vec<Arc<MeshData>>> = entry.meshes.iter().map(Weak::upgrade).collect();
@@ -97,7 +130,7 @@ impl SourceModelCache {
             source_path.display().to_string(),
             Entry {
                 byte_len: file_data.len(),
-                fingerprint: fingerprint(file_data),
+                fingerprint: file_identity(source_path, file_data),
                 meshes: model.meshes.iter().map(Arc::downgrade).collect(),
                 mesh_transforms: model.mesh_transforms.clone(),
                 mesh_cast_shadows: model.mesh_cast_shadows.clone(),
@@ -153,6 +186,36 @@ mod tests {
         }
         assert_ne!(fingerprint(&data[..999]), fingerprint(&data[..998]));
         assert_ne!(fingerprint(&[0u8; 64]), fingerprint(&[0u8; 65]));
+    }
+
+    #[test]
+    fn a_file_on_disk_is_known_by_its_size_and_time_of_change() {
+        let mut models = ModelManager::new();
+        let handle = models.gen_mesh_cube(1.0, 1.0, 1.0);
+        let dir = std::env::temp_dir().join(format!("bloom-source-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("actor.glb");
+        std::fs::write(&path, b"file bytes").unwrap();
+        let mut cache = SourceModelCache::default();
+        cache.remember(&path, b"file bytes", models.get(handle).unwrap());
+        assert!(
+            cache.share(&path, b"file bytes").is_some(),
+            "same file shares"
+        );
+        // the same length, rewritten later: a new import
+        std::fs::write(&path, b"edited byt").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(
+            cache.share(&path, b"edited byt").is_none(),
+            "changed file reimports"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
