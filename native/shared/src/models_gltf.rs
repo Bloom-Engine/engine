@@ -7,6 +7,7 @@
 //! animation update, procedural mesh gen) stays in `models.rs`.
 
 use super::*;
+use std::borrow::Cow;
 
 #[path = "models_gltf_layered_pbr.rs"]
 mod layered_pbr_import;
@@ -98,7 +99,7 @@ fn walk_scene_collect_instances(
 
 fn read_accessor_f32(
     _gltf: &gltf::Gltf,
-    buffer_data: &[Vec<u8>],
+    buffer_data: &[Cow<[u8]>],
     accessor: &gltf::Accessor,
 ) -> Vec<f32> {
     let view = match accessor.view() {
@@ -148,17 +149,21 @@ fn read_accessor_f32(
 /// of a load). Inline base64 buffers are decoded; an external `.bin` next to
 /// the file is read from `base_dir` (with `strict`, a missing one fails the
 /// load; otherwise it is an empty buffer).
-fn take_buffers(
+fn take_buffers<'a>(
     gltf: &mut gltf::Gltf,
+    glb_bin: Option<&'a [u8]>,
     base_dir: Option<&std::path::Path>,
     strict: bool,
-) -> Option<Vec<Vec<u8>>> {
-    let mut bin = gltf.blob.take();
-    let mut buffer_data: Vec<Vec<u8>> = Vec::new();
+) -> Option<Vec<Cow<'a, [u8]>>> {
+    let mut bin: Option<Cow<'a, [u8]>> = match glb_bin {
+        Some(b) => Some(Cow::Borrowed(b)),
+        None => gltf.blob.take().map(Cow::Owned),
+    };
+    let mut buffer_data: Vec<Cow<'a, [u8]>> = Vec::new();
     for buffer in gltf.buffers() {
-        let bytes = match buffer.source() {
+        let bytes: Cow<'a, [u8]> = match buffer.source() {
             gltf::buffer::Source::Bin => bin.take().unwrap_or_default(),
-            gltf::buffer::Source::Uri(uri) => {
+            gltf::buffer::Source::Uri(uri) => Cow::Owned({
                 if let Some(encoded) = uri.strip_prefix("data:application/octet-stream;base64,") {
                     let mut decoded = Vec::new();
                     let _ = base64_decode(encoded, &mut decoded);
@@ -172,7 +177,7 @@ fn take_buffers(
                 } else {
                     Vec::new()
                 }
-            }
+            }),
         };
         buffer_data.push(bytes);
     }
@@ -180,8 +185,8 @@ fn take_buffers(
 }
 
 pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
-    let mut gltf = parse::parse_gltf(data)?;
-    let buffer_data = take_buffers(&mut gltf, None, false)?;
+    let (mut gltf, glb_bin) = parse::parse_borrowed(data)?;
+    let buffer_data = take_buffers(&mut gltf, glb_bin, None, false)?;
     animation_from(&gltf, &buffer_data)
 }
 
@@ -195,7 +200,7 @@ pub fn load_gltf_animation_file(path: &std::path::Path) -> Option<ModelAnimation
     load_gltf_animation(&std::fs::read(path).ok()?)
 }
 
-fn animation_from(gltf: &gltf::Gltf, buffer_data: &[Vec<u8>]) -> Option<ModelAnimation> {
+fn animation_from(gltf: &gltf::Gltf, buffer_data: &[Cow<[u8]>]) -> Option<ModelAnimation> {
     // Parse skeleton from the first skin
     let skeleton = if let Some(skin) = gltf.skins().next() {
         let joints_nodes: Vec<_> = skin.joints().collect();
@@ -360,7 +365,7 @@ fn animation_from(gltf: &gltf::Gltf, buffer_data: &[Vec<u8>]) -> Option<ModelAni
             }
         }
         for channel in anim.channels() {
-            let buffers = |b: gltf::Buffer| buffer_data.get(b.index()).map(|d| d.as_slice());
+            let buffers = |b: gltf::Buffer| buffer_data.get(b.index()).map(|d| d.as_ref());
             if let Some(track) = morph::read_weight_channel(&channel, buffers, &morph_slots) {
                 duration = duration.max(track.times.last().copied().unwrap_or(0.0));
                 morph_tracks.push(track);
@@ -515,11 +520,11 @@ pub(super) fn load_gltf_with_textures(
     base_dir: Option<&std::path::Path>,
     source_label: Option<&str>,
 ) -> Option<ModelData> {
-    let mut gltf = parse::parse_gltf(data)?;
+    let (mut gltf, glb_bin) = parse::parse_borrowed(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, source_label.unwrap_or("<memory glTF>"));
 
     // Get buffer data
-    let buffer_data = take_buffers(&mut gltf, base_dir, false)?;
+    let buffer_data = take_buffers(&mut gltf, glb_bin, base_dir, false)?;
     let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     // Pre-walk materials to identify which image indices are normal
@@ -791,7 +796,7 @@ pub(super) fn load_gltf_with_textures(
                     continue;
                 }
                 let reader =
-                    primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
+                    primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_ref()));
                 let positions: Vec<[f32; 3]> = match reader.read_positions() {
                     Some(iter) => iter.collect(),
                     None => continue,
@@ -1072,10 +1077,10 @@ fn load_gltf_staged_impl(
 ) -> Option<crate::staging::StagedModel> {
     use crate::staging::{StagedModel, StagedTexture};
 
-    let mut gltf = parse::parse_gltf(data)?;
+    let (mut gltf, glb_bin) = parse::parse_borrowed(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, source_label);
 
-    let buffer_data = take_buffers(&mut gltf, base_dir, true)?;
+    let buffer_data = take_buffers(&mut gltf, glb_bin, base_dir, true)?;
     let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     // Pre-walk materials for the image indices used as normal maps — they
@@ -1222,7 +1227,7 @@ fn load_gltf_staged_impl(
     let morph_slots = morph::morph_slots(&gltf);
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
-            let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
+            let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_ref()));
             let positions: Vec<[f32; 3]> = match reader.read_positions() {
                 Some(iter) => iter.collect(),
                 None => continue,
@@ -1508,11 +1513,11 @@ fn stage_image_variants(
 }
 
 pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
-    let mut gltf = parse::parse_gltf(data)?;
+    let (mut gltf, glb_bin) = parse::parse_borrowed(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, "<memory glTF>");
 
     // Get buffer data (for .glb, embedded; for .gltf, inline base64)
-    let buffer_data = take_buffers(&mut gltf, None, false)?;
+    let buffer_data = take_buffers(&mut gltf, glb_bin, None, false)?;
     let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     let mut source_meshes: Vec<Vec<(u32, MeshData)>> =
@@ -1521,7 +1526,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
     let morph_slots = morph::morph_slots(&gltf);
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
-            let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
+            let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_ref()));
 
             let positions: Vec<[f32; 3]> = match reader.read_positions() {
                 Some(iter) => iter.collect(),

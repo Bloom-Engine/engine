@@ -76,7 +76,11 @@ pub(super) fn load(path: &Path) -> Option<Option<ModelAnimation>> {
         f.seek(SeekFrom::Start(bin_off + o as u64)).ok()?;
         f.read_exact(&mut bin[o..o + l]).ok()?;
     }
-    let buffer_data = if bin_len > 0 { vec![bin] } else { Vec::new() };
+    let buffer_data = if bin_len > 0 {
+        vec![std::borrow::Cow::Owned(bin)]
+    } else {
+        Vec::new()
+    };
     Some(super::animation_from(&gltf, &buffer_data))
 }
 

@@ -234,8 +234,15 @@ struct StreamedTexture {
 }
 
 /// The bytes of `image`'s chain from each level down.
+/// The bytes of each level and all smaller ones, of the image whose shape
+/// `image` is (its levels may be empty): they follow from the format and size.
 fn chain_bytes(image: &CompressedImage) -> Vec<u64> {
-    let mut sizes: Vec<u64> = image.levels.iter().map(|l| l.len() as u64).collect();
+    let mut sizes: Vec<u64> = (0..image.levels.len() as u32)
+        .map(|l| {
+            let (w, h) = ((image.width >> l).max(1), (image.height >> l).max(1));
+            image.format.level_bytes(w, h) as u64
+        })
+        .collect();
     for at in (0..sizes.len().saturating_sub(1)).rev() {
         sizes[at] += sizes[at + 1];
     }
@@ -274,9 +281,35 @@ struct LevelReader {
 /// The texture in `source` from `level` down (moved to the nearest larger
 /// level that is whole blocks), with the level it starts at.
 fn load_levels(source: &StreamSource, level: u32) -> Option<(u32, CompressedImage)> {
-    let image = CompressedImage::from_ktx2(&read_source(source)?)?;
-    let level = block_aligned_level(&image, level)?;
-    Some((level, sub_image(&image, level)))
+    let mut file = std::fs::File::open(&source.path).ok()?;
+    // The image's header and level index first, in a zeroed buffer of the
+    // image's size (pages never written cost nothing), then only the bytes of
+    // the levels kept: KTX2 stores the smallest level first, so those are one
+    // range. The whole chain was read for every raise and every lowering.
+    let length = usize::try_from(source.length).ok()?;
+    let mut bytes = vec![0u8; length];
+    let read_at = |file: &mut std::fs::File, bytes: &mut [u8], from: usize, to: usize| {
+        file.seek(SeekFrom::Start(source.offset + from as u64))
+            .ok()?;
+        file.read_exact(bytes.get_mut(from..to)?).ok()
+    };
+    read_at(&mut file, &mut bytes, 0, 80.min(length))?;
+    let count = u32::from_le_bytes(bytes.get(40..44)?.try_into().ok()?).max(1) as usize;
+    let index_end = 80usize.checked_add(count.checked_mul(24)?)?;
+    read_at(&mut file, &mut bytes, 80, index_end)?;
+    let shape = CompressedImage::from_ktx2_from(&bytes, u32::MAX)?;
+    let level = block_aligned_level(&shape, level)?;
+    let range = |at: usize| -> Option<usize> {
+        usize::try_from(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?)).ok()
+    };
+    let (mut from, mut to) = (usize::MAX, 0usize);
+    for l in level as usize..count {
+        let (offset, len) = (range(80 + l * 24)?, range(88 + l * 24)?);
+        from = from.min(offset);
+        to = to.max(offset.checked_add(len)?);
+    }
+    read_at(&mut file, &mut bytes, from, to)?;
+    Some((level, CompressedImage::from_ktx2_from(&bytes, level)?))
 }
 
 impl LevelReader {
@@ -386,6 +419,7 @@ pub(crate) fn every_level_is_whole_blocks(image: &CompressedImage, floor: u32) -
 }
 
 /// `image` from `level` down: the same texture with its largest levels left out.
+#[cfg(test)]
 pub(crate) fn sub_image(image: &CompressedImage, level: u32) -> CompressedImage {
     let level = (level as usize).min(image.levels.len().saturating_sub(1));
     CompressedImage {
@@ -397,25 +431,21 @@ pub(crate) fn sub_image(image: &CompressedImage, level: u32) -> CompressedImage 
     }
 }
 
-fn read_source(source: &StreamSource) -> Option<Vec<u8>> {
-    let mut file = std::fs::File::open(&source.path).ok()?;
-    file.seek(SeekFrom::Start(source.offset)).ok()?;
-    let mut bytes = vec![0u8; usize::try_from(source.length).ok()?];
-    file.read_exact(&mut bytes).ok()?;
-    Some(bytes)
-}
-
 impl Renderer {
-    /// Register a KTX2 image found at `file_range` (offset, length) of the
-    /// file being imported. With streaming on and the image larger than the
-    /// floor, only its small levels are uploaded and the rest stays on disk.
+    /// Register the KTX2 image `ktx2` found at `file_range` (offset, length)
+    /// of the file being imported. With streaming on and the image larger
+    /// than the floor, only its small levels are uploaded and the rest stays
+    /// on disk: only those levels are copied out of `ktx2` (the larger ones
+    /// were copied and thrown away, most of a model's bytes).
     pub(crate) fn register_compressed_streamed(
         &mut self,
-        image: &CompressedImage,
+        ktx2: &[u8],
         is_normal: bool,
         srgb: bool,
         file_range: Option<(u64, u64)>,
     ) -> Option<u32> {
+        // the shape only (one empty level per level): no level is copied yet
+        let image = &CompressedImage::from_ktx2_from(ktx2, u32::MAX)?;
         let source = if self
             .texture_streaming
             .enabled
@@ -443,9 +473,11 @@ impl Renderer {
         .unwrap_or(0);
         let streamable = level > 0 && every_level_is_whole_blocks(image, level);
         let Some(source) = source.filter(|_| streamable) else {
-            return self.register_texture_compressed(image, is_normal, srgb);
+            let whole = CompressedImage::from_ktx2(ktx2)?;
+            return self.register_texture_compressed(&whole, is_normal, srgb);
         };
-        let index = self.register_texture_compressed(&sub_image(image, level), is_normal, srgb)?;
+        let resident = CompressedImage::from_ktx2_from(ktx2, level)?;
+        let index = self.register_texture_compressed(&resident, is_normal, srgb)?;
         self.texture_streaming.entries.insert(
             index,
             StreamedTexture {

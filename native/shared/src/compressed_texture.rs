@@ -152,6 +152,15 @@ impl CompressedImage {
     /// Parse a KTX2 file. `None` for anything that is not a plain 2D ASTC or
     /// BC7 texture without supercompression, or whose levels are truncated.
     pub fn from_ktx2(bytes: &[u8]) -> Option<Self> {
+        Self::from_ktx2_from(bytes, 0)
+    }
+
+    /// As [`Self::from_ktx2`], but only the levels from `first_level` down are
+    /// copied: the image is the same texture with its largest levels left
+    /// out (`width`, `height` those of `first_level`, clamped to the last
+    /// level). Every level is still checked. `u32::MAX` copies none and keeps
+    /// the full size: the shape only, with one empty level per level.
+    pub fn from_ktx2_from(bytes: &[u8], first_level: u32) -> Option<Self> {
         if !is_ktx2(bytes) {
             return None;
         }
@@ -173,6 +182,8 @@ impl CompressedImage {
         if supercompression != 0 || level_count > u32::BITS - width.max(height).leading_zeros() {
             return None;
         }
+        let shape_only = first_level == u32::MAX;
+        let first = (first_level as usize).min(level_count as usize - 1);
         let mut levels = Vec::with_capacity(level_count as usize);
         for index in 0..level_count as usize {
             let entry = 80 + index * 24;
@@ -182,12 +193,26 @@ impl CompressedImage {
             if length != format.level_bytes(level_width, level_height) {
                 return None;
             }
-            levels.push(bytes.get(offset..offset.checked_add(length)?)?.to_vec());
+            let level = bytes.get(offset..offset.checked_add(length)?)?;
+            if shape_only {
+                levels.push(Vec::new());
+            } else if index >= first {
+                levels.push(level.to_vec());
+            }
+        }
+        if shape_only {
+            return Some(Self {
+                format,
+                width,
+                height,
+                srgb,
+                levels,
+            });
         }
         Some(Self {
             format,
-            width,
-            height,
+            width: (width >> first).max(1),
+            height: (height >> first).max(1),
             srgb,
             levels,
         })
@@ -361,6 +386,28 @@ mod tests {
             assert_eq!((parsed.width, parsed.height), (image.width, image.height));
             assert_eq!(parsed.levels, image.levels);
         }
+    }
+
+    #[test]
+    fn reading_from_a_level_equals_trimming_the_whole_read() {
+        let format = BlockFormat::Astc {
+            width: 4,
+            height: 4,
+        };
+        let image = sample(format, true);
+        let bytes = image.to_ktx2().expect("serialises");
+        let whole = CompressedImage::from_ktx2(&bytes).expect("parses");
+        for level in 0..whole.levels.len() as u32 + 2 {
+            let part = CompressedImage::from_ktx2_from(&bytes, level).expect("parses");
+            let trimmed = crate::renderer::texture_streaming::sub_image(&whole, level);
+            assert_eq!((part.width, part.height), (trimmed.width, trimmed.height));
+            assert_eq!(part.levels, trimmed.levels, "level {level}");
+        }
+        let shape = CompressedImage::from_ktx2_from(&bytes, u32::MAX).expect("parses");
+        assert_eq!((shape.width, shape.height), (whole.width, whole.height));
+        assert_eq!(shape.levels.len(), whole.levels.len());
+        assert!(shape.levels.iter().all(Vec::is_empty));
+        assert!(CompressedImage::from_ktx2_from(&bytes[..bytes.len() - 1], 3).is_none());
     }
 
     #[test]
