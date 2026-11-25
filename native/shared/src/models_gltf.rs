@@ -520,6 +520,19 @@ pub(super) fn load_gltf_with_textures(
     base_dir: Option<&std::path::Path>,
     source_label: Option<&str>,
 ) -> Option<ModelData> {
+    // a load that fails after taking shared textures lets them go again
+    renderer.shared_import_begin();
+    let model = import_gltf_with_textures(data, renderer, base_dir, source_label);
+    renderer.shared_import_end(model.is_some());
+    model
+}
+
+fn import_gltf_with_textures(
+    data: &[u8],
+    renderer: &mut crate::renderer::Renderer,
+    base_dir: Option<&std::path::Path>,
+    source_label: Option<&str>,
+) -> Option<ModelData> {
     let (mut gltf, glb_bin) = parse::parse_borrowed(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, source_label.unwrap_or("<memory glTF>"));
 
@@ -547,28 +560,20 @@ pub(super) fn load_gltf_with_textures(
     // Extract and register textures
     let mut texture_indices: Vec<u32> = Vec::new(); // maps glTF image index -> renderer texture index
                                                     // textures shared by content with other models (renderer/shared_textures.rs), held once by this one
-    let mut shared_here: std::collections::HashMap<
-        crate::renderer::shared_textures::SharedTextureKey,
-        u32,
-    > = Default::default();
+    let mut shares = crate::renderer::shared_textures::ModelShares::default();
     for (image_idx, image) in gltf.images().enumerate() {
         let is_normal = normal_image_set.contains(&image_idx);
         let is_srgb = !is_normal && srgb_image_set.contains(&image_idx);
-        let shared_key = crate::renderer::shared_textures::content_hash(
+        let mask = mask_coverage_references.contains_key(&image_idx);
+        let shared_key = crate::renderer::shared_textures::image_key(
             image.extras().as_ref().map(|raw| raw.get()),
-        )
-        .filter(|_| !mask_coverage_references.contains_key(&image_idx))
-        .map(|hash| (hash, is_normal, is_srgb));
-        if let Some(key) = shared_key {
-            let held = match shared_here.get(&key) {
-                Some(&slot) => Some(slot),
-                None => renderer.shared_texture_take(key),
-            };
-            if let Some(slot) = held {
-                shared_here.insert(key, slot);
-                texture_indices.push(slot);
-                continue;
-            }
+            is_normal,
+            is_srgb,
+            mask,
+        );
+        if let Some(slot) = renderer.shared_texture_hold(&mut shares, shared_key) {
+            texture_indices.push(slot);
+            continue;
         }
         match image.source() {
             gltf::image::Source::View { view, .. } => {
@@ -589,10 +594,7 @@ pub(super) fn load_gltf_with_textures(
                                 data, offset, length,
                             ),
                         ) {
-                            if let Some(key) = shared_key {
-                                renderer.shared_texture_add(key, index);
-                                shared_here.insert(key, index);
-                            }
+                            renderer.shared_texture_register(&mut shares, shared_key, index);
                             texture_indices.push(index);
                         } else if let Some((rgba, w, h)) =
                             decode_texture_bytes(img_data, "embedded-image")
