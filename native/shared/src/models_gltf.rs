@@ -141,32 +141,47 @@ fn read_accessor_f32(
     result
 }
 
-pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
-    let mut gltf = parse::parse_gltf(data)?;
-
-    // Get buffer data
-    let mut buffer_data: Vec<Vec<u8>> = Vec::new();
+/// The glTF's buffers, in order. The GLB binary chunk is moved out of the
+/// parsed file, not cloned (a clone was a third copy of the file at the peak
+/// of a load). Inline base64 buffers are decoded; an external `.bin` next to
+/// the file is read from `base_dir` (with `strict`, a missing one fails the
+/// load; otherwise it is an empty buffer).
+fn take_buffers(
+    gltf: &mut gltf::Gltf,
+    base_dir: Option<&std::path::Path>,
+    strict: bool,
+) -> Option<Vec<Vec<u8>>> {
     let mut bin = gltf.blob.take();
+    let mut buffer_data: Vec<Vec<u8>> = Vec::new();
     for buffer in gltf.buffers() {
-        match buffer.source() {
-            gltf::buffer::Source::Bin => {
-                // Moved, not cloned: a clone was a third copy of the file
-                // (after the read and the parser's) at the peak of the load.
-                if let Some(blob) = bin.take() {
-                    buffer_data.push(blob);
-                }
-            }
+        let bytes = match buffer.source() {
+            gltf::buffer::Source::Bin => bin.take().unwrap_or_default(),
             gltf::buffer::Source::Uri(uri) => {
                 if let Some(encoded) = uri.strip_prefix("data:application/octet-stream;base64,") {
                     let mut decoded = Vec::new();
                     let _ = base64_decode(encoded, &mut decoded);
-                    buffer_data.push(decoded);
+                    decoded
+                } else if let Some(dir) = base_dir {
+                    match std::fs::read(dir.join(uri)) {
+                        Ok(bytes) => bytes,
+                        Err(_) if strict => return None,
+                        Err(_) => Vec::new(),
+                    }
                 } else {
-                    buffer_data.push(Vec::new());
+                    Vec::new()
                 }
             }
-        }
+        };
+        buffer_data.push(bytes);
     }
+    Some(buffer_data)
+}
+
+pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
+    let mut gltf = parse::parse_gltf(data)?;
+
+    // Get buffer data
+    let buffer_data = take_buffers(&mut gltf, None, false)?;
 
     // Parse skeleton from the first skin
     let skeleton = if let Some(skin) = gltf.skins().next() {
@@ -491,35 +506,7 @@ pub(super) fn load_gltf_with_textures(
     emit_unsupported_material_extension_diagnostics(&gltf, source_label.unwrap_or("<memory glTF>"));
 
     // Get buffer data
-    let mut buffer_data: Vec<Vec<u8>> = Vec::new();
-    let mut bin = gltf.blob.take();
-    for buffer in gltf.buffers() {
-        match buffer.source() {
-            gltf::buffer::Source::Bin => {
-                // Moved, not cloned: a clone was a third copy of the file
-                // (after the read and the parser's) at the peak of the load.
-                if let Some(blob) = bin.take() {
-                    buffer_data.push(blob);
-                }
-            }
-            gltf::buffer::Source::Uri(uri) => {
-                if let Some(encoded) = uri.strip_prefix("data:application/octet-stream;base64,") {
-                    let mut decoded = Vec::new();
-                    let _ = base64_decode(encoded, &mut decoded);
-                    buffer_data.push(decoded);
-                } else if let Some(dir) = base_dir {
-                    // External .bin file alongside the .gltf.
-                    let path = dir.join(uri);
-                    match std::fs::read(&path) {
-                        Ok(bytes) => buffer_data.push(bytes),
-                        Err(_) => buffer_data.push(Vec::new()),
-                    }
-                } else {
-                    buffer_data.push(Vec::new());
-                }
-            }
-        }
-    }
+    let buffer_data = take_buffers(&mut gltf, base_dir, false)?;
     let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     // Pre-walk materials to identify which image indices are normal
@@ -1075,30 +1062,7 @@ fn load_gltf_staged_impl(
     let mut gltf = parse::parse_gltf(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, source_label);
 
-    let mut buffer_data: Vec<Vec<u8>> = Vec::new();
-    let mut bin = gltf.blob.take();
-    for buffer in gltf.buffers() {
-        match buffer.source() {
-            gltf::buffer::Source::Bin => {
-                // Moved, not cloned: a clone was a third copy of the file
-                // (after the read and the parser's) at the peak of the load.
-                if let Some(blob) = bin.take() {
-                    buffer_data.push(blob);
-                }
-            }
-            gltf::buffer::Source::Uri(uri) => {
-                if let Some(encoded) = uri.strip_prefix("data:application/octet-stream;base64,") {
-                    let mut decoded = Vec::new();
-                    let _ = base64_decode(encoded, &mut decoded);
-                    buffer_data.push(decoded);
-                } else if let Some(dir) = base_dir {
-                    buffer_data.push(std::fs::read(dir.join(uri)).ok()?);
-                } else {
-                    buffer_data.push(Vec::new());
-                }
-            }
-        }
-    }
+    let buffer_data = take_buffers(&mut gltf, base_dir, true)?;
     let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     // Pre-walk materials for the image indices used as normal maps — they
@@ -1535,29 +1499,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
     emit_unsupported_material_extension_diagnostics(&gltf, "<memory glTF>");
 
     // Get buffer data (for .glb, embedded; for .gltf, inline base64)
-    let mut buffer_data: Vec<Vec<u8>> = Vec::new();
-    let mut bin = gltf.blob.take();
-    for buffer in gltf.buffers() {
-        match buffer.source() {
-            gltf::buffer::Source::Bin => {
-                // Moved, not cloned: a clone was a third copy of the file
-                // (after the read and the parser's) at the peak of the load.
-                if let Some(blob) = bin.take() {
-                    buffer_data.push(blob);
-                }
-            }
-            gltf::buffer::Source::Uri(uri) => {
-                if let Some(encoded) = uri.strip_prefix("data:application/octet-stream;base64,") {
-                    // Try to decode base64 inline data
-                    let mut decoded = Vec::new();
-                    let _ = base64_decode(encoded, &mut decoded);
-                    buffer_data.push(decoded);
-                } else {
-                    buffer_data.push(Vec::new());
-                }
-            }
-        }
-    }
+    let buffer_data = take_buffers(&mut gltf, None, false)?;
     let source_geometry_sha256 = complete_geometry_source_hash(data, &gltf, &buffer_data);
 
     let mut source_meshes: Vec<Vec<(u32, MeshData)>> =
