@@ -1524,7 +1524,7 @@ pub fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_index:
     }
     let mesh = &model_data.meshes[mi];
 
-    let vertices = mesh.vertices.clone();
+    let vertices = mesh.vertices.to_vertices();
     let indices = mesh.indices.clone();
     let base_color_tex = mesh.texture_idx;
     let normal_tex = mesh.normal_texture_idx;

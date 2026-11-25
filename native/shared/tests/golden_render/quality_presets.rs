@@ -152,7 +152,7 @@ fn install_glossy_detail_fixture(eng: &mut EngineState) {
     assert!(eng.renderer.cache_model_if_static(
         GLOSSY_DETAIL_HANDLE,
         &[MeshData {
-            vertices,
+            vertices: vertices.into(),
             secondary_tex_coords: None,
             indices,
             texture_idx: Some(base_color),

@@ -10144,13 +10144,10 @@ impl Renderer {
                 shared_identity.and_then(|identity| shared_pt_geometry.get(&identity).copied())
             {
                 window
-            } else if build_static_pt_geometry
-                && !n.vertices().is_empty()
-                && !n.indices().is_empty()
-            {
+            } else if build_static_pt_geometry && n.vertex_count() != 0 && !n.indices().is_empty() {
                 let vb = (geo_vertices.len() / 24) as u32;
                 let ib = geo_indices.len() as u32;
-                geo_vertices.extend_from_slice(bytemuck::cast_slice(n.vertices()));
+                geo_vertices.extend_from_slice(bytemuck::cast_slice(&n.vertices()));
                 geo_indices.extend_from_slice(n.indices());
                 let window = (vb, ib, n.indices().len() as u32);
                 if let Some(identity) = shared_identity {
@@ -10200,7 +10197,7 @@ impl Renderer {
                     &mut geo_secondary_uvs,
                     vertex_base as usize,
                     if index_count != 0 {
-                        n.vertices().len()
+                        n.vertex_count()
                     } else {
                         0
                     },
@@ -14175,9 +14172,10 @@ impl Renderer {
         // Check if any vertex is skinned — cached alongside the meshes so
         // per-frame draws don't rescan every vertex.
         let is_skinned = meshes.iter().any(|m| {
-            m.vertices
-                .iter()
-                .any(|v| v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01)
+            (0..m.vertices.len()).any(|i| {
+                let w = m.vertices.weight(i);
+                w[0] + w[1] + w[2] + w[3] > 0.01
+            })
         });
         if is_skinned {
             self.model_skinned.insert(handle_bits);
@@ -14220,16 +14218,18 @@ impl Renderer {
                 // (min > max) when the mesh has no vertices.
                 let mut local_min = [f32::MAX; 3];
                 let mut local_max = [f32::MIN; 3];
-                for v in mesh.vertices.iter() {
+                for p in mesh.vertices.positions() {
                     for a in 0..3 {
-                        if v.position[a] < local_min[a] {
-                            local_min[a] = v.position[a];
+                        if p[a] < local_min[a] {
+                            local_min[a] = p[a];
                         }
-                        if v.position[a] > local_max[a] {
-                            local_max[a] = v.position[a];
+                        if p[a] > local_max[a] {
+                            local_max[a] = p[a];
                         }
                     }
                 }
+                // whole vertices for the upload (the mesh keeps them compact)
+                let whole = mesh.vertices.to_vertices();
                 if mesh.vertices.is_empty() {
                     local_min = [1.0; 3];
                     local_max = [-1.0; 3];
@@ -14244,7 +14244,7 @@ impl Renderer {
                             .device
                             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                                 label: Some("cached_skinned_model_vb"),
-                                contents: bytemuck::cast_slice(&mesh.vertices),
+                                contents: bytemuck::cast_slice(&whole),
                                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
                             }),
                         index: self
@@ -14263,7 +14263,7 @@ impl Renderer {
                         let geometry = self.gpu_driven.upload_static_or_dedicated(
                             &self.device,
                             &self.queue,
-                            &mesh.vertices,
+                            &whole,
                             &mesh.indices,
                         );
                         if let gpu_driven::MeshGeometry::Shared(slice) = &geometry {
@@ -14500,7 +14500,7 @@ impl Renderer {
                     layered_uses_uv1,
                     material_bg,
                     material_textures: [base_color_idx, normal_idx, mr_idx, em_idx, occ_idx],
-                    uv_density: texture_streaming::uv_density(&mesh.vertices, &mesh.indices),
+                    uv_density: texture_streaming::uv_density(&whole, &mesh.indices),
                     _material_uniform: material_uniform,
                     shadow_cutout_bg,
                     _shadow_cutoff_buf: shadow_cutoff_buf,
@@ -14508,7 +14508,7 @@ impl Renderer {
                     // TLAS path (skinned only; a handful of enemy models,
                     // a few thousand verts each).
                     cpu_vertices: if is_skinned {
-                        Some(mesh.vertices.clone())
+                        Some(whole.clone())
                     } else {
                         None
                     },

@@ -1030,7 +1030,7 @@ fn import_gltf_with_textures(
                 };
                 let morph = morph_slots.read(&reader, &vertices, skin_vertex_scale, mesh.index());
                 let source = Arc::new(MeshData {
-                    vertices,
+                    vertices: vertices.into(),
                     secondary_tex_coords,
                     indices,
                     texture_idx: tex_idx,
@@ -1450,7 +1450,7 @@ fn load_gltf_staged_impl(
             source_meshes[mesh.index()].push((
                 primitive.index() as u32,
                 MeshData {
-                    vertices,
+                    vertices: vertices.into(),
                     secondary_tex_coords,
                     indices,
                     texture_idx: tex_idx,
@@ -1644,7 +1644,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
             source_meshes[mesh.index()].push((
                 primitive.index() as u32,
                 MeshData {
-                    vertices,
+                    vertices: vertices.into(),
                     secondary_tex_coords,
                     indices,
                     texture_idx: None,

@@ -49,7 +49,7 @@ fn layered_pbr_runs_on_opaque_sorted_reactive_and_weighted_paths() {
     assert!(eng.renderer.cache_model_if_static(
         HANDLE,
         &[MeshData {
-            vertices,
+            vertices: vertices.into(),
             secondary_tex_coords: None,
             indices,
             texture_idx: None,
@@ -147,7 +147,7 @@ fn layered_pbr_runs_on_opaque_sorted_reactive_and_weighted_paths() {
     assert!(eng.renderer.cache_model_if_static(
         REFRACTIVE_HANDLE,
         &[MeshData {
-            vertices: refractive_vertices,
+            vertices: refractive_vertices.into(),
             secondary_tex_coords: None,
             indices: refractive_indices,
             texture_idx: None,
@@ -231,7 +231,7 @@ fn layered_pbr_runs_on_opaque_sorted_reactive_and_weighted_paths() {
     assert!(eng.renderer.cache_model_if_static(
         REFRACTIVE_UV1_HANDLE,
         &[MeshData {
-            vertices: uv1_vertices,
+            vertices: uv1_vertices.into(),
             secondary_tex_coords: Some(uv1),
             indices: uv1_indices,
             texture_idx: None,
@@ -481,10 +481,10 @@ fn weighted_transparency_is_order_independent_for_intersecting_imported_blend() 
         const BLUE_HANDLE: u64 = 0x0170_0002;
         assert!(eng
             .renderer
-            .cache_model_if_static(RED_HANDLE, &[blend_mesh(red_vertices)]));
+            .cache_model_if_static(RED_HANDLE, &[blend_mesh(red_vertices.into())]));
         assert!(eng
             .renderer
-            .cache_model_if_static(BLUE_HANDLE, &[blend_mesh(blue_vertices)]));
+            .cache_model_if_static(BLUE_HANDLE, &[blend_mesh(blue_vertices.into())]));
         let custom_material = custom_material_z
             .map(|_| {
                 eng.renderer.compile_material_with_options(

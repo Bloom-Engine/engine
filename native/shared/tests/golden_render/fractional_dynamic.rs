@@ -330,7 +330,7 @@ fn fractional_skinned_motion_tracks_native_and_fresh_recovery() {
     assert!(eng.renderer.cache_model_if_static(
         HANDLE,
         &[MeshData {
-            vertices,
+            vertices: vertices.into(),
             secondary_tex_coords: None,
             indices,
             texture_idx: Some(texture),
@@ -461,7 +461,8 @@ fn fractional_alpha_tested_motion_tracks_native_and_fresh_recovery() {
                 vertex([1.0, 0.0, 0.0], [1.0, 1.0]),
                 vertex([1.0, 2.8, 0.0], [1.0, 0.0]),
                 vertex([-1.0, 2.8, 0.0], [0.0, 0.0]),
-            ],
+            ]
+            .into(),
             secondary_tex_coords: None,
             indices: vec![0, 1, 2, 0, 2, 3],
             texture_idx: Some(texture),
@@ -798,7 +799,8 @@ fn fractional_procedural_foliage_tracks_native_at_fixed_time() {
                 vertex([1.15, 0.0, 0.0], [1.0, 1.0]),
                 vertex([1.15, 4.2, 0.0], [1.0, 0.0]),
                 vertex([-1.15, 4.2, 0.0], [0.0, 0.0]),
-            ],
+            ]
+            .into(),
             secondary_tex_coords: None,
             indices: vec![0, 1, 2, 0, 2, 3],
             texture_idx: Some(texture),

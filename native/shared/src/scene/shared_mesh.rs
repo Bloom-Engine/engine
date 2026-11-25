@@ -58,7 +58,7 @@ impl SharedMeshCache {
         let entry = self.entry(mesh);
         *entry
             .key
-            .get_or_insert_with(|| scene_geometry_key(&mesh.vertices, &mesh.indices))
+            .get_or_insert_with(|| scene_geometry_key(&mesh.vertices.to_vertices(), &mesh.indices))
     }
 
     /// Vertex and index buffers of a shared mesh used as a reduced-detail
@@ -75,7 +75,7 @@ impl SharedMeshCache {
                 (
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("scene_shared_lod_vb"),
-                        contents: bytemuck::cast_slice(&mesh.vertices),
+                        contents: bytemuck::cast_slice(&mesh.vertices.to_vertices()),
                         usage: wgpu::BufferUsages::VERTEX,
                     }),
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -94,7 +94,7 @@ impl SharedMeshCache {
 pub(super) fn node_geometry_key(node: &SceneNode, cache: &mut SharedMeshCache) -> SceneGeometryKey {
     match node.shared_model_mesh.as_ref() {
         Some(mesh) => cache.key(mesh),
-        None => scene_geometry_key(node.vertices(), node.indices()),
+        None => scene_geometry_key(&node.vertices(), node.indices()),
     }
 }
 
@@ -106,7 +106,7 @@ mod tests {
         let mut vertex = Vertex3D::default();
         vertex.position = [x, 0.0, 0.0];
         Arc::new(MeshData {
-            vertices: vec![vertex; 3],
+            vertices: vec![vertex; 3].into(),
             secondary_tex_coords: None,
             indices: vec![0, 1, 2],
             texture_idx: None,
@@ -133,7 +133,10 @@ mod tests {
         let mut cache = SharedMeshCache::default();
         let a = mesh(1.0);
         let key = cache.key(&a);
-        assert_eq!(key, scene_geometry_key(&a.vertices, &a.indices));
+        assert_eq!(
+            key,
+            scene_geometry_key(&a.vertices.to_vertices(), &a.indices)
+        );
         assert_eq!(cache.key(&a), key);
         assert_eq!(cache.entries.len(), 1);
         assert_ne!(cache.key(&mesh(2.0)), key);
@@ -153,6 +156,9 @@ mod tests {
         cache.entries.insert(Arc::as_ptr(&b) as usize, stale);
         let key_b = cache.key(&b);
         assert_ne!(key_b, key_a);
-        assert_eq!(key_b, scene_geometry_key(&b.vertices, &b.indices));
+        assert_eq!(
+            key_b,
+            scene_geometry_key(&b.vertices.to_vertices(), &b.indices)
+        );
     }
 }

@@ -118,7 +118,8 @@ fn cache_square(eng: &mut EngineState, handle: u64, joints: usize, half_size: f3
                 vertex(1.0, -1.0),
                 vertex(1.0, 1.0),
                 vertex(-1.0, 1.0),
-            ],
+            ]
+            .into(),
             secondary_tex_coords: None,
             indices: vec![0, 1, 2, 0, 2, 3],
             texture_idx: None,

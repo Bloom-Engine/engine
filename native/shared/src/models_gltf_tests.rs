@@ -508,7 +508,7 @@ fn staged_mask_loader_routes_coverage_variant_and_keeps_plain_loader_image_neutr
     assert_eq!(staged.textures[0].alpha_coverage_reference, Some(0.625));
     assert_eq!(staged.model.meshes[0].texture_idx, Some(1));
     assert!(staged.model.meshes[0].alpha_coverage_mips);
-    let color = staged.model.meshes[0].vertices[0].color;
+    let color = staged.model.meshes[0].vertices.get(0).color;
     for (actual, expected) in color.into_iter().zip([0.1, 0.1, 0.45, 0.4]) {
         assert!(
             (actual - expected).abs() < 1e-6,
@@ -1071,6 +1071,7 @@ fn physical_metadata_round_trips_through_plain_and_staged_glb_loaders() {
         assert_eq!(mesh.layered_pbr.anisotropy_rotation, 0.75, "{label}");
         assert!(
             mesh.vertices
+                .to_vertices()
                 .iter()
                 .all(|vertex| vertex.tangent == [1.0, 0.0, 0.0, -1.0]),
             "{label}: authored mirrored tangents were not preserved"
@@ -1117,8 +1118,8 @@ fn shared_static_node_scale_preserves_world_bounds_and_volume_contract() {
     ] {
         assert_eq!(model.meshes.len(), 1, "{label}");
         let mesh = &model.meshes[0];
-        assert_eq!(mesh.vertices[1].position, [1.0, 0.0, 0.0], "{label}");
-        assert_eq!(mesh.vertices[2].position, [0.0, 1.0, 0.0], "{label}");
+        assert_eq!(mesh.vertices.get(1).position, [1.0, 0.0, 0.0], "{label}");
+        assert_eq!(mesh.vertices.get(2).position, [0.0, 1.0, 0.0], "{label}");
         assert_eq!(model.mesh_transform(0)[0][0], 2.0, "{label}");
         assert_eq!(model.mesh_transform(0)[1][1], 2.0, "{label}");
         assert_eq!(model.mesh_transform(0)[2][2], 2.0, "{label}");
@@ -1207,7 +1208,7 @@ fn physical_texcoord_1_is_retained_lazily_and_exactly() {
             "{label} loader must preserve authored TEXCOORD_1 exactly"
         );
         assert_eq!(
-            model.meshes[0].vertices[1].uv,
+            model.meshes[0].vertices.get(1).uv,
             [1.0, 0.0],
             "{label} loader must leave the established UV0 vertex ABI intact"
         );

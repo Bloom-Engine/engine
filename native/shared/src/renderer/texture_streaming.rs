@@ -803,12 +803,12 @@ impl Renderer {
             {
                 continue;
             }
-            let key = node.vertices().as_ptr() as usize;
+            let key = node.geometry_identity();
             let local = *self
                 .texture_streaming
                 .uv_density
                 .entry(key)
-                .or_insert_with(|| uv_density(node.vertices(), node.indices()));
+                .or_insert_with(|| uv_density(&node.vertices(), node.indices()));
             let world = node.world_transform();
             let scale = (0..3)
                 .map(|c| (world[c][0].powi(2) + world[c][1].powi(2) + world[c][2].powi(2)).sqrt())

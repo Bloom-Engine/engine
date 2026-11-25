@@ -328,7 +328,7 @@ mod tests {
 
     fn mesh() -> Arc<MeshData> {
         Arc::new(MeshData {
-            vertices: vec![Vertex3D::default(); 3],
+            vertices: vec![Vertex3D::default(); 3].into(),
             secondary_tex_coords: None,
             indices: vec![0, 1, 2],
             texture_idx: None,

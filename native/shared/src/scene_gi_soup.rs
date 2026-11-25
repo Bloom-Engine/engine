@@ -9,8 +9,6 @@
 //! `min_feature` apart and the distance to it moves by at most that. Larger
 //! triangles are untouched.
 
-use crate::renderer::Vertex3D;
-
 /// Floats per soup vertex: the world position and nothing else. The bake
 /// shader wants the `Vertex3D` stride, and gets it when the triangles a bake
 /// uses are packed for upload (`sdf_clipmap_prep::pack_binned_triangles`); a
@@ -66,7 +64,7 @@ fn bounds_inside(bmin: [f32; 3], bmax: [f32; 3], lo: [f32; 3], hi: [f32; 3]) -> 
 /// only the triangles that reach into the region: a 500 m ground tile under a
 /// 120 m region would otherwise put all of itself into every soup.
 pub(crate) fn append_node_triangles_in(
-    vertices: &[Vertex3D],
+    vertices: &[[f32; 3]],
     indices: &[u32],
     world_transform: &[[f32; 4]; 4],
     min_feature: f32,
@@ -94,7 +92,7 @@ pub(crate) fn append_node_triangles_in(
 /// Append one mesh in world space; returns the triangles appended.
 #[cfg(test)]
 pub(crate) fn append_node_triangles(
-    vertices: &[Vertex3D],
+    vertices: &[[f32; 3]],
     indices: &[u32],
     world_transform: &[[f32; 4]; 4],
     min_feature: f32,
@@ -113,7 +111,7 @@ pub(crate) fn append_node_triangles(
 }
 
 fn append_triangles(
-    vertices: &[Vertex3D],
+    vertices: &[[f32; 3]],
     indices: &[u32],
     world_transform: &[[f32; 4]; 4],
     min_feature: f32,
@@ -131,14 +129,14 @@ fn append_triangles(
         // Only the surviving triangles' corners are emitted.
         vbuf.reserve(kept.len() * STRIDE);
         for (slot, &index) in kept.iter().enumerate() {
-            push_position(vbuf, world_transform, vertices[index as usize].position);
+            push_position(vbuf, world_transform, vertices[index as usize]);
             ibuf.push(base + slot as u32);
         }
         return (kept.len() / 3) as u32;
     }
     vbuf.reserve(vertices.len() * STRIDE);
     for vertex in vertices {
-        push_position(vbuf, world_transform, vertex.position);
+        push_position(vbuf, world_transform, *vertex);
     }
     ibuf.extend(indices.iter().map(|&index| base + index));
     (indices.len() / 3) as u32
@@ -148,7 +146,7 @@ fn append_triangles(
 /// thinning, or `None` when nothing was dropped and the mesh should be
 /// emitted as it is.
 fn select_triangles(
-    vertices: &[Vertex3D],
+    vertices: &[[f32; 3]],
     indices: &[u32],
     world_transform: &[[f32; 4]; 4],
     min_feature: f32,
@@ -180,7 +178,7 @@ fn select_triangles(
     let mut kept: Vec<u32> = Vec::new();
     let mut dropped_any = false;
     for (triangle, corners) in indices.chunks_exact(3).enumerate() {
-        let position = |corner: u32| vertices.get(corner as usize).map(|v| v.position);
+        let position = |corner: u32| vertices.get(corner as usize).copied();
         let (Some(a), Some(b), Some(c)) = (
             position(corners[0]),
             position(corners[1]),
@@ -234,6 +232,11 @@ fn select_triangles(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::Vertex3D;
+
+    fn pos(v: &[Vertex3D]) -> Vec<[f32; 3]> {
+        v.iter().map(|v| v.position).collect()
+    }
 
     const IDENTITY: [[f32; 4]; 4] = [
         [1.0, 0.0, 0.0, 0.0],
@@ -310,8 +313,14 @@ mod tests {
     fn large_triangles_are_emitted_unchanged() {
         let (vertices, indices) = grid(4, 4.0); // 0.5 m² triangles
         let (mut vbuf, mut ibuf) = (Vec::new(), Vec::new());
-        let count =
-            append_node_triangles(&vertices, &indices, &IDENTITY, 0.08, &mut vbuf, &mut ibuf);
+        let count = append_node_triangles(
+            &pos(&vertices),
+            &indices,
+            &IDENTITY,
+            0.08,
+            &mut vbuf,
+            &mut ibuf,
+        );
         assert_eq!(count, 32);
         assert_eq!(ibuf, indices);
         assert_eq!(vbuf.len(), vertices.len() * STRIDE);
@@ -322,8 +331,14 @@ mod tests {
         // 1 m² in 20 000 triangles of 0.5 cm² each; samples 10 cm apart.
         let (vertices, indices) = grid(100, 1.0);
         let (mut vbuf, mut ibuf) = (Vec::new(), Vec::new());
-        let count =
-            append_node_triangles(&vertices, &indices, &IDENTITY, 0.1, &mut vbuf, &mut ibuf);
+        let count = append_node_triangles(
+            &pos(&vertices),
+            &indices,
+            &IDENTITY,
+            0.1,
+            &mut vbuf,
+            &mut ibuf,
+        );
         assert!((100..=121).contains(&count), "kept {count}");
         assert_eq!(ibuf.len() as u32, count * 3);
         assert_eq!(vbuf.len(), ibuf.len() * STRIDE);
@@ -351,7 +366,7 @@ mod tests {
         let bounds = ([0.0, 0.0, 0.0], [400.0, 0.0, 400.0]);
         let (mut vbuf, mut ibuf) = (Vec::new(), Vec::new());
         let count = append_node_triangles_in(
-            &vertices,
+            &pos(&vertices),
             &indices,
             &IDENTITY,
             0.08,
@@ -370,7 +385,7 @@ mod tests {
         let whole = ([-10.0, -50.0, -10.0], [410.0, 50.0, 410.0]);
         let (mut vbuf, mut ibuf) = (Vec::new(), Vec::new());
         let count = append_node_triangles_in(
-            &vertices,
+            &pos(&vertices),
             &indices,
             &IDENTITY,
             0.08,
@@ -382,7 +397,7 @@ mod tests {
         assert_eq!((count, ibuf.len()), (3200, indices.len()));
         let away = ([900.0, -50.0, 900.0], [950.0, 50.0, 950.0]);
         let count = append_node_triangles_in(
-            &vertices,
+            &pos(&vertices),
             &indices,
             &IDENTITY,
             0.08,
@@ -395,7 +410,7 @@ mod tests {
         // No thinning asked for: the clip still applies.
         let (mut vbuf, mut ibuf) = (Vec::new(), Vec::new());
         let count = append_node_triangles_in(
-            &vertices,
+            &pos(&vertices),
             &indices,
             &IDENTITY,
             0.0,
@@ -415,7 +430,8 @@ mod tests {
         big[1][1] = 100.0;
         big[2][2] = 100.0; // triangles are now 0.5 m² each
         let (mut vbuf, mut ibuf) = (Vec::new(), Vec::new());
-        let count = append_node_triangles(&vertices, &indices, &big, 0.1, &mut vbuf, &mut ibuf);
+        let count =
+            append_node_triangles(&pos(&vertices), &indices, &big, 0.1, &mut vbuf, &mut ibuf);
         assert_eq!(count, 20_000);
     }
 }

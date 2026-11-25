@@ -106,7 +106,15 @@ pub fn bloom_set_shadow_filter_4tap(on: f64) -> f64 {
 }
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn bloom_set_far_shadow(cx: f64, cz: f64, half_x: f64, half_z: f64, y_min: f64, y_max: f64, refresh: f64) -> f64 {
+pub fn bloom_set_far_shadow(
+    cx: f64,
+    cz: f64,
+    half_x: f64,
+    half_z: f64,
+    y_min: f64,
+    y_max: f64,
+    refresh: f64,
+) -> f64 {
     engine().renderer.set_far_shadow(
         cx as f32,
         cz as f32,
@@ -231,7 +239,9 @@ pub fn bloom_set_auto_resolution(target_hz: f64, enabled: f64) -> f64 {
 }
 #[wasm_bindgen]
 pub fn bloom_set_aerial_perspective(strength: f64) -> f64 {
-    engine().renderer.set_aerial_perspective_strength(strength as f32);
+    engine()
+        .renderer
+        .set_aerial_perspective_strength(strength as f32);
     1.0
 }
 #[wasm_bindgen]
@@ -398,7 +408,9 @@ pub fn bloom_set_foliage_shadow_motion(on: f64) -> f64 {
 
 #[wasm_bindgen]
 pub fn bloom_set_weather(cloud_cover: f64, wetness: f64) -> f64 {
-    engine().renderer.set_weather(cloud_cover as f32, wetness as f32);
+    engine()
+        .renderer
+        .set_weather(cloud_cover as f32, wetness as f32);
     1.0
 }
 
@@ -496,7 +508,7 @@ pub fn bloom_scene_attach_model_lod(
         return 0.0;
     }
     let mesh = &md.meshes[mi];
-    let (v, i) = (mesh.vertices.clone(), mesh.indices.clone());
+    let (v, i) = (mesh.vertices.to_vertices(), mesh.indices.clone());
     eng.scene
         .set_lod_geometry(node, lod_index as usize, v, i, max_coverage as f32);
     1.0

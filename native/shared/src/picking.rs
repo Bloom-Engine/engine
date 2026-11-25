@@ -99,9 +99,9 @@ pub fn raycast_scene(scene: &SceneGraph, origin: &[f32; 3], direction: &[f32; 3]
             if tri.len() < 3 {
                 continue;
             }
-            let v0 = &node.vertices()[tri[0] as usize];
-            let v1 = &node.vertices()[tri[1] as usize];
-            let v2 = &node.vertices()[tri[2] as usize];
+            let v0 = &node.vertex(tri[0] as usize);
+            let v1 = &node.vertex(tri[1] as usize);
+            let v2 = &node.vertex(tri[2] as usize);
 
             if let Some((t, u, v)) = ray_triangle_intersection(
                 &local_origin,
@@ -179,9 +179,9 @@ pub fn raycast_scene_all(
             if tri.len() < 3 {
                 continue;
             }
-            let v0 = &node.vertices()[tri[0] as usize];
-            let v1 = &node.vertices()[tri[1] as usize];
-            let v2 = &node.vertices()[tri[2] as usize];
+            let v0 = &node.vertex(tri[0] as usize);
+            let v1 = &node.vertex(tri[1] as usize);
+            let v2 = &node.vertex(tri[2] as usize);
 
             if let Some((t, u, v)) = ray_triangle_intersection(
                 &local_origin,

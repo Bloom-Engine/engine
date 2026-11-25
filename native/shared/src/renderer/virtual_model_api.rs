@@ -491,7 +491,8 @@ fn build_roles(
                         weights: [0.0; 4],
                         tangent: vertex.tangent,
                     })
-                    .collect();
+                    .collect::<Vec<_>>()
+                    .into();
                 mesh.indices = primitive.indices.clone();
                 mesh.secondary_tex_coords = None;
                 let proxy = Arc::new(mesh);

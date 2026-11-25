@@ -20,7 +20,7 @@ fn quad_vertices(half_extent: f32) -> Vec<Vertex3D> {
 
 fn untextured_mesh(vertices: Vec<Vertex3D>, alpha_mode: MaterialAlphaMode) -> MeshData {
     MeshData {
-        vertices,
+        vertices: vertices.into(),
         secondary_tex_coords: None,
         indices: vec![0, 1, 2, 0, 2, 3],
         texture_idx: None,

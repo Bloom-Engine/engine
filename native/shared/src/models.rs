@@ -2,6 +2,10 @@ use crate::handles::HandleRegistry;
 use crate::renderer::Vertex3D;
 use std::sync::Arc;
 
+#[path = "models_vertex_store.rs"]
+mod vertex_store;
+pub use vertex_store::VertexStore;
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum MaterialAlphaMode {
     #[default]
@@ -443,7 +447,9 @@ pub(crate) fn exclusive_texture_indices(meshes: &[Arc<MeshData>]) -> Vec<u32> {
 
 #[derive(Clone)]
 pub struct MeshData {
-    pub vertices: Vec<Vertex3D>,
+    /// The CPU vertices, by field and compact (models_vertex_store.rs): use
+    /// `positions()` where positions do, `to_vertices()` for whole ones.
+    pub vertices: VertexStore,
     /// Compact glTF TEXCOORD_1 sidecar retained only when an active physical
     /// transmission/thickness texture requests it. Keeping it out of
     /// `Vertex3D` preserves every ordinary vertex ABI and fetch footprint.
@@ -840,7 +846,7 @@ impl ModelManager {
 
         let model = ModelData {
             meshes: vec![Arc::new(MeshData {
-                vertices,
+                vertices: vertices.into(),
                 secondary_tex_coords: None,
                 indices,
                 texture_idx: None,
@@ -964,7 +970,7 @@ impl ModelManager {
 
         let model = ModelData {
             meshes: vec![Arc::new(MeshData {
-                vertices,
+                vertices: vertices.into(),
                 secondary_tex_coords: None,
                 indices,
                 texture_idx: None,
@@ -1037,7 +1043,7 @@ impl ModelManager {
         let indices = index_data.to_vec();
         let model = ModelData {
             meshes: vec![Arc::new(MeshData {
-                vertices,
+                vertices: vertices.into(),
                 secondary_tex_coords: None,
                 indices,
                 texture_idx: None,
@@ -1172,7 +1178,7 @@ impl ModelManager {
 
         let model = ModelData {
             meshes: vec![Arc::new(MeshData {
-                vertices,
+                vertices: vertices.into(),
                 secondary_tex_coords: None,
                 indices,
                 texture_idx: None,
