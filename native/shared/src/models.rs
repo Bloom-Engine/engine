@@ -1211,6 +1211,7 @@ impl ModelManager {
     }
 
     /// As `load_model_animation`, reading only what the clips need from the file.
+    #[cfg(feature = "models3d")]
     pub fn load_model_animation_file(&mut self, path: &std::path::Path) -> f64 {
         match gltf_load::load_gltf_animation_file(path) {
             Some(anim) => self.animations.alloc(anim),
