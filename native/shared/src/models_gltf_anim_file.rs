@@ -59,7 +59,11 @@ pub(super) fn load(path: &Path) -> Option<Option<ModelAnimation>> {
         }
         if let Some(view) = a.view() {
             let (o, l) = (view.offset(), view.length());
-            if o + l > bin_len {
+            // the accessor's last element must lie inside its view (else the
+            // full read would see bytes this one leaves at zero)
+            let stride = view.stride().unwrap_or(a.size());
+            let span = a.offset() + a.count().saturating_sub(1) * stride + a.size();
+            if o + l > bin_len || (a.count() > 0 && span > l) {
                 return None;
             }
             ranges.push((o, l));
