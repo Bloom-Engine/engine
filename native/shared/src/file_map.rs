@@ -14,7 +14,10 @@
 use std::ops::Deref;
 use std::path::Path;
 
-pub enum FileBytes {
+/// The bytes of a file (see [`read`]). The mapping is private to this module.
+pub struct FileBytes(Inner);
+
+enum Inner {
     #[cfg(unix)]
     Mapped {
         ptr: *const u8,
@@ -26,13 +29,13 @@ pub enum FileBytes {
 impl Deref for FileBytes {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        match self {
+        match &self.0 {
             #[cfg(unix)]
-            FileBytes::Mapped { ptr, len } => {
+            Inner::Mapped { ptr, len } => {
                 // SAFETY: ptr/len describe a live read-only mapping owned by self.
                 unsafe { std::slice::from_raw_parts(*ptr, *len) }
             }
-            FileBytes::Owned(bytes) => bytes,
+            Inner::Owned(bytes) => bytes,
         }
     }
 }
@@ -40,7 +43,7 @@ impl Deref for FileBytes {
 impl Drop for FileBytes {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let FileBytes::Mapped { ptr, len } = *self {
+        if let Inner::Mapped { ptr, len } = self.0 {
             // SAFETY: the mapping was made by `read` with this address and length.
             unsafe {
                 libc::munmap(ptr as *mut libc::c_void, len);
@@ -51,7 +54,14 @@ impl Drop for FileBytes {
 
 /// The bytes of the file at `path`: mapped on Unix-like systems (falling back
 /// to a read when the mapping fails), read whole elsewhere.
-pub fn read(path: &Path) -> std::io::Result<FileBytes> {
+///
+/// # Safety
+///
+/// While the returned `FileBytes` lives, the file must not be truncated or
+/// rewritten by anyone: a mapping is not a snapshot, and reading a page past
+/// a new end of file faults. Engine loads hold it only for the load of one
+/// model from the game's own assets.
+pub unsafe fn read(path: &Path) -> std::io::Result<FileBytes> {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -71,14 +81,14 @@ pub fn read(path: &Path) -> std::io::Result<FileBytes> {
                 )
             };
             if ptr != libc::MAP_FAILED {
-                return Ok(FileBytes::Mapped {
+                return Ok(FileBytes(Inner::Mapped {
                     ptr: ptr as *const u8,
                     len,
-                });
+                }));
             }
         }
     }
-    std::fs::read(path).map(FileBytes::Owned)
+    std::fs::read(path).map(|bytes| FileBytes(Inner::Owned(bytes)))
 }
 
 #[cfg(test)]
@@ -90,10 +100,11 @@ mod tests {
         let path = dir.join("bytes.bin");
         let bytes: Vec<u8> = (0..100_000u32).map(|i| (i * 31 % 251) as u8).collect();
         std::fs::write(&path, &bytes).unwrap();
-        assert_eq!(&*super::read(&path).unwrap(), &bytes[..]);
+        // SAFETY (all three): the test's own files, not changed while mapped.
+        assert_eq!(&*unsafe { super::read(&path) }.unwrap(), &bytes[..]);
         std::fs::write(&path, b"").unwrap();
-        assert!(super::read(&path).unwrap().is_empty());
-        assert!(super::read(&dir.join("missing")).is_err());
+        assert!(unsafe { super::read(&path) }.unwrap().is_empty());
+        assert!(unsafe { super::read(&dir.join("missing")) }.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -19,7 +19,8 @@ macro_rules! __bloom_ffi_models {
                 let resolved =bloom_resolve_asset_path(path);
                 let resolved_path = std::path::Path::new(resolved.as_ref());
                 // mapped, not read: only the pages the load touches come in from disk
-                match $crate::file_map::read(resolved_path) {
+                // SAFETY: an asset file, not rewritten while one model loads from it.
+                match unsafe { $crate::file_map::read(resolved_path) } {
                     Ok(data) => {
                         let eng = engine();
                         let $crate::engine::EngineState { ref mut models, ref mut renderer, .. } = *eng;

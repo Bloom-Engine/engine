@@ -78,12 +78,14 @@ fn file_identity(source_path: &Path, file_data: &[u8]) -> u64 {
     if meta.len() != file_data.len() as u64 {
         return fingerprint(file_data);
     }
-    let changed = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
+    // nanoseconds from the epoch, before it (the high bit set) or after
+    let changed = match meta.modified() {
+        Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => after.as_nanos() as u64,
+            Err(before) => (before.duration().as_nanos() as u64) | 1 << 63,
+        },
+        Err(_) => 0,
+    };
     #[cfg(unix)]
     let (ino, dev) = {
         use std::os::unix::fs::MetadataExt;

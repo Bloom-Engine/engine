@@ -17,7 +17,12 @@ pub(super) fn split_glb(data: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
     let word = |at: usize| -> Option<usize> {
         Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?) as usize)
     };
-    if data.get(0..4)? != b"glTF" || data.get(16..20)? != b"JSON" {
+    if data.get(0..4)? != b"glTF" || word(4)? != 2 || data.get(16..20)? != b"JSON" {
+        return None;
+    }
+    // the header's total length must fit the data (a truncated file is the
+    // gltf crate's to reject, with its message)
+    if word(8)? > data.len() {
         return None;
     }
     let json_end = 20usize.checked_add(word(12)?)?;
