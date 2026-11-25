@@ -1328,6 +1328,9 @@ mod physical_uv_tests {
     #[test]
     fn secondary_uv_keeps_established_vertex_and_uniform_abis() {
         assert_eq!(std::mem::size_of::<Vertex3D>(), 96);
+        // Static meshes upload without joints/weights (vertex_formats.rs).
+        assert_eq!(std::mem::size_of::<super::super::StaticVertex3D>(), 64);
+        assert_eq!(super::super::StaticVertex3D::static_desc().array_stride, 64);
         assert_eq!(std::mem::size_of::<SceneTransmissionUniforms>(), 96);
         assert_eq!(std::mem::size_of::<SsrTemporalParams>(), 144);
         let layout = secondary_uv_desc();

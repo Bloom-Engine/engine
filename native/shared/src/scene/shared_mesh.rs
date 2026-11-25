@@ -15,7 +15,7 @@ struct SharedMeshEntry {
     /// even if a new mesh was allocated at the same address.
     mesh: Weak<MeshData>,
     key: Option<SceneGeometryKey>,
-    lod_buffers: Option<(wgpu::Buffer, wgpu::Buffer)>,
+    lod_buffers: Option<(wgpu::Buffer, wgpu::Buffer, VertexLayout)>,
 }
 
 #[derive(Default)]
@@ -61,21 +61,23 @@ impl SharedMeshCache {
             .get_or_insert_with(|| scene_geometry_key(&mesh.vertices.to_vertices(), &mesh.indices))
     }
 
-    /// Vertex and index buffers of a shared mesh used as a reduced-detail
-    /// level, created on first use and shared by every node after that.
+    /// Vertex and index buffers (and the vertex format) of a shared mesh used
+    /// as a reduced-detail level, created on first use and shared by every
+    /// node after that.
     pub(super) fn lod_buffers(
         &mut self,
         device: &wgpu::Device,
         mesh: &Arc<MeshData>,
-    ) -> (wgpu::Buffer, wgpu::Buffer) {
+    ) -> (wgpu::Buffer, wgpu::Buffer, VertexLayout) {
         let entry = self.entry(mesh);
         entry
             .lod_buffers
             .get_or_insert_with(|| {
+                let layout = VertexLayout::for_store(&mesh.vertices);
                 (
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("scene_shared_lod_vb"),
-                        contents: bytemuck::cast_slice(&mesh.vertices.to_vertices()),
+                        contents: &layout.encode(&mesh.vertices.to_vertices()),
                         usage: wgpu::BufferUsages::VERTEX,
                     }),
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -83,6 +85,7 @@ impl SharedMeshCache {
                         contents: bytemuck::cast_slice(&mesh.indices),
                         usage: wgpu::BufferUsages::INDEX,
                     }),
+                    layout,
                 )
             })
             .clone()

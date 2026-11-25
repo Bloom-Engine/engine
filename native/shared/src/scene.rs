@@ -12,7 +12,7 @@ use crate::renderer::{
     gpu_driven::{self, GeometrySlice, GpuDrawRecord},
     material_indirection::MaterialId,
     ImportedIridescenceDrawRef, ImportedRefractiveDrawRef, ImportedTransparentDrawRef, MeshDrawRef,
-    Uniforms3D, Vertex3D,
+    Uniforms3D, Vertex3D, VertexLayout,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -212,6 +212,8 @@ pub struct SceneNode {
     pub world_bounds_max: [f32; 3],
     // GPU resources (lazily created)
     pub gpu_vb: Option<wgpu::Buffer>,
+    /// The format `gpu_vb` holds (64 bytes unless a vertex is skinned).
+    pub(crate) gpu_vb_layout: VertexLayout,
     pub(crate) gpu_secondary_uv_vb: Option<wgpu::Buffer>,
     pub gpu_ib: Option<wgpu::Buffer>,
     /// Deduplicated geometry used only by the GPU-driven main/depth path.
@@ -338,6 +340,7 @@ pub struct LodLevel {
     /// NDC extent of its world AABB, 0..1) drops below this value.
     pub max_coverage: f32,
     gpu_vb: Option<wgpu::Buffer>,
+    gpu_vb_layout: VertexLayout,
     gpu_secondary_uv_vb: Option<wgpu::Buffer>,
     gpu_ib: Option<wgpu::Buffer>,
     gpu_index_count: u32,
@@ -355,9 +358,9 @@ impl SceneNode {
     pub fn active_lod(&self) -> i32 {
         self.active_lod
     }
-    /// The active level's own GPU geometry (vertex buffer, index buffer, index count), or
-    /// None when the base geometry is drawn or the level is not uploaded.
-    pub fn active_lod_geometry(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)> {
+    /// The active level's own GPU geometry (vertex buffer, index buffer, index count, vertex
+    /// format), or None when the base geometry is drawn or the level is not uploaded.
+    pub fn active_lod_geometry(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32, VertexLayout)> {
         if self.active_lod < 0 {
             return None;
         }
@@ -366,6 +369,7 @@ impl SceneNode {
             lod.gpu_vb.as_ref()?,
             lod.gpu_ib.as_ref()?,
             lod.gpu_index_count,
+            lod.gpu_vb_layout,
         ))
     }
     /// The arena slice and index count of the geometry drawn this frame (the
@@ -410,6 +414,7 @@ impl SceneNode {
             world_bounds_min: [f32::MAX; 3],
             world_bounds_max: [f32::MIN; 3],
             gpu_vb: None,
+            gpu_vb_layout: VertexLayout::Full96,
             gpu_secondary_uv_vb: None,
             gpu_ib: None,
             gpu_geometry: None,
@@ -516,6 +521,7 @@ struct SharedSceneGeometry {
 #[derive(Clone)]
 struct SharedSceneGpuResources {
     vertex: wgpu::Buffer,
+    layout: VertexLayout,
     index: wgpu::Buffer,
     blas: Option<wgpu::Blas>,
     blas_ready: bool,
@@ -1070,6 +1076,7 @@ impl SceneGraph {
                 indices: Vec::new(),
                 max_coverage: 0.0,
                 gpu_vb: None,
+                gpu_vb_layout: VertexLayout::Full96,
                 gpu_secondary_uv_vb: None,
                 gpu_ib: None,
                 gpu_index_count: 0,
@@ -1815,15 +1822,18 @@ impl SceneGraph {
                     lod.gpu_geometry = None;
                     lod.gpu_geometry_refused = false;
                     if let Some(mesh) = lod.shared.as_ref() {
-                        let (vertex, index) = shared_mesh_cache.lod_buffers(device, mesh);
+                        let (vertex, index, layout) = shared_mesh_cache.lod_buffers(device, mesh);
                         lod.gpu_vb = Some(vertex);
+                        lod.gpu_vb_layout = layout;
                         lod.gpu_ib = Some(index);
                         lod.gpu_index_count = mesh.indices.len() as u32;
                     } else {
+                        let layout = VertexLayout::for_vertices(&lod.vertices);
+                        lod.gpu_vb_layout = layout;
                         lod.gpu_vb = Some(device.create_buffer_init(
                             &wgpu::util::BufferInitDescriptor {
                                 label: Some("scene_node_lod_vb"),
-                                contents: bytemuck::cast_slice(&lod.vertices),
+                                contents: &layout.encode(&lod.vertices),
                                 usage: wgpu::BufferUsages::VERTEX,
                             },
                         ));
@@ -1929,6 +1939,7 @@ impl SceneGraph {
                             cached.references = cached.references.saturating_add(1);
                         }
                         node.gpu_vb = Some(cached.vertex.clone());
+                        node.gpu_vb_layout = cached.layout;
                         node.gpu_ib = Some(cached.index.clone());
                         node.blas = cached.blas.clone();
                         node.blas_ready = cached.blas_ready;
@@ -1965,10 +1976,12 @@ impl SceneGraph {
                     wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE
                 };
                 if !reused_resources && resource_key.is_some() {
+                    let layout = node.vertex_layout();
+                    node.gpu_vb_layout = layout;
                     node.gpu_vb = Some(device.create_buffer_init(
                         &wgpu::util::BufferInitDescriptor {
                             label: Some("scene_shared_vb"),
-                            contents: bytemuck::cast_slice(&node.vertices()),
+                            contents: &layout.encode(&node.vertices()),
                             usage: vb_usage,
                         },
                     ));
@@ -2140,6 +2153,7 @@ impl SceneGraph {
                             key,
                             SharedSceneGpuResources {
                                 vertex: vertex.clone(),
+                                layout: node.gpu_vb_layout,
                                 index: index.clone(),
                                 blas: node.blas.clone(),
                                 blas_ready: node.blas_ready,
@@ -2528,46 +2542,31 @@ impl SceneGraph {
         renderer.retire_scene_gpu_materials(self.retired_gpu_materials.drain(..));
     }
 
-    /// Render all visible scene nodes into the given render pass.
-    /// Must be called after prepare() and after the pipeline/lighting/joints are set.
-    pub fn render<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, gpu_driven_enabled: bool) {
-        self.render_with_refraction(pass, gpu_driven_enabled, false);
-    }
-
-    pub(crate) fn render_with_refraction<'a>(
-        &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
-        gpu_driven_enabled: bool,
-        imported_refraction_enabled: bool,
-    ) {
-        self.render_with_material_pipeline_selection(
-            pass,
-            gpu_driven_enabled,
-            imported_refraction_enabled,
-            None,
-            None,
-            0,
-            None,
-        );
-    }
-
+    /// The opaque retained nodes of the world layer, shaded with
+    /// `base_pipeline` (the scene pipelines), the layered-material ones, and
+    /// for the nodes the depth prepass drew `prepassed_pipeline`. Each node
+    /// takes the pipeline of its vertex format; `skin_zero` is the zero
+    /// joints/weights stream of the 64-byte one.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_with_material_specializations<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         gpu_driven_enabled: bool,
         imported_refraction_enabled: bool,
-        base_pipeline: &'a wgpu::RenderPipeline,
+        base_pipeline: &'a crate::renderer::vertex_formats::MeshPipelines,
         layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
-        prepassed_pipeline: Option<&'a wgpu::RenderPipeline>,
+        prepassed_pipeline: Option<&'a crate::renderer::vertex_formats::MeshPipelines>,
+        skin_zero: &'a wgpu::Buffer,
     ) {
         self.render_with_material_pipeline_selection(
             pass,
             gpu_driven_enabled,
             imported_refraction_enabled,
-            Some(base_pipeline),
+            base_pipeline,
             layered,
             0,
             prepassed_pipeline,
+            skin_zero,
         );
     }
 
@@ -2576,17 +2575,19 @@ impl SceneGraph {
         pass: &mut wgpu::RenderPass<'a>,
         render_layer: u32,
         imported_refraction_enabled: bool,
-        base_pipeline: &'a wgpu::RenderPipeline,
+        base_pipeline: &'a crate::renderer::vertex_formats::MeshPipelines,
         layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
+        skin_zero: &'a wgpu::Buffer,
     ) {
         self.render_with_material_pipeline_selection(
             pass,
             false,
             imported_refraction_enabled,
-            Some(base_pipeline),
+            base_pipeline,
             layered,
             render_layer,
             None,
+            skin_zero,
         );
     }
 
@@ -2606,6 +2607,7 @@ impl SceneGraph {
             &'a wgpu::Buffer,
             &'a wgpu::Buffer,
             u32,
+            VertexLayout,
         ),
     > + 'a {
         self.nodes.iter().filter_map(move |(_handle, node)| {
@@ -2638,27 +2640,29 @@ impl SceneGraph {
                 .lods
                 .get(node.active_lod.max(0) as usize)
                 .filter(|_| node.active_lod >= 0);
-            let (vb, ib, index_count) = match active_lod {
+            let (vb, ib, index_count, layout) = match active_lod {
                 Some(lod) => (
                     lod.gpu_vb.as_ref()?,
                     lod.gpu_ib.as_ref()?,
                     lod.gpu_index_count,
+                    lod.gpu_vb_layout,
                 ),
                 None => (
                     node.gpu_vb.as_ref()?,
                     node.gpu_ib.as_ref()?,
                     node.gpu_index_count,
+                    node.gpu_vb_layout,
                 ),
             };
             node.gpu_uniform_bg.as_ref()?;
             node.gpu_material_bg.as_ref()?;
-            Some((node, active_lod, vb, ib, index_count))
+            Some((node, active_lod, vb, ib, index_count, layout))
         })
     }
 
     /// Depth-only draws of the opaque retained nodes in the world layer, into
-    /// the depth prepass (the caller binds the depth pipeline, lighting and
-    /// joints). The main pass then shades each of their pixels once, with the
+    /// the depth prepass with `depth_pipeline` of each node's vertex format
+    /// (the caller binds lighting and joints). The main pass then shades each of their pixels once, with the
     /// depth-equal `prepassed` pipelines, instead of every overlapping
     /// fragment; on a tiler (Adreno) a depth-tested opaque prepass is also what
     /// keeps early-Z working for the rest of the pass. The base material bind
@@ -2669,8 +2673,11 @@ impl SceneGraph {
         pass: &mut wgpu::RenderPass<'a>,
         gpu_driven_enabled: bool,
         imported_refraction_enabled: bool,
+        depth_pipeline: &'a crate::renderer::vertex_formats::MeshPipelines,
+        skin_zero: &'a wgpu::Buffer,
     ) {
-        for (node, _lod, vb, ib, index_count) in
+        let mut current_layout = None;
+        for (node, _lod, vb, ib, index_count, layout) in
             self.opaque_node_draws(gpu_driven_enabled, imported_refraction_enabled, 0)
         {
             if !node.depth_prepassed() {
@@ -2679,9 +2686,14 @@ impl SceneGraph {
             let (Some(bg), Some(material)) = (&node.gpu_uniform_bg, &node.gpu_material_bg) else {
                 continue;
             };
+            if current_layout != Some(layout) {
+                pass.set_pipeline(depth_pipeline.get(layout));
+                current_layout = Some(layout);
+            }
             pass.set_bind_group(0, bg, &[]);
             pass.set_bind_group(2, material, &[]);
             pass.set_vertex_buffer(0, vb.slice(..));
+            crate::renderer::vertex_formats::bind_skin_zero(pass, layout, 1, skin_zero);
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..index_count, 0, 0..1);
         }
@@ -2693,19 +2705,18 @@ impl SceneGraph {
         pass: &mut wgpu::RenderPass<'a>,
         gpu_driven_enabled: bool,
         imported_refraction_enabled: bool,
-        base_pipeline: Option<&'a wgpu::RenderPipeline>,
+        base_pipeline: &'a crate::renderer::vertex_formats::MeshPipelines,
         layered: Option<&'a crate::renderer::layered_pbr_scene::SceneLayeredPbrResources>,
         render_layer: u32,
-        prepassed_pipeline: Option<&'a wgpu::RenderPipeline>,
+        prepassed_pipeline: Option<&'a crate::renderer::vertex_formats::MeshPipelines>,
+        skin_zero: &'a wgpu::Buffer,
     ) {
-        // The renderer enters with the ordinary scene pipeline already bound.
-        // Public callers that do not opt into specialization retain the old
-        // contract and incur no per-node pipeline selection. With
-        // `prepassed_pipeline`, the nodes the depth prepass drew
+        // With `prepassed_pipeline`, the nodes the depth prepass drew
         // (`SceneNode::depth_prepassed`) take it, or the layered prepassed one;
-        // the rest keep the depth-writing pipelines.
-        let mut current_pipeline = base_pipeline.map(|_| (false, false, false));
-        for (node, active_lod, vb, ib, index_count) in self.opaque_node_draws(
+        // the rest keep the depth-writing pipelines. Every choice is per
+        // vertex format (vertex_formats.rs).
+        let mut current_pipeline = None;
+        for (node, active_lod, vb, ib, index_count, layout) in self.opaque_node_draws(
             gpu_driven_enabled,
             imported_refraction_enabled,
             render_layer,
@@ -2726,20 +2737,17 @@ impl SceneGraph {
             if uses_uv1 && secondary_uv.is_none() {
                 continue;
             }
-            if let Some(base_pipeline) = base_pipeline {
-                let prepassed = prepassed_pipeline.is_some() && node.depth_prepassed();
-                let key = (layered_material.is_some(), uses_uv1, prepassed);
-                if current_pipeline != Some(key) {
-                    if let (Some(layered), Some(_)) = (layered, layered_material) {
-                        pass.set_pipeline(layered.opaque_pipeline(uses_uv1, prepassed));
-                    } else if let (true, Some(prepassed_pipeline)) = (prepassed, prepassed_pipeline)
-                    {
-                        pass.set_pipeline(prepassed_pipeline);
-                    } else {
-                        pass.set_pipeline(base_pipeline);
-                    }
-                    current_pipeline = Some(key);
+            let prepassed = prepassed_pipeline.is_some() && node.depth_prepassed();
+            let key = (layered_material.is_some(), uses_uv1, prepassed, layout);
+            if current_pipeline != Some(key) {
+                if let (Some(layered), Some(_)) = (layered, layered_material) {
+                    pass.set_pipeline(layered.opaque_pipeline(uses_uv1, prepassed, layout));
+                } else if let (true, Some(prepassed_pipeline)) = (prepassed, prepassed_pipeline) {
+                    pass.set_pipeline(prepassed_pipeline.get(layout));
+                } else {
+                    pass.set_pipeline(base_pipeline.get(layout));
                 }
+                current_pipeline = Some(key);
             }
             pass.set_bind_group(0, bg, &[]);
             pass.set_bind_group(2, layered_material.unwrap_or(base_material), &[]);
@@ -2747,6 +2755,12 @@ impl SceneGraph {
             if let Some(secondary_uv) = secondary_uv {
                 pass.set_vertex_buffer(1, secondary_uv.slice(..));
             }
+            crate::renderer::vertex_formats::bind_skin_zero(
+                pass,
+                layout,
+                crate::renderer::vertex_formats::zero_slot(u32::from(secondary_uv.is_some())),
+                skin_zero,
+            );
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..index_count, 0, 0..1);
         }

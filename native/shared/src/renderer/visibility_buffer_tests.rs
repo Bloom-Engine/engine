@@ -22,7 +22,8 @@ fn packed_record_is_exactly_one_rg32uint_texel() {
     assert!(report.starts_with("{\"format\":\"rg32uint\""));
     assert!(report.contains("\"native_1080p_bytes\":16588800"));
     assert!(report.contains("\"required_feature\":\"primitive-index\""));
-    assert!(report.contains("\"vertex_stride_bytes\":96"));
+    // The arena's 64-byte static vertices (vertex_formats.rs).
+    assert!(report.contains("\"vertex_stride_bytes\":64"));
     assert!(report.contains("\"shipping_enabled\":false"));
 }
 
@@ -77,7 +78,8 @@ fn shared_reconstruction_header_parses_and_keeps_the_cpu_abi_constants() {
         RECONSTRUCTION_WGSL.contains("const BLOOM_VISIBILITY_FRONT_FACE_BIT: u32 = 0x80000000u")
     );
     assert!(RECONSTRUCTION_WGSL.contains("fn bloom_perspective_barycentrics("));
-    assert!(GEOMETRY_WGSL.contains("const BLOOM_VERTEX3D_WORDS: u32 = 24u"));
+    assert!(GEOMETRY_WGSL.contains("const BLOOM_VERTEX3D_WORDS: u32 = 16u"));
+    assert_eq!(std::mem::size_of::<super::super::StaticVertex3D>(), 16 * 4);
     assert_eq!(std::mem::size_of::<Vertex3D>(), 96);
 }
 
@@ -140,11 +142,12 @@ fn large_vertex_arenas_split_at_aligned_storage_binding_boundaries() {
     let mut limits = wgpu::Limits::downlevel_defaults();
     limits.max_storage_buffer_binding_size = 128 * 1024 * 1024;
     limits.min_storage_buffer_offset_alignment = 256;
-    let vertex_stride = std::mem::size_of::<super::super::Vertex3D>() as u64;
-    let used_bytes = 1_738_262 * vertex_stride;
+    // The arena's 64-byte static vertices: windows of lcm(64, 256) bytes.
+    let vertex_stride = std::mem::size_of::<super::super::StaticVertex3D>() as u64;
+    let used_bytes = 2_607_393 * vertex_stride;
     let ranges = visibility_vertex_binding_ranges(&limits, 256 * 1024 * 1024, used_bytes);
-    assert_eq!(ranges[0], (0, 134_217_216));
-    assert_eq!(ranges[1], (134_217_216, used_bytes - 134_217_216));
+    assert_eq!(ranges[0], (0, 134_217_728));
+    assert_eq!(ranges[1], (134_217_728, used_bytes - 134_217_728));
     assert_eq!(ranges[2], (0, vertex_stride));
     assert!(ranges
         .iter()
@@ -704,10 +707,20 @@ fn cs_main() {
             usage: wgpu::BufferUsages::STORAGE,
         })
     };
+    // The arena stores 64-byte static vertices: every lane but joints and
+    // weights, which decode as the zeros an unskinned vertex holds.
     let vertex_buffer = make_storage(
         "visibility_shared_geometry_oracle_vertices",
-        bytemuck::cast_slice(&vertices),
+        &super::super::VertexLayout::Static64.encode(&vertices),
     );
+    let expected_vertices: Vec<Vertex3D> = vertices[1..]
+        .iter()
+        .map(|v| Vertex3D {
+            joints: [0.0; 4],
+            weights: [0.0; 4],
+            ..*v
+        })
+        .collect();
     let index_buffer = make_storage(
         "visibility_shared_geometry_oracle_indices",
         bytemuck::cast_slice(&indices),
@@ -788,7 +801,7 @@ fn cs_main() {
 
     let output_bytes = readback(&device, &readback_buffer);
     let output: &[u32] = bytemuck::cast_slice(&output_bytes);
-    let expected_raw: &[u32] = bytemuck::cast_slice(&vertices[1..]);
+    let expected_raw: &[u32] = bytemuck::cast_slice(&expected_vertices);
     assert_eq!(&output[..72], expected_raw);
 
     let clip = [
@@ -797,7 +810,7 @@ fn cs_main() {
         [-2.0, 3.2, 0.5, 4.0],
     ];
     let bary = perspective_barycentrics([point_ndc[0], point_ndc[1]], clip).unwrap();
-    let source: &[f32] = bytemuck::cast_slice(&vertices[1..]);
+    let source: &[f32] = bytemuck::cast_slice(&expected_vertices);
     for lane in 0..24 {
         let expected =
             source[lane] * bary[0] + source[24 + lane] * bary[1] + source[48 + lane] * bary[2];

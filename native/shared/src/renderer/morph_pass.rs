@@ -386,6 +386,7 @@ impl MorphPass {
         if skinned && !self.overrides.is_empty() {
             if let Some(vb) = self.vertex_buffer(joint_offset, mesh_idx) {
                 draw.vertex = vb;
+                draw.layout = VertexLayout::Full96;
             }
         }
         draw
@@ -773,8 +774,13 @@ impl Renderer {
                 .and_then(|m| m.as_ref())
                 .and_then(|m| m.get(mesh_idx))
                 .and_then(|m| match &m.geometry {
-                    gpu_driven::MeshGeometry::Dedicated { vertex, .. } => Some(vertex),
-                    gpu_driven::MeshGeometry::Shared(_) => None,
+                    // Morphs read and write 96-byte vertices: skinned meshes only.
+                    gpu_driven::MeshGeometry::Dedicated {
+                        vertex,
+                        layout: super::VertexLayout::Full96,
+                        ..
+                    } => Some(vertex),
+                    _ => None,
                 })
             else {
                 continue;

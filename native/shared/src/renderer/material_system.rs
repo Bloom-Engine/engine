@@ -249,6 +249,8 @@ pub fn map_texture_array_format(code: u32) -> wgpu::TextureFormat {
 pub struct MaterialSystem {
     pub layouts: MaterialAbiLayouts,
     pub(super) pipeline_creation_count: u64,
+    /// Zero joints/weights for 64-byte static meshes (vertex_formats.rs).
+    pub(super) skin_zero: wgpu::Buffer,
 
     // Compiled pipelines, indexed by MaterialHandle (1-based; 0 = invalid).
     pub pipelines: Vec<Option<MaterialPipeline>>,
@@ -825,6 +827,7 @@ impl MaterialSystem {
         indirection.flush(device, queue);
 
         Self {
+            skin_zero: super::vertex_formats::create_skin_zero_buffer(device),
             layouts,
             pipeline_creation_count: 0,
             pipelines: Vec::new(),
@@ -2053,43 +2056,48 @@ impl MaterialSystem {
             return;
         }
 
-        let mut last_material: MaterialHandle = 0;
+        // The material and vertex format (vertex_formats.rs) bound last.
+        let mut bound: Option<(MaterialHandle, super::VertexLayout)> = None;
         for cmd in &self.commands {
             if !accept(cmd.material) {
                 continue;
             }
-            if cmd.material != last_material {
-                let mat = match self.pipelines.get(cmd.material as usize - 1) {
-                    Some(Some(m)) => m,
-                    _ => continue,
-                };
-                // Probe passes (use_reflection_pipeline) present the
-                // 4-attachment opaque G-buffer layout. Translucent-
-                // profile pipelines are single-target — binding one
-                // there is a wgpu validation panic — and reads_scene
-                // materials expect a group-4 bind the probe pass never
-                // provides. Skip both; `last_material` stays latched on
-                // the previously bound material, which is correct
-                // because no pipeline/bind state changes here.
-                if use_reflection_pipeline
-                    && (matches!(mat.profile, FragmentProfile::Translucent) || mat.reads_scene)
-                {
-                    continue;
-                }
-                let pipeline = if use_reflection_pipeline {
-                    mat.reflection_pipeline.as_ref().unwrap_or(&mat.pipeline)
-                } else {
-                    &mat.pipeline
-                };
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, &self.per_frame_bg, &[]);
-                pass.set_bind_group(1, per_view_bg, &[]);
-                pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);
-                last_material = cmd.material;
+            let mat = match self.pipelines.get(cmd.material as usize - 1) {
+                Some(Some(m)) => m,
+                _ => continue,
+            };
+            // Probe passes (use_reflection_pipeline) present the
+            // 4-attachment opaque G-buffer layout. Translucent-
+            // profile pipelines are single-target — binding one
+            // there is a wgpu validation panic — and reads_scene
+            // materials expect a group-4 bind the probe pass never
+            // provides. Skip both.
+            if use_reflection_pipeline
+                && (matches!(mat.profile, FragmentProfile::Translucent) || mat.reads_scene)
+            {
+                continue;
             }
             if let Some((mesh, lmin, lmax)) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
+                if bound != Some((cmd.material, mesh.layout)) {
+                    let pipeline = if use_reflection_pipeline {
+                        mat.reflection_pipeline.as_ref().unwrap_or(&mat.pipeline)
+                    } else {
+                        &mat.pipeline
+                    };
+                    pass.set_pipeline(pipeline.get(mesh.layout));
+                    pass.set_bind_group(0, &self.per_frame_bg, &[]);
+                    pass.set_bind_group(1, per_view_bg, &[]);
+                    pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);
+                    bound = Some((cmd.material, mesh.layout));
+                }
                 pass.set_bind_group(3, &self.per_draw_bgs[cmd.draw_slot], &[]);
                 pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+                super::vertex_formats::bind_skin_zero(
+                    pass,
+                    mesh.layout,
+                    super::vertex_formats::zero_slot(u32::from(mat.wants_instancing)),
+                    &self.skin_zero,
+                );
                 pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 let instance_range = self.bind_instance_buffer(pass, &cmd.instance);
                 if instance_range.end <= instance_range.start {
@@ -2255,12 +2263,13 @@ impl MaterialSystem {
             return;
         }
 
-        let mut last_material: MaterialHandle = 0;
+        let mut last_material = None;
         for cmd in &self.translucent_commands {
             if let Some(mesh) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
-                let bind_material_state = cmd.material != last_material;
+                let key = (cmd.material, mesh.layout);
+                let bind_material_state = last_material != Some(key);
                 if self.dispatch_translucent_command(pass, cmd, mesh, false, bind_material_state) {
-                    last_material = cmd.material;
+                    last_material = Some(key);
                 }
             }
         }

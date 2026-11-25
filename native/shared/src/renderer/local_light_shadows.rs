@@ -524,9 +524,12 @@ pub(crate) struct PassInputs<'a> {
     pub vbs: &'a [&'a wgpu::Buffer],
     pub ibs: &'a [&'a wgpu::Buffer],
     pub cutout_bgs: &'a [&'a wgpu::BindGroup],
-    pub pipeline: &'a wgpu::RenderPipeline,
-    pub pipeline_cutout: &'a wgpu::RenderPipeline,
+    /// Opaque and cutout casters per vertex format (vertex_formats.rs).
+    pub pipeline: &'a super::vertex_formats::MeshPipelines,
+    pub pipeline_cutout: &'a super::vertex_formats::MeshPipelines,
     pub pipeline_skinned: &'a wgpu::RenderPipeline,
+    /// The zero joints/weights stream of 64-byte casters.
+    pub skin_zero: &'a wgpu::Buffer,
     pub joint_bind_group: &'a wgpu::BindGroup,
     pub camera_pos: [f32; 3],
     pub camera_planes: [[f32; 4]; 6],
@@ -880,7 +883,7 @@ impl LocalLightShadows {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            let mut current_kind = u8::MAX;
+            let mut current_kind = None;
             for (slot, &entry_index) in entries.iter().enumerate() {
                 let entry = &inputs.nodes[entry_index];
                 let kind = if entry.skinned {
@@ -890,13 +893,13 @@ impl LocalLightShadows {
                 } else {
                     0
                 };
-                if kind != current_kind {
+                if current_kind != Some((kind, entry.layout)) {
                     pass.set_pipeline(match kind {
-                        1 => inputs.pipeline_cutout,
+                        1 => inputs.pipeline_cutout.get(entry.layout),
                         2 => inputs.pipeline_skinned,
-                        _ => inputs.pipeline,
+                        _ => inputs.pipeline.get(entry.layout),
                     });
-                    current_kind = kind;
+                    current_kind = Some((kind, entry.layout));
                 }
                 pass.set_bind_group(0, &gpu.draw_bind_group, &[(base + slot * stride) as u32]);
                 if kind == 1 {
@@ -905,6 +908,7 @@ impl LocalLightShadows {
                     pass.set_bind_group(1, inputs.joint_bind_group, &[]);
                 }
                 pass.set_vertex_buffer(0, inputs.vbs[entry.vb_idx].slice(..));
+                super::vertex_formats::bind_skin_zero(&mut pass, entry.layout, 1, inputs.skin_zero);
                 pass.set_index_buffer(
                     inputs.ibs[entry.ib_idx].slice(..),
                     wgpu::IndexFormat::Uint32,

@@ -141,6 +141,7 @@ pub use virtual_model_api::VirtualNodeRole;
 mod volumetric_fog;
 #[cfg(feature = "models3d")]
 pub use virtual_geometry_integration::RendererVirtualGeometryError;
+pub(crate) mod vertex_formats;
 pub(crate) mod visibility_buffer;
 mod visibility_ids;
 pub(crate) mod visibility_shading;
@@ -220,6 +221,8 @@ use types::{
     MAX_UNIFORM_SLOTS,
 };
 pub use types::{RenderMode, SceneMaterialUniforms, Vertex2D, Vertex3D};
+use vertex_formats::{bind_skin_zero, MeshPipelines};
+pub use vertex_formats::{StaticVertex3D, VertexLayout};
 
 // ============================================================
 // Shaders
@@ -339,6 +342,8 @@ pub(super) struct MeshDrawRef<'a> {
     pub(super) first_index: u32,
     pub(super) index_count: u32,
     pub(super) base_vertex: i32,
+    /// The format `vertex` holds: picks the pipeline and the zero stream.
+    pub(super) layout: VertexLayout,
 }
 
 impl MeshDrawRef<'_> {
@@ -1187,7 +1192,7 @@ pub struct Renderer {
     /// captures land; consumed by the card-lighting pass for NdotL.
     pub card_slot_meta_buffer: wgpu::Buffer,
 
-    pub card_capture_pipeline: LazyRenderPipeline,
+    pub card_capture_pipeline: MeshPipelines,
     pub card_capture_uniform_layout: wgpu::BindGroupLayout,
     pub card_capture_texture_layout: wgpu::BindGroupLayout,
     pub card_capture_uniform: wgpu::Buffer,
@@ -1665,15 +1670,15 @@ pub struct Renderer {
     // Scene pipeline (retained scene graph rendering with normal
     // mapping). Distinct from pipeline_3d so immediate-mode draws
     // don't have to carry tangent vertex data or normal-map bindings.
-    pub scene_pipeline: LazyRenderPipeline,
+    pub scene_pipeline: MeshPipelines,
     /// The settings the pipelines were last prewarmed for (lazy_pipeline.rs).
     prewarm_signature: u64,
-    scene_transparent_pipeline: LazyRenderPipeline,
-    scene_transparent_double_sided_pipeline: LazyRenderPipeline,
-    scene_transparent_reactive_pipeline: Option<wgpu::RenderPipeline>,
-    scene_transparent_reactive_double_sided_pipeline: Option<wgpu::RenderPipeline>,
-    scene_weighted_transparent_pipeline: Option<wgpu::RenderPipeline>,
-    scene_weighted_transparent_double_sided_pipeline: Option<wgpu::RenderPipeline>,
+    scene_transparent_pipeline: MeshPipelines,
+    scene_transparent_double_sided_pipeline: MeshPipelines,
+    scene_transparent_reactive_pipeline: Option<MeshPipelines>,
+    scene_transparent_reactive_double_sided_pipeline: Option<MeshPipelines>,
+    scene_weighted_transparent_pipeline: Option<MeshPipelines>,
+    scene_weighted_transparent_double_sided_pipeline: Option<MeshPipelines>,
     weighted_transparency_resolve_pipeline: Option<wgpu::RenderPipeline>,
     weighted_transparency_reactive_resolve_pipeline: Option<wgpu::RenderPipeline>,
     weighted_transparency_resolve_layout: Option<wgpu::BindGroupLayout>,
@@ -1686,14 +1691,14 @@ pub struct Renderer {
     /// route gate. Opaque-only scenes keep both at None/false.
     transmitted_shadow_resources: Option<transmitted_shadows::TransmittedShadowResources>,
     transmitted_shadows_active: bool,
-    scene_refractive_pipeline: Option<wgpu::RenderPipeline>,
-    scene_refractive_double_sided_pipeline: Option<wgpu::RenderPipeline>,
-    scene_refractive_uv1_pipeline: Option<wgpu::RenderPipeline>,
-    scene_refractive_uv1_double_sided_pipeline: Option<wgpu::RenderPipeline>,
-    scene_refractive_reactive_pipeline: Option<wgpu::RenderPipeline>,
-    scene_refractive_reactive_double_sided_pipeline: Option<wgpu::RenderPipeline>,
-    scene_refractive_reactive_uv1_pipeline: Option<wgpu::RenderPipeline>,
-    scene_refractive_reactive_uv1_double_sided_pipeline: Option<wgpu::RenderPipeline>,
+    scene_refractive_pipeline: Option<MeshPipelines>,
+    scene_refractive_double_sided_pipeline: Option<MeshPipelines>,
+    scene_refractive_uv1_pipeline: Option<MeshPipelines>,
+    scene_refractive_uv1_double_sided_pipeline: Option<MeshPipelines>,
+    scene_refractive_reactive_pipeline: Option<MeshPipelines>,
+    scene_refractive_reactive_double_sided_pipeline: Option<MeshPipelines>,
+    scene_refractive_reactive_uv1_pipeline: Option<MeshPipelines>,
+    scene_refractive_reactive_uv1_double_sided_pipeline: Option<MeshPipelines>,
     /// Native physical-transmission group 4 specialization. Present only when
     /// the bounded screen-space reflection tier is startup-enabled and a
     /// contributing material has forced lazy pipeline creation.
@@ -1705,19 +1710,19 @@ pub struct Renderer {
     scene_refractive_reflection_params_buffer: Option<wgpu::Buffer>,
     refractive_reflections_active: bool,
     /// EN-044 — depth-only prepass over the same cached-model draws.
-    pub scene_depth_pipeline: LazyRenderPipeline,
+    pub scene_depth_pipeline: MeshPipelines,
     /// The same with a fragment stage that cannot discard, for solid meshes.
-    scene_depth_opaque_pipeline: LazyRenderPipeline,
+    scene_depth_opaque_pipeline: MeshPipelines,
     /// Shade-mode depth-only variant whose inert color slot makes it
     /// compatible with the inline packed visibility attachment.
     #[cfg(not(target_arch = "wasm32"))]
-    scene_depth_visibility_pipeline: Option<LazyRenderPipeline>,
+    scene_depth_visibility_pipeline: Option<MeshPipelines>,
     /// EN-044 — cached-model pipeline for the prepassed path (no depth write, Equal).
-    pub scene_pipeline_prepassed: LazyRenderPipeline,
+    pub scene_pipeline_prepassed: MeshPipelines,
     /// The retained scene nodes' depth prepass and prepassed pipeline: as
     /// above, with scene_pipeline's back-face culling.
-    scene_node_depth_pipeline: LazyRenderPipeline,
-    scene_node_pipeline_prepassed: LazyRenderPipeline,
+    scene_node_depth_pipeline: MeshPipelines,
+    scene_node_pipeline_prepassed: MeshPipelines,
     pub scene_material_layout: wgpu::BindGroupLayout,
     scene_sheen_albedo_lut: Option<layered_pbr_scene::SceneSheenAlbedoLut>,
     scene_layered_pbr_resources: Option<layered_pbr_scene::SceneLayeredPbrResources>,
@@ -1819,7 +1824,7 @@ pub struct Renderer {
     /// house) into the planar probe with a mirrored VP. Single-target HDR
     /// pipeline + a dynamic per-draw model uniform + a sun/ambient uniform.
     /// `None` until the first `dispatch_planar_reflections` with a probe.
-    pub reflect_scene_pipeline: Option<wgpu::RenderPipeline>,
+    pub reflect_scene_pipeline: Option<MeshPipelines>,
     pub reflect_model_buf: Option<wgpu::Buffer>,
     pub reflect_model_bg: Option<wgpu::BindGroup>,
     pub reflect_light_buf: Option<wgpu::Buffer>,
@@ -2030,6 +2035,7 @@ impl Renderer {
         // when the high-tier VSM environment switch is also present.
         let renderer_capabilities =
             capabilities::RendererCapabilities::detect(device.features(), &device.limits());
+        vertex_formats::configure_for_backend(device.adapter_info().backend);
         crate::virtual_shadows::configure_capability_tier(renderer_capabilities.selected_tier);
 
         // EN-063 — the format frames are RENDERED in, as opposed to the
@@ -3880,7 +3886,7 @@ impl Renderer {
                 ],
                 immediate_size: 0,
             });
-        let scene_pipeline = LazyRenderPipeline::new(
+        let scene_pipeline = MeshPipelines::lazy(
             &device,
             &wgpu::RenderPipelineDescriptor {
                 label: Some("scene_pipeline"),
@@ -3961,7 +3967,7 @@ impl Renderer {
 
         let create_scene_transparent_pipeline =
             |label: &'static str, cull_mode: Option<wgpu::Face>| {
-                LazyRenderPipeline::new(
+                MeshPipelines::lazy(
                     &device,
                     &wgpu::RenderPipelineDescriptor {
                         label: Some(label),
@@ -4055,7 +4061,7 @@ impl Renderer {
         // scene_pipeline: their prepass culls the same faces.
         let create_scene_pipeline_prepassed =
             |label: &'static str, cull_mode: Option<wgpu::Face>| {
-                LazyRenderPipeline::new(
+                MeshPipelines::lazy(
                     &device,
                     &wgpu::RenderPipelineDescriptor {
                         label: Some(label),
@@ -6716,7 +6722,7 @@ impl Renderer {
                 ],
                 immediate_size: 0,
             });
-        let card_capture_pipeline = LazyRenderPipeline::new(
+        let card_capture_pipeline = MeshPipelines::lazy(
             &device,
             &wgpu::RenderPipelineDescriptor {
                 label: Some("card_capture_pipeline"),
@@ -9603,7 +9609,7 @@ impl Renderer {
                     has_em,
                     node.material.emissive,
                     em_idx,
-                    vb.clone(),
+                    (vb.clone(), node.gpu_vb_layout),
                     ib.clone(),
                     node.gpu_index_count,
                 )
@@ -9670,7 +9676,8 @@ impl Renderer {
                 capture_draws.push(CardCaptureDraw {
                     uniform_offset: uniform_offset as u32,
                     texture_bg: texture_bg.clone(),
-                    vertex_buffer: vb_ptr.clone(),
+                    vertex_buffer: vb_ptr.0.clone(),
+                    vertex_layout: vb_ptr.1,
                     index_buffer: ib_ptr.clone(),
                     index_count,
                     cell_x: axis * CARD_SLOT_SIZE,
@@ -10742,7 +10749,7 @@ impl Renderer {
                         size: &size_descs[i],
                         vertex_buffer: vb,
                         first_vertex: 0,
-                        vertex_stride: std::mem::size_of::<Vertex3D>() as u64,
+                        vertex_stride: n.gpu_vb_layout.stride(),
                         index_buffer: Some(ib),
                         first_index: Some(0),
                         transform_buffer: None,
@@ -12042,8 +12049,9 @@ impl Renderer {
             });
 
         let create_pipeline = |label: &'static str, cull_mode: Option<wgpu::Face>| {
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            MeshPipelines::lazy(
+                &self.device,
+                &wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&pipeline_layout),
                     vertex: wgpu::VertexState {
@@ -12091,7 +12099,8 @@ impl Renderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview_mask: None,
                     cache: None,
-                })
+                },
+            )
         };
         self.scene_refractive_pipeline = Some(create_pipeline(
             "scene_refractive_pipeline",
@@ -12182,8 +12191,9 @@ impl Renderer {
             });
         let vertex_layouts = [Vertex3D::desc(), secondary_uv_desc()];
         let create_pipeline = |label: &'static str, cull_mode: Option<wgpu::Face>| {
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            MeshPipelines::lazy(
+                &self.device,
+                &wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
@@ -12228,7 +12238,8 @@ impl Renderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview_mask: None,
                     cache: None,
-                })
+                },
+            )
         };
         self.scene_refractive_uv1_pipeline = Some(create_pipeline(
             "scene_refractive_uv1_pipeline",
@@ -13023,7 +13034,6 @@ impl Renderer {
             // color + normal map) apply — drawModel should behave the same
             // as attachModelToNode for PBR purposes.
             if !self.model_draw_commands.is_empty() {
-                pass.set_pipeline(&self.scene_pipeline);
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);
                 pass.set_bind_group(3, &self.joint_bind_group, &[]);
                 let mut joint_page = 0;
@@ -13038,6 +13048,7 @@ impl Renderer {
                                 cmd.joint_offset,
                                 cmd.mesh_idx,
                             );
+                            pass.set_pipeline(self.scene_pipeline.get(draw.layout));
                             self.bind_joint_page(&mut pass, 3, cmd.joint_offset, &mut joint_page);
                             pass.set_bind_group(
                                 0,
@@ -13046,6 +13057,7 @@ impl Renderer {
                             );
                             pass.set_bind_group(2, &mesh.material_bg, &[]);
                             pass.set_vertex_buffer(0, draw.vertex.slice(..));
+                            bind_skin_zero(&mut pass, draw.layout, 1, self.gpu_driven.skin_zero());
                             pass.set_index_buffer(draw.index.slice(..), wgpu::IndexFormat::Uint32);
                             pass.draw_indexed(draw.index_range(), draw.base_vertex, 0..1);
                         }
@@ -14240,6 +14252,7 @@ impl Renderer {
                 // buffers because the compute pre-skin pass reads them directly.
                 let geometry = if is_skinned {
                     gpu_driven::MeshGeometry::Dedicated {
+                        layout: VertexLayout::Full96,
                         vertex: self
                             .device
                             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -14296,16 +14309,18 @@ impl Renderer {
                         index_count: mesh.indices.len() as u32,
                     },
                 );
-                let (vertex_byte_offset, index_byte_offset) = match &geometry {
-                    gpu_driven::MeshGeometry::Shared(slice) => {
-                        (slice.vertex_offset, slice.index_offset)
-                    }
-                    gpu_driven::MeshGeometry::Dedicated { .. } => (0, 0),
+                let (vertex_byte_offset, index_byte_offset, geometry_layout) = match &geometry {
+                    gpu_driven::MeshGeometry::Shared(slice) => (
+                        slice.vertex_offset,
+                        slice.index_offset,
+                        self.gpu_driven.arena_layout(),
+                    ),
+                    gpu_driven::MeshGeometry::Dedicated { layout, .. } => (0, 0, *layout),
                 };
                 let vertex_buffer_view_id = self.material_system.indirection.register_buffer_view(
                     material_indirection::ResidentBufferView {
                         byte_offset: vertex_byte_offset,
-                        byte_size: (mesh.vertices.len() * std::mem::size_of::<Vertex3D>()) as u64,
+                        byte_size: mesh.vertices.len() as u64 * geometry_layout.stride(),
                     },
                 );
                 let index_buffer_view_id = self.material_system.indirection.register_buffer_view(

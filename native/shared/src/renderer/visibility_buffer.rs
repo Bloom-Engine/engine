@@ -57,7 +57,7 @@ pub(crate) fn contract_json() -> String {
         VIRTUAL_DRAW_BIT,
         DRAW_INDEX_MASK,
         virtual_namespace_valid,
-        std::mem::size_of::<super::Vertex3D>(),
+        std::mem::size_of::<super::StaticVertex3D>(),
         target_bytes(1_920, 1_080).expect("1080p visibility allocation is bounded"),
         RECONSTRUCTION_WGSL.len(),
         GEOMETRY_WGSL.len(),
@@ -208,7 +208,9 @@ pub(crate) struct VisibilityBufferRuntime {
     mode: RuntimeMode,
     enabled: bool,
     disabled_reason: &'static str,
-    raster_pipeline: Option<wgpu::RenderPipeline>,
+    /// Draws the shared arena, in its vertex format (vertex_formats.rs),
+    /// with `skin_zero` as the zero joints/weights of the 64-byte one.
+    raster_pipeline: Option<(wgpu::RenderPipeline, wgpu::Buffer)>,
     reconstruct_pipeline: Option<wgpu::ComputePipeline>,
     reconstruct_layout: Option<wgpu::BindGroupLayout>,
     overlay_pipeline: Option<wgpu::RenderPipeline>,
@@ -237,7 +239,8 @@ fn visibility_vertex_binding_ranges(
     buffer_bytes: u64,
     used_bytes: u64,
 ) -> [(u64, u64); VISIBILITY_VERTEX_SEGMENTS] {
-    let vertex_stride = std::mem::size_of::<super::Vertex3D>() as u64;
+    // The arena's records (geometry.wgsl): 64-byte static vertices.
+    let vertex_stride = std::mem::size_of::<super::StaticVertex3D>() as u64;
     let binding_alignment = u64::from(limits.min_storage_buffer_offset_alignment).max(1);
     let segment_alignment =
         vertex_stride / gcd(vertex_stride, binding_alignment) * binding_alignment;
@@ -309,6 +312,12 @@ impl VisibilityBufferRuntime {
             runtime.disabled_reason = "gpu-driven-unavailable";
             return runtime;
         }
+        // geometry.wgsl reads the arena as 64-byte static vertices (the
+        // 96-byte fallback is OpenGL's, which has no primitive index anyway).
+        if super::VertexLayout::arena() != super::VertexLayout::Static64 {
+            runtime.disabled_reason = "static-vertex-layout-unavailable";
+            return runtime;
+        }
         let (Some(global_material_layout), Some(gpu_scene_source)) =
             (global_material_layout, gpu_scene_source)
         else {
@@ -345,7 +354,7 @@ impl VisibilityBufferRuntime {
             vertex: wgpu::VertexState {
                 module: &raster_shader,
                 entry_point: Some("vs_main_scene"),
-                buffers: &[super::Vertex3D::desc()],
+                buffers: &super::gpu_driven::arena_buffers(),
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -481,7 +490,10 @@ impl VisibilityBufferRuntime {
             mode,
             enabled: true,
             disabled_reason: "none",
-            raster_pipeline: Some(raster_pipeline),
+            raster_pipeline: Some((
+                raster_pipeline,
+                super::vertex_formats::create_skin_zero_buffer(device),
+            )),
             reconstruct_pipeline,
             reconstruct_layout,
             overlay_pipeline,
@@ -761,16 +773,17 @@ impl VisibilityBufferRuntime {
         draw_count: u32,
         count_supported: bool,
     ) {
-        pass.set_pipeline(
-            self.raster_pipeline
-                .as_ref()
-                .expect("enabled visibility runtime owns raster pipeline"),
-        );
+        let (pipeline, skin_zero) = self
+            .raster_pipeline
+            .as_ref()
+            .expect("enabled visibility runtime owns raster pipeline");
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, draw_bind_group, &[]);
         pass.set_bind_group(1, lighting, &[]);
         pass.set_bind_group(2, global_materials, &[]);
         pass.set_bind_group(3, joints, &[]);
         pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        super::vertex_formats::bind_skin_zero(pass, super::VertexLayout::arena(), 1, skin_zero);
         pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         if count_supported {
             pass.multi_draw_indexed_indirect_count(

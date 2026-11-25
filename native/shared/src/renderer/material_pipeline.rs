@@ -476,8 +476,10 @@ enum TranslucentReactiveSource {
 /// A pipeline ready to receive draws. Owns only the `RenderPipeline`;
 /// the layouts are borrowed from the shared `MaterialAbiLayouts`.
 pub struct MaterialPipeline {
-    pub pipeline: wgpu::RenderPipeline,
-    pub(crate) reactive_pipeline: Option<wgpu::RenderPipeline>,
+    /// One per vertex format (vertex_formats.rs): 64-byte static meshes and
+    /// 96-byte skinned ones draw through the same material.
+    pub pipeline: super::vertex_formats::MeshPipelinePair,
+    pub(crate) reactive_pipeline: Option<super::vertex_formats::MeshPipelinePair>,
     reactive_recipe: Option<TranslucentReactiveRecipe>,
     pub profile: FragmentProfile,
     pub bucket: Bucket,
@@ -505,7 +507,7 @@ pub struct MaterialPipeline {
     /// `None` for materials whose original cull mode is already
     /// `None` (translucent, cutout) — flipping a non-culled pipeline
     /// is a no-op so we don't bother compiling a duplicate.
-    pub reflection_pipeline: Option<wgpu::RenderPipeline>,
+    pub reflection_pipeline: Option<super::vertex_formats::MeshPipelinePair>,
 }
 
 impl MaterialPipeline {
@@ -576,7 +578,8 @@ impl MaterialPipeline {
             }),
             Some(reactive_target),
         ];
-        self.reactive_pipeline = Some(device.create_render_pipeline(
+        self.reactive_pipeline = Some(super::vertex_formats::MeshPipelinePair::new(
+            device,
             &wgpu::RenderPipelineDescriptor {
                 label: Some(&format!("{}_reactive_compatible", recipe.label)),
                 layout: Some(&recipe.pipeline_layout),
@@ -973,32 +976,35 @@ pub fn compile_material(
 
     let make_pipeline = |cull: Option<wgpu::Face>, label_suffix: &str| {
         let label_owned = format!("{}{}", desc.label, label_suffix);
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(&label_owned),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                buffers: vertex_buffers,
-                compilation_options: Default::default(),
+        super::vertex_formats::MeshPipelinePair::new(
+            device,
+            &wgpu::RenderPipelineDescriptor {
+                label: Some(&label_owned),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    buffers: vertex_buffers,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: cull,
+                    ..Default::default()
+                },
+                depth_stencil: depth_stencil.clone(),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                targets,
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: cull,
-                ..Default::default()
-            },
-            depth_stencil: depth_stencil.clone(),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        })
+        )
     };
 
     let pipeline = make_pipeline(main_cull, "");

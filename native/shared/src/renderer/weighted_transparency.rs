@@ -230,8 +230,9 @@ impl Renderer {
             },
         };
         let create_accumulation_pipeline = |label: &'static str, cull_mode: Option<wgpu::Face>| {
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            MeshPipelines::lazy(
+                &self.device,
+                &wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&scene_layout),
                     vertex: wgpu::VertexState {
@@ -276,7 +277,8 @@ impl Renderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview_mask: None,
                     cache: None,
-                })
+                },
+            )
         };
         let single_sided = create_accumulation_pipeline(
             "scene_weighted_transparency_pipeline",

@@ -625,22 +625,22 @@ fn apply_layered_capture_debug(source: String, mode: Option<&str>) -> String {
 
 pub(crate) struct SceneLayeredPbrResources {
     pub(crate) material_layout: wgpu::BindGroupLayout,
-    opaque: wgpu::RenderPipeline,
-    opaque_prepassed: wgpu::RenderPipeline,
-    opaque_uv1: wgpu::RenderPipeline,
-    opaque_prepassed_uv1: wgpu::RenderPipeline,
-    transparent: wgpu::RenderPipeline,
-    transparent_double_sided: wgpu::RenderPipeline,
-    transparent_uv1: wgpu::RenderPipeline,
-    transparent_uv1_double_sided: wgpu::RenderPipeline,
-    reactive: Option<wgpu::RenderPipeline>,
-    reactive_double_sided: Option<wgpu::RenderPipeline>,
-    reactive_uv1: Option<wgpu::RenderPipeline>,
-    reactive_uv1_double_sided: Option<wgpu::RenderPipeline>,
-    weighted: Option<wgpu::RenderPipeline>,
-    weighted_double_sided: Option<wgpu::RenderPipeline>,
-    weighted_uv1: Option<wgpu::RenderPipeline>,
-    weighted_uv1_double_sided: Option<wgpu::RenderPipeline>,
+    opaque: MeshPipelines,
+    opaque_prepassed: MeshPipelines,
+    opaque_uv1: MeshPipelines,
+    opaque_prepassed_uv1: MeshPipelines,
+    transparent: MeshPipelines,
+    transparent_double_sided: MeshPipelines,
+    transparent_uv1: MeshPipelines,
+    transparent_uv1_double_sided: MeshPipelines,
+    reactive: Option<MeshPipelines>,
+    reactive_double_sided: Option<MeshPipelines>,
+    reactive_uv1: Option<MeshPipelines>,
+    reactive_uv1_double_sided: Option<MeshPipelines>,
+    weighted: Option<MeshPipelines>,
+    weighted_double_sided: Option<MeshPipelines>,
+    weighted_uv1: Option<MeshPipelines>,
+    weighted_uv1_double_sided: Option<MeshPipelines>,
 }
 
 pub(crate) struct SceneSheenAlbedoLut {
@@ -704,6 +704,7 @@ impl SceneLayeredPbrResources {
         &self,
         secondary_uv: bool,
         prepassed: bool,
+        layout: VertexLayout,
     ) -> &wgpu::RenderPipeline {
         match (secondary_uv, prepassed) {
             (false, false) => &self.opaque,
@@ -711,6 +712,7 @@ impl SceneLayeredPbrResources {
             (true, false) => &self.opaque_uv1,
             (true, true) => &self.opaque_prepassed_uv1,
         }
+        .get(layout)
     }
 
     pub(crate) fn transparent_pipeline(
@@ -719,8 +721,9 @@ impl SceneLayeredPbrResources {
         double_sided: bool,
         reactive: bool,
         weighted: bool,
+        layout: VertexLayout,
     ) -> &wgpu::RenderPipeline {
-        match (weighted, reactive, secondary_uv, double_sided) {
+        let pipelines = match (weighted, reactive, secondary_uv, double_sided) {
             (false, false, false, false) => &self.transparent,
             (false, false, false, true) => &self.transparent_double_sided,
             (false, false, true, false) => &self.transparent_uv1,
@@ -757,7 +760,8 @@ impl SceneLayeredPbrResources {
                 .weighted_uv1_double_sided
                 .as_ref()
                 .expect("layered weighted UV1 resources are initialized"),
-        }
+        };
+        pipelines.get(layout)
     }
 }
 
@@ -900,7 +904,7 @@ fn create_layered_opaque_pipeline(
     secondary_uv: bool,
     prepassed: bool,
     label: &'static str,
-) -> wgpu::RenderPipeline {
+) -> MeshPipelines {
     let shader = match (secondary_uv, prepassed) {
         (false, false) => modules.scalar,
         (false, true) => modules.scalar_prepassed,
@@ -909,45 +913,48 @@ fn create_layered_opaque_pipeline(
     };
     let buffers = scene_vertex_buffers(secondary_uv);
     let targets = scene_main_targets();
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main_scene"),
-            buffers: &buffers,
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_main_scene"),
-            targets: &targets,
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(!prepassed),
-            depth_compare: Some(if prepassed {
-                wgpu::CompareFunction::Equal
-            } else {
-                wgpu::CompareFunction::Less
+    MeshPipelines::lazy(
+        device,
+        &wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_main_scene"),
+                targets: &targets,
+                compilation_options: Default::default(),
             }),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(!prepassed),
+                depth_compare: Some(if prepassed {
+                    wgpu::CompareFunction::Equal
+                } else {
+                    wgpu::CompareFunction::Less
+                }),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -960,43 +967,46 @@ fn create_layered_transparent_pipeline(
     secondary_uv: bool,
     double_sided: bool,
     label: &'static str,
-) -> wgpu::RenderPipeline {
+) -> MeshPipelines {
     let buffers = scene_vertex_buffers(secondary_uv);
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main_scene"),
-            buffers: &buffers,
-            compilation_options: Default::default(),
+    MeshPipelines::lazy(
+        device,
+        &wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some(entry_point),
+                targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: (!double_sided).then_some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some(entry_point),
-            targets,
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: (!double_sided).then_some(wgpu::Face::Back),
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+    )
 }
 
 impl Renderer {

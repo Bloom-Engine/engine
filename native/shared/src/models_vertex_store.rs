@@ -121,6 +121,10 @@ impl VertexStore {
         self.weights.get(i)
     }
 
+    pub fn joint(&self, i: usize) -> [f32; 4] {
+        self.joints.get(i)
+    }
+
     /// The sum of every normal, added in vertex order (as a loop over the
     /// whole vertices would, so the result has the same bits).
     pub fn normal_sum(&self) -> [f32; 3] {

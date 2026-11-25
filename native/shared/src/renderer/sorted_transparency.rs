@@ -28,8 +28,9 @@ enum SortedPipelineKey {
         double_sided: bool,
         layered: bool,
         secondary_uv: bool,
+        layout: VertexLayout,
     },
-    Custom(material_system::MaterialHandle),
+    Custom(material_system::MaterialHandle, VertexLayout),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -110,9 +111,9 @@ impl material_system::MaterialSystem {
             let Some(pipeline) = material.reactive_pipeline.as_ref() else {
                 return false;
             };
-            pipeline
+            pipeline.get(mesh.layout)
         } else {
-            &material.pipeline
+            material.pipeline.get(mesh.layout)
         };
         if bind_material_state {
             pass.set_pipeline(pipeline);
@@ -127,6 +128,12 @@ impl material_system::MaterialSystem {
         }
         pass.set_bind_group(3, &self.per_draw_bgs[command.draw_slot], &[]);
         pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+        super::vertex_formats::bind_skin_zero(
+            pass,
+            mesh.layout,
+            super::vertex_formats::zero_slot(u32::from(material.wants_instancing)),
+            &self.skin_zero,
+        );
         pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
         let instance_range = self.bind_instance_buffer(pass, &command.instance);
         if instance_range.end > instance_range.start {
@@ -142,13 +149,14 @@ impl material_system::MaterialSystem {
     ) where
         F: FnMut(u64, usize) -> Option<MeshDrawRef<'pass>>,
     {
-        let mut last_material = 0;
+        let mut last_material = None;
         for command in &self.translucent_commands {
             if let Some(mesh) = mesh_fetch(command.mesh_handle, command.mesh_idx) {
-                let bind_material_state = command.material != last_material;
+                let key = (command.material, mesh.layout);
+                let bind_material_state = last_material != Some(key);
                 if self.dispatch_translucent_command(pass, command, mesh, true, bind_material_state)
                 {
-                    last_material = command.material;
+                    last_material = Some(key);
                 }
             }
         }
@@ -287,8 +295,8 @@ impl Renderer {
             )
         } else {
             (
-                self.scene_transparent_pipeline.get(),
-                self.scene_transparent_double_sided_pipeline.get(),
+                &self.scene_transparent_pipeline,
+                &self.scene_transparent_double_sided_pipeline,
             )
         };
         pass.set_bind_group(1, &self.lighting_bind_group, &[]);
@@ -303,17 +311,24 @@ impl Renderer {
                 &mut joint_page,
             );
             let secondary_uv = draw.secondary_uv.is_some();
-            let pipeline_key = (draw.layered, secondary_uv, draw.double_sided);
+            let layout = draw.mesh.layout;
+            let pipeline_key = (draw.layered, secondary_uv, draw.double_sided, layout);
             if current_pipeline_key != Some(pipeline_key) {
                 let pipeline = if draw.layered {
                     self.scene_layered_pbr_resources
                         .as_ref()
                         .expect("layered material initialized its pipelines")
-                        .transparent_pipeline(secondary_uv, draw.double_sided, reactive, weighted)
+                        .transparent_pipeline(
+                            secondary_uv,
+                            draw.double_sided,
+                            reactive,
+                            weighted,
+                            layout,
+                        )
                 } else if draw.double_sided {
-                    double_sided
+                    double_sided.get(layout)
                 } else {
-                    single_sided
+                    single_sided.get(layout)
                 };
                 pass.set_pipeline(pipeline);
                 current_pipeline_key = Some(pipeline_key);
@@ -324,6 +339,12 @@ impl Renderer {
             if let Some(secondary_uv) = draw.secondary_uv {
                 pass.set_vertex_buffer(1, secondary_uv.slice(..));
             }
+            bind_skin_zero(
+                pass,
+                layout,
+                vertex_formats::zero_slot(u32::from(secondary_uv)),
+                self.gpu_driven.skin_zero(),
+            );
             pass.set_index_buffer(
                 draw.mesh.index.slice(draw.index_byte_offset..),
                 wgpu::IndexFormat::Uint32,
@@ -368,8 +389,8 @@ impl Renderer {
             )
         } else {
             (
-                self.scene_transparent_pipeline.get(),
-                self.scene_transparent_double_sided_pipeline.get(),
+                &self.scene_transparent_pipeline,
+                &self.scene_transparent_double_sided_pipeline,
             )
         };
         let mut current_pipeline = None;
@@ -395,10 +416,12 @@ impl Renderer {
             };
             if take_imported {
                 let draw = imported.next().expect("peeked imported draw");
+                let layout = draw.mesh.layout;
                 let key = SortedPipelineKey::Imported {
                     double_sided: draw.double_sided,
                     layered: draw.layered,
                     secondary_uv: draw.secondary_uv.is_some(),
+                    layout,
                 };
                 if current_pipeline != Some(key) {
                     let pipeline = if draw.layered {
@@ -410,11 +433,12 @@ impl Renderer {
                                 draw.double_sided,
                                 reactive,
                                 false,
+                                layout,
                             )
                     } else if draw.double_sided {
-                        imported_pipelines.1
+                        imported_pipelines.1.get(layout)
                     } else {
-                        imported_pipelines.0
+                        imported_pipelines.0.get(layout)
                     };
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(1, &self.lighting_bind_group, &[]);
@@ -434,6 +458,12 @@ impl Renderer {
                 if let Some(secondary_uv) = draw.secondary_uv {
                     pass.set_vertex_buffer(1, secondary_uv.slice(..));
                 }
+                bind_skin_zero(
+                    pass,
+                    layout,
+                    vertex_formats::zero_slot(u32::from(draw.secondary_uv.is_some())),
+                    self.gpu_driven.skin_zero(),
+                );
                 pass.set_index_buffer(
                     draw.mesh.index.slice(draw.index_byte_offset..),
                     wgpu::IndexFormat::Uint32,
@@ -447,9 +477,9 @@ impl Renderer {
                 let Some(mesh) = meshes.get(command.mesh_idx) else {
                     continue;
                 };
-                let key = SortedPipelineKey::Custom(command.material);
-                let bind_material_state = current_pipeline != Some(key);
                 let mesh = self.gpu_driven.mesh_draw(&mesh.geometry, mesh.index_count);
+                let key = SortedPipelineKey::Custom(command.material, mesh.layout);
+                let bind_material_state = current_pipeline != Some(key);
                 if self.material_system.dispatch_translucent_command(
                     pass,
                     command,

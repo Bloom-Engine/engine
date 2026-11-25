@@ -92,7 +92,7 @@ impl SceneGraph {
                 continue;
             };
             let uses_uv1 = node.gpu_layered_uses_uv1;
-            let (vertex, index, index_count, secondary_uv) = match node
+            let (vertex, index, index_count, layout, secondary_uv) = match node
                 .lods
                 .get(node.active_lod.max(0) as usize)
                 .filter(|_| node.active_lod >= 0)
@@ -102,6 +102,7 @@ impl SceneGraph {
                         lod.gpu_vb.as_ref()?,
                         lod.gpu_ib.as_ref()?,
                         lod.gpu_index_count,
+                        lod.gpu_vb_layout,
                         if uses_uv1 {
                             Some(lod.gpu_secondary_uv_vb.as_ref()?)
                         } else {
@@ -125,7 +126,13 @@ impl SceneGraph {
                     } else {
                         None
                     };
-                    (vertex, index, node.gpu_index_count, secondary_uv)
+                    (
+                        vertex,
+                        index,
+                        node.gpu_index_count,
+                        node.gpu_vb_layout,
+                        secondary_uv,
+                    )
                 }
             };
             out.push(ImportedIridescenceDrawRef {
@@ -137,6 +144,7 @@ impl SceneGraph {
                     first_index: 0,
                     index_count,
                     base_vertex: 0,
+                    layout,
                 },
                 secondary_uv,
                 vertex_byte_offset: 0,
@@ -201,7 +209,7 @@ impl SceneGraph {
                 continue;
             }
             let uses_uv1 = node.gpu_refractive_uses_uv1;
-            let (vertex, index, index_count, secondary_uv) = match node
+            let (vertex, index, index_count, layout, secondary_uv) = match node
                 .lods
                 .get(node.active_lod.max(0) as usize)
                 .filter(|_| node.active_lod >= 0)
@@ -211,6 +219,7 @@ impl SceneGraph {
                         lod.gpu_vb.as_ref()?,
                         lod.gpu_ib.as_ref()?,
                         lod.gpu_index_count,
+                        lod.gpu_vb_layout,
                         if uses_uv1 {
                             Some(lod.gpu_secondary_uv_vb.as_ref()?)
                         } else {
@@ -234,7 +243,13 @@ impl SceneGraph {
                     } else {
                         None
                     };
-                    (vertex, index, node.gpu_index_count, secondary_uv)
+                    (
+                        vertex,
+                        index,
+                        node.gpu_index_count,
+                        node.gpu_vb_layout,
+                        secondary_uv,
+                    )
                 }
             };
             let Some(uniforms) = &node.gpu_uniform_bg else {
@@ -270,63 +285,12 @@ impl SceneGraph {
                     first_index: 0,
                     index_count,
                     base_vertex: 0,
+                    layout,
                 },
                 secondary_uv,
                 vertex_byte_offset: 0,
                 index_byte_offset: 0,
             });
-        }
-    }
-
-    /// Render glTF BLEND nodes back-to-front into the forward translucent pass.
-    /// Opaque depth remains read-only; these nodes never enter the depth prepass.
-    pub fn render_transparent<'a>(
-        &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
-        single_sided_pipeline: &'a wgpu::RenderPipeline,
-        double_sided_pipeline: &'a wgpu::RenderPipeline,
-        view_projection: &[[f32; 4]; 4],
-    ) {
-        self.render_transparent_with_refraction(
-            pass,
-            single_sided_pipeline,
-            double_sided_pipeline,
-            view_projection,
-            false,
-        );
-    }
-
-    pub(crate) fn render_transparent_with_refraction<'a>(
-        &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
-        single_sided_pipeline: &'a wgpu::RenderPipeline,
-        double_sided_pipeline: &'a wgpu::RenderPipeline,
-        view_projection: &[[f32; 4]; 4],
-        imported_refraction_enabled: bool,
-    ) {
-        let mut draws = Vec::new();
-        self.append_transparent_draws(&mut draws, view_projection, 0, imported_refraction_enabled);
-        draws.sort_by(|left, right| {
-            right
-                .view_depth
-                .total_cmp(&left.view_depth)
-                .then_with(|| left.stable_id.cmp(&right.stable_id))
-        });
-        let mut current_double_sided = None;
-        for draw in draws {
-            if current_double_sided != Some(draw.double_sided) {
-                pass.set_pipeline(if draw.double_sided {
-                    double_sided_pipeline
-                } else {
-                    single_sided_pipeline
-                });
-                current_double_sided = Some(draw.double_sided);
-            }
-            pass.set_bind_group(0, draw.uniforms, &[]);
-            pass.set_bind_group(2, draw.material, &[]);
-            pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
-            pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(draw.mesh.index_range(), draw.mesh.base_vertex, 0..1);
         }
     }
 
@@ -356,7 +320,7 @@ impl SceneGraph {
             };
             let layered_material = node.gpu_layered_material_bg.as_ref();
             let uses_uv1 = layered_material.is_some() && node.gpu_layered_uses_uv1;
-            let (vb, ib, index_count, secondary_uv) = match node
+            let (vb, ib, index_count, layout, secondary_uv) = match node
                 .lods
                 .get(node.active_lod.max(0) as usize)
                 .filter(|_| node.active_lod >= 0)
@@ -366,6 +330,7 @@ impl SceneGraph {
                         lod.gpu_vb.as_ref()?,
                         lod.gpu_ib.as_ref()?,
                         lod.gpu_index_count,
+                        lod.gpu_vb_layout,
                         if uses_uv1 {
                             Some(lod.gpu_secondary_uv_vb.as_ref()?)
                         } else {
@@ -385,7 +350,13 @@ impl SceneGraph {
                     } else {
                         None
                     };
-                    (vb, ib, node.gpu_index_count, secondary_uv)
+                    (
+                        vb,
+                        ib,
+                        node.gpu_index_count,
+                        node.gpu_vb_layout,
+                        secondary_uv,
+                    )
                 }
             };
             let center = if node.world_bounds_min[0] <= node.world_bounds_max[0] {
@@ -415,6 +386,7 @@ impl SceneGraph {
                     first_index: 0,
                     index_count,
                     base_vertex: 0,
+                    layout,
                 },
                 secondary_uv,
                 vertex_byte_offset: 0,
@@ -536,6 +508,7 @@ impl SceneGraph {
         &wgpu::Buffer,
         &wgpu::Buffer,
         u32,
+        VertexLayout,
         &wgpu::BindGroup,
         [[f32; 4]; 4],
         [f32; 3],
@@ -551,6 +524,7 @@ impl SceneGraph {
         &wgpu::Buffer,
         &wgpu::Buffer,
         u32,
+        VertexLayout,
         &wgpu::BindGroup,
         [[f32; 4]; 4],
         [f32; 3],
@@ -579,6 +553,7 @@ impl SceneGraph {
                 vb,
                 ib,
                 node.gpu_index_count,
+                node.gpu_vb_layout,
                 mat_bg,
                 node.world_transform(),
                 node.world_bounds_min,

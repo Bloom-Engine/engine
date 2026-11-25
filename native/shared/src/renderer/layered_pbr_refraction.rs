@@ -150,14 +150,14 @@ pub(super) fn scene_layered_refractive_shader_source(
 
 pub(super) struct SceneLayeredRefractiveResources {
     material_layout: wgpu::BindGroupLayout,
-    scalar: wgpu::RenderPipeline,
-    scalar_double_sided: wgpu::RenderPipeline,
-    uv1: Option<wgpu::RenderPipeline>,
-    uv1_double_sided: Option<wgpu::RenderPipeline>,
-    reactive: Option<wgpu::RenderPipeline>,
-    reactive_double_sided: Option<wgpu::RenderPipeline>,
-    reactive_uv1: Option<wgpu::RenderPipeline>,
-    reactive_uv1_double_sided: Option<wgpu::RenderPipeline>,
+    scalar: MeshPipelines,
+    scalar_double_sided: MeshPipelines,
+    uv1: Option<MeshPipelines>,
+    uv1_double_sided: Option<MeshPipelines>,
+    reactive: Option<MeshPipelines>,
+    reactive_double_sided: Option<MeshPipelines>,
+    reactive_uv1: Option<MeshPipelines>,
+    reactive_uv1_double_sided: Option<MeshPipelines>,
 }
 
 impl SceneLayeredRefractiveResources {
@@ -166,8 +166,9 @@ impl SceneLayeredRefractiveResources {
         secondary_uv: bool,
         double_sided: bool,
         reactive: bool,
+        layout: VertexLayout,
     ) -> &wgpu::RenderPipeline {
-        match (reactive, secondary_uv, double_sided) {
+        let pipelines = match (reactive, secondary_uv, double_sided) {
             (false, false, false) => &self.scalar,
             (false, false, true) => &self.scalar_double_sided,
             (false, true, false) => self
@@ -194,7 +195,8 @@ impl SceneLayeredRefractiveResources {
                 .reactive_uv1_double_sided
                 .as_ref()
                 .expect("layered refractive reactive UV1 resources are initialized"),
-        }
+        };
+        pipelines.get(layout)
     }
 }
 
@@ -303,7 +305,7 @@ fn create_pipeline(
     double_sided: bool,
     reactive: bool,
     label: &'static str,
-) -> wgpu::RenderPipeline {
+) -> MeshPipelines {
     let buffers = if secondary_uv {
         vec![Vertex3D::desc(), secondary_uv_desc()]
     } else {
@@ -328,41 +330,44 @@ fn create_pipeline(
             write_mask: wgpu::ColorWrites::RED,
         }));
     }
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main_scene"),
-            buffers: &buffers,
-            compilation_options: Default::default(),
+    MeshPipelines::lazy(
+        device,
+        &wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_refractive_scene"),
+                targets: &targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: (!double_sided).then_some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_refractive_scene"),
-            targets: &targets,
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: (!double_sided).then_some(wgpu::Face::Back),
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+    )
 }
 
 impl Renderer {

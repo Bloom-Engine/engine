@@ -3,7 +3,7 @@
 //! is enough.
 
 use super::SceneNode;
-use crate::renderer::Vertex3D;
+use crate::renderer::{Vertex3D, VertexLayout};
 
 impl SceneNode {
     /// Read the node's effective local vertex payload. Imported geometry may
@@ -25,6 +25,14 @@ impl SceneNode {
         match self.shared_model_mesh.as_ref() {
             Some(mesh) => std::sync::Arc::as_ptr(mesh) as usize,
             None => self.vertices.as_ptr() as usize,
+        }
+    }
+
+    /// The format the node's vertices go to the GPU in (vertex_formats.rs).
+    pub(crate) fn vertex_layout(&self) -> VertexLayout {
+        match self.shared_model_mesh.as_ref() {
+            Some(mesh) => VertexLayout::for_store(&mesh.vertices),
+            None => VertexLayout::for_vertices(&self.vertices),
         }
     }
 

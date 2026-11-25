@@ -426,8 +426,9 @@ impl Renderer {
                 immediate_size: 0,
             });
         let create_pipeline = |label: &'static str, cull_mode: Option<wgpu::Face>| {
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            MeshPipelines::lazy(
+                &self.device,
+                &wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
@@ -472,7 +473,8 @@ impl Renderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview_mask: None,
                     cache: None,
-                })
+                },
+            )
         };
         self.scene_transparent_reactive_pipeline = Some(create_pipeline(
             "scene_transparent_reactive_pipeline",
@@ -540,8 +542,9 @@ impl Renderer {
                 immediate_size: 0,
             });
         let create_pipeline = |label: &'static str, cull_mode: Option<wgpu::Face>| {
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            MeshPipelines::lazy(
+                &self.device,
+                &wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
@@ -591,7 +594,8 @@ impl Renderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview_mask: None,
                     cache: None,
-                })
+                },
+            )
         };
         self.scene_refractive_reactive_pipeline = Some(create_pipeline(
             "scene_refractive_reactive_pipeline",
@@ -667,8 +671,9 @@ impl Renderer {
             });
         let vertex_layouts = [Vertex3D::desc(), secondary_uv_desc()];
         let create_pipeline = |label: &'static str, cull_mode: Option<wgpu::Face>| {
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            MeshPipelines::lazy(
+                &self.device,
+                &wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
@@ -718,7 +723,8 @@ impl Renderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview_mask: None,
                     cache: None,
-                })
+                },
+            )
         };
         self.scene_refractive_reactive_uv1_pipeline = Some(create_pipeline(
             "scene_refractive_reactive_uv1_pipeline",

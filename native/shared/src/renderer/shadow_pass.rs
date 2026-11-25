@@ -9,6 +9,8 @@ use super::*;
 /// shadow pages and the local-light shadow maps.
 pub(crate) struct ShadowDrawEntry {
     pub(crate) vb_idx: usize,
+    /// The vertex format of `vb_idx`'s buffer: picks the pipeline variant.
+    pub(crate) layout: VertexLayout,
     pub(crate) ib_idx: usize,
     pub(crate) index_start: u32,
     pub(crate) index_count: u32,
@@ -55,6 +57,20 @@ pub(crate) struct ShadowDrawEntry {
 }
 
 impl Renderer {
+    /// The shadow pipeline of a caster of `kind` (0 opaque, 1 cutout, 2
+    /// skinned) whose vertex buffer holds `layout`. Skinned casters are
+    /// always 96-byte.
+    fn shadow_caster_pipeline(&self, kind: u8, layout: VertexLayout) -> &wgpu::RenderPipeline {
+        match kind {
+            1 => self.shadow_map.pipeline_cutout.get(layout),
+            2 => {
+                debug_assert_eq!(layout, VertexLayout::Full96);
+                &self.shadow_map.pipeline_skinned
+            }
+            _ => self.shadow_map.pipeline.get(layout),
+        }
+    }
+
     pub(super) fn record_shadow_pass(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -308,12 +324,12 @@ impl Renderer {
                 // A node drawn at a simpler level of detail casts with that level too: the full
                 // mesh of a distant tree went into every cascade at its close-up triangle count.
                 let lod = node.active_lod_geometry();
-                let (vb, ib, index_count) = match lod {
-                    Some((vb, ib, count)) => (vb, ib, count),
+                let (vb, ib, index_count, vb_layout) = match lod {
+                    Some((vb, ib, count, layout)) => (vb, ib, count, layout),
                     None => {
                         let Some(vb) = &node.gpu_vb else { continue };
                         let Some(ib) = &node.gpu_ib else { continue };
-                        (vb, ib, node.gpu_index_count)
+                        (vb, ib, node.gpu_index_count, node.gpu_vb_layout)
                     }
                 };
                 let vb_idx = shadow_vbs.len();
@@ -337,6 +353,7 @@ impl Renderer {
                 let world_transform = node.world_transform();
                 shadow_nodes.push(ShadowDrawEntry {
                     vb_idx,
+                    layout: vb_layout,
                     ib_idx: vb_idx,
                     index_start: 0,
                     index_count,
@@ -376,6 +393,7 @@ impl Renderer {
                     // unbounded, always-dirty entry (pre-segmentation shape).
                     shadow_nodes.push(ShadowDrawEntry {
                         vb_idx,
+                        layout: VertexLayout::Full96,
                         ib_idx: vb_idx,
                         index_start: 0,
                         index_count: self.indices_3d.len() as u32,
@@ -409,6 +427,7 @@ impl Renderer {
                         }
                         shadow_nodes.push(ShadowDrawEntry {
                             vb_idx,
+                            layout: VertexLayout::Full96,
                             ib_idx: vb_idx,
                             index_start: call.index_start,
                             index_count: count,
@@ -488,6 +507,7 @@ impl Renderer {
                                 .unwrap_or(([1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]));
                             shadow_nodes.push(ShadowDrawEntry {
                                 vb_idx,
+                                layout: draw.layout,
                                 ib_idx: vb_idx,
                                 index_start: draw.first_index,
                                 index_count: draw.index_count,
@@ -541,6 +561,7 @@ impl Renderer {
                                 transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
                             shadow_nodes.push(ShadowDrawEntry {
                                 vb_idx,
+                                layout: draw.layout,
                                 ib_idx: vb_idx,
                                 index_start: draw.first_index,
                                 index_count: draw.index_count,
@@ -616,6 +637,7 @@ impl Renderer {
                             transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
                         shadow_nodes.push(ShadowDrawEntry {
                             vb_idx,
+                            layout: draw.layout,
                             ib_idx: vb_idx,
                             index_start: draw.first_index,
                             index_count: draw.index_count,
@@ -1011,8 +1033,7 @@ impl Renderer {
 
                         // Pipeline kind per caster: 0 opaque, 1 cutout, 2 skinned.
                         // Only switch when the kind changes.
-                        let mut cur_kind: u8 = 0;
-                        shadow_pass.set_pipeline(&self.shadow_map.pipeline);
+                        let mut cur_kind: Option<(u8, VertexLayout)> = None;
                         for (slot, &ei) in static_entries.iter().enumerate() {
                             let entry = &shadow_nodes[ei];
                             let offset = (static_base + slot * stride) as u32;
@@ -1023,13 +1044,10 @@ impl Renderer {
                             } else {
                                 0
                             };
-                            if kind != cur_kind {
-                                shadow_pass.set_pipeline(match kind {
-                                    1 => &self.shadow_map.pipeline_cutout,
-                                    2 => &self.shadow_map.pipeline_skinned,
-                                    _ => &self.shadow_map.pipeline,
-                                });
-                                cur_kind = kind;
+                            if cur_kind != Some((kind, entry.layout)) {
+                                shadow_pass
+                                    .set_pipeline(self.shadow_caster_pipeline(kind, entry.layout));
+                                cur_kind = Some((kind, entry.layout));
                             }
                             shadow_pass.set_bind_group(0, static_bind_group, &[offset]);
                             if kind == 1 {
@@ -1048,6 +1066,12 @@ impl Renderer {
                                 );
                             }
                             shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
+                            bind_skin_zero(
+                                &mut shadow_pass,
+                                entry.layout,
+                                1,
+                                self.gpu_driven.skin_zero(),
+                            );
                             shadow_pass.set_index_buffer(
                                 shadow_ibs[entry.ib_idx].slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -1163,8 +1187,7 @@ impl Renderer {
                                 occlusion_query_set: None,
                                 multiview_mask: None,
                             });
-                        let mut cur_kind: u8 = 0;
-                        shadow_pass.set_pipeline(&self.shadow_map.pipeline);
+                        let mut cur_kind: Option<(u8, VertexLayout)> = None;
                         for (slot, &ei) in dyn_entries.iter().enumerate() {
                             let entry = &shadow_nodes[ei];
                             let offset = (dyn_base + slot * stride) as u32;
@@ -1175,13 +1198,10 @@ impl Renderer {
                             } else {
                                 0
                             };
-                            if kind != cur_kind {
-                                shadow_pass.set_pipeline(match kind {
-                                    1 => &self.shadow_map.pipeline_cutout,
-                                    2 => &self.shadow_map.pipeline_skinned,
-                                    _ => &self.shadow_map.pipeline,
-                                });
-                                cur_kind = kind;
+                            if cur_kind != Some((kind, entry.layout)) {
+                                shadow_pass
+                                    .set_pipeline(self.shadow_caster_pipeline(kind, entry.layout));
+                                cur_kind = Some((kind, entry.layout));
                             }
                             shadow_pass.set_bind_group(
                                 0,
@@ -1206,6 +1226,12 @@ impl Renderer {
                                 );
                             }
                             shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
+                            bind_skin_zero(
+                                &mut shadow_pass,
+                                entry.layout,
+                                1,
+                                self.gpu_driven.skin_zero(),
+                            );
                             shadow_pass.set_index_buffer(
                                 shadow_ibs[entry.ib_idx].slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -1515,8 +1541,7 @@ impl Renderer {
                                 index,
                             );
                         }
-                        let mut current_kind = 0u8;
-                        page_pass.set_pipeline(&self.shadow_map.pipeline);
+                        let mut current_kind: Option<(u8, VertexLayout)> = None;
                         for (slot, &entry_index) in page_entries.iter().enumerate() {
                             let entry = &shadow_nodes[entry_index];
                             let offset = (page_base + slot * stride) as u32;
@@ -1529,13 +1554,10 @@ impl Renderer {
                             };
                             page_cutout_draws += usize::from(kind == 1);
                             page_skinned_draws += usize::from(kind == 2);
-                            if kind != current_kind {
-                                page_pass.set_pipeline(match kind {
-                                    1 => &self.shadow_map.pipeline_cutout,
-                                    2 => &self.shadow_map.pipeline_skinned,
-                                    _ => &self.shadow_map.pipeline,
-                                });
-                                current_kind = kind;
+                            if current_kind != Some((kind, entry.layout)) {
+                                page_pass
+                                    .set_pipeline(self.shadow_caster_pipeline(kind, entry.layout));
+                                current_kind = Some((kind, entry.layout));
                             }
                             page_pass.set_bind_group(0, vsm_uniforms, &[offset]);
                             if kind == 1 {
@@ -1554,6 +1576,12 @@ impl Renderer {
                                 );
                             }
                             page_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
+                            bind_skin_zero(
+                                &mut page_pass,
+                                entry.layout,
+                                1,
+                                self.gpu_driven.skin_zero(),
+                            );
                             page_pass.set_index_buffer(
                                 shadow_ibs[entry.ib_idx].slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -1591,6 +1619,7 @@ impl Renderer {
                 pipeline: &self.shadow_map.pipeline,
                 pipeline_cutout: &self.shadow_map.pipeline_cutout,
                 pipeline_skinned: &self.shadow_map.pipeline_skinned,
+                skin_zero: self.gpu_driven.skin_zero(),
                 joint_bind_group: &self.joint_bind_group,
                 camera_pos: self.current_camera_pos,
                 camera_planes: crate::scene::extract_frustum_planes(&mat4_multiply(

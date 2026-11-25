@@ -218,10 +218,15 @@ impl Renderer {
             let src_vb = match self.model_gpu_cache.get(&w.cache_handle) {
                 Some(Some(meshes)) => match meshes.get(w.mesh_idx) {
                     Some(m) => match &m.geometry {
-                        gpu_driven::MeshGeometry::Dedicated { vertex, .. } => vertex,
                         // Dynamic PT windows are registered only for skinned
-                        // cached meshes, which always retain dedicated input.
-                        gpu_driven::MeshGeometry::Shared(_) => continue,
+                        // cached meshes, which always retain dedicated 96-byte
+                        // input (cs_skin reads 24 words a vertex).
+                        gpu_driven::MeshGeometry::Dedicated {
+                            vertex,
+                            layout: super::VertexLayout::Full96,
+                            ..
+                        } => vertex,
+                        _ => continue,
                     },
                     None => continue,
                 },
