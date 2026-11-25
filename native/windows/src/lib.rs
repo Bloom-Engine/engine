@@ -861,6 +861,35 @@ unsafe fn init_engine_for_hwnd(
         );
     }
 
+    // Only the CPU rasteriser (Microsoft Basic Render Driver / WARP): a PC or
+    // VM without a DirectX 12 GPU. A game there runs at a frame every few
+    // seconds and looks frozen (the Microsoft Store's certification failed a
+    // game for exactly that), so say what is needed and close instead.
+    // BLOOM_ADAPTER (asking for WARP by name) or BLOOM_ALLOW_CPU=1 runs anyway.
+    if adapter.get_info().device_type == wgpu::DeviceType::Cpu
+        && by_name.is_none()
+        && !std::env::var("BLOOM_ALLOW_CPU").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowTextW, MessageBoxW, MB_ICONERROR, MB_OK,
+        };
+        let mut title = [0u16; 256];
+        let n = GetWindowTextW(hwnd, &mut title) as usize;
+        let mut caption: Vec<u16> = title[..n].to_vec();
+        caption.push(0);
+        let text: Vec<u16> = "This game needs a graphics card (GPU) with DirectX 12 support.\n\n\
+             Windows found only the Microsoft Basic Render Driver, which draws on the \
+             processor and is far too slow for 3D. Install or update the graphics driver, \
+             or play on a PC with a DirectX 12 graphics card."
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        eprintln!("bloom: only the CPU rasteriser is available; no DirectX 12 GPU, exiting");
+        MessageBoxW(hwnd, PCWSTR(text.as_ptr()), PCWSTR(caption.as_ptr()), MB_OK | MB_ICONERROR);
+        std::process::exit(0);
+    }
+
     // 2026-07-16: HW ray query is OPT-IN now, not granted-by-default.
     // Measured on the shooter (760M, PT off): merely granting the
     // feature flips SSGI/WSRC to the HW trace and registers every
