@@ -546,9 +546,30 @@ pub(super) fn load_gltf_with_textures(
 
     // Extract and register textures
     let mut texture_indices: Vec<u32> = Vec::new(); // maps glTF image index -> renderer texture index
+                                                    // textures shared by content with other models (renderer/shared_textures.rs), held once by this one
+    let mut shared_here: std::collections::HashMap<
+        crate::renderer::shared_textures::SharedTextureKey,
+        u32,
+    > = Default::default();
     for (image_idx, image) in gltf.images().enumerate() {
         let is_normal = normal_image_set.contains(&image_idx);
         let is_srgb = !is_normal && srgb_image_set.contains(&image_idx);
+        let shared_key = crate::renderer::shared_textures::content_hash(
+            image.extras().as_ref().map(|raw| raw.get()),
+        )
+        .filter(|_| !mask_coverage_references.contains_key(&image_idx))
+        .map(|hash| (hash, is_normal, is_srgb));
+        if let Some(key) = shared_key {
+            let held = match shared_here.get(&key) {
+                Some(&slot) => Some(slot),
+                None => renderer.shared_texture_take(key),
+            };
+            if let Some(slot) = held {
+                shared_here.insert(key, slot);
+                texture_indices.push(slot);
+                continue;
+            }
+        }
         match image.source() {
             gltf::image::Source::View { view, .. } => {
                 let buf_idx = view.buffer().index();
@@ -568,6 +589,10 @@ pub(super) fn load_gltf_with_textures(
                                 data, offset, length,
                             ),
                         ) {
+                            if let Some(key) = shared_key {
+                                renderer.shared_texture_add(key, index);
+                                shared_here.insert(key, index);
+                            }
                             texture_indices.push(index);
                         } else if let Some((rgba, w, h)) =
                             decode_texture_bytes(img_data, "embedded-image")

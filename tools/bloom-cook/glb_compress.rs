@@ -351,6 +351,47 @@ fn view_range(root: &Value, view: usize) -> Option<(usize, usize)> {
 }
 
 /// Compress the images of `data` (a GLB); returns the new file and a report.
+/// Every KTX2 image gets `extras.bloomContentHash`: the first 128 bits of the
+/// SHA-256 of its bytes, as 32 hex digits. The engine loads an image whose
+/// hash (and use: colour or normal map, sRGB) it already has as the texture it
+/// already has, so a texture embedded in many models is in memory once. A
+/// hash made here, over all the bytes, is exact and costs the load nothing.
+/// Returns how many images were marked.
+fn mark_content_hashes(root: &mut Value, bin: &[u8]) -> usize {
+    use sha2::{Digest, Sha256};
+    let count = root
+        .get("images")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let mut marked = 0;
+    for index in 0..count {
+        let Some(view) = root["images"][index]
+            .get("bufferView")
+            .and_then(Value::as_u64)
+        else {
+            continue;
+        };
+        let Some((offset, length)) = view_range(root, view as usize) else {
+            continue;
+        };
+        let Some(bytes) = bin.get(offset..offset + length) else {
+            continue;
+        };
+        if !bloom_shared::compressed_texture::is_ktx2(bytes) {
+            continue;
+        }
+        let digest = Sha256::digest(bytes);
+        let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+        let image = &mut root["images"][index];
+        if !image.get("extras").is_some_and(Value::is_object) {
+            image["extras"] = serde_json::json!({});
+        }
+        image["extras"]["bloomContentHash"] = Value::from(hex);
+        marked += 1;
+    }
+    marked
+}
+
 pub(crate) fn compress_glb(data: &[u8], flags: &[String]) -> Result<(Vec<u8>, String), String> {
     let options = parse_options(flags)?;
     let (mut root, bin, other_chunks) = split_glb(data)?;
@@ -459,6 +500,7 @@ pub(crate) fn compress_glb(data: &[u8], flags: &[String]) -> Result<(Vec<u8>, St
         new_bin.extend_from_slice(bytes);
     }
     new_bin.resize(new_bin.len().next_multiple_of(4), 0);
+    let hashed = mark_content_hashes(&mut root, &new_bin);
     if root
         .get("buffers")
         .and_then(|buffers| buffers.get(0))
@@ -481,10 +523,11 @@ pub(crate) fn compress_glb(data: &[u8], flags: &[String]) -> Result<(Vec<u8>, St
     out.extend_from_slice(&other_chunks);
 
     let report = format!(
-        "{} image(s) compressed, {} -> {} bytes\n{}",
+        "{} image(s) compressed, {} -> {} bytes, {} content hash(es)\n{}",
         replacements.len(),
         data.len(),
         out.len(),
+        hashed,
         notes.join("\n")
     );
     Ok((out, report))
@@ -782,6 +825,32 @@ mod tests {
         assert_eq!(root["images"][0]["mimeType"], "image/png");
         assert!(image_bytes(&root, bin, 0).starts_with(b"\x89PNG"));
         assert_eq!(read_u32(&out, 8), Some(out.len() as u32));
+    }
+
+    #[test]
+    fn every_ktx2_image_carries_the_hash_of_its_bytes() {
+        use sha2::{Digest, Sha256};
+        let (out, _) = compress_glb(&sample_glb("OPAQUE"), &[]).unwrap();
+        let (root, bin, _) = split_glb(&out).unwrap();
+        let images = root["images"].as_array().unwrap();
+        let mut marked = 0;
+        for index in 0..images.len() {
+            let bytes = image_bytes(&root, bin, index);
+            let hash = root["images"][index]["extras"]["bloomContentHash"].as_str();
+            if bloom_shared::compressed_texture::is_ktx2(bytes) {
+                let digest = Sha256::digest(bytes);
+                let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+                assert_eq!(hash, Some(hex.as_str()), "image {index}");
+                marked += 1;
+            } else {
+                assert!(hash.is_none(), "image {index} is not KTX2");
+            }
+        }
+        assert!(marked > 0);
+        // compressing again keeps the same hashes (KTX2 images are left as they are)
+        let (again, _) = compress_glb(&out, &[]).unwrap();
+        let (root2, _, _) = split_glb(&again).unwrap();
+        assert_eq!(root["images"], root2["images"]);
     }
 
     #[test]

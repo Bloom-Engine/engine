@@ -112,6 +112,7 @@ mod scene_pass;
 mod sdf_clipmap_prep;
 mod shaders;
 mod shadow_pass;
+pub(crate) mod shared_textures;
 mod sorted_transparency;
 mod ssgi_pass;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1437,6 +1438,7 @@ pub struct Renderer {
     // raw bind-pose joint indices; the scene VS skins them per draw)
     model_gpu_cache: HashMap<u64, Option<Vec<GpuMesh>>>,
     texture_streaming: texture_streaming::TextureStreaming,
+    shared_textures: shared_textures::SharedTextures,
     /// Original model-mesh indices represented by a compact compatibility-only
     /// cache. Absent means the handle owns an ordinary complete model cache.
     #[cfg(feature = "models3d")]
@@ -8638,6 +8640,7 @@ impl Renderer {
             persistent_ib_3d_capacity: ib_3d_cap,
             model_gpu_cache: HashMap::new(),
             texture_streaming: Default::default(),
+            shared_textures: Default::default(),
             #[cfg(feature = "models3d")]
             model_virtual_compatibility_sources: HashMap::new(),
             gpu_driven,
