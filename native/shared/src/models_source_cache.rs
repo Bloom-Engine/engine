@@ -13,7 +13,6 @@
 
 use super::{MeshData, ModelData, ModelPrimitiveSource};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
@@ -34,10 +33,38 @@ pub struct SourceModelCache {
     entries: HashMap<String, Entry>,
 }
 
+/// A fast fingerprint of the file's bytes (four independent 64-bit lanes,
+/// several GB/s). It only has to notice a file that changed on disk, not
+/// resist an adversary. SipHash (`DefaultHasher`) ran at about 1.5 GB/s, so
+/// it cost about 60 ms per 100 MB model, on every load and every repeat.
 fn fingerprint(file_data: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    file_data.hash(&mut hasher);
-    hasher.finish()
+    const K: [u64; 4] = [
+        0x9e37_79b9_7f4a_7c15,
+        0xc2b2_ae3d_27d4_eb4f,
+        0x1656_67b1_9e37_79f9,
+        0x85eb_ca77_c2b2_ae63,
+    ];
+    let mut lane = [K[1], K[2], K[3], K[0]];
+    let mut chunks = file_data.chunks_exact(32);
+    for c in &mut chunks {
+        for (i, l) in lane.iter_mut().enumerate() {
+            let mut w = [0u8; 8];
+            w.copy_from_slice(&c[i * 8..i * 8 + 8]);
+            *l = (*l ^ u64::from_le_bytes(w))
+                .wrapping_mul(K[i])
+                .rotate_left(31);
+        }
+    }
+    let mut h = file_data.len() as u64 ^ K[0];
+    for (i, b) in chunks.remainder().iter().enumerate() {
+        h = (h ^ (u64::from(*b) << ((i % 8) * 8)))
+            .wrapping_mul(K[1])
+            .rotate_left(27);
+    }
+    for (i, l) in lane.iter().enumerate() {
+        h = (h ^ *l).wrapping_mul(K[i]).rotate_left(29);
+    }
+    h ^ (h >> 32)
 }
 
 impl SourceModelCache {
@@ -112,6 +139,20 @@ mod tests {
             crate::models::exclusive_texture_indices(&meshes),
             vec![7, 8]
         );
+    }
+
+    #[test]
+    fn the_fingerprint_notices_any_changed_byte() {
+        let data: Vec<u8> = (0..1000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let base = fingerprint(&data);
+        assert_eq!(base, fingerprint(&data.clone()));
+        for i in [0, 31, 32, 500, 991, 999] {
+            let mut d = data.clone();
+            d[i] ^= 1;
+            assert_ne!(base, fingerprint(&d), "byte {i}");
+        }
+        assert_ne!(fingerprint(&data[..999]), fingerprint(&data[..998]));
+        assert_ne!(fingerprint(&[0u8; 64]), fingerprint(&[0u8; 65]));
     }
 
     #[test]

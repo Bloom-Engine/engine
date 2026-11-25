@@ -142,15 +142,18 @@ fn read_accessor_f32(
 }
 
 pub fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
-    let gltf = parse::parse_gltf(data)?;
+    let mut gltf = parse::parse_gltf(data)?;
 
     // Get buffer data
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
+    let mut bin = gltf.blob.take();
     for buffer in gltf.buffers() {
         match buffer.source() {
             gltf::buffer::Source::Bin => {
-                if let Some(blob) = gltf.blob.as_ref() {
-                    buffer_data.push(blob.clone());
+                // Moved, not cloned: a clone was a third copy of the file
+                // (after the read and the parser's) at the peak of the load.
+                if let Some(blob) = bin.take() {
+                    buffer_data.push(blob);
                 }
             }
             gltf::buffer::Source::Uri(uri) => {
@@ -484,16 +487,19 @@ pub(super) fn load_gltf_with_textures(
     base_dir: Option<&std::path::Path>,
     source_label: Option<&str>,
 ) -> Option<ModelData> {
-    let gltf = parse::parse_gltf(data)?;
+    let mut gltf = parse::parse_gltf(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, source_label.unwrap_or("<memory glTF>"));
 
     // Get buffer data
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
+    let mut bin = gltf.blob.take();
     for buffer in gltf.buffers() {
         match buffer.source() {
             gltf::buffer::Source::Bin => {
-                if let Some(blob) = gltf.blob.as_ref() {
-                    buffer_data.push(blob.clone());
+                // Moved, not cloned: a clone was a third copy of the file
+                // (after the read and the parser's) at the peak of the load.
+                if let Some(blob) = bin.take() {
+                    buffer_data.push(blob);
                 }
             }
             gltf::buffer::Source::Uri(uri) => {
@@ -1066,15 +1072,18 @@ fn load_gltf_staged_impl(
 ) -> Option<crate::staging::StagedModel> {
     use crate::staging::{StagedModel, StagedTexture};
 
-    let gltf = parse::parse_gltf(data)?;
+    let mut gltf = parse::parse_gltf(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, source_label);
 
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
+    let mut bin = gltf.blob.take();
     for buffer in gltf.buffers() {
         match buffer.source() {
             gltf::buffer::Source::Bin => {
-                if let Some(blob) = gltf.blob.as_ref() {
-                    buffer_data.push(blob.clone());
+                // Moved, not cloned: a clone was a third copy of the file
+                // (after the read and the parser's) at the peak of the load.
+                if let Some(blob) = bin.take() {
+                    buffer_data.push(blob);
                 }
             }
             gltf::buffer::Source::Uri(uri) => {
@@ -1522,16 +1531,19 @@ fn stage_image_variants(
 }
 
 pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
-    let gltf = parse::parse_gltf(data)?;
+    let mut gltf = parse::parse_gltf(data)?;
     emit_unsupported_material_extension_diagnostics(&gltf, "<memory glTF>");
 
     // Get buffer data (for .glb, embedded; for .gltf, inline base64)
     let mut buffer_data: Vec<Vec<u8>> = Vec::new();
+    let mut bin = gltf.blob.take();
     for buffer in gltf.buffers() {
         match buffer.source() {
             gltf::buffer::Source::Bin => {
-                if let Some(blob) = gltf.blob.as_ref() {
-                    buffer_data.push(blob.clone());
+                // Moved, not cloned: a clone was a third copy of the file
+                // (after the read and the parser's) at the peak of the load.
+                if let Some(blob) = bin.take() {
+                    buffer_data.push(blob);
                 }
             }
             gltf::buffer::Source::Uri(uri) => {

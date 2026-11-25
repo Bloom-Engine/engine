@@ -43,10 +43,27 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// A loaded sound effect or music track (PCM samples).
+///
+/// Kept as 16-bit integers: every decoder (WAV 8/16-bit, MP3, Vorbis)
+/// produces 16-bit samples, so this is lossless and half the memory of
+/// `f32` (a game's effects held about 95 MB as floats).
 pub struct SoundData {
-    pub samples: Vec<f32>,
+    pub samples: Vec<i16>,
     pub sample_rate: u32,
     pub channels: u16,
+}
+
+impl SoundData {
+    /// Sample `i` in [-1, 1).
+    #[inline]
+    pub fn sample(&self, i: usize) -> f32 {
+        f32::from(self.samples[i]) * (1.0 / 32768.0)
+    }
+}
+
+/// A float sample in [-1, 1] as 16-bit PCM (tests and generated sounds).
+pub fn pcm16(x: f32) -> i16 {
+    (x * 32768.0).round().clamp(-32768.0, 32767.0) as i16
 }
 
 /// Render-side playback state readable from the control side.
@@ -702,7 +719,7 @@ mod tests {
     fn tone(len: usize) -> SoundData {
         SoundData {
             samples: (0..len)
-                .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+                .map(|i| if i % 2 == 0 { pcm16(0.5) } else { pcm16(-0.5) })
                 .collect(),
             sample_rate: 44_100,
             channels: 1,
@@ -1053,7 +1070,7 @@ mod tests {
     /// All-0.5 mono signal: peaks read gains directly.
     fn flat(len: usize) -> SoundData {
         SoundData {
-            samples: vec![0.5; len],
+            samples: vec![pcm16(0.5); len],
             sample_rate: 44_100,
             channels: 1,
         }
@@ -1062,7 +1079,7 @@ mod tests {
     fn sine(freq: f32, len: usize) -> SoundData {
         SoundData {
             samples: (0..len)
-                .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / 44_100.0).sin())
+                .map(|i| pcm16((2.0 * std::f32::consts::PI * freq * i as f32 / 44_100.0).sin()))
                 .collect(),
             sample_rate: 44_100,
             channels: 1,
