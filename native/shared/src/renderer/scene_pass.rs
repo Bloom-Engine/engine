@@ -66,6 +66,22 @@ pub(super) fn create_scene_depth_pipeline(
     )
 }
 
+/// Whether the depth prepass (EN-044) draws the opaque meshes by default.
+/// Not on wasm (EN-063: Tint breaks the bit-identical depths the Equal test needs)
+/// and not on Android: on a tiled mobile GPU the prepass runs the whole vertex load
+/// a second time and round-trips the depth buffer through memory, and the GPU
+/// rejects hidden fragments itself (Adreno LRZ). Measured on a Pixel 4a (Adreno
+/// 618), in a chess scene of skinned pieces: depth_prepass 9.7 ms GPU, and
+/// 17.5 -> 25.3 fps without it. `BLOOM_DEPTH_PREPASS=1|0` overrides either way.
+pub(super) fn depth_prepass_draws_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("BLOOM_DEPTH_PREPASS").as_deref() {
+        Ok("1") => cfg!(not(target_arch = "wasm32")),
+        Ok("0") => false,
+        _ => cfg!(not(target_arch = "wasm32")) && cfg!(not(target_os = "android")),
+    })
+}
+
 impl Renderer {
     pub(super) fn record_hdr_scene_pass(
         &mut self,
@@ -160,14 +176,22 @@ impl Renderer {
         let inline_visibility_recorded = false;
         #[cfg(feature = "models3d")]
         let mut virtual_visibility_recorded = false;
-        // Whether the opaque retained nodes get their depth here, and so take
-        // the depth-equal pipelines in the main pass. Not on wasm, where the
-        // prepass draws nothing (above).
-        let scene_nodes_prepassed = cfg!(not(target_arch = "wasm32"))
+        // Whether the prepass draws anything. When it doesn't (wasm, Android,
+        // a diagnostic skip) the main pass draws every opaque mesh with the
+        // classic Less + write pipelines instead of the depth-equal ones.
+        let prepass_draws = depth_prepass_draws_default()
             && !self.dbg_skip("prepass")
-            && !self.dbg_skip("prepass_draws")
-            && !self.dbg_skip("scene_graph");
-        if !self.dbg_skip("prepass") {
+            && !self.dbg_skip("prepass_draws");
+        // Whether the opaque retained nodes get their depth here, and so take
+        // the depth-equal pipelines in the main pass.
+        let scene_nodes_prepassed = prepass_draws && !self.dbg_skip("scene_graph");
+        // Without draws and without a visibility target to clear, the prepass
+        // would only clear depth: the main pass clears it instead, which on a
+        // tiled GPU saves storing the depth buffer and loading it back.
+        let main_pass_clears_depth = !prepass_draws
+            && !self.dbg_skip("prepass")
+            && self.gpu_driven.visibility_raster_attachment().is_none();
+        if !self.dbg_skip("prepass") && !main_pass_clears_depth {
             let prepass_ts = profiler.pass_timestamp_writes("depth_prepass");
             let color_attachments = [self.gpu_driven.visibility_raster_attachment()];
             #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
@@ -198,8 +222,8 @@ impl Renderer {
             // pipeline on wasm instead — overdraw over early-Z, correctness
             // over speed.
             #[cfg(not(target_arch = "wasm32"))]
-            if !self.dbg_skip("prepass_draws") {
-                // SH-055 diag — keep pass+clear, skip draws
+            if prepass_draws {
+                // SH-055 diag "prepass_draws" — keep pass+clear, skip draws
                 if let Some(global_materials) =
                     self.material_system.indirection.global_bind_group.as_ref()
                 {
@@ -328,10 +352,7 @@ impl Renderer {
         // primitive-index feature. Validate/debug keep their separately timed
         // depth-equal diagnostic pass and forward remains authoritative. Shade
         // mode recorded the same IDs inside the depth prepass above.
-        if self.gpu_driven.visibility_diagnostic_enabled()
-            && !self.dbg_skip("prepass")
-            && !self.dbg_skip("prepass_draws")
-        {
+        if self.gpu_driven.visibility_diagnostic_enabled() && prepass_draws {
             if let Some(global_materials) =
                 self.material_system.indirection.global_bind_group.as_ref()
             {
@@ -468,8 +489,13 @@ impl Renderer {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
                         // EN-044 — LOAD, not Clear: the depth prepass just primed this
-                        // buffer, and clearing it here would throw that away.
-                        load: wgpu::LoadOp::Load,
+                        // buffer, and clearing it here would throw that away. Clear
+                        // when the prepass didn't run (`main_pass_clears_depth`).
+                        load: if main_pass_clears_depth {
+                            wgpu::LoadOp::Clear(1.0)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -571,19 +597,20 @@ impl Renderer {
                         &self.lighting_bind_group,
                         global_materials,
                         &self.joint_bind_group,
-                        cfg!(not(target_arch = "wasm32")),
+                        prepass_draws,
                     );
                 }
                 // EN-044 — cached models go through the PREPASSED pipeline (no depth
                 // write, Equal test), because the depth prepass above already stored
                 // their exact depth. That is what lets the hardware early-Z reject the
                 // occluded leaf cards instead of shading every one of them.
-                // wasm: no prepass priming (see above) — classic Less + write.
-                #[cfg(not(target_arch = "wasm32"))]
-                let base_cached_pipeline = &self.scene_pipeline_prepassed;
-                #[cfg(target_arch = "wasm32")]
-                let base_cached_pipeline = &self.scene_pipeline;
-                let cached_prepassed = cfg!(not(target_arch = "wasm32"));
+                // Without prepass draws (wasm, Android): classic Less + write.
+                let cached_prepassed = prepass_draws;
+                let base_cached_pipeline = if cached_prepassed {
+                    &self.scene_pipeline_prepassed
+                } else {
+                    &self.scene_pipeline
+                };
                 // (layered, uv1, vertex format); each picked per draw.
                 let mut current_cached_pipeline = None;
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);
