@@ -474,7 +474,10 @@ impl super::Renderer {
             }
             // the depth-equal pipelines only draw after a prepass that drew (scene_pass.rs)
             if super::scene_pass::depth_prepass_draws_default() {
-                for pipelines in [&self.scene_pipeline_prepassed, &self.scene_node_pipeline_prepassed] {
+                for pipelines in [
+                    &self.scene_pipeline_prepassed,
+                    &self.scene_node_pipeline_prepassed,
+                ] {
                     wanted.extend(pipelines.warm_handles());
                 }
             }
