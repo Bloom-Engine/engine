@@ -768,6 +768,17 @@ unsafe fn init_engine_for_hwnd(
         // features that silently reshape the frame (HW ray query for
         // GI, timestamps for the profiler) are available on it.
         let info = adapter.get_info();
+        // GPU-driven submission reads its draw record through
+        // @builtin(instance_index) and relies on the indirect draw's
+        // first_instance. On DX12 (wgpu 29) that offset does not reach the
+        // shader, so every draw reads record 0: roads, car bodies, wheels
+        // and most props vanish or land in the wrong place. Use the classic
+        // path there unless BLOOM_GPU_DRIVEN is set explicitly. #162 is the
+        // fuller fix (bounded multi-draw fallback on DX12).
+        if info.backend == wgpu::Backend::Dx12 && std::env::var_os("BLOOM_GPU_DRIVEN").is_none() {
+            std::env::set_var("BLOOM_GPU_DRIVEN", "0");
+            eprintln!("bloom: DX12: GPU-driven submission off (first_instance does not reach the shader)");
+        }
         eprintln!(
             "bloom: adapter '{}' ({:?}), ray_query={}, timestamps={}, tex_arrays={}",
             info.name,
